@@ -12,7 +12,16 @@ import type {
 } from "../lib/types";
 import { LiveView } from "../components/LiveView";
 import { Timeline } from "../components/Timeline";
-import { StatusBadge } from "../components/StatusBadge";
+import {
+  Button,
+  EmptyState,
+  Field,
+  Input,
+  Panel,
+  Spinner,
+  Stat,
+  StatusPill,
+} from "../components/ui";
 import {
   formatBytes,
   formatClock,
@@ -30,42 +39,50 @@ const RANGE_OPTIONS: { label: string; hours: number }[] = [
   { label: "3d", hours: 72 },
 ];
 
-const SEVERITY_CLASS: Record<Severity, string> = {
-  info: "text-slate-400 ring-slate-500/30",
-  warning: "text-amber-300 ring-amber-500/30",
-  critical: "text-red-300 ring-red-500/30",
+const SEVERITY_COLOR: Record<Severity, string> = {
+  info: "#71717a",
+  warning: "#fbbf24",
+  critical: "#ef4444",
 };
 
-function Panel({
-  title,
-  actions,
-  children,
-  className = "",
-}: {
-  title: string;
-  actions?: ReactNode;
-  children: ReactNode;
-  className?: string;
-}) {
+// Anchor styled like a default <Button size="sm"> (anchors can't be Buttons).
+const ANCHOR_BTN =
+  "inline-flex items-center justify-center gap-1.5 rounded-md border border-line bg-raised px-2.5 py-1 text-xs font-medium text-fg transition-colors duration-150 hover:border-[#34373e] hover:bg-[#23262c] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-canvas";
+
+/* ------------------------------ small bits ------------------------------ */
+
+function Dot() {
+  return <span className="text-fg-muted/60">·</span>;
+}
+
+function ArrowLeftIcon({ className }: { className?: string }) {
   return (
-    <section className={`panel ${className}`}>
-      <div className="panel-head">
-        <h2 className="panel-title">{title}</h2>
-        {actions}
-      </div>
-      <div className="p-4">{children}</div>
-    </section>
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.6" className={className}>
+      <path d="M9.5 3.5 5 8l4.5 4.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
   );
 }
 
-function Field({ label, value }: { label: string; value: ReactNode }) {
+function LockIcon({ className }: { className?: string }) {
   return (
-    <div className="flex flex-col">
-      <span className="stat-k">{label}</span>
-      <span className="stat-v break-words">{value}</span>
+    <svg viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" className={className}>
+      <rect x="3.5" y="7" width="9" height="6.5" rx="1.2" />
+      <path d="M5.5 7V5a2.5 2.5 0 0 1 5 0v2" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** Compact mono key/value row for dense config / telemetry. */
+function Meta({ label, value }: { label: ReactNode; value: ReactNode }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 py-1">
+      <span className="font-mono text-[10px] uppercase tracking-micro text-fg-muted">{label}</span>
+      <span className="break-words text-right font-mono text-xs text-fg-secondary">{value}</span>
     </div>
   );
 }
+
+/* -------------------------------- page ---------------------------------- */
 
 export function CameraDetail() {
   const { id = "" } = useParams();
@@ -205,6 +222,7 @@ export function CameraDetail() {
 
   const cam = camera.data;
   const st = status.data;
+  const headerState = st?.state ?? (cam?.enabled ? "unknown" : "disabled");
   const recentSegments = useMemo(
     () => [...(segments.data ?? [])].reverse(),
     [segments.data],
@@ -212,144 +230,154 @@ export function CameraDetail() {
 
   if (camera.error && !cam) {
     return (
-      <div className="mx-auto max-w-3xl px-4 py-10 text-center">
-        <p className="text-sm text-red-300">Failed to load camera: {camera.error}</p>
-        <Link to="/" className="btn mt-4">
-          ← Back to cameras
-        </Link>
+      <div className="mx-auto max-w-2xl px-4 py-16">
+        <EmptyState
+          title="Camera unavailable"
+          hint={`Failed to load camera: ${camera.error}`}
+          action={
+            <Link to="/" className={ANCHOR_BTN}>
+              <ArrowLeftIcon className="h-3.5 w-3.5" />
+              Back to wall
+            </Link>
+          }
+        />
       </div>
     );
   }
 
   return (
-    <div className="mx-auto max-w-[1600px] px-4 py-5">
+    <div className="mx-auto max-w-[1600px] animate-rise px-4 py-5 sm:px-6">
       {/* Header */}
-      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center gap-3">
-          <Link to="/" className="btn btn-sm" title="Back to cameras">
-            ←
+      <div className="mb-5 flex flex-wrap items-start justify-between gap-4">
+        <div className="flex items-start gap-3">
+          <Link
+            to="/"
+            title="Back to wall"
+            className="mt-0.5 inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-line bg-raised text-fg-secondary transition-colors duration-150 hover:border-[#34373e] hover:bg-[#23262c] hover:text-fg"
+          >
+            <ArrowLeftIcon className="h-4 w-4" />
           </Link>
-          <div>
-            <div className="flex items-center gap-2">
-              <h1 className="text-lg font-semibold tracking-tight text-slate-100">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2.5">
+              <h1 className="truncate font-display text-xl font-extrabold tracking-tight text-fg">
                 {cam?.name ?? id}
               </h1>
-              <StatusBadge state={st?.state ?? (cam?.enabled ? "unknown" : "disabled")} />
+              <StatusPill state={headerState} />
             </div>
-            <div className="mt-0.5 text-xs text-slate-500">
-              <span className="font-mono">{id}</span>
-              {cam ? ` · ${cam.vendor}` : ""}
-              {cam?.model ? ` · ${cam.model}` : ""}
-              {cam?.record_url_masked ? ` · ${cam.record_url_masked}` : ""}
+            <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 font-mono text-[11px] text-fg-muted">
+              <span className="text-fg-secondary">{id}</span>
+              {cam && (
+                <>
+                  <Dot />
+                  <span className="uppercase">{cam.vendor}</span>
+                </>
+              )}
+              {cam?.model && (
+                <>
+                  <Dot />
+                  <span>{cam.model}</span>
+                </>
+              )}
+              {cam?.record_url_masked && (
+                <>
+                  <Dot />
+                  <span className="max-w-[320px] truncate">{cam.record_url_masked}</span>
+                </>
+              )}
             </div>
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          <button className="btn btn-sm" onClick={runTest} disabled={testing}>
-            {testing ? "Testing…" : "Test stream"}
-          </button>
-          {cam && (
-            <button
-              className="btn btn-sm"
-              disabled={actionBusy}
-              onClick={() => toggle("record_enabled", !cam.record_enabled)}
-            >
-              {cam.record_enabled ? "Pause recording" : "Resume recording"}
-            </button>
-          )}
-          {cam && (
-            <button
-              className="btn btn-sm"
-              disabled={actionBusy}
-              onClick={() => toggle("enabled", !cam.enabled)}
-            >
-              {cam.enabled ? "Disable" : "Enable"}
-            </button>
-          )}
-          <button className="btn btn-danger btn-sm" disabled={actionBusy} onClick={remove}>
-            Delete
-          </button>
-        </div>
       </div>
-
-      {testResult && (
-        <div
-          className={`mb-4 rounded-md border px-3 py-2 text-sm ${
-            testResult.reachable
-              ? "border-emerald-500/40 bg-emerald-950/30 text-emerald-200"
-              : "border-red-500/40 bg-red-950/30 text-red-200"
-          }`}
-        >
-          {testResult.reachable ? (
-            <span>
-              Reachable · {testResult.codec ?? "?"} {testResult.width}×{testResult.height} ·{" "}
-              <span className="font-mono">{testResult.url}</span>
-            </span>
-          ) : (
-            <span>Unreachable — {testResult.error ?? "unknown error"}</span>
-          )}
-        </div>
-      )}
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         {/* Main column */}
-        <div className="space-y-4 lg:col-span-2">
+        <div className="stagger space-y-4 lg:col-span-2">
+          {/* Hero: live player */}
           <Panel
-            title="Live view"
+            title="Live View"
+            subtitle="Low-latency HLS"
+            padded={false}
             actions={
-              <button className="btn btn-sm" onClick={() => void startLive()} disabled={liveLoading}>
+              <Button size="sm" onClick={() => void startLive()} disabled={liveLoading}>
                 {liveLoading ? "Connecting…" : live ? "Restart" : "Start"}
-              </button>
+              </Button>
             }
           >
-            <LiveView hlsUrl={live?.hls_url} poster={api.snapshotUrl(id)} />
-            {liveError && <p className="mt-2 text-xs text-red-300">{liveError}</p>}
-            {live && (
-              <div className="mt-2 grid grid-cols-1 gap-1 text-[11px] text-slate-500 sm:grid-cols-3">
-                <span className="truncate">HLS: <span className="font-mono text-slate-400">{live.hls_url}</span></span>
-                <span className="truncate">WebRTC: <span className="font-mono text-slate-400">{live.webrtc_url}</span></span>
-                <span className="truncate">RTSP: <span className="font-mono text-slate-400">{live.rtsp_url}</span></span>
-              </div>
-            )}
+            <div className="p-3">
+              <LiveView
+                hlsUrl={live?.hls_url}
+                poster={api.snapshotUrl(id)}
+                name={cam?.name ?? id}
+                state={headerState}
+                loading={liveLoading}
+                onRetry={() => void startLive()}
+              />
+              {liveError && (
+                <p className="mt-2 font-mono text-xs text-danger">{liveError}</p>
+              )}
+              {live && (
+                <div className="mt-3 grid grid-cols-1 gap-2 border-t border-line pt-3 sm:grid-cols-3">
+                  {[
+                    { k: "HLS", v: live.hls_url },
+                    { k: "WebRTC", v: live.webrtc_url },
+                    { k: "RTSP", v: live.rtsp_url },
+                  ].map(({ k, v }) => (
+                    <div key={k} className="min-w-0">
+                      <div className="font-mono text-[9px] uppercase tracking-micro text-fg-muted">
+                        {k}
+                      </div>
+                      <div className="truncate font-mono text-[11px] text-fg-secondary" title={v}>
+                        {v}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </Panel>
 
           {playback && (
             <Panel
-              title="Recorded playback"
+              title="Recorded Playback"
+              padded={false}
               actions={
                 <div className="flex items-center gap-2">
-                  <a className="btn btn-sm" href={playback.src} download>
+                  <a className={ANCHOR_BTN} href={playback.src} download>
                     Download
                   </a>
-                  <button className="btn btn-sm" onClick={() => setPlayback(null)}>
+                  <Button size="sm" variant="ghost" onClick={() => setPlayback(null)}>
                     Close
-                  </button>
+                  </Button>
                 </div>
               }
             >
-              <video
-                key={playback.src}
-                className="aspect-video w-full rounded-md bg-black"
-                src={playback.src}
-                controls
-                autoPlay
-              />
-              <p className="mt-2 truncate text-xs text-slate-500">{playback.label}</p>
+              <div className="p-3">
+                <video
+                  key={playback.src}
+                  className="aspect-video w-full rounded-md border border-line bg-black"
+                  src={playback.src}
+                  controls
+                  autoPlay
+                />
+                <p className="mt-2 truncate font-mono text-xs text-fg-muted">{playback.label}</p>
+              </div>
             </Panel>
           )}
 
           <Panel
             title="Timeline"
+            subtitle="Recorded availability"
             actions={
               <div className="flex gap-1">
                 {RANGE_OPTIONS.map((opt) => (
-                  <button
+                  <Button
                     key={opt.hours}
-                    className={`btn btn-sm ${rangeHours === opt.hours ? "btn-primary" : ""}`}
+                    size="sm"
+                    variant={rangeHours === opt.hours ? "primary" : "default"}
                     onClick={() => setRangeHours(opt.hours)}
                   >
                     {opt.label}
-                  </button>
+                  </Button>
                 ))}
               </div>
             }
@@ -363,31 +391,33 @@ export function CameraDetail() {
                 onPick={handlePick}
               />
             ) : (
-              <div className="py-6 text-center text-sm text-slate-500">
-                {timeline.error ?? "Loading timeline…"}
+              <div className="flex items-center justify-center gap-2 py-8 font-mono text-xs text-fg-muted">
+                {timeline.error ? (
+                  <span className="text-danger">{timeline.error}</span>
+                ) : (
+                  <>
+                    <Spinner size={14} /> Loading timeline…
+                  </>
+                )}
               </div>
             )}
           </Panel>
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-            <Panel title="Snapshot">
+            <Panel title="Snapshot" subtitle="Frame grab">
               <div className="flex flex-wrap items-end gap-2">
-                <div className="flex-1">
-                  <label className="label" htmlFor="snap-at">
-                    At time (blank = live)
-                  </label>
-                  <input
-                    id="snap-at"
-                    type="datetime-local"
-                    step={1}
-                    className="input"
-                    value={snapInput}
-                    onChange={(e) => setSnapInput(e.target.value)}
-                  />
+                <div className="min-w-0 flex-1">
+                  <Field label="At time — blank = live" htmlFor="snap-at">
+                    <Input
+                      id="snap-at"
+                      type="datetime-local"
+                      step={1}
+                      value={snapInput}
+                      onChange={(e) => setSnapInput(e.target.value)}
+                    />
+                  </Field>
                 </div>
-                <button className="btn" onClick={captureSnapshot}>
-                  Capture
-                </button>
+                <Button onClick={captureSnapshot}>Capture</Button>
               </div>
               {snapSrc && (
                 <div className="mt-3">
@@ -396,66 +426,61 @@ export function CameraDetail() {
                     alt="Snapshot"
                     className="w-full rounded-md border border-line bg-black"
                   />
-                  <a className="btn btn-sm mt-2" href={snapSrc} target="_blank" rel="noreferrer">
+                  <a className={`${ANCHOR_BTN} mt-2`} href={snapSrc} target="_blank" rel="noreferrer">
                     Open full size
                   </a>
                 </div>
               )}
             </Panel>
 
-            <Panel title="Export evidence clip">
-              <form onSubmit={submitClip} className="space-y-2">
-                <div>
-                  <label className="label" htmlFor="clip-from">
-                    From
-                  </label>
-                  <input
+            <Panel title="Evidence Clip" subtitle="Export MP4">
+              <form onSubmit={submitClip} className="space-y-3">
+                <Field label="From" htmlFor="clip-from">
+                  <Input
                     id="clip-from"
                     type="datetime-local"
                     step={1}
-                    className="input"
                     value={clipFrom}
                     onChange={(e) => setClipFrom(e.target.value)}
                     required
                   />
-                </div>
-                <div>
-                  <label className="label" htmlFor="clip-to">
-                    To
-                  </label>
-                  <input
+                </Field>
+                <Field label="To" htmlFor="clip-to">
+                  <Input
                     id="clip-to"
                     type="datetime-local"
                     step={1}
-                    className="input"
                     value={clipTo}
                     onChange={(e) => setClipTo(e.target.value)}
                     required
                   />
-                </div>
-                <button type="submit" className="btn btn-primary w-full" disabled={clipLoading}>
+                </Field>
+                <Button type="submit" variant="primary" className="w-full" disabled={clipLoading}>
                   {clipLoading ? "Exporting…" : "Export clip"}
-                </button>
+                </Button>
               </form>
-              {clipError && <p className="mt-2 text-xs text-red-300">{clipError}</p>}
+              {clipError && <p className="mt-2 font-mono text-xs text-danger">{clipError}</p>}
               {clipResult && (
-                <div className="mt-3 rounded-md border border-line bg-ink p-2 text-xs text-slate-300">
-                  <div className="mb-1 font-medium text-slate-100">{clipResult.filename}</div>
-                  <div className="text-slate-500">
+                <div className="mt-3 rounded-md border border-line bg-canvas p-3">
+                  <div className="truncate font-mono text-xs font-semibold text-fg">
+                    {clipResult.filename}
+                  </div>
+                  <div className="mt-1 font-mono text-[11px] text-fg-muted">
                     {formatDuration(clipResult.requested_seconds)} · {formatBytes(clipResult.size_bytes)} ·{" "}
                     {clipResult.segment_count} segments
                   </div>
                   <div className="mt-2 flex gap-2">
-                    <a className="btn btn-sm" href={clipResult.url} download>
+                    <a className={ANCHOR_BTN} href={clipResult.url} download>
                       Download
                     </a>
-                    <button
-                      className="btn btn-sm"
-                      type="button"
-                      onClick={() => setPlayback({ src: clipResult.url, label: clipResult.filename })}
+                    <Button
+                      size="sm"
+                      onClick={() =>
+                        setPlayback({ src: clipResult.url, label: clipResult.filename })
+                      }
                     >
                       Play
-                    </button>
+                    </Button>
                   </div>
                 </div>
               )}
@@ -464,67 +489,136 @@ export function CameraDetail() {
         </div>
 
         {/* Side column */}
-        <div className="space-y-4">
-          <Panel title="Health">
+        <div className="stagger space-y-4">
+          <Panel title="Health" subtitle="Recorder telemetry">
             {st ? (
-              <div className="grid grid-cols-2 gap-3">
-                <Field label="State" value={<StatusBadge state={st.state} />} />
-                <Field label="FPS observed" value={st.fps_observed != null ? st.fps_observed.toFixed(1) : "—"} />
-                <Field
-                  label="Bitrate"
-                  value={st.bitrate_kbps != null ? `${st.bitrate_kbps.toFixed(0)} kbps` : "—"}
-                />
-                <Field label="Reconnects" value={st.reconnect_count} />
-                <Field label="Segments written" value={st.segments_written} />
-                <Field label="Recorder PID" value={st.recorder_pid ?? "—"} />
-                <Field label="Last segment" value={timeAgo(st.last_segment_at)} />
-                <Field label="Last started" value={timeAgo(st.last_started_at)} />
-                <div className="col-span-2">
-                  <Field label="Updated" value={formatClock(st.updated_at)} />
+              <>
+                <div className="mb-4 flex items-center justify-between gap-2">
+                  <StatusPill state={st.state} />
+                  <span className="font-mono text-[10px] uppercase tracking-micro text-fg-muted">
+                    upd {timeAgo(st.updated_at)}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-4">
+                  <Stat
+                    label="FPS"
+                    value={st.fps_observed != null ? st.fps_observed.toFixed(1) : "—"}
+                    unit={st.fps_observed != null ? "fps" : undefined}
+                  />
+                  <Stat
+                    label="Bitrate"
+                    value={st.bitrate_kbps != null ? st.bitrate_kbps.toFixed(0) : "—"}
+                    unit={st.bitrate_kbps != null ? "kbps" : undefined}
+                  />
+                  <Stat
+                    label="Reconnects"
+                    value={st.reconnect_count}
+                    tone={st.reconnect_count > 0 ? "warn" : "default"}
+                  />
+                  <Stat label="Segments" value={st.segments_written} />
+                </div>
+                <div className="mt-4 border-t border-line pt-2">
+                  <Meta label="Last segment" value={timeAgo(st.last_segment_at)} />
+                  <Meta label="Last started" value={timeAgo(st.last_started_at)} />
+                  <Meta label="Recorder PID" value={st.recorder_pid ?? "—"} />
                 </div>
                 {st.last_error && (
-                  <div className="col-span-2 rounded-md border border-red-500/30 bg-red-950/20 px-2 py-1.5 text-xs text-red-300">
+                  <div className="mt-3 rounded-md border border-danger/30 bg-danger/10 px-2.5 py-2 font-mono text-[11px] text-red-300">
                     {st.last_error}
                   </div>
                 )}
-              </div>
+              </>
             ) : (
-              <p className="text-sm text-slate-500">{status.error ?? "No health data yet."}</p>
+              <p className="font-mono text-xs text-fg-muted">
+                {status.error ?? "No health data yet."}
+              </p>
             )}
+          </Panel>
+
+          <Panel title="Settings" subtitle="Recording & actions">
+            <div className="grid grid-cols-2 gap-2">
+              <Button
+                disabled={actionBusy || !cam}
+                onClick={() => cam && toggle("record_enabled", !cam.record_enabled)}
+                className="w-full"
+              >
+                {cam?.record_enabled ? "Pause rec" : "Resume rec"}
+              </Button>
+              <Button
+                disabled={actionBusy || !cam}
+                onClick={() => cam && toggle("enabled", !cam.enabled)}
+                className="w-full"
+              >
+                {cam?.enabled ? "Disable" : "Enable"}
+              </Button>
+              <Button onClick={runTest} disabled={testing} className="w-full">
+                {testing ? "Testing…" : "Test stream"}
+              </Button>
+              <Button variant="danger" disabled={actionBusy} onClick={remove} className="w-full">
+                Delete
+              </Button>
+            </div>
+
+            {testResult && (
+              <div
+                className={`mt-3 rounded-md border px-2.5 py-2 font-mono text-[11px] ${
+                  testResult.reachable
+                    ? "border-rec/40 bg-rec/10 text-emerald-200"
+                    : "border-danger/40 bg-danger/10 text-red-200"
+                }`}
+              >
+                {testResult.reachable ? (
+                  <span>
+                    Reachable · {testResult.codec ?? "?"} {testResult.width}×{testResult.height}
+                    <span className="mt-1 block truncate text-fg-muted">{testResult.url}</span>
+                  </span>
+                ) : (
+                  <span>Unreachable — {testResult.error ?? "unknown error"}</span>
+                )}
+              </div>
+            )}
+
             {cam && (
-              <div className="mt-3 grid grid-cols-2 gap-3 border-t border-line pt-3">
-                <Field label="Record stream" value={cam.record_stream} />
-                <Field label="Segment length" value={`${cam.segment_seconds}s`} />
-                <Field label="Retention" value={`${cam.retention_hours}h`} />
-                <Field label="Codec" value={cam.codec ?? "—"} />
+              <div className="mt-3 border-t border-line pt-2">
+                <Meta label="Record stream" value={cam.record_stream} />
+                <Meta label="Segment length" value={`${cam.segment_seconds}s`} />
+                <Meta label="Retention" value={`${cam.retention_hours}h`} />
+                <Meta label="Codec" value={cam.codec ?? "—"} />
               </div>
             )}
           </Panel>
 
           <Panel
-            title="Recent segments"
-            actions={<span className="text-[11px] text-slate-500">{recentSegments.length}</span>}
+            title="Recent Segments"
+            actions={
+              <span className="font-mono text-[11px] tabular-nums text-fg-muted">
+                {recentSegments.length}
+              </span>
+            }
           >
             {recentSegments.length === 0 ? (
-              <p className="text-sm text-slate-500">No recorded segments yet.</p>
+              <p className="font-mono text-xs text-fg-muted">No recorded segments yet.</p>
             ) : (
-              <ul className="max-h-96 space-y-1 overflow-y-auto pr-1">
+              <ul className="-mr-1 max-h-96 space-y-1.5 overflow-y-auto pr-1">
                 {recentSegments.map((seg) => (
                   <li
                     key={seg.id}
-                    className="flex items-center justify-between gap-2 rounded-md border border-line bg-ink px-2 py-1.5 text-xs"
+                    className="flex items-center justify-between gap-2 rounded-md border border-line bg-canvas px-2.5 py-2 transition-colors duration-150 hover:border-[#34373e]"
                   >
                     <div className="min-w-0">
-                      <div className="font-mono text-slate-300">
-                        {formatTimeShort(seg.start_time)} → {formatTimeShort(seg.end_time)}
+                      <div className="flex items-center gap-1.5 font-mono text-xs text-fg-secondary">
+                        {seg.locked && <LockIcon className="h-3 w-3 text-accent" />}
+                        <span className="tabular-nums">
+                          {formatTimeShort(seg.start_time)} → {formatTimeShort(seg.end_time)}
+                        </span>
                       </div>
-                      <div className="text-slate-500">
+                      <div className="mt-0.5 font-mono text-[10px] text-fg-muted">
                         {formatDuration(seg.duration_s)} · {formatBytes(seg.size_bytes)}
-                        {seg.locked ? " · 🔒" : ""}
                       </div>
                     </div>
-                    <button
-                      className="btn btn-sm shrink-0"
+                    <Button
+                      size="sm"
+                      className="shrink-0"
                       onClick={() =>
                         setPlayback({
                           src: seg.url,
@@ -533,18 +627,25 @@ export function CameraDetail() {
                       }
                     >
                       Play
-                    </button>
+                    </Button>
                   </li>
                 ))}
               </ul>
             )}
           </Panel>
 
-          <Panel title="Recent events">
+          <Panel
+            title="Recent Events"
+            actions={
+              <span className="font-mono text-[11px] tabular-nums text-fg-muted">
+                {(events.data ?? []).length}
+              </span>
+            }
+          >
             {(events.data ?? []).length === 0 ? (
-              <p className="text-sm text-slate-500">No events.</p>
+              <p className="font-mono text-xs text-fg-muted">No events.</p>
             ) : (
-              <ul className="max-h-96 space-y-1.5 overflow-y-auto pr-1">
+              <ul className="-mr-1 max-h-96 space-y-1.5 overflow-y-auto pr-1">
                 {(events.data ?? []).map((ev) => (
                   <EventRow key={ev.id} ev={ev} />
                 ))}
@@ -559,21 +660,24 @@ export function CameraDetail() {
 
 function EventRow({ ev }: { ev: VisionEvent }) {
   const payloadKeys = Object.keys(ev.payload ?? {});
+  const color = SEVERITY_COLOR[ev.severity] ?? SEVERITY_COLOR.info;
   return (
-    <li className="rounded-md border border-line bg-ink px-2 py-1.5 text-xs">
+    <li className="rounded-md border border-line bg-canvas px-2.5 py-2">
       <div className="flex items-center justify-between gap-2">
-        <span className="truncate font-medium text-slate-200">{ev.event_type}</span>
+        <span className="truncate text-xs font-semibold text-fg">{ev.event_type}</span>
         <span
-          className={`shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-semibold uppercase ring-1 ring-inset ${
-            SEVERITY_CLASS[ev.severity] ?? SEVERITY_CLASS.info
-          }`}
+          className="shrink-0 rounded border px-1.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-micro"
+          style={{ color, borderColor: `${color}55`, backgroundColor: `${color}1a` }}
         >
           {ev.severity}
         </span>
       </div>
-      <div className="mt-0.5 text-slate-500">{formatClock(ev.timestamp)}</div>
+      <div className="mt-0.5 font-mono text-[10px] text-fg-muted">{formatClock(ev.timestamp)}</div>
       {payloadKeys.length > 0 && (
-        <div className="mt-1 truncate font-mono text-[11px] text-slate-600" title={JSON.stringify(ev.payload)}>
+        <div
+          className="mt-1 truncate font-mono text-[10px] text-fg-muted/80"
+          title={JSON.stringify(ev.payload)}
+        >
           {JSON.stringify(ev.payload)}
         </div>
       )}

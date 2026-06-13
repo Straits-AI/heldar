@@ -2,6 +2,7 @@ import { useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import type { Timeline as TimelineData } from "../lib/types";
 import { formatClock, formatDuration } from "../lib/format";
+import { StatusLed } from "./ui";
 
 interface Props {
   timeline: TimelineData;
@@ -90,25 +91,33 @@ export function Timeline({ timeline, from, to, selected, onPick }: Props) {
 
   if (!valid) {
     return (
-      <div className="rounded-md border border-line bg-ink px-3 py-6 text-center text-sm text-slate-500">
-        No time window to display.
+      <div className="rounded-md border border-dashed border-line bg-canvas px-3 py-8 text-center font-mono text-[11px] uppercase tracking-micro text-fg-muted">
+        No time window to display
       </div>
     );
   }
 
   return (
     <div className="select-none">
-      <div className="mb-1 flex items-center justify-between text-[11px] text-slate-500">
-        <span>{formatClock(new Date(startMs).toISOString())}</span>
-        <span className="text-slate-400">
-          {formatDuration(timeline.recorded_seconds)} recorded · {timeline.segment_count} segments
+      {/* Header: window bounds + recorded summary */}
+      <div className="mb-2 flex items-center justify-between gap-3 font-mono text-[10px]">
+        <span className="uppercase tracking-micro text-fg-muted">
+          {formatClock(new Date(startMs).toISOString())}
         </span>
-        <span>{formatClock(new Date(endMs).toISOString())}</span>
+        <span className="flex items-center gap-1.5 text-fg-secondary">
+          <StatusLed state="recording" pulse={false} />
+          <span className="tabular-nums">{formatDuration(timeline.recorded_seconds)} recorded</span>
+          <span className="text-fg-muted">·</span>
+          <span className="tabular-nums">{timeline.segment_count} seg</span>
+        </span>
+        <span className="uppercase tracking-micro text-fg-muted">
+          {formatClock(new Date(endMs).toISOString())}
+        </span>
       </div>
 
       <div
         ref={trackRef}
-        className="relative h-12 cursor-crosshair overflow-hidden rounded-md border border-line bg-ink"
+        className="relative h-14 cursor-crosshair overflow-hidden rounded-md border border-line bg-canvas"
         onMouseMove={handleMove}
         onMouseLeave={() => {
           setHoverIso(null);
@@ -122,21 +131,32 @@ export function Timeline({ timeline, from, to, selected, onPick }: Props) {
         aria-valuenow={selected ? new Date(selected).getTime() : endMs}
         tabIndex={0}
       >
-        {/* availability blocks */}
+        {/* faint inner gradient floor */}
+        <div className="pointer-events-none absolute inset-0 bg-gradient-to-b from-transparent to-black/30" />
+
+        {/* availability blocks (recorded footage) */}
         {blocks.map((b, i) => (
           <div
             key={i}
-            className="absolute top-0 h-full bg-emerald-500/30 hover:bg-emerald-500/45"
-            style={{ left: `${b.left}%`, width: `${Math.max(b.width, 0.4)}%` }}
+            className="absolute top-0 h-full bg-rec/25 transition-colors duration-150 hover:bg-rec/45"
+            style={{
+              left: `${b.left}%`,
+              width: `${Math.max(b.width, 0.4)}%`,
+              boxShadow: "inset 0 0 0 1px rgba(16,185,129,0.25)",
+            }}
             title={`${formatClock(b.range.start)} → ${formatClock(b.range.end)} (${formatDuration(b.range.seconds)})`}
-          />
+          >
+            <span className="absolute inset-x-0 top-0 h-px bg-rec/70" />
+          </div>
         ))}
 
         {/* hour ticks */}
         {ticks.map((t, i) => (
           <div key={i} className="absolute top-0 h-full" style={{ left: `${t.pct}%` }}>
             <div className="h-full w-px bg-line" />
-            <div className="absolute bottom-0.5 left-1 text-[9px] text-slate-600">{t.label}</div>
+            <div className="absolute bottom-0.5 left-1 font-mono text-[9px] tabular-nums text-fg-muted">
+              {t.label}
+            </div>
           </div>
         ))}
 
@@ -152,24 +172,28 @@ export function Timeline({ timeline, from, to, selected, onPick }: Props) {
         {selectedPct != null && selectedPct >= 0 && selectedPct <= 100 && (
           <div
             className="pointer-events-none absolute top-0 h-full w-0.5 bg-accent"
-            style={{ left: `${selectedPct}%` }}
+            style={{ left: `${selectedPct}%`, boxShadow: "0 0 8px 0 rgba(245,158,11,0.6)" }}
           >
-            <div className="absolute -top-0.5 left-1/2 h-2 w-2 -translate-x-1/2 rotate-45 bg-accent" />
+            <div className="absolute -top-px left-1/2 h-2 w-2 -translate-x-1/2 rotate-45 bg-accent" />
           </div>
         )}
       </div>
 
-      <div className="mt-1 h-4 text-[11px] text-slate-400">
+      <div className="mt-1.5 flex h-4 items-center font-mono text-[11px]">
         {hoverIso ? (
-          <span>
-            Click to seek · <span className="font-mono text-slate-300">{formatClock(hoverIso)}</span>
+          <span className="text-fg-secondary">
+            Click to seek ·{" "}
+            <span className="tabular-nums text-accent">{formatClock(hoverIso)}</span>
           </span>
         ) : selected ? (
-          <span>
-            Selected · <span className="font-mono text-slate-300">{formatClock(selected)}</span>
+          <span className="text-fg-secondary">
+            Selected ·{" "}
+            <span className="tabular-nums text-fg">{formatClock(selected)}</span>
           </span>
         ) : (
-          <span className="text-slate-600">Hover and click to pick a moment</span>
+          <span className="uppercase tracking-micro text-fg-muted">
+            Hover and click to pick a moment
+          </span>
         )}
       </div>
     </div>

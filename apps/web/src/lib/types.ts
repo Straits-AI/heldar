@@ -154,6 +154,43 @@ export interface VisionEvent {
   created_at: string;
 }
 
+export interface DiscoverOptions {
+  /** CIDR ("192.168.0.0/24"), range ("192.168.0.2-192.168.0.12"), single IP, or comma list. */
+  targets: string;
+  username?: string;
+  password?: string;
+  /** Probe each candidate with ffprobe + credentials to confirm a working stream. */
+  verify?: boolean;
+  /** Register verified, not-yet-known devices as cameras (recording disabled by default). */
+  auto_add?: boolean;
+  rtsp_port?: number;
+}
+
+export interface DiscoveredDevice {
+  address: string;
+  rtsp_port: number;
+  rtsp_open: boolean;
+  http_open: boolean;
+  vendor_guess: string;
+  http_server?: string | null;
+  verified: boolean;
+  codec?: string | null;
+  width?: number | null;
+  height?: number | null;
+  suggested_id: string;
+  already_registered: boolean;
+}
+
+export interface DiscoverResponse {
+  /** Echo of the requested targets spec. */
+  scanned: string;
+  found: number;
+  verified: number;
+  /** IDs of cameras registered during this scan (when auto_add was set). */
+  added: string[];
+  devices: DiscoveredDevice[];
+}
+
 export interface SystemInfo {
   name: string;
   version: string;

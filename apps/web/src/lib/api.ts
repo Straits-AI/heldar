@@ -10,6 +10,8 @@ import type {
   CameraUpdate,
   CameraView,
   ClipResult,
+  DiscoverOptions,
+  DiscoverResponse,
   LiveUrls,
   SegmentView,
   SystemInfo,
@@ -116,6 +118,13 @@ export const api = {
   // ---- Live view ----
   liveview: (id: string) =>
     request<LiveUrls>(`/api/v1/cameras/${enc(id)}/liveview`, { method: "POST" }),
+
+  // ---- Discovery ----
+  discover: (opts: DiscoverOptions) =>
+    request<DiscoverResponse>("/api/v1/discover", {
+      method: "POST",
+      body: JSON.stringify(opts),
+    }),
 
   // ---- Health / system / events ----
   listHealth: () => request<CameraStatus[]>("/api/v1/health/cameras"),

@@ -19,6 +19,9 @@ The Rust control plane in `apps/core` provides:
 
 - **Camera registry** — CRUD over cameras with per-camera recording/retention policy; RTSP URLs are
   either supplied explicitly or built from a vendor template (HikVision / Dahua).
+- **Network discovery** — scan a CIDR/range for cameras (open RTSP), guess the vendor from the HTTP
+  banner, verify credentials via ffprobe, and optionally auto-register found devices (`POST
+  /api/v1/discover`); also a "Discover" page in the dashboard.
 - **RTSP ingest + recorder supervisor** — one FFmpeg process per camera, one supervised Tokio task
   each, with automatic reconnect (exponential backoff up to 30s) and live status tracking.
 - **Segment recording** — `-c copy` (no decode / no re-encode), audio dropped in Stage 0, written as
@@ -32,6 +35,8 @@ The Rust control plane in `apps/core` provides:
 - **Snapshots** — JPEG frame either from recorded footage at a timestamp (`?at=`) or grabbed live.
 - **Live view** — registers the camera as a [MediaMTX](https://github.com/bluenviron/mediamtx) path
   server-side (credentials never reach the browser) and returns HLS / WebRTC / RTSP playback URLs.
+  Cameras that emit HEVC (which browsers can't play over HLS/WebRTC) are transcoded to H.264 on demand,
+  only while a viewer is connected — the recorded stream stays untouched.
 - **Camera health & events** — per-camera state (`recording` / `connecting` / `offline` / `error` /
   `disabled`), reconnect counts, last segment/error, plus a generic event log.
 - **Retention** — per-camera age-based deletion **and** a global size cap; locked (evidence)
@@ -188,6 +193,7 @@ Base URL: `http://localhost:8000`. All bodies and responses are JSON unless note
 | `PATCH`       | `/api/v1/cameras/{id}`                 | Partial update (re-reconciles the recorder).                        |
 | `DELETE`      | `/api/v1/cameras/{id}`                 | Delete camera, stop its recorder, remove its footage.               |
 | `GET`/`POST`  | `/api/v1/cameras/{id}/test`            | Probe the stream via ffprobe; returns reachability + codec/size.    |
+| `POST`        | `/api/v1/discover`                     | Scan a network range for cameras; verify creds, optionally auto-add. |
 | `GET`         | `/api/v1/cameras/{id}/segments`        | List recorded segment files (`?from&to&limit`), each with a URL.    |
 | `GET`         | `/api/v1/cameras/{id}/timeline`        | Coalesced recorded ranges (`?from&to`).                             |
 | `POST`        | `/api/v1/cameras/{id}/clip`            | Export an MP4 clip for a `{from,to}` window (`-c copy`).             |

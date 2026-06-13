@@ -12,7 +12,7 @@ fn hik_channel(stream: &str) -> &'static str {
 }
 
 /// Percent-encode the reserved characters that would break the `user:pass@host` userinfo section.
-fn encode_userinfo(s: &str) -> String {
+pub(crate) fn encode_userinfo(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         match b {

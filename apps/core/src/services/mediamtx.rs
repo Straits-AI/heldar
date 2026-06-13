@@ -40,7 +40,21 @@ pub async fn ensure_live(state: &AppState, camera_id: &str) -> AppResult<LiveUrl
     let already = matches!(existing, Ok(ref r) if r.status().is_success());
 
     if !already {
-        let body = json!({ "source": source, "sourceOnDemand": true });
+        // Transcode to H.264 on demand: many cameras (e.g. these HikVision units) emit HEVC, which
+        // browsers can't play over HLS/WebRTC. FFmpeg decodes the camera stream and republishes
+        // H.264 to this path, but only while someone is actually watching (runOnDemand). The raw
+        // stream is still recorded untouched by the recorder; this decode is preview-only.
+        // $MTX_PATH / $RTSP_PORT are substituted by MediaMTX; credentials stay server-side.
+        let run_on_demand = format!(
+            "ffmpeg -nostdin -rtsp_transport tcp -timeout 10000000 -i {source} -an \
+-c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -pix_fmt yuv420p -g 30 \
+-f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH"
+        );
+        let body = json!({
+            "runOnDemand": run_on_demand,
+            "runOnDemandRestart": true,
+            "runOnDemandCloseAfter": "10s",
+        });
         let resp = state
             .http
             .post(format!("{api}/v3/config/paths/add/{name}"))
