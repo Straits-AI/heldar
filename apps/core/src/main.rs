@@ -3,6 +3,7 @@
 //! Boots the SQLite store, starts a recorder supervisor per camera, runs the timeline indexer,
 //! health monitor and retention sweeper, and serves the HTTP API + recorded media.
 
+mod auth;
 mod camera_url;
 mod config;
 mod db;
@@ -48,10 +49,14 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = db::init_pool(&cfg).await.context("init database pool")?;
     db::run_migrations(&pool).await.context("run migrations")?;
+    auth::ensure_bootstrap(&pool, &cfg)
+        .await
+        .context("auth bootstrap")?;
 
     let recorder = RecorderManager::new(pool.clone(), cfg.clone());
     let sampler = SamplerManager::new(pool.clone(), cfg.clone());
     let zones = crate::services::zones::ZoneEngine::new(pool.clone(), cfg.clone());
+    let anpr = crate::services::anpr::AnprEngine::new(pool.clone(), cfg.clone());
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -62,6 +67,7 @@ async fn main() -> anyhow::Result<()> {
         recorder: recorder.clone(),
         sampler: sampler.clone(),
         zones,
+        anpr,
         http,
         started_at: chrono::Utc::now(),
     };

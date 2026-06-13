@@ -377,3 +377,218 @@ export interface ZoneEvent {
   evidence_path?: string | null;
   created_at: string;
 }
+
+// ---- Stage 4: Campus Entry + RBAC ----
+
+export type Role = "admin" | "manager" | "guard" | "viewer" | "integration";
+
+export interface Principal {
+  id: string;
+  name: string;
+  role: Role;
+  kind: "user" | "api_key" | "system";
+}
+
+export interface UserView {
+  id: string;
+  username: string;
+  role: Role;
+  display_name?: string | null;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LoginResult {
+  token: string;
+  expires_at: string;
+  user: UserView;
+}
+
+export interface UserCreate {
+  username: string;
+  password: string;
+  role?: Role;
+  display_name?: string;
+  active?: boolean;
+}
+
+export type UserUpdate = Partial<Omit<UserCreate, "username">>;
+
+export interface ApiKeyView {
+  id: string;
+  name: string;
+  key_prefix: string;
+  role: Role;
+  active: boolean;
+  last_used_at?: string | null;
+  created_at: string;
+}
+
+/** Response from creating an API key — `key` is shown exactly once. */
+export interface ApiKeyCreated {
+  id: string;
+  name: string;
+  role: Role;
+  key: string;
+}
+
+export type OwnerType = "student" | "staff" | "resident" | "contractor" | "visitor";
+
+export interface Vehicle {
+  id: string;
+  plate: string;
+  plate_norm: string;
+  owner_name?: string | null;
+  owner_type: OwnerType;
+  owner_ref?: string | null;
+  site_id?: string | null;
+  vehicle_type?: string | null;
+  make?: string | null;
+  model?: string | null;
+  color?: string | null;
+  notes?: string | null;
+  active: boolean;
+  valid_from?: string | null;
+  valid_until?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VehicleCreate {
+  plate: string;
+  owner_name?: string;
+  owner_type?: OwnerType;
+  owner_ref?: string;
+  site_id?: string;
+  vehicle_type?: string;
+  make?: string;
+  model?: string;
+  color?: string;
+  notes?: string;
+  active?: boolean;
+  valid_from?: string;
+  valid_until?: string;
+}
+
+export type VehicleUpdate = Partial<VehicleCreate>;
+
+export type PassStatus = "active" | "checked_in" | "checked_out" | "expired" | "revoked";
+
+export interface VisitorPass {
+  id: string;
+  code: string;
+  visitor_name: string;
+  phone?: string | null;
+  company?: string | null;
+  host?: string | null;
+  purpose?: string | null;
+  plate?: string | null;
+  plate_norm?: string | null;
+  vehicle_desc?: string | null;
+  site_id?: string | null;
+  valid_from: string;
+  valid_until: string;
+  status: PassStatus;
+  checked_in_at?: string | null;
+  checked_out_at?: string | null;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface VisitorPassCreate {
+  visitor_name: string;
+  phone?: string;
+  company?: string;
+  host?: string;
+  purpose?: string;
+  plate?: string;
+  vehicle_desc?: string;
+  site_id?: string;
+  valid_from?: string;
+  valid_until?: string;
+}
+
+export type VisitorPassUpdate = Partial<VisitorPassCreate> & { status?: PassStatus };
+
+export type WatchKind = "block" | "vip" | "alert";
+
+export interface WatchlistEntry {
+  id: string;
+  plate: string;
+  plate_norm: string;
+  kind: WatchKind;
+  reason?: string | null;
+  severity: Severity;
+  active: boolean;
+  created_by?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface WatchlistCreate {
+  plate: string;
+  kind?: WatchKind;
+  reason?: string;
+  severity?: Severity;
+  active?: boolean;
+}
+
+export type WatchlistUpdate = Partial<Omit<WatchlistCreate, "plate">>;
+
+export type AuthStatus = "matched" | "exception" | "unmatched" | "blocked";
+export type WorkflowStatus = "pending" | "confirmed" | "rejected" | "auto";
+export type EntryEventType =
+  | "vehicle_entry"
+  | "vehicle_exit"
+  | "visitor_checkin"
+  | "visitor_checkout";
+
+/** Canonical entry/exit event (memo §8.1). */
+export interface EntryEvent {
+  id: string;
+  site_id?: string | null;
+  camera_id?: string | null;
+  event_type: EntryEventType;
+  timestamp: string;
+  direction: "inbound" | "outbound" | "unknown";
+  plate?: string | null;
+  plate_confidence?: number | null;
+  subject: Record<string, unknown>;
+  authorization: Record<string, unknown>;
+  auth_status: AuthStatus;
+  evidence: Record<string, unknown>;
+  workflow_status: WorkflowStatus;
+  workflow: Record<string, unknown>;
+  audit: Record<string, unknown>;
+  track_id?: string | null;
+  created_at: string;
+}
+
+export interface AuditLogEntry {
+  id: string;
+  actor: string;
+  actor_name?: string | null;
+  role?: string | null;
+  action: string;
+  target_type?: string | null;
+  target_id?: string | null;
+  detail: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface EntryLogReport {
+  from: string;
+  to: string;
+  total: number;
+  by_auth_status: Record<string, number>;
+  events: EntryEvent[];
+}
+
+export interface ExceptionReport {
+  from: string;
+  to: string;
+  total: number;
+  events: EntryEvent[];
+}

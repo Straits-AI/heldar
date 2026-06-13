@@ -32,6 +32,18 @@ is production-grade; model *accuracy* on local footage (Malaysian vehicles/plate
 crowded ReID) still needs a local benchmark set before any hard decision is made on
 it (memo §15.3/§15.4).
 
+**Stage 4 (Campus Entry app) has also shipped** — the first vertical on the kernel.
+It adds an **RBAC layer** (users / sessions / API keys, five roles, a `Principal`
+extractor gated by `VISIONOPS_AUTH_ENABLED`), an entry **registry** (registered
+vehicles, visitor passes, watchlist), and an **ANPR temporal-voting engine**
+(`services/anpr.rs`) that consolidates per-frame plate reads from an `anpr` worker
+task into one canonical entry/exit event (memo §8.1), resolves it against the
+registry, and drives a guard confirm/reject **workflow** + daily/exception/audit
+**reports**. New schema: `migrations/0005_entry.sql`. It is documented in §17 below
+and, for operators/integrators, in [`docs/CAMPUS-ENTRY.md`](docs/CAMPUS-ENTRY.md).
+The ANPR/attribute *engineering* is production-grade; OCR + make/model *accuracy*
+needs the same local benchmark (memo §15.3/§15.4) before any hard access decision.
+
 Stage 0 maps to **memo §14 "Stage 0 — Media kernel MVP"** (camera registry, RTSP
 ingest, recording segmenter, timeline index, playback API, clip export, basic live
 view, camera health) and is built on the layer model of **memo §5**. The recording
@@ -1109,3 +1121,250 @@ start with type + color, treat make/model and any identity-like association as
 assistive (top-5) candidates, **benchmark on local gate/shop footage**, fine-tune
 only after local data collection, and never use model recognition as a hard access
 decision. Accuracy benchmarking is gated on collecting that local footage set.
+
+---
+
+## 17. Stage 4 — Campus Entry app
+
+Stage 4 (memo §2 Phase 1, §7.3–7.4 ANPR + vehicle attributes, §8.1 canonical event,
+§14 "Stage 4") is the first **vertical app** on the kernel: turn the Stage 3 event
+substrate into a guard-operable gate. It adds three things — an **RBAC layer**, an
+entry **registry**, and an **ANPR temporal-voting engine** — and reuses everything
+below it (sampler, ingest contract, events log + alert webhook, retention loop,
+evidence snapshots) **with no change to the Stage 0–3 paths**. The
+operator/integrator guide is [`docs/CAMPUS-ENTRY.md`](docs/CAMPUS-ENTRY.md); this
+section documents the implementation.
+
+New code: `services/anpr.rs` (engine), `auth.rs` (RBAC + `Principal` extractor),
+`routes/auth.rs` (login/users/keys), `routes/entry.rs` (registry + events +
+reports), the Stage 4 types in `models.rs`, the `auth_*`/`anpr_*`/`entry_*` settings
+in `config.rs`, and `migrations/0005_entry.sql`. The `AnprEngine` is built in
+`main.rs` and held in `AppState` (`state.anpr`); like the zone engine it has **no
+background loop** — it is driven synchronously from the detection-ingest path.
+
+```
+   AI worker (apps/ai)                    media kernel (apps/core)
+   ┌────────────────────┐
+   │ AnprAnalyzer       │  vehicle boxes → color → (optional) OCR plate, per frame
+   │ YOLO+ByteTrack+OCR │  attributes:{plate, plate_confidence, vehicle_type, color, direction, …}
+   └─────────┬──────────┘
+             │ POST /api/v1/ai/events  { task_type:"anpr", detections:[{track_id, attributes}], ... }
+             ▼
+   routes/ai.rs::ingest ── tx: insert detections ──► detections table
+             │
+             │ if task_type == "anpr":  st.anpr.process(camera_id, site_id, &detections)   (sync, in-proc)
+             ▼
+   services/anpr.rs::AnprEngine
+     per (camera|track) vote on normalized plate ─► winning plate ─► commit at min_votes / on TTL-prune
+        resolve(): block-watchlist → registered-vehicle → visitor-pass → vip → unmatched
+             │                                            │
+             ▼                                            ▼
+        entry_events row (+ evidence frame)       repo::log_event "entry_<auth_status>"
+        (canonical §8.1 event)                    (severity → Stage 1 notifier/webhook)
+
+   RBAC: auth.rs::Principal (FromRequestParts)  ── auth_enabled? token→principal : system_admin
+         routes/entry.rs / routes/auth.rs handlers ── principal.require(can_*(), action)
+```
+
+### 17.1 Entry domain tables (`migrations/0005_entry.sql`)
+
+Eight tables across three groups. As with `zone_events`, **event/audit rows have no
+camera FK** so they outlive a camera deletion (audit integrity); registry rows key on
+a normalized plate.
+
+**RBAC**
+
+| Table | Notes |
+|---|---|
+| `users` | `id`, `username` UNIQUE, `password_hash` (argon2id PHC), `role`, `display_name`, `active`. |
+| `sessions` | `id` = **SHA-256 of the issued token** (the token itself is never stored), `user_id` FK CASCADE, `expires_at`, `last_used_at`. |
+| `api_keys` | `id`, `name`, `key_hash` UNIQUE (SHA-256), `key_prefix` (display only), `role`, `active`, `last_used_at`. |
+
+**Registry**
+
+| Table | Notes |
+|---|---|
+| `vehicles` | the allow anchor. `plate_norm` UNIQUE (uppercased, alphanumeric-only); `owner_type ∈ student\|staff\|resident\|contractor\|visitor`; optional `valid_from`/`valid_until` window; `vehicle_type`/`make`/`model`/`color` for secondary verification. |
+| `visitor_passes` | `code` UNIQUE (`V-XXXXXX`), `visitor_name`, optional `plate`/`plate_norm`, `valid_from`/`valid_until` (NOT NULL), `status ∈ active\|checked_in\|checked_out\|expired\|revoked`, `checked_in_at`/`checked_out_at`, `created_by`. |
+| `watchlist` | `plate_norm` UNIQUE, `kind ∈ block\|vip\|alert`, `reason`, `severity ∈ info\|warning\|critical`, `active`. |
+
+**Events + audit**
+
+| Table | Notes |
+|---|---|
+| `entry_events` | the canonical §8.1 event. Denormalized columns `plate`/`auth_status`/`workflow_status`/`direction`/`timestamp`/`plate_confidence` for fast query+reports; `subject`/`authorization`/`evidence`/`workflow`/`audit` are JSON. `event_type ∈ vehicle_entry\|vehicle_exit\|visitor_checkin\|visitor_checkout`. Indexed on ts/plate/auth_status/workflow_status. |
+| `audit_log` | append-only RBAC accountability: `actor`, `actor_name`, `role`, `action`, `target_type`, `target_id`, `detail` JSON. |
+
+### 17.2 The ANPR engine (`services/anpr.rs`)
+
+`AnprEngine::process(camera_id, site_id, detections)` is invoked by
+`routes/ai.rs::ingest` **after** the detection batch is committed, **only** when the
+task is `anpr`. It consolidates many noisy per-frame plate reads of one vehicle into
+**one** authoritative event.
+
+**Server-time, per-track voting.** State is an in-memory `Mutex<HashMap<key,
+TrackVoteState>>` keyed `"{camera}|{track}"`; with no `track_id` the key falls back to
+`"{camera}|plate:{norm}"` so repeated reads of the same plate still consolidate (and
+dedupe) inside the window. **All timing is server time** (`Utc::now()`), never the
+worker-supplied timestamp. For each detection the engine:
+
+- normalizes the plate (`normalize_plate`: ASCII-alphanumeric, uppercased) and adds a
+  **vote** for that key (count + summed confidence);
+- latches the **highest-confidence** observation of each attribute
+  (`vehicle_type`/`color`/`make`/`model`), the `direction` (`inbound`/`outbound`), and
+  `model_versions`.
+
+**Winning plate** (`winning_plate`) = most votes, tie-broken by summed confidence, but
+**plausible plates are preferred** over implausible ones (a digits-only OCR misread
+can't mask a real plate); the overall leader is used only when none is plausible.
+`is_plausible_plate`: 3–10 chars **and** mixes a letter and a digit (Malaysian shape).
+
+**Commit + prune.** In one locked pass the engine (a) **commits** any track whose
+winning plate has reached `anpr_min_votes` (default 3, clamp 1…50) reads — voting on
+the *plate*, not the raw detection count, so a single noisy read or a plateless track
+can't trip the gate; and (b) **prunes** tracks not seen for `STATE_TTL_SECS = 30` s,
+**committing on prune** any that produced ≥1 plate read but never reached threshold (a
+vehicle that passed too fast to accumulate votes is still logged). Tracks that yielded
+**no** plate (pure background vehicles) are dropped silently so the log isn't flooded
+with `unmatched` events. Commit jobs are built under the lock and processed after
+release; an insert failure clears `committed` so a still-live track retries next batch.
+
+**Identity resolution (`resolve`), strict precedence — first match wins:**
+
+1. **Unreadable** plate (empty / not plausible) → `unmatched` (`no_plate_read` /
+   `plate_unreadable`).
+2. **Block watchlist** (`active`, `kind='block'`) → `blocked` (severity = entry's
+   `severity` or `critical`). This is the only security-critical lookup and **fails
+   closed**: a DB error becomes an `exception` (`watchlist_lookup_failed`), never a
+   silent fall-through to an allow branch.
+3. **Registered vehicle** (`active`): outside its validity window →
+   `exception (outside_validity_window)`; else an **attribute check** comparing
+   **`color` + `vehicle_type` only** (make/model is assistive, never a mismatch
+   trigger — memo §7.4/§15.4), mismatch (both sides known + differ, case-insensitive)
+   → `exception` with the `mismatches` list; a clean match → `matched`/`auto`, **but a
+   concurrent alert listing downgrades it to `exception`/`pending`**.
+4. **Visitor pass** currently within its window (`status IN active,checked_in`,
+   `valid_from ≤ now ≤ valid_until`, newest `valid_until` first so a future-dated pass
+   can't mask a valid one) → `matched`; an `active` pass on an **inbound** read is
+   auto-flipped to `checked_in`. A pass that exists but is outside its window →
+   `exception (pass_outside_validity_window)`.
+5. **VIP watchlist** (`kind='vip'`) → `matched` (informational allow).
+6. Otherwise unknown: **alert-listed** (`kind='alert'`) → `exception`; else
+   `unmatched`.
+
+`auth_status ∈ matched | exception | unmatched | blocked`;
+`workflow_status ∈ auto | pending | confirmed | rejected`. A clean automatic match is
+`auto`; everything needing review (`blocked`/`exception`/`unmatched`) is `pending`.
+
+### 17.3 Canonical event + evidence + alert mirror
+
+On commit the engine writes one `entry_events` row (the §8.1 model — see
+[`docs/CAMPUS-ENTRY.md`](docs/CAMPUS-ENTRY.md) §6 for the full JSON and field
+mapping). `event_type` is `vehicle_exit` when `direction == "outbound"`, else
+`vehicle_entry`. The top-level `plate` column is the **normalized** key; `subject.plate`
+is the raw read; `subject.plate_valid` carries the plausibility flag;
+`subject.make_model` is composed from make+model when present. `audit.model_versions`
+is whatever the worker stamped.
+
+**Evidence** (`copy_evidence`) copies the camera's latest sampled frame — preferring
+`latest_main.jpg`, falling back to `latest_sub.jpg` — to
+`snapshots/entryevt_<id>.jpg` and stores `/media/snapshots/entryevt_<id>.jpg` as
+`evidence.snapshot_path`. A cheap file copy, no decode, reusing the Stage 2 sampler's
+always-current frame (the Stage 3 evidence pattern).
+
+**Alert mirror** — every event is also written to the kernel `events` log via the same
+`repo::log_event` as `entry_<auth_status>` (e.g. `entry_blocked`) at the resolution's
+severity, so `warning`/`critical` entry events flow into the **Stage 1 alert
+notifier/webhook** (§14.3) with zero extra wiring — exactly like a zone event.
+
+A **manual** guard check-in/out (`routes/entry.rs::record_manual_entry`) writes the
+same canonical shape (`visitor_checkin`/`visitor_checkout`, `auth_status: matched`,
+`workflow_status: confirmed`, `source: visitor_pass`) so the daily log is complete for
+both automatic (ANPR) and booth (manual) entries.
+
+### 17.4 The RBAC layer + `Principal` extractor (`auth.rs`)
+
+Two credentialed principal kinds — **users** (`vos_…` session tokens) and **API keys**
+(`vok_…`) — plus a synthetic **system** principal. Tokens are random 256-bit values;
+only their **SHA-256** is stored (a DB leak exposes no usable credential). Passwords
+are **argon2id**; login verifies even unknown/disabled users against a dummy hash so
+latency can't reveal account existence.
+
+`Principal` implements `FromRequestParts<AppState>` — it is just a handler argument.
+`token_from_headers` reads `Authorization: Bearer <t>` (or `bearer`) and falls back to
+`X-API-Key`. `resolve_token` dispatches on prefix: `vok_` → `api_keys` (active +
+parseable-role checks, else deny — never fail-open), else a `sessions JOIN users`
+lookup (expiry → delete + deny; inactive → deny; `last_used_at` best-effort stamp).
+
+**`auth_enabled` gating** is the crux:
+
+```
+token present?
+ ├─ resolves to a principal      ─► use it
+ ├─ no/invalid token, auth_enabled=false ─► Principal::system_admin()   (open LAN appliance, default)
+ └─ no/invalid token, auth_enabled=true  ─► 401 (authentication required / invalid credentials)
+```
+
+So with the default `VISIONOPS_AUTH_ENABLED=false` every request is the synthetic
+admin and the whole API behaves as the pre-Stage-4 open appliance; flip it on and the
+entry/admin surface requires a valid token and enforces roles. Five roles map to five
+capabilities — `can_view` (all), `can_operate_gate` (admin/manager/guard),
+`can_manage_registry` (admin/manager), `can_ingest` (admin/integration), `can_admin`
+(admin) — asserted by `principal.require(allowed, action)` → 403 on denial. The full
+role×capability matrix and per-endpoint roles are in
+[`docs/CAMPUS-ENTRY.md`](docs/CAMPUS-ENTRY.md) §4/§9.
+
+**Bootstrap** — `ensure_bootstrap` (called from `main.rs` right after migrations)
+seeds one admin from `VISIONOPS_BOOTSTRAP_ADMIN_USER`/`_PASSWORD` (password ≥8) when
+auth is enabled and no users exist; a no-op otherwise. **Last-admin protection** in
+`routes/auth.rs` refuses to demote/disable/delete the final active admin (and refuses
+self-deletion). Every mutation across `routes/auth.rs` + `routes/entry.rs` appends an
+`audit_log` row via `auth::audit` (best-effort; never fails the caller).
+
+### 17.5 HTTP surface (`routes/auth.rs`, `routes/entry.rs`)
+
+Both routers are `merge`d in `routes/mod.rs`. The full table (method × path × role ×
+purpose) is in [`docs/CAMPUS-ENTRY.md`](docs/CAMPUS-ENTRY.md) §9. In brief: `/auth/*`
+(login/logout/me) + admin-only `/users` + `/api-keys`; `/vehicles` + `/watchlist`
+(read = view, write = manage_registry); `/passes` + check-in/out + entry-event
+confirm/reject (gate ops = operate_gate); `/entry-events` + `/reports/{entry-log,
+exceptions}` (view); `/audit` (manager+). Reads require any authenticated principal;
+the ANPR worker reaches the engine through the **Stage 2** `POST /api/v1/ai/events`
+(ingest capability).
+
+Reports resolve a `[from,to)` window from either `date=YYYY-MM-DD` (a UTC day, default
+today) or explicit `from`/`to`. The exception report is
+`auth_status IN ('blocked','exception','unmatched') OR workflow_status='rejected'`.
+
+### 17.6 How it plugs into ingest + retention
+
+- **Ingest** — no new endpoint. `routes/ai.rs::ingest` already runs the zone engine
+  on tracked detections; Stage 4 adds one branch: `if task_type == "anpr"` →
+  `st.anpr.process(camera_id, cam.site_id, &detections)`. The engine and the zone
+  engine are independent in-proc consumers of the **same** committed batch.
+- **Retention** — the Stage 0/1 sweeper (`services/retention.rs`) gained an entry
+  phase governed by `VISIONOPS_ENTRY_RETENTION_DAYS` (default 365): prune
+  `entry_events` older than the cutoff **and their evidence JPEGs**, then prune
+  `audit_log` and the mirrored `events` rows past the same cutoff, and prune **expired
+  `sessions`** every sweep. Recording-segment policy + evidence lock are untouched.
+- **Evidence + alerting** — entry evidence is served by the existing
+  `/media/snapshots` `ServeDir`; entry events reuse the `events` log + Stage 1 webhook.
+- **Isolation preserved** — the engine adds **no background task** and **no decode**:
+  it runs inline on the ingest request and only ever copies an already-sampled JPEG,
+  so the Stage 2 guarantee (AI cannot break recording/live view) still holds.
+
+### 17.7 Honest scope — engineering done, accuracy needs local data
+
+The Stage 4 **engineering** is production-grade and unit-tested (`services/anpr.rs`
+covers normalization, plausibility, plausible-preferred voting, and the
+both-known-and-differ mismatch rule; `auth.rs` covers password/token roundtrips, role
+parsing, and the capability matrix): temporal voting, the strict resolution precedence
+with a fail-closed block lookup, the guard workflow, the canonical event + evidence,
+RBAC, and the full CRUD/report API. What is **not** validated is **accuracy**: plate
+OCR and vehicle-attribute recognition on **local Malaysian gate footage** (memo
+§15.3/§15.4) — the reference worker emits **type + color only** (no make/model
+classifier), and by design attributes raise **review exceptions, never
+auto-rejections**. Two further deliberate deferrals: **directional entry/exit *lines* +
+calibration** (only a per-camera `direction` config *hint* is accepted; no
+line-crossing/homography), and **extending the `Principal` guard to the legacy Stage
+0–3 routes** (today auth gates the Stage 4 + ingest surface).

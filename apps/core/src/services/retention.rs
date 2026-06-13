@@ -268,5 +268,60 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
             "retention: pruned old zone events + evidence"
         );
     }
+
+    // 6) Prune old entry events (+ evidence frames), stale audit log, and expired sessions.
+    let entry_cutoff = Utc::now() - chrono::Duration::days(cfg.entry_retention_days.max(1));
+    let old_entries: Vec<(String, sqlx::types::Json<serde_json::Value>)> =
+        sqlx::query_as("SELECT id, evidence FROM entry_events WHERE created_at < ?")
+            .bind(entry_cutoff)
+            .fetch_all(pool)
+            .await?;
+    if !old_entries.is_empty() {
+        for (_id, evidence) in &old_entries {
+            if let Some(url) = evidence.0.get("snapshot_path").and_then(|v| v.as_str()) {
+                if let Some(name) = url.rsplit('/').next() {
+                    let _ = tokio::fs::remove_file(cfg.snapshots_dir.join(name)).await;
+                }
+            }
+        }
+        let epruned = sqlx::query("DELETE FROM entry_events WHERE created_at < ?")
+            .bind(entry_cutoff)
+            .execute(pool)
+            .await?
+            .rows_affected();
+        tracing::info!(
+            deleted = epruned,
+            "retention: pruned old entry events + evidence"
+        );
+    }
+    let apruned = sqlx::query("DELETE FROM audit_log WHERE created_at < ?")
+        .bind(entry_cutoff)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    if apruned > 0 {
+        tracing::info!(deleted = apruned, "retention: pruned old audit log entries");
+    }
+    let spruned = sqlx::query("DELETE FROM sessions WHERE expires_at < ?")
+        .bind(Utc::now())
+        .execute(pool)
+        .await?
+        .rows_affected();
+    if spruned > 0 {
+        tracing::debug!(deleted = spruned, "retention: pruned expired sessions");
+    }
+
+    // 7) Prune the generic event log (camera-status events, disk-pressure warnings, and the entry
+    //    mirrors written by the ANPR engine). It is otherwise unbounded. The alert notifier advances
+    //    a durable cursor over recent rows, so deleting rows older than the (long) entry TTL — which
+    //    are far past delivery — is safe.
+    let evpruned = sqlx::query("DELETE FROM events WHERE created_at < ?")
+        .bind(entry_cutoff)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    if evpruned > 0 {
+        tracing::info!(deleted = evpruned, "retention: pruned old event-log rows");
+    }
     Ok(())
 }

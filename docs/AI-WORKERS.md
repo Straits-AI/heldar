@@ -1,4 +1,4 @@
-# VisionOps Core — AI Worker Integration Guide (Stages 2–3)
+# VisionOps Core — AI Worker Integration Guide (Stages 2–4)
 
 This is the integration guide for **AI workers** against the VisionOps Core media
 kernel. It documents the Stage 2 **frame sampler** and the **worker contract**
@@ -816,8 +816,123 @@ after the zone is renamed or deleted (`zone_events` has no FK back to `zones`).
 
 ---
 
-See also: [`ARCHITECTURE.md`](../ARCHITECTURE.md) §15 (Stage 2 implementation) and
-§16 (Stage 3 detection/tracking/zone kernel),
-[`ROADMAP.md`](../ROADMAP.md) Stages 2–3 (checklists),
-[`docs/OBSERVABILITY.md`](OBSERVABILITY.md) (Stage 1 metrics/alerts the AI + zone
-events feed into).
+## 12. Stage 4 — the ANPR analyzer
+
+Stage 4 adds an `anpr` task type and registers a real `Analyzer` for it
+(`AnprAnalyzer` in `apps/ai/worker.py`) — again **with no change to §§1–10**: the
+worker still discovers tasks, pulls `latest.jpg`, and POSTs to `/api/v1/ai/events`.
+The kernel routes `task_type == "anpr"` results into the **entry engine**
+(`services/anpr.rs`), which does temporal plate voting + registry resolution. The
+engine and its event model are documented in [`docs/CAMPUS-ENTRY.md`](CAMPUS-ENTRY.md)
+and [`ARCHITECTURE.md`](../ARCHITECTURE.md) §17; this section is the **worker** half.
+
+### 12.1 The vehicle → plate → OCR pipeline
+
+`AnprAnalyzer` shares the Stage 3 backbone (**YOLOv8 + ByteTrack**), restricted to
+vehicle classes for speed, and emits **one detection per vehicle box per frame**,
+each with a stable `track_id`:
+
+```
+frame → YOLO vehicle boxes → ByteTrack track_id      (per task thread, state on self)
+            │
+            ├─ vehicle_type   = YOLO class (car/truck/bus/motorcycle/…)
+            ├─ color          = coarse HSV heuristic over the box centre (assistive)
+            └─ plate          = OCR over the vehicle crop  ── IF an OCR backend is installed
+```
+
+Per-task `config` keys (all optional): `weights` (default `yolov8n.pt`), `threshold`
+(min vehicle confidence, default `0.3`), `ocr` (force a backend), `direction`
+(`inbound`/`outbound`), `device` (default auto), `min_box_area` (ignore boxes smaller
+than this fraction of the frame), `imgsz`.
+
+### 12.2 OCR backends are OPTIONAL (and never fabricate)
+
+Plate reading uses a lazy `_OcrBackend` that tries **PaddleOCR** then **EasyOCR** (or
+exactly the one named in `config.ocr`). **Both are optional Python packages.** If
+neither is installed:
+
+- the analyzer **stays enabled** and keeps emitting vehicles **with attributes but
+  WITHOUT a plate** — it **never fabricates a plate**;
+- the core engine still receives the vehicle reads and will log unreadable-/no-plate
+  events (`auth_status: unmatched`, `note: no_plate_read`) for guard review.
+
+When a backend *is* present, `read_plate` keeps the **most plate-like** token: it
+normalizes each OCR candidate to uppercase alphanumerics and accepts it only if it is
+**3–10 chars and mixes a letter and a digit** (the same plausibility gate the core
+applies), returning the highest-confidence survivor as `(text, confidence)`. Install
+them only if you want plate reads (see `apps/ai/requirements.txt`):
+
+```bash
+pip install paddleocr      # or: pip install easyocr
+```
+
+### 12.3 Color heuristic + direction config
+
+- **Color** (`_estimate_color`) is a crude dominant-color estimate over the central
+  50 % of the vehicle box → one of `black/white/gray/red/orange/yellow/green/blue/
+  purple` or none. The names match what an operator types when registering a vehicle,
+  so the core's **case-insensitive** mismatch check lines up. It is **assistive
+  metadata only** (memo §7.4/§15.4), never an access decision, and real accuracy needs
+  local benchmarking.
+- **Direction** is a **per-camera config hint**, not geometry: `config.direction =
+  "inbound" | "outbound"`. There is **no calibrated line-crossing** in the worker or
+  kernel yet, so a single-direction gate camera supplies its direction this way; the
+  core uses it to choose `vehicle_entry` vs `vehicle_exit` and to gate visitor-pass
+  auto-check-in.
+
+### 12.4 The per-frame `attributes` contract the engine consumes
+
+Each ANPR detection is the standard §5.3 shape (`label` = vehicle type, `confidence`,
+`bbox` normalized `[x,y,w,h]`, `track_id`) with an `attributes` object the core ANPR
+engine reads:
+
+| `attributes` key | Type | Emitted when | Engine use |
+|---|---|---|---|
+| `plate` | string | OCR backend present **and** a plausible token read | normalized → the voted identity key |
+| `plate_confidence` | number 0…1 | with `plate` | vote tie-break + stored `plate_confidence` |
+| `vehicle_type` | string | always (YOLO class) | secondary mismatch check vs registered vehicle |
+| `color` | string | when the heuristic returns one | secondary mismatch check (case-insensitive) |
+| `make` | string | *(not emitted by the reference worker — no make classifier)* | assistive only; **never** a mismatch trigger |
+| `model` | string | *(not emitted by the reference worker)* | assistive only |
+| `direction` | `"inbound"`/`"outbound"` | when `config.direction` is set | event type + pass auto-check-in |
+| `model_versions` | object | always | stamped into the event's `audit.model_versions` |
+
+`model_versions` from the reference worker looks like
+`{"anpr": "anpr_v0.1_<paddleocr|easyocr|noocr>", "vehicle_attr": "heuristic_v0.1",
+"detector": "yolov8n.pt"}`. The engine keeps the **highest-confidence** observation of
+each attribute across the track's frames and votes the **plate** across frames — so a
+single noisy read is outvoted (see [`docs/CAMPUS-ENTRY.md`](CAMPUS-ENTRY.md) §2.2).
+
+Example posted detection:
+
+```json
+{
+  "label": "car",
+  "confidence": 0.86,
+  "bbox": [0.31, 0.40, 0.22, 0.30],
+  "track_id": "t17",
+  "attributes": {
+    "vehicle_type": "car",
+    "color": "white",
+    "direction": "inbound",
+    "plate": "ABC1234",
+    "plate_confidence": 0.91,
+    "model_versions": { "anpr": "anpr_v0.1_paddleocr", "vehicle_attr": "heuristic_v0.1", "detector": "yolov8n.pt" }
+  }
+}
+```
+
+> **Accuracy needs local benchmarking.** As with Stage 3, the ANPR *engineering* is
+> production-grade, but plate OCR, color, and (future) make/model **accuracy** is not
+> validated on local Malaysian gate footage (memo §15.3/§15.4). Treat attributes as
+> assistive, surface mismatches as **guard-review exceptions**, and never make a hard
+> access decision on recognition until it is locally benchmarked.
+
+---
+
+See also: [`ARCHITECTURE.md`](../ARCHITECTURE.md) §15 (Stage 2 implementation), §16
+(Stage 3 detection/tracking/zone kernel), and §17 (Stage 4 Campus Entry),
+[`docs/CAMPUS-ENTRY.md`](CAMPUS-ENTRY.md) (the entry engine + RBAC + reports),
+[`ROADMAP.md`](../ROADMAP.md) Stages 2–4 (checklists),
+[`docs/OBSERVABILITY.md`](OBSERVABILITY.md) (Stage 1 metrics/alerts the AI + zone +
+entry events feed into).

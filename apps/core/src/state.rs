@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 
 use crate::config::Config;
+use crate::services::anpr::AnprEngine;
 use crate::services::recorder::RecorderManager;
 use crate::services::sampler::SamplerManager;
 use crate::services::zones::ZoneEngine;
@@ -16,6 +17,7 @@ pub struct AppState {
     pub recorder: Arc<RecorderManager>,
     pub sampler: Arc<SamplerManager>,
     pub zones: Arc<ZoneEngine>,
+    pub anpr: Arc<AnprEngine>,
     pub http: reqwest::Client,
     pub started_at: DateTime<Utc>,
 }

@@ -1,3 +1,4 @@
+pub mod anpr;
 pub mod clip;
 pub mod discovery;
 pub mod health;

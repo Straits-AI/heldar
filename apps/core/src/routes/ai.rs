@@ -298,8 +298,13 @@ const MAX_INGEST_DETECTIONS: usize = 1000;
 
 /// Ingest detections (and an optional event) posted by an AI worker. Detections are written in a
 /// single transaction so a batch is all-or-nothing.
-async fn ingest(State(st): State<AppState>, Json(body): Json<AiIngest>) -> AppResult<Json<Value>> {
-    let _ = load_camera(&st.pool, &body.camera_id).await?;
+async fn ingest(
+    State(st): State<AppState>,
+    principal: crate::auth::Principal,
+    Json(body): Json<AiIngest>,
+) -> AppResult<Json<Value>> {
+    principal.require(principal.can_ingest(), "ingest perception events")?;
+    let cam = load_camera(&st.pool, &body.camera_id).await?;
     if body.task_type.trim().is_empty() {
         return Err(AppError::BadRequest("`task_type` is required".into()));
     }
@@ -340,6 +345,13 @@ async fn ingest(State(st): State<AppState>, Json(body): Json<AiIngest>) -> AppRe
     // Feed tracked detections to the zone engine (raises enter/exit/dwell events with evidence).
     // The engine drives membership off server time, not the worker-supplied timestamp.
     st.zones.process(&body.camera_id, &body.detections).await;
+
+    // ANPR tasks feed the entry engine: temporal plate voting → registry lookup → entry event.
+    if body.task_type.eq_ignore_ascii_case("anpr") {
+        st.anpr
+            .process(&body.camera_id, cam.site_id.as_deref(), &body.detections)
+            .await;
+    }
 
     if let Some(ev) = &body.event {
         let severity = ev.severity.clone().unwrap_or_else(|| "info".into());

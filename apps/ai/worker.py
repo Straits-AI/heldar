@@ -656,12 +656,285 @@ class YoloAnalyzer(Analyzer):
         )
 
 
+# Basic color buckets for the (assistive) vehicle-color heuristic. Names match what an operator
+# would type when registering a vehicle, so the core's case-insensitive mismatch check lines up.
+_COLOR_NAMES = ("black", "white", "gray", "red", "orange", "yellow", "green", "blue", "purple")
+
+
+def _estimate_color(img_rgb: "Image.Image", bbox_px: tuple) -> Optional[str]:
+    """Crude dominant-color estimate over the centre of a vehicle box (assistive metadata only).
+
+    Returns a coarse color name or None. This is deliberately simple — per memo §7.4/§15.4, color is
+    secondary verification, not an access decision, and real accuracy needs local benchmarking.
+    """
+    x1, y1, x2, y2 = bbox_px
+    if x2 - x1 < 4 or y2 - y1 < 4:
+        return None
+    # Sample the central 50% of the box to avoid background/edges.
+    cx1 = x1 + (x2 - x1) // 4
+    cx2 = x2 - (x2 - x1) // 4
+    cy1 = y1 + (y2 - y1) // 4
+    cy2 = y2 - (y2 - y1) // 4
+    crop = img_rgb.crop((cx1, cy1, cx2, cy2)).resize((16, 16), Image.BILINEAR)
+    arr = np.asarray(crop, dtype=np.float32) / 255.0
+    r, g, b = (float(arr[..., i].mean()) for i in range(3))
+    mx, mn = max(r, g, b), min(r, g, b)
+    v = mx
+    s = 0.0 if mx <= 0 else (mx - mn) / mx
+    if s < 0.18:  # achromatic
+        if v < 0.25:
+            return "black"
+        if v > 0.72:
+            return "white"
+        return "gray"
+    # Hue in degrees.
+    if mx == mn:
+        h = 0.0
+    elif mx == r:
+        h = (60 * ((g - b) / (mx - mn)) + 360) % 360
+    elif mx == g:
+        h = 60 * ((b - r) / (mx - mn)) + 120
+    else:
+        h = 60 * ((r - g) / (mx - mn)) + 240
+    if h < 15 or h >= 345:
+        return "red"
+    if h < 45:
+        return "orange"
+    if h < 70:
+        return "yellow"
+    if h < 170:
+        return "green"
+    if h < 260:
+        return "blue"
+    if h < 345:
+        return "purple"
+    return None
+
+
+class _OcrBackend:
+    """Lazy, optional OCR backend for plate reading. Tries PaddleOCR then EasyOCR; if neither is
+    installed it stays disabled and the analyzer simply emits vehicles WITHOUT a plate (never a
+    fabricated one). Returns (text, confidence) for the most plate-like token found."""
+
+    def __init__(self, preferred: Optional[str], log: logging.LoggerAdapter):
+        self.log = log
+        self.kind: Optional[str] = None
+        self._engine = None
+        self._init(preferred)
+
+    def _init(self, preferred: Optional[str]) -> None:
+        order = [preferred] if preferred else ["paddleocr", "easyocr"]
+        for kind in order:
+            if not kind:
+                continue
+            try:
+                if kind == "paddleocr":
+                    from paddleocr import PaddleOCR  # type: ignore
+
+                    self._engine = PaddleOCR(use_angle_cls=False, lang="en", show_log=False)
+                    self.kind = "paddleocr"
+                    self.log.info("ANPR OCR backend: PaddleOCR")
+                    return
+                if kind == "easyocr":
+                    import easyocr  # type: ignore
+
+                    self._engine = easyocr.Reader(["en"], gpu=False)
+                    self.kind = "easyocr"
+                    self.log.info("ANPR OCR backend: EasyOCR")
+                    return
+            except Exception as exc:  # noqa: BLE001
+                self.log.warning("OCR backend %s unavailable (%s)", kind, exc)
+        self.log.warning(
+            "ANPR: no OCR backend available (install paddleocr or easyocr); emitting vehicle "
+            "attributes WITHOUT plate reads. The engine will still log unreadable-plate events."
+        )
+
+    @property
+    def enabled(self) -> bool:
+        return self._engine is not None
+
+    def read_plate(self, crop: "Image.Image") -> Optional[tuple]:
+        if self._engine is None:
+            return None
+        try:
+            arr = np.asarray(crop.convert("RGB"))
+            candidates: List[tuple] = []  # (text, conf)
+            if self.kind == "paddleocr":
+                result = self._engine.ocr(arr, cls=False)
+                for block in result or []:
+                    for line in block or []:
+                        try:
+                            text, conf = line[1][0], float(line[1][1])
+                            candidates.append((text, conf))
+                        except (IndexError, TypeError, ValueError):
+                            continue
+            elif self.kind == "easyocr":
+                for item in self._engine.readtext(arr):
+                    try:
+                        text, conf = item[1], float(item[2])
+                        candidates.append((text, conf))
+                    except (IndexError, TypeError, ValueError):
+                        continue
+            best = None
+            for text, conf in candidates:
+                norm = "".join(c for c in text.upper() if c.isalnum())
+                if not (3 <= len(norm) <= 10):
+                    continue
+                if not (any(c.isalpha() for c in norm) and any(c.isdigit() for c in norm)):
+                    continue
+                if best is None or conf > best[1]:
+                    best = (norm, conf)
+            return best
+        except Exception as exc:  # noqa: BLE001
+            self.log.debug("OCR read failed: %s", exc)
+            return None
+
+
+class AnprAnalyzer(Analyzer):
+    """ANPR / vehicle-attribute analyzer (Stage 4).
+
+    Detects + tracks vehicles with YOLOv8 + ByteTrack (same backbone as :class:`YoloAnalyzer`),
+    estimates a coarse color, and — when an OCR backend is installed — reads the plate from the
+    vehicle crop. It emits ONE detection per vehicle box per frame, carrying the per-frame plate
+    read and attributes in ``attributes``; the core's ANPR engine performs temporal voting across
+    frames, validates the plate, and resolves authorization. This analyzer never fabricates a plate:
+    if OCR is unavailable or unconfident, it simply omits the plate field.
+
+    Per-task ``config`` keys (all optional):
+      * ``weights``    — YOLO weights (default ``yolov8n.pt``).
+      * ``threshold``  — min vehicle confidence (default ``0.3``).
+      * ``ocr``        — force OCR backend: ``"paddleocr"`` | ``"easyocr"`` (default: auto-detect).
+      * ``direction``  — fixed lane direction for this camera: ``"inbound"`` | ``"outbound"``
+                         (gate cameras are usually single-direction; the core has no calibrated
+                         line-crossing yet, so this is how direction is supplied).
+      * ``device``     — force device (default auto).
+      * ``min_box_area`` — ignore vehicle boxes smaller than this fraction of the frame (default 0).
+    """
+
+    name = "anpr"
+
+    def __init__(self, config: Dict[str, Any], log: logging.LoggerAdapter):
+        super().__init__(config, log)
+        import torch
+        from ultralytics import YOLO
+
+        self.weights = str(self.config.get("weights", "yolov8n.pt"))
+        self.conf = float(self.config.get("threshold", 0.3))
+        self.imgsz = self.config.get("imgsz")
+        device = self.config.get("device")
+        if device is None or device == "auto":
+            device = 0 if torch.cuda.is_available() else "cpu"
+        self.device = device
+        self.model = YOLO(self.weights)
+        self.names: Dict[int, str] = dict(self.model.names)
+        # Restrict to vehicle classes for speed.
+        self.vehicle_classes = sorted(
+            idx for idx, name in self.names.items() if name.lower() in _VEHICLE_CLASSES
+        )
+        direction = self.config.get("direction")
+        self.direction = direction if direction in ("inbound", "outbound") else None
+        self.min_box_area = float(self.config.get("min_box_area", 0.0))
+        self.ocr = _OcrBackend(self.config.get("ocr"), log)
+        self.model_versions = {
+            "anpr": f"anpr_v0.1_{self.ocr.kind or 'noocr'}",
+            "vehicle_attr": "heuristic_v0.1",
+            "detector": self.weights,
+        }
+        self.log.info(
+            "ANPR loaded weights=%s device=%s ocr=%s direction=%s",
+            self.weights,
+            self.device,
+            self.ocr.kind or "none",
+            self.direction or "unknown",
+        )
+
+    def analyze(self, frame: FrameContext) -> AnalysisResult:
+        img = frame.image().convert("RGB")
+        width, height = img.size
+        track_kwargs: Dict[str, Any] = {
+            "persist": True,
+            "tracker": "bytetrack.yaml",
+            "conf": self.conf,
+            "device": self.device,
+            "verbose": False,
+        }
+        if self.vehicle_classes:
+            track_kwargs["classes"] = self.vehicle_classes
+        if self.imgsz:
+            track_kwargs["imgsz"] = self.imgsz
+
+        results = self.model.track(img, **track_kwargs)
+        if not results:
+            return AnalysisResult()
+        result = results[0]
+        oh, ow = getattr(result, "orig_shape", (height, width))
+        ow = ow or width
+        oh = oh or height
+
+        detections: List[Detection] = []
+        boxes = result.boxes
+        plates_read = 0
+        if boxes is not None:
+            for box in boxes:
+                cls_idx = int(box.cls.item())
+                vtype = self.names.get(cls_idx, str(cls_idx))
+                confidence = float(box.conf.item())
+                x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
+                x1, y1 = max(0.0, x1), max(0.0, y1)
+                bw, bh = (x2 - x1), (y2 - y1)
+                if ow * oh > 0 and (bw * bh) / (ow * oh) < self.min_box_area:
+                    continue
+                bbox = [
+                    round(x1 / ow, 5),
+                    round(y1 / oh, 5),
+                    round(bw / ow, 5),
+                    round(bh / oh, 5),
+                ]
+                track_id = str(int(box.id.item())) if box.id is not None else None
+
+                attrs: Dict[str, Any] = {
+                    "vehicle_type": vtype,
+                    "model_versions": self.model_versions,
+                }
+                color = _estimate_color(img, (int(x1), int(y1), int(x2), int(y2)))
+                if color:
+                    attrs["color"] = color
+                if self.direction:
+                    attrs["direction"] = self.direction
+                if self.ocr.enabled:
+                    crop = img.crop((int(x1), int(y1), int(x2), int(y2)))
+                    plate = self.ocr.read_plate(crop)
+                    if plate:
+                        attrs["plate"] = plate[0]
+                        attrs["plate_confidence"] = round(plate[1], 4)
+                        plates_read += 1
+
+                detections.append(
+                    Detection(
+                        label=vtype,
+                        confidence=round(confidence, 4),
+                        bbox=bbox,
+                        track_id=track_id,
+                        attributes=attrs,
+                    )
+                )
+
+        self.log.debug(
+            "anpr vehicles=%d plates=%d ocr=%s",
+            len(detections),
+            plates_read,
+            self.ocr.kind or "none",
+        )
+        return AnalysisResult(detections=detections)
+
+
 # Registry: task_type -> Analyzer subclass. Stage 3 wires the real YOLO model
-# in for "detection" (and the explicit "yolo" alias); motion stays available.
+# in for "detection" (and the explicit "yolo" alias); Stage 4 adds "anpr"; motion stays available.
 ANALYZERS: Dict[str, type] = {
     "motion": MotionAnalyzer,
     "detection": YoloAnalyzer,
     "yolo": YoloAnalyzer,
+    "anpr": AnprAnalyzer,
 }
 
 

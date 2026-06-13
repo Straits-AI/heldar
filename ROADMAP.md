@@ -176,17 +176,71 @@ Reference worker: `apps/ai`.
 
 ---
 
-## ⬜ Stage 4 — Campus Entry app (client Phase 1)
+## ✅ Stage 4 — Campus Entry app (client Phase 1)  — **DONE**
 
-**Goal:** the client's "Premise Security / Entry intelligence" deliverable. (memo §2 Phase 1, §7.3–7.4, §14)
+**Goal:** the client's "Premise Security / Entry intelligence" deliverable. (memo §2
+Phase 1, §7.3–7.4, §8.1, §14) Built as the first **vertical app** on the kernel: an
+RBAC layer, an entry registry (vehicles / passes / watchlist), an **ANPR
+temporal-voting engine** producing canonical entry/exit events, a guard
+confirm/reject workflow, and reports — all on the **unchanged** Stage 2 ingest
+contract (`anpr` tasks feed the engine via `POST /api/v1/ai/events`). Operator/
+integrator guide: [`docs/CAMPUS-ENTRY.md`](docs/CAMPUS-ENTRY.md); implementation:
+`ARCHITECTURE.md` §17. Worker side: `apps/ai` `AnprAnalyzer`.
 
-- [ ] Visitor pre-registration + guard-booth check-in (operator dashboard)
-- [ ] **ANPR / ALPR** — vehicle→plate detect→rectify→OCR→temporal voting→format validate→lookup. Plate/pass = **primary** identity anchor.
-- [ ] Vehicle attributes (type → color → make → model) — **secondary** verification + search metadata only (top-5 assistive; no hard access decision on make/model in Malaysia without local benchmarking)
-- [ ] Daily entry logs · exception reports (plate/vehicle mismatch) · audit reports
-- [ ] Role matrix (RBAC) + API/webhook integration layer
+**Shipped checklist:**
 
-**Done when:** guard runs entry end-to-end; exceptions/audit reports generate; sized for ~2–3k students × 2 entries.
+- [x] **Visitor pre-registration + guard-booth check-in (operator dashboard surface)** — `visitor_passes` (auto `V-XXXXXX` code, validity window, `active→checked_in→checked_out`/`revoked` lifecycle) + check-in/out endpoints that also write a manual `visitor_checkin`/`visitor_checkout` entry event. Full CRUD API for the booth UI. (`routes/entry.rs`, `migrations/0005_entry.sql`)
+- [x] **ANPR / ALPR** — vehicle→plate→OCR (worker `AnprAnalyzer`) → **server-time temporal voting** per `(camera,track)` → format/plausibility validate → registry lookup, committing **one** canonical event per vehicle. Plate/pass = **primary** identity anchor; voting is on the plate (min `VISIONOPS_ANPR_MIN_VOTES`, default 3) with commit-on-prune for fast passers. (`services/anpr.rs`, `apps/ai/worker.py`)
+- [x] **Vehicle attributes (type → color → make → model)** — **secondary** verification + search metadata only: the engine compares **color + vehicle_type** for mismatch (→ *exception for guard review*, never auto-reject); make/model is assistive and never a hard access decision (memo §7.4/§15.4). The reference worker emits type + color (no make/model classifier yet). (`services/anpr.rs::check_mismatch`, `apps/ai/worker.py`)
+- [x] **Daily entry logs · exception reports · audit reports** — `GET /reports/entry-log` (window + `by_auth_status` counts), `GET /reports/exceptions` (blocked/exception/unmatched/rejected), `GET /audit` (immutable action log, manager+). (`routes/entry.rs`)
+- [x] **Role matrix (RBAC) + API integration layer** — five roles (`admin`/`manager`/`guard`/`viewer`/`integration`) × five capabilities; opaque `vos_` sessions + `vok_` API keys (SHA-256 at rest, argon2id passwords); `auth_enabled` gating with a synthetic system admin when off; env bootstrap admin. API keys (`X-API-Key` / `Bearer`) are the integration seam for the worker + external callers. (`auth.rs`, `routes/auth.rs`)
+
+**Done when (status):** ✅ **Met.** A guard runs entry end-to-end — ANPR auto-resolves
+registered/pass/VIP plates, raises `pending` exceptions/blocks for review, and the
+guard confirms/rejects from the entry-event queue; manual booth check-in/out lands in
+the same feed. Daily-log / exception / audit reports generate over any window. The
+design (in-memory voting keyed per track, SQLite registry, one synchronous engine call
+per ingest batch, 365-day entry retention) is sized for the ~2–3k students × 2 entries
+target with no extra moving parts. **Open:** OCR/make-model *accuracy* is an evaluation
+task pending local footage (see deferrals).
+
+**Deferred (honest scope):**
+
+- [ ] **Directional entry/exit *lines* + spatial calibration** — the engine accepts a
+  per-camera `direction` config **hint** (`inbound`/`outbound`) only; a calibrated
+  line-crossing / homography primitive (true in/out from geometry) is future work.
+  Gate cameras are usually single-direction, so the hint covers the Phase 1 need.
+- [ ] **OCR + make/model *accuracy* benchmarking on local Malaysian gate footage** —
+  the *engineering* (voting, resolution, workflow, schema, API) is production-grade and
+  unit-tested; *accuracy* is an evaluation task per memo §15.3/§15.4 (Malaysian plate
+  shapes/angles, motorcycles, night-IR, rain; fine-grained make/model). Never a hard
+  access decision until locally benchmarked.
+- [ ] **Auth on the legacy Stage 0–3 routes** — the `Principal` guard currently
+  protects the Stage 4 entry/admin surface (+ ingest); extending it to cameras /
+  recordings / zones / AI-task management is follow-up hardening.
+
+**Cross-ref to memo §14 Phase 1 items:**
+
+| Memo §14 Phase 1 (Campus Entry) item | Status | Backed by |
+|---|---|---|
+| Visitor registration + guard-booth check-in | ✅ | `visitor_passes` + checkin/checkout (`routes/entry.rs`), manual entry events |
+| ANPR / ALPR (primary identity anchor) | ✅ engineering; ⚠️ accuracy unbenchmarked | `services/anpr.rs` temporal voting + resolution, worker `AnprAnalyzer` |
+| Vehicle attributes (type/color/make/model, secondary) | ◑ type + color shipped; make/model classifier deferred | `services/anpr.rs::check_mismatch` (color+type → exception), worker color heuristic |
+| Daily entry logs | ✅ | `GET /reports/entry-log` (+ `by_auth_status`) |
+| Exception reports (plate/vehicle mismatch) | ✅ | `GET /reports/exceptions`; mismatches surface as `exception` events |
+| Audit reports | ✅ | `audit_log` + `GET /audit` (manager+), written on every mutation |
+| Role matrix (RBAC) | ✅ | `auth.rs` 5 roles × 5 capabilities; sessions + API keys; `auth_enabled` gating |
+| API integration layer | ✅ | `vok_` API keys (`X-API-Key`/`Bearer`), `integration` role = least-privilege ingest |
+
+> **Engineering is production-grade; OCR/make-model accuracy is not yet benchmarked
+> (memo §15.3/§15.4)** — same posture as Stage 3: the systems work (temporal voting,
+> fail-closed block lookup, attribute-mismatch-as-exception, canonical event +
+> evidence, guard workflow, RBAC, reports) is complete and tested; recognition
+> *accuracy* on local Malaysian gate footage is an evaluation task gated on collecting
+> that footage set. This is research.md **Level 2 → 3** applied to premise security:
+> the canonical entry event is a typed §8.1 claim with subject + authorization +
+> evidence + workflow + audit, and the registry resolution is the first identity-aware
+> event (anonymous tracking still the default elsewhere; cross-camera ReID is Stage 6).
 
 ---
 

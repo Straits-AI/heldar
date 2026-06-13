@@ -43,6 +43,21 @@ pub struct Config {
     pub default_ai_width: i64,
     /// How long detection rows are kept before the retention sweeper prunes them.
     pub detection_retention_hours: i64,
+    // ---- Stage 4: Campus Entry / RBAC ----
+    /// Master switch for authentication + RBAC. When false, the API is open (dev/single-tenant
+    /// LAN appliance default) and a synthetic admin principal is used. When true, the Stage 4
+    /// entry/admin surface requires a valid bearer token (session or API key) and enforces roles.
+    pub auth_enabled: bool,
+    /// Lifetime of an issued login session token.
+    pub session_ttl_hours: i64,
+    /// Optional first-run admin bootstrap (only used when no users exist yet).
+    pub bootstrap_admin_user: Option<String>,
+    pub bootstrap_admin_password: Option<String>,
+    /// Minimum reads agreeing on a track's winning plate before the ANPR engine commits an entry
+    /// event (temporal voting). Lower = faster but noisier; higher = more accurate but more latency.
+    pub anpr_min_votes: u32,
+    /// How long old entry events / audit log rows are kept before retention prunes them.
+    pub entry_retention_days: i64,
 }
 
 fn var(key: &str) -> Option<String> {
@@ -120,6 +135,12 @@ impl Config {
             default_ai_fps: parse_or("VISIONOPS_DEFAULT_AI_FPS", 5.0),
             default_ai_width: parse_or("VISIONOPS_DEFAULT_AI_WIDTH", 1280),
             detection_retention_hours: parse_or("VISIONOPS_DETECTION_RETENTION_HOURS", 168),
+            auth_enabled: parse_bool("VISIONOPS_AUTH_ENABLED", false),
+            session_ttl_hours: parse_or("VISIONOPS_SESSION_TTL_HOURS", 12),
+            bootstrap_admin_user: var("VISIONOPS_BOOTSTRAP_ADMIN_USER"),
+            bootstrap_admin_password: var("VISIONOPS_BOOTSTRAP_ADMIN_PASSWORD"),
+            anpr_min_votes: parse_or::<u32>("VISIONOPS_ANPR_MIN_VOTES", 3).clamp(1, 50),
+            entry_retention_days: parse_or("VISIONOPS_ENTRY_RETENTION_DAYS", 365),
         }
     }
 

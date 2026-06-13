@@ -3,8 +3,10 @@ use axum::Router;
 use crate::state::AppState;
 
 pub mod ai;
+pub mod auth;
 pub mod cameras;
 pub mod discovery;
+pub mod entry;
 pub mod health;
 pub mod liveview;
 pub mod metrics;
@@ -25,4 +27,6 @@ pub fn api_router() -> Router<AppState> {
         .merge(discovery::router())
         .merge(ai::router())
         .merge(zones::router())
+        .merge(auth::router())
+        .merge(entry::router())
 }

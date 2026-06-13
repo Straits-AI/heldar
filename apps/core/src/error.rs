@@ -12,6 +12,10 @@ pub enum AppError {
     BadRequest(String),
     #[error("{0}")]
     Conflict(String),
+    #[error("{0}")]
+    Unauthorized(String),
+    #[error("{0}")]
+    Forbidden(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]
@@ -26,6 +30,8 @@ impl IntoResponse for AppError {
             AppError::NotFound(m) => (StatusCode::NOT_FOUND, m),
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
             AppError::Conflict(m) => (StatusCode::CONFLICT, m),
+            AppError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, m),
+            AppError::Forbidden(m) => (StatusCode::FORBIDDEN, m),
             AppError::Db(sqlx::Error::RowNotFound) => {
                 (StatusCode::NOT_FOUND, "resource not found".to_string())
             }
