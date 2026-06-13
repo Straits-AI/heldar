@@ -3,8 +3,8 @@ name = "visionops-search"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "VisionOps semantic search — PROPRIETARY searchable visual-event memory. Deterministic structured search over kernel event facts + an LLM-as-query-PLANNER natural-language layer (never the source of truth) + a proof layer (claim levels → evidence → confidence). Built on the visionops-kernel platform."
-license = "Proprietary"
+description = "VisionOps semantic search — generic searchable visual-event memory. Deterministic structured search over kernel event facts + an LLM-as-query-PLANNER natural-language layer (never the source of truth) + a proof layer (claim levels → evidence → confidence). Built on the visionops-kernel platform."
+license = "Apache-2.0"
 
 [lib]
 name = "visionops_search"

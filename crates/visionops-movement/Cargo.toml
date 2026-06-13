@@ -3,8 +3,8 @@ name = "visionops-movement"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "VisionOps Movement intelligence — PROPRIETARY cross-camera ReID + movement trails + red-zone breach alerts. Multi-signal candidate matching (plate/attributes/topology/time), never pure visual embedding; ReID is probabilistic correlation with human review, not legal identity. Built on the visionops-kernel platform."
-license = "Proprietary"
+description = "VisionOps Movement intelligence — generic cross-camera ReID + movement trails + red-zone breach alerts. Multi-signal candidate matching (plate/attributes/topology/time), never pure visual embedding; ReID is probabilistic correlation with human review, not legal identity. Built on the visionops-kernel platform."
+license = "Apache-2.0"
 
 [lib]
 name = "visionops_movement"

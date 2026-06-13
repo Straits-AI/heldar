@@ -1,10 +1,12 @@
-//! VisionOps Movement intelligence — PROPRIETARY cross-camera ReID + trails + breach alerts.
+//! VisionOps Movement intelligence — generic, **open (Apache-2.0)** cross-camera ReID + trails +
+//! breach alerts.
 //!
-//! Maps to the client's "Movement intelligence" (Phase 2). It correlates the kernel's per-camera
-//! observations into cross-camera journeys and flags red-zone breaches — under strict privacy gates:
+//! A domain-neutral correlation layer: it links the kernel's per-camera observations into
+//! cross-camera journeys and flags red-zone breaches — under strict privacy gates:
 //!
 //! * **Multi-signal, never pure visual embedding.** Vehicle ReID is anchored on the PLATE (already
-//!   resolved by Campus Entry into `entry_events`), fused with vehicle attributes (color/type), the
+//!   resolved by `visionops-entry` into `entry_events`), fused with vehicle attributes (color/type),
+//!   the
 //!   operator's camera-topology graph, and transit-time plausibility. Person ReID has no plate and no
 //!   appearance embedding here, so it is offered only as a low-confidence, on-demand candidate search
 //!   over topology + time + coarse attributes — explicitly weak, for human triage.

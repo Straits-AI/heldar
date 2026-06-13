@@ -1,4 +1,4 @@
-//! VisionOps semantic search — PROPRIETARY searchable visual-event memory.
+//! VisionOps semantic search — generic, **open (Apache-2.0)** searchable visual-event memory.
 //!
 //! Turns the platform's accumulated event facts into a queryable memory — *who / what / where / when /
 //! confidence / evidence* — under one governing principle from research.md §12–13 and the memo:

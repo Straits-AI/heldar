@@ -3,8 +3,8 @@ name = "visionops-entry"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "VisionOps Campus Entry — PROPRIETARY domain app: ANPR authorization, vehicle/visitor/watchlist registry, guard workflow, entry reports. Built on the visionops-kernel platform."
-license = "Proprietary"
+description = "VisionOps Access Control — generic ANPR authorization, vehicle/visitor/watchlist registry, guard workflow, and entry reports for gated-entry deployments. Built on the visionops-kernel platform."
+license = "Apache-2.0"
 
 [lib]
 name = "visionops_entry"
