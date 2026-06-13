@@ -8,6 +8,7 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::error::AppResult;
+use crate::services::remote_access::{self, OverlayStatus};
 use crate::services::storage::{self, StorageReport};
 use crate::state::AppState;
 
@@ -56,6 +57,7 @@ struct SystemInfo {
     recordings_gb: f64,
     max_recordings_gb: f64,
     storage: StorageReport,
+    remote_access: OverlayStatus,
 }
 
 async fn system_info(State(st): State<AppState>) -> AppResult<Json<SystemInfo>> {
@@ -90,5 +92,6 @@ async fn system_info(State(st): State<AppState>) -> AppResult<Json<SystemInfo>> 
         recordings_gb: recordings_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
         max_recordings_gb: st.cfg.max_recordings_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
         storage,
+        remote_access: remote_access::status(&st.cfg),
     }))
 }

@@ -55,6 +55,16 @@ pub struct Config {
     pub bootstrap_admin_password: Option<String>,
     /// How long kernel audit-log + generic-event rows are kept before retention prunes them.
     pub audit_retention_days: i64,
+    // ---- Remote-access overlay (kernel platform feature; see docs/REMOTE-ACCESS.md) ----
+    /// Whether this deployment is reached through a WireGuard overlay (Tailscale / NetBird /
+    /// wireguard) running as an external daemon on the host. The kernel does not manage the
+    /// overlay; it only reports whether the configured interface is present + up so the dashboard
+    /// can surface remote-access health. When false, the deployment is LAN-only.
+    pub overlay_enabled: bool,
+    /// Label for the overlay in use: `tailscale` | `netbird` | `wireguard` | `none`.
+    pub overlay_kind: String,
+    /// The overlay's network interface to probe (e.g. `tailscale0`, `wt0`, `wg0`).
+    pub overlay_iface: Option<String>,
 }
 
 fn var(key: &str) -> Option<String> {
@@ -137,6 +147,9 @@ impl Config {
             bootstrap_admin_user: var("VISIONOPS_BOOTSTRAP_ADMIN_USER"),
             bootstrap_admin_password: var("VISIONOPS_BOOTSTRAP_ADMIN_PASSWORD"),
             audit_retention_days: parse_or("VISIONOPS_AUDIT_RETENTION_DAYS", 365),
+            overlay_enabled: parse_bool("VISIONOPS_OVERLAY_ENABLED", false),
+            overlay_kind: var_or("VISIONOPS_OVERLAY_KIND", "none"),
+            overlay_iface: var("VISIONOPS_OVERLAY_IFACE"),
         }
     }
 

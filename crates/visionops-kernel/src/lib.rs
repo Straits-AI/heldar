@@ -1,14 +1,15 @@
 //! VisionOps kernel library.
 //!
-//! The domain-agnostic platform: media/DVR control plane (camera registry, RTSP ingest, recording,
-//! timeline index, playback, live view), the perception ingest + sampler framework and its
-//! `DetectionConsumer` seam, the zone engine, the auth primitive, observability, retention, and the
-//! worker SDK contract. Domain applications (Campus Entry, BakerySense, …) link this crate and plug
-//! in as consumers / route modules via the composing server binary.
+//! The domain-agnostic, **open (Apache-2.0)** platform: media/DVR control plane (camera registry,
+//! RTSP ingest, recording, timeline index, playback, live view), the perception ingest + sampler
+//! framework and its `DetectionConsumer` seam, the zone engine, auth/RBAC, observability, retention,
+//! remote-access overlay awareness, and the worker SDK contract. Domain applications link this crate
+//! and plug in as consumers / route modules via the composing server binary.
 //!
-//! NOTE: the Campus Entry app modules (`services::anpr`, `routes::entry`, the RBAC half of `auth`,
-//! and migration 0005) currently live here too; they are slated to move into a separate proprietary
-//! crate, at which point this crate becomes Apache-2.0.
+//! Generic reference apps (`visionops-entry`, `visionops-movement`, `visionops-search`) are also
+//! Apache-2.0 and live alongside this crate; vertical/client products (Campus Entry, BakerySense, …)
+//! are proprietary crates that depend on the generic ones. See `ARCHITECTURE.md` for the open-core
+//! split and `docs/REMOTE-ACCESS.md` for the remote-access model.
 
 pub mod auth;
 pub mod camera_url;

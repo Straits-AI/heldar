@@ -1950,3 +1950,34 @@ parse, or send a structured `QueryPlan` for full control). This is research.md *
 (event memory → latent world memory) applied to search: a typed, evidence-backed,
 deterministic query layer whose **only** inference — reading the question — is surfaced,
 fallible, and decoupled from the answer.
+
+## 21. Remote access — the WireGuard overlay model
+
+A deployment is normally behind **CGNAT** (shared public IPv4, no inbound port-forward, DDNS
+useless), so the only thing that reaches it is the node **dialing out**. VisionOps standardizes
+on a **WireGuard overlay** (Tailscale for personal/dev, NetBird self-hosted for shipped products)
+running as an **external daemon** on the host. This is an **open kernel** capability — every
+Apache-2.0 deployment gets private, P2P-first remote viewing with no proprietary component. Full
+rationale, the transport comparison (vs Cloudflare-native and self-hosted reverse tunnels), and the
+deploy recipes live in `docs/REMOTE-ACCESS.md`; this section records the architecture.
+
+**Two layers, kept separate.** *Reachability* is the overlay: WireGuard builds a direct encrypted
+tunnel between viewer and camera-site host whenever NAT traversal succeeds (hole-punch **+ UDP port
+prediction**, or end-to-end IPv6), and falls back to an encrypted relay (DERP / NetBird relay) only
+in the symmetric-on-both-ends case — a relay that forwards **ciphertext it cannot decrypt**. *Media*
+is unchanged: MediaMTX serves its normal WebRTC (WHEP) / HLS on its normal ports, now reachable at
+the host's overlay address; WHEP media is itself DTLS-SRTP encrypted (a second, independent layer).
+So **content is private on every path**; only connection *metadata* is exposed, and only to a managed
+coordinator — self-hosting the coordinator (NetBird/Headscale) removes even that.
+
+**The overlay is orthogonal to the kernel.** Critically, remote access required **no** media-stack
+changes: the overlay is a deployment concern (install a client, set an ACL), not kernel code. The
+kernel does **not** embed or manage WireGuard — duplicating mature daemons would be wrong. Its entire
+contribution is *awareness*: `config` reads `VISIONOPS_OVERLAY_{ENABLED,KIND,IFACE}`, and
+`services::remote_access::status` probes the configured interface via `/sys/class/net/<iface>`
+(dependency-free; TUN devices report `operstate=unknown` when healthy, so `unknown` is treated as
+up), surfaced at `GET /api/v1/system → remote_access`. Transport-agnostic by construction: any
+overlay that presents a network interface is reported. A managed, hosted, multi-site control plane —
+if ever built — would be a **proprietary** crate; the default open path needs none of it. This is the
+open-core boundary applied to connectivity: the platform-level, non-domain capability stays in the
+Apache-2.0 kernel; only client-specific gateway customization would be proprietary.

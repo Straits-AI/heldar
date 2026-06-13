@@ -7,6 +7,7 @@ pub mod mediamtx;
 pub mod metrics;
 pub mod notifier;
 pub mod recorder;
+pub mod remote_access;
 pub mod retention;
 pub mod sampler;
 pub mod snapshot;
