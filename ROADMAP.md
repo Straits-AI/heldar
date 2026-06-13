@@ -3,6 +3,8 @@
 > **Thesis:** Camera streams become structured events → events become workflows → workflows become operational intelligence.
 > We build the **media kernel first**, then AI as plugins on top, then vertical apps. The long arc (see `research.md`) is to turn continuous video into a **compressed, queryable, verifiable world memory** of a physical space — so analytical intent can be defined *after* collection, not before.
 
+> **Status (2026-06):** Stages **0–7 are all shipped (✅ DONE)** — the media kernel, observability, the AI frame sampler, detection/tracking/zones, Campus Entry, BakerySense, Movement intelligence, and Semantic search. What remains is the research frontier below (Level 4–5) and the per-stage accuracy benchmarking gated on local footage.
+
 Source of truth: `memo.md` §14 (Build roadmap) and `research.md` §21 (Product Roadmap) + §5 (Level 1–5 maturity ladder). This file reconciles the two.
 
 ---
@@ -408,17 +410,94 @@ is unbenchmarked on local footage — the human review gate is the safeguard (se
 
 ---
 
-## ⬜ Stage 7 — Semantic video search
+## ✅ Stage 7 — Semantic video search  — **DONE**
 
-**Goal:** searchable visual event memory — *who/what/where/when/confidence/evidence/workflow.* (memo §9, §14; research.md Stage 3–4)
+**Goal:** searchable visual event memory — *who/what/where/when/confidence/evidence/workflow.*
+(memo §9, §14; research.md Stage 3–4) Built as a fourth **vertical app**
+(`crates/visionops-search`) — and the most "composed, not welded" of all: **not** a
+`DetectionConsumer` and **not** even a background loop, but a **read-only query layer over
+kernel facts** (three HTTP routes + one query log) reading the tables Stages 3/4/6 already
+wrote (`entry_events`, `zone_events`, `breach_alerts`). One governing principle: **the LLM
+is a query PLANNER, never the source of truth** — answers are the executed query's rows.
+Operator/integrator guide: [`docs/SEARCH.md`](docs/SEARCH.md); implementation:
+`ARCHITECTURE.md` §20.
 
-- [ ] Search by plate · by vehicle image · by person crop · by object attributes
-- [ ] Natural-language event search (LLM as **query planner**, never source of truth)
-- [ ] VLM-based report interpretation
-- [ ] Open-vocabulary enrichment + event/clip embeddings (vector retrieval)
-- [ ] **Proof layer:** every answer decomposed into claim levels (obs → track → event → aggregate → inference → hypothesis) with evidence + confidence (research.md §12–13)
+**Shipped checklist:**
 
-> Example targets: *"unknown white cars entering Gate B after 6pm last week"; "people who entered red zones yesterday without authorization"; "customers who waited >5 min and left without checkout."* This is research.md **Level 3 → 4** (latent world memory / event-causal memory).
+- [x] **Search by object attributes** — a structured `QueryPlan` (plate · colour ·
+  vehicle_type · subject_type · auth_status · source · event_type · zone_kind · free-text ·
+  camera · time window · time-of-day) executed deterministically over the kernel fact
+  tables; `POST /api/v1/search/events`. (`query.rs::execute`)
+- [x] **Search by plate** — exact normalized-plate filter across `entry_events` (and
+  `breach_alerts` where the plate was correlated by Movement); plate-targeted queries are
+  **identity-bearing** and audited. (`query.rs`, `routes.rs::is_identity_query`)
+- [x] **Natural-language event search (LLM as query planner, never source of truth)** — a
+  question is *planned* into the same `QueryPlan` (offline rule parser by default, optional
+  LLM seam when configured), executed deterministically, and the **rows are the answer**;
+  `POST /api/v1/search/nl` + a `POST /api/v1/search/plan` dry-run. (`planner.rs`,
+  `routes.rs`)
+- [x] **Proof layer** — every answer decomposed into claim levels
+  (observation → track → event → aggregate → inference) with evidence + confidence; the
+  NL→plan reading is the **single** step marked `fallible: true`; no layer asserts identity
+  or causation. (`proof.rs`, research.md §12–13)
+- [ ] **Search by vehicle image · by person crop** — **deferred** (needs event/clip
+  embeddings; see below).
+- [ ] **VLM-based report interpretation** — **deferred** (by design; see below).
+- [ ] **Open-vocabulary enrichment + event/clip embeddings (vector retrieval)** —
+  **deferred** (a seam, not built; see below).
+
+**Done when (status):** ✅ **Met.** An operator (or integration key) with `view` can ask a
+question in natural language — *"unknown white cars entering Gate B after 6pm last week"*,
+*"people who entered red zones yesterday without authorization"* — and get back the matching
+**stored events**, each with its evidence frame + a clip pointer, wrapped in a proof ladder
+that shows the executed plan and flags the question-reading as the only inference. The same
+filters are available as a structured `QueryPlan`, and `/search/plan` dry-runs the
+interpretation with no execution. The design (read-only query over already-stored kernel
+tables, a default 7-day window + a fetch cap, one small query log, no ingest path / no loop /
+no decode) means a slow or failing search can affect only that request. The rule parser runs
+**fully offline**; the LLM is optional and only ever plans. **Open:** the embedding/VLM
+retrieval seam (search-by-image) is documented, not built (see deferrals).
+
+**Deferred (honest scope):**
+
+- [ ] **Open-vocabulary VLM enrichment + event/clip EMBEDDINGS + vector retrieval** — a
+  documented **seam, not built.** They need an **embedding/VLM worker** (the same
+  `Analyzer`-style contract as the detection worker) to write embeddings the query layer
+  could rank against. This stage ships the deterministic structured + NL-plan + proof core
+  only.
+- [ ] **Search by image / vehicle crop / person crop** — depends on those embeddings, so
+  **not available**; today's search is by structured *attributes*, not visual similarity.
+- [ ] **VLM-based report interpretation** — intentionally absent: the proof layer reports
+  deterministic aggregates, **not** generated prose (the LLM plans, it never narrates the
+  answer).
+- [ ] **LLM planner is optional and untested without a live endpoint** — exercised only when
+  `VISIONOPS_SEARCH_LLM_URL` is configured; the default and fallback path is the rule parser.
+- [ ] **Rule parser is best-effort** — it recognizes its keyword patterns (colour/type/
+  subject/auth/source/event, relative dates, time-of-day, camera names, plate token) and
+  leaves the rest to the default window; it cannot express dwell thresholds or
+  multi-condition joins (use `/search/plan` to confirm a parse, or send a structured
+  `QueryPlan` for full control).
+
+**Cross-ref to memo §9 / research.md §12–13:**
+
+| Memo §9 / research.md target | Status | Backed by |
+|---|---|---|
+| Searchable visual event memory (who/what/where/when) | ✅ | `query.rs` structured + NL search over `entry_events`/`zone_events`/`breach_alerts` |
+| Natural-language search, **LLM as query planner** | ✅ | `planner.rs` (offline rules default + optional LLM seam, falls back) |
+| Search by plate / object attributes | ✅ | `QueryPlan` filters + deterministic executor |
+| Search by vehicle/person image | ◻ deferred | needs event/clip embeddings (embedding/VLM worker) |
+| VLM-based report interpretation | ◻ deferred | by design — proof reports deterministic aggregates, not prose |
+| Open-vocab enrichment + embeddings / vector retrieval | ◻ deferred | a seam; needs an embedding/VLM worker |
+| Proof layer (claim levels + evidence + confidence) | ✅ | `proof.rs` (obs→track→event→aggregate→inference; NL→plan = the only fallible step) |
+
+> **Engineering is production-grade; the embedding/VLM retrieval layer is a deliberate
+> seam.** Same posture as Stages 3–6: the systems work (the `QueryPlan`, the deterministic
+> time-bounded executor, the offline rule parser + optional LLM planner-with-fallback, the
+> proof/claim ladder, the search log + identity-query audit, the RBAC-gated routes) is
+> complete; visual/embedding retrieval is documented future work needing an embedding/VLM
+> worker. This is research.md **Level 3 → 4** (event memory → latent world memory): a typed,
+> evidence-backed, deterministic query layer whose **only** inference — reading the question
+> — is surfaced, fallible, and decoupled from the answer.
 
 ---
 

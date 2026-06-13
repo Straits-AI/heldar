@@ -17,6 +17,7 @@ visionops-kernel = { path = "../visionops-kernel" }
 visionops-entry = { path = "../visionops-entry" }
 visionops-bakery = { path = "../visionops-bakery" }
 visionops-movement = { path = "../visionops-movement" }
+visionops-search = { path = "../visionops-search" }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }

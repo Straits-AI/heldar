@@ -10,6 +10,7 @@ import { Ai } from "./pages/Ai";
 import { Entry } from "./pages/Entry";
 import { Bakery } from "./pages/Bakery";
 import { Movement } from "./pages/Movement";
+import { Search } from "./pages/Search";
 
 function NotFound() {
   return (
@@ -35,6 +36,7 @@ export default function App() {
         <Route path="/entry" element={<Entry />} />
         <Route path="/bakery" element={<Bakery />} />
         <Route path="/movement" element={<Movement />} />
+        <Route path="/search" element={<Search />} />
         <Route path="/system" element={<System />} />
         <Route path="/cameras/:id" element={<CameraDetail />} />
         <Route path="*" element={<NotFound />} />

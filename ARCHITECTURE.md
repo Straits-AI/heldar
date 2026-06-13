@@ -76,6 +76,26 @@ already-stored kernel/Entry tables, composed (not welded) with its own schema/co
 retention/routes; the kernel is unaware of it. It is documented in §19 below and, for
 operators/integrators, in [`docs/MOVEMENT.md`](docs/MOVEMENT.md).
 
+**Stage 7 (Semantic search) has also shipped** — the platform's accumulated event facts
+become a queryable **visual-event memory**, under one governing principle: **the LLM is a
+query PLANNER, never the source of truth.** A natural-language question is translated into
+a structured **query plan**, the plan is executed deterministically against the kernel's
+stored facts (`entry_events`, `zone_events`, `breach_alerts`), and the **answer is those
+rows** — never model output. When no LLM endpoint is configured (the default) a transparent
+**rule parser** produces the same plan, so search works **fully offline**; when one is
+configured it **only** plans (and falls back to the rules on any failure). Every answer is
+wrapped in a **proof layer** (the research.md §12–13 claim ladder), with the NL→plan reading
+surfaced as the *single* fallible inference. Like BakerySense/Movement it is **not** a
+`DetectionConsumer` — and unlike them it is not even a background loop: it is a **read-only
+query layer over kernel facts** (three HTTP routes + one small query log), composed (not
+welded) with its own schema/config/routes. New code lives in `crates/visionops-search`. It
+is documented in §20 below and, for operators/integrators, in
+[`docs/SEARCH.md`](docs/SEARCH.md). Open-vocabulary VLM enrichment + event/clip embeddings +
+vector retrieval (search-by-image) remain a documented future seam — they need an
+embedding/VLM worker; this stage ships the deterministic structured + NL-plan + proof core.
+
+With Stage 7, **all roadmap stages 0–7 are now shipped** (see [`ROADMAP.md`](ROADMAP.md)).
+
 Stage 0 maps to **memo §14 "Stage 0 — Media kernel MVP"** (camera registry, RTSP
 ingest, recording segmenter, timeline index, playback API, clip export, basic live
 view, camera health) and is built on the layer model of **memo §5**. The recording
@@ -1788,3 +1808,145 @@ an auto-decision; and **cross-camera person journeys are low-confidence, human-t
 only** (never auto-proposed, capped at 0.4, always audited). This is research.md **Level 3**
 (scene/event graph) applied to security: a typed, evidence-backed, audited cross-camera
 correlation that stays explicitly probabilistic.
+
+---
+
+## 20. Stage 7 — Semantic search
+
+Stage 7 (memo §9 "Industrial frontier", §14 "Stage 7"; research.md §12–13, Stage 3–4) turns
+the platform's accumulated event facts into a queryable **visual-event memory** —
+*who / what / where / when / confidence / evidence*. New code (all in
+`crates/visionops-search`): `query.rs` (the `QueryPlan` + its deterministic executor),
+`planner.rs` (the offline rule parser + the optional LLM seam), `proof.rs` (the claim
+ladder), `routes.rs` (the HTTP surface + audit + log), `config.rs` (knobs), `schema.sql`
+(its one query-log table), `lib.rs` (the governing principle). The operator/integrator
+guide is [`docs/SEARCH.md`](docs/SEARCH.md).
+
+The architecture is a **planner → deterministic executor → proof** pipeline, governed by one
+rule from research.md §27 and memo §9: **the LLM is a query PLANNER, never the source of
+truth.** A question is translated into a structured **plan** (a deterministic filter), the
+plan is **executed** against stored kernel facts, and the **answer is the executed query's
+rows** — not anything a model "said". No model ever sees, summarizes, or generates an answer
+about the data; the inference surface is reduced to one explicit, inspectable, fallible step
+(how the question was read), decoupled from the rows it selects.
+
+Search is the most "composed, not welded" app in the stack: like BakerySense (§18) and
+Movement (§19) it is **not** a `DetectionConsumer` — and unlike them it is **not even a
+background loop**. It is a pure **read-only query layer over kernel facts**: three HTTP
+routes plus one small query log, reading tables the kernel and the Stage 4/6 apps have
+*already* written (`entry_events`, `zone_events`, `breach_alerts`). It owns no ingest path,
+no decode, no `spawn_supervised` task, and no new fact table.
+
+```
+   kernel + app fact tables (Stages 3/4/6)        visionops-search (3 routes, no loop, no consumer)
+     entry_events / zone_events / breach_alerts   ┌─────────────────────────────────────────────┐
+        │                                         │ POST /search/events  ─ QueryPlan ───────┐     │
+        │  ╌╌ search READS; never consumes ╌╌      │ POST /search/nl      ─ question ─ plan ─┤     │
+        ▼                                         │       plan_llm() if LLM_URL set,        │     │
+   query::execute(plan)  ◄───────────────────────┤       else parse_rules() (offline)      ▼     │
+     time-bounded SQL per source (default 7d)     │                              execute → proof │
+     + Rust field filters + sort + limit          │ POST /search/plan    ─ question ─ {plan}      │
+        │                                         │       (dry-run: NO execution, NO data)        │
+        ▼                                         └─────────────────────────────────────────────┘
+   proof::build  → claim ladder (inference? · aggregate · event)
+        │
+        ▼   every search → search_log;  plate-targeted query → kernel audit_log
+```
+
+### 20.1 The `QueryPlan` + the deterministic executor (`query.rs`)
+
+The `QueryPlan` is an all-optional flat struct (empty ⇒ "everything in the default window")
+— time window (`from`/`to`), time-of-day (`hour_min`/`hour_max`, UTC hour), `cameras`,
+`sources` (subset of `entry`/`zone`/`breach`, empty ⇒ all), and the attribute filters
+`plate` / `color` / `vehicle_type` / `subject_type` / `auth_status` / `event_type` /
+`zone_kind` / free-text `text` / `limit`. It is the **only** thing the NL layer produces, is
+accepted directly by `/search/events`, is echoed in every response, and is stored in
+`search_log`.
+
+`execute(pool, plan, max)` is **pure SQL + Rust**, fully reproducible. It (1) resolves the
+window — unset `from` defaults to **now − 7 days**, `to` to now + 1 min, so an unbounded
+query never scans the whole history; (2) issues **one time-bounded, newest-first SQL query
+per requested source**, capped at `fetch_cap = (max×5).clamp(100, 20_000)` — `entry_events`,
+`zone_events LEFT JOIN zones` (for `kind`), and `breach_alerts` — normalizing every row into
+a unified `SearchHit` (`claim_level = "event"`); (3) applies the remaining plan fields as
+**deterministic Rust filters** (`hits.retain`: cameras, UTC hour bounds, plate, colour/type
+on `subject`, lenient `subject_type`, `auth_status`, `event_type`, `zone_kind`, lowercased
+`text` substring); (4) **merges, sorts newest-first, and truncates** to
+`limit.unwrap_or(max).clamp(1, max)`. Only the time window and the fetch cap touch SQL (so
+the query is always indexed and bounded); everything else is in-process. `breakdown(hits)`
+computes counts by source / by day for the proof's aggregate.
+
+### 20.2 The planner — rules by default, LLM as an optional seam (`planner.rs`)
+
+Two implementations produce the **same** plan type. **`parse_rules(query, cameras)`** is the
+always-available default: a transparent, dependency-free keyword parser over the lowercased
+question (colour/type/subject/auth/source/event keywords, relative dates, time-of-day,
+camera-name resolution by longest-name-first match, and a plate-like token), with `cameras`
+as `(id, name)` pairs so phrases resolve to camera ids. It is **best-effort** — it recognizes
+its patterns and leaves the rest to the default window — and it means **search works fully
+offline with no external dependency.**
+
+**`plan_llm(http, cfg, query, cameras)`** is engaged **only when
+`VISIONOPS_SEARCH_LLM_URL` is set**. It asks an OpenAI-compatible endpoint
+(`temperature: 0`, `response_format: json_object`, a system prompt spelling out the schema +
+known camera ids, and the hard rule *"you never answer the question or invent data"*) to
+emit a plan JSON, parsed back into a `QueryPlan` and `sanitize()`d (out-of-range hours
+dropped). **It returns `None` — and the caller falls back to the rule parser — on any
+failure** (no endpoint, non-2xx, unparseable). The model **never** sees or returns data;
+only a plan flows out of it, executed deterministically and shown back exactly like a
+rule-parsed one.
+
+### 20.3 The proof layer (`proof.rs`)
+
+`build(query, planner, plan, hits)` decomposes every answer into the research.md §12–13
+claim ladder — **observation → track → event → aggregate → inference**. Facts live at the
+**event** level and below (kernel-produced, backed by `detections` provenance + an evidence
+frame); this layer adds the **aggregate** (the executed count + by-source/by-day breakdown +
+window, confidence `high`, *"the answer is these rows, not model output"*) and the
+**inference** (the NL→plan reading, **`fallible: true`**, the *only* non-deterministic step,
+with a caveat to verify the plan reflects intent). The **event** level spells out per-hit
+provenance — pull the clip via the kernel clip API (`POST /api/v1/cameras/{id}/clip`) and the
+evidence frame via `evidence_path`. A structured `/search/events` call has no question, so
+the inference level is omitted — it has *no* fallible step. The closing note states plainly:
+**no layer asserts identity or causation.**
+
+### 20.4 HTTP surface, audit, and the search log (`routes.rs`, `schema.sql`)
+
+All three routes require the Stage 4 RBAC **`view`** capability. `POST /search/events`
+executes a `QueryPlan` directly (logged `mode=structured`, `planner=structured`);
+`POST /search/nl` plans (LLM if configured, else rules) → executes → proves (logged
+`mode=nl`, empty query ⇒ 400); `POST /search/plan` is a **dry-run** returning
+`{ query, planner, plan }` only — **no execution, no data, no log, no audit**. Every
+executed search writes a `search_log` row (actor, mode, verbatim question, executed plan,
+planner, result count — `schema.sql`'s sole table), and a query that **targets a specific
+plate** (`plan.plate.is_some()`, the re-identifying handle here) additionally writes a
+`search_identity_query` row to the kernel `audit_log` via `auth::audit(...)` — the same
+immutable trail as the Stage 6 plate searches. Every response echoes the `planner` and the
+exact `plan` that ran, so there is nothing hidden between the question and the rows.
+
+### 20.5 How it composes + honest scope
+
+Search is wired in `crates/visionops-server/src/main.rs` purely as a bundled app: schema
+applied after the kernel migrations (`visionops_search::schema::init`), config from the
+environment (`SearchConfig::from_env`), router `merge`d. It is **absent from the `consumers`
+vec** and has **no `spawn_supervised` loop** — it touches the ingest/recording/live-view path
+nowhere, so a slow or failing request can only affect that request. Adding it was a
+schema-init + a `merge` with **zero** change to the kernel ingest handler.
+
+The Stage 7 **engineering** is production-grade: the `QueryPlan` + the deterministic
+time-bounded executor over the three fact tables (default 7-day window + Rust filters +
+sort/limit), the transparent offline rule parser, the optional LLM planner seam (sanitize +
+fallback), the proof/claim-ladder layer, the search log + identity-query audit, and the
+RBAC-gated structured / NL / dry-run routes. **Deliberate deferrals** (memo §9; research.md
+Stage 3–4): **open-vocabulary VLM enrichment + event/clip embeddings + vector retrieval are
+a documented seam, not built** — they need an embedding/VLM worker to write the vectors a
+query layer could rank against; consequently **search-by-image / vehicle-crop / person-crop
+is unavailable** (today's search is by structured *attributes*, not visual similarity);
+**VLM-based report interpretation** is intentionally absent (the proof reports deterministic
+aggregates, not generated prose); **the LLM planner is optional and untested without a live
+endpoint** (the default path is the rule parser); and **the rule parser is best-effort** (it
+cannot express dwell thresholds or multi-condition joins — use `/search/plan` to confirm a
+parse, or send a structured `QueryPlan` for full control). This is research.md **Level 3 → 4**
+(event memory → latent world memory) applied to search: a typed, evidence-backed,
+deterministic query layer whose **only** inference — reading the question — is surfaced,
+fallible, and decoupled from the answer.

@@ -11,6 +11,7 @@ members = [
     "crates/visionops-entry",
     "crates/visionops-bakery",
     "crates/visionops-movement",
+    "crates/visionops-search",
     "crates/visionops-server",
 ]
 

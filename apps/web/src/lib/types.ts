@@ -698,3 +698,56 @@ export interface PlateSearchResult {
   candidates: MovementCandidate[];
   note: string;
 }
+
+// ---- Stage 7: Semantic search ----
+
+export interface QueryPlan {
+  from?: string | null;
+  to?: string | null;
+  hour_min?: number | null;
+  hour_max?: number | null;
+  cameras?: string[];
+  sources?: string[];
+  plate?: string | null;
+  color?: string | null;
+  vehicle_type?: string | null;
+  subject_type?: string | null;
+  auth_status?: string[];
+  event_type?: string | null;
+  zone_kind?: string | null;
+  text?: string | null;
+  limit?: number | null;
+}
+
+export interface SearchHit {
+  source: string;
+  id: string;
+  timestamp: string;
+  camera_id?: string | null;
+  kind: string;
+  plate?: string | null;
+  subject: Record<string, unknown>;
+  auth_status?: string | null;
+  zone?: string | null;
+  zone_kind?: string | null;
+  evidence_path?: string | null;
+  claim_level: string;
+}
+
+export interface SearchResponse {
+  query?: string | null;
+  planner: string;
+  plan: QueryPlan;
+  count: number;
+  hits: SearchHit[];
+  proof: {
+    claim_levels: Array<Record<string, unknown>>;
+    note: string;
+  };
+}
+
+export interface SearchPlanResponse {
+  query: string;
+  planner: string;
+  plan: QueryPlan;
+}

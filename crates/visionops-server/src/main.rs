@@ -52,6 +52,9 @@ async fn main() -> anyhow::Result<()> {
     visionops_movement::schema::init(&pool)
         .await
         .context("movement schema init")?;
+    visionops_search::schema::init(&pool)
+        .await
+        .context("search schema init")?;
     auth::ensure_bootstrap(&pool, &cfg)
         .await
         .context("auth bootstrap")?;
@@ -65,6 +68,7 @@ async fn main() -> anyhow::Result<()> {
     let entry_cfg = Arc::new(visionops_entry::config::EntryConfig::from_env());
     let bakery_cfg = Arc::new(visionops_bakery::config::BakeryConfig::from_env());
     let movement_cfg = Arc::new(visionops_movement::config::MovementConfig::from_env());
+    let search_cfg = Arc::new(visionops_search::config::SearchConfig::from_env());
     use services::consumer::DetectionConsumer;
     let consumers: Arc<Vec<Arc<dyn DetectionConsumer>>> = Arc::new(vec![
         // Zone engine = kernel-open spatial primitive.
@@ -157,6 +161,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(visionops_entry::routes::router())
         .merge(visionops_bakery::routes::router(bakery_cfg.clone()))
         .merge(visionops_movement::routes::router(movement_cfg.clone()))
+        .merge(visionops_search::routes::router(search_cfg.clone()))
         .nest_service("/media/recordings", ServeDir::new(&cfg.recordings_dir))
         .nest_service("/media/clips", ServeDir::new(&cfg.clips_dir))
         .nest_service("/media/snapshots", ServeDir::new(&cfg.snapshots_dir))

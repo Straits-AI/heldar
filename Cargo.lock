@@ -2368,6 +2368,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "visionops-search"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "chrono",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "tracing",
+ "uuid",
+ "visionops-kernel",
+]
+
+[[package]]
 name = "visionops-server"
 version = "0.1.0"
 dependencies = [
@@ -2384,6 +2400,7 @@ dependencies = [
  "visionops-entry",
  "visionops-kernel",
  "visionops-movement",
+ "visionops-search",
 ]
 
 [[package]]

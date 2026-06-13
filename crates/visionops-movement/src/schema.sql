@@ -54,3 +54,5 @@ CREATE TABLE IF NOT EXISTS breach_alerts (
     resolved_by   TEXT, resolved_at TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_breach_status ON breach_alerts(status, created_at);
+-- Plain created_at index for time-range scans (e.g. semantic search) that don't filter by status.
+CREATE INDEX IF NOT EXISTS idx_breach_created ON breach_alerts(created_at);

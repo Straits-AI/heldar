@@ -18,6 +18,9 @@ import type {
   CameraLink,
   MovementCandidate,
   PlateSearchResult,
+  QueryPlan,
+  SearchPlanResponse,
+  SearchResponse,
   CameraStatus,
   CameraTestResult,
   CameraUpdate,
@@ -402,4 +405,15 @@ export const api = {
   searchPlate: (plate: string) =>
     request<PlateSearchResult>(`/api/v1/movement/search/plate/${enc(plate)}`),
   triggerMovement: () => request<{ ok: boolean }>("/api/v1/movement/run", { method: "POST" }),
+
+  // ---- Semantic search (Stage 7) ----
+  searchEvents: (plan: QueryPlan) =>
+    request<SearchResponse>("/api/v1/search/events", { method: "POST", body: JSON.stringify(plan) }),
+  searchNl: (query: string) =>
+    request<SearchResponse>("/api/v1/search/nl", { method: "POST", body: JSON.stringify({ query }) }),
+  searchPlan: (query: string) =>
+    request<SearchPlanResponse>("/api/v1/search/plan", {
+      method: "POST",
+      body: JSON.stringify({ query }),
+    }),
 };
