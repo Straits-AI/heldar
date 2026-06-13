@@ -46,6 +46,9 @@ async fn main() -> anyhow::Result<()> {
     visionops_entry::schema::init(&pool)
         .await
         .context("entry schema init")?;
+    visionops_bakery::schema::init(&pool)
+        .await
+        .context("bakery schema init")?;
     auth::ensure_bootstrap(&pool, &cfg)
         .await
         .context("auth bootstrap")?;
@@ -57,6 +60,7 @@ async fn main() -> anyhow::Result<()> {
     // (e.g. BakerySense) is a push here, not an edit to the ingest handler.
     // Bundled domain apps load their own config from the environment (the kernel carries none).
     let entry_cfg = Arc::new(visionops_entry::config::EntryConfig::from_env());
+    let bakery_cfg = Arc::new(visionops_bakery::config::BakeryConfig::from_env());
     use services::consumer::DetectionConsumer;
     let consumers: Arc<Vec<Arc<dyn DetectionConsumer>>> = Arc::new(vec![
         // Zone engine = kernel-open spatial primitive.
@@ -99,6 +103,11 @@ async fn main() -> anyhow::Result<()> {
         spawn_supervised("entry_retention", move || {
             visionops_entry::retention::run(p.clone(), c.clone(), e.clone())
         });
+        // BakerySense rollup loop (aggregates anonymous behaviour metrics + prunes its observations).
+        let (p, b) = (pool.clone(), bakery_cfg.clone());
+        spawn_supervised("bakery_rollup", move || {
+            visionops_bakery::rollup::run(p.clone(), b.clone())
+        });
         // Only supervise the notifier when a webhook is configured — otherwise run() returns
         // immediately and the supervisor would respawn it in a tight loop.
         if cfg.alert_webhook_url.is_some() {
@@ -133,6 +142,7 @@ async fn main() -> anyhow::Result<()> {
         .merge(routes::metrics::router())
         // Bundled domain apps (proprietary) merge their routers here; the kernel router is unaware.
         .merge(visionops_entry::routes::router())
+        .merge(visionops_bakery::routes::router(bakery_cfg.clone()))
         .nest_service("/media/recordings", ServeDir::new(&cfg.recordings_dir))
         .nest_service("/media/clips", ServeDir::new(&cfg.clips_dir))
         .nest_service("/media/snapshots", ServeDir::new(&cfg.snapshots_dir))

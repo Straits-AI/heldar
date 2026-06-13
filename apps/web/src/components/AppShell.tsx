@@ -104,6 +104,25 @@ function EntryIcon({ className }: IconProps) {
   );
 }
 
+function BakeryIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M3 17V8.5a1.5 1.5 0 0 1 1.5-1.5h11A1.5 1.5 0 0 1 17 8.5V17" />
+      <path d="M2 17h16" />
+      <path d="M6.5 7V5.5M10 7V5M13.5 7V5.5" />
+      <path d="M6 11h8M6 13.5h8" opacity="0.85" />
+    </svg>
+  );
+}
+
 function SystemIcon({ className }: IconProps) {
   return (
     <svg
@@ -126,6 +145,7 @@ const NAV_ITEMS: { to: string; label: string; end?: boolean; Icon: (p: IconProps
   { to: "/cameras/new", label: "Add Camera", Icon: AddCameraIcon },
   { to: "/ai", label: "AI", Icon: AiIcon },
   { to: "/entry", label: "Entry", Icon: EntryIcon },
+  { to: "/bakery", label: "Bakery", Icon: BakeryIcon },
   { to: "/system", label: "System", Icon: SystemIcon },
 ];
 

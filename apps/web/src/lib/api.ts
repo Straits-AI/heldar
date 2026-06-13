@@ -10,6 +10,9 @@ import type {
   ApiKeyCreated,
   ApiKeyView,
   AuditLogEntry,
+  BakeryObservation,
+  BakeryReport,
+  BakerySummary,
   CameraCreate,
   CameraStatus,
   CameraTestResult,
@@ -352,4 +355,20 @@ export const api = {
   reportExceptions: (q: ReportQuery = {}) =>
     request<ExceptionReport>(`/api/v1/reports/exceptions${qs(q)}`),
   listAudit: (q: AuditQuery = {}) => request<AuditLogEntry[]>(`/api/v1/audit${qs(q)}`),
+
+  // ---- BakerySense (Stage 5) ----
+  bakeryObservations: (
+    q: { from?: string; to?: string; camera_id?: string; metric?: string; limit?: number } = {},
+  ) => request<BakeryObservation[]>(`/api/v1/bakery/observations${qs(q)}`),
+  bakeryReports: (q: { date?: string; scope?: string; limit?: number } = {}) =>
+    request<BakeryReport[]>(`/api/v1/bakery/reports${qs(q)}`),
+  generateBakeryReport: (date?: string, scope?: string) =>
+    request<BakeryReport>("/api/v1/bakery/reports", {
+      method: "POST",
+      body: JSON.stringify({ date, scope }),
+    }),
+  bakerySummary: (date?: string) =>
+    request<BakerySummary>(`/api/v1/bakery/summary${qs({ date })}`),
+  triggerBakeryRollup: () =>
+    request<{ ok: boolean }>("/api/v1/bakery/rollup", { method: "POST" }),
 };

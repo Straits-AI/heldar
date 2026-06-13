@@ -6,7 +6,12 @@
 # links the kernel and the bundled apps for a deployment.
 [workspace]
 resolver = "2"
-members = ["crates/visionops-kernel", "crates/visionops-server"]
+members = [
+    "crates/visionops-kernel",
+    "crates/visionops-entry",
+    "crates/visionops-bakery",
+    "crates/visionops-server",
+]
 
 [profile.dev]
 opt-level = 0

@@ -244,17 +244,72 @@ task pending local footage (see deferrals).
 
 ---
 
-## ⬜ Stage 5 — BakerySense Vision
+## ✅ Stage 5 — BakerySense Vision  — **DONE**
 
-**Goal:** retail behaviour analytics on the **same kernel**, different ontology. Diagnosis-oriented, **anonymous (no identity, no face recognition).** (memo §7.7, §14; research.md §24 MVP, Stage 1)
+**Goal:** retail behaviour analytics on the **same kernel**, different ontology.
+Diagnosis-oriented, **anonymous by construction (no identity, no faces, no plates).**
+(memo §7.7, §14; research.md §24 MVP, Stage 1) Built as the second **vertical app**
+(`crates/visionops-bakery`) — **not** a detection consumer on the hot path, but a
+**rollup loop + report generator** reading the kernel's stored `zone_events` +
+`detections`, **composed (not welded)** into the server with its own schema/config/
+rollup/retention/routes. Operator/integrator guide:
+[`docs/BAKERYSENSE.md`](docs/BAKERYSENSE.md); implementation: `ARCHITECTURE.md` §18.
 
-- [ ] Shop camera analysis + zone annotation (entrance/exit/shelf/cashier/queue)
-- [ ] Footfall (entry/exit count) · queue length & dwell · browse dwell · display engagement
-- [ ] Abandonment proxy (browse without checkout transition) · staff coverage · shelf/counter-empty state
-- [ ] Daily **diagnosis** report: observation → evidence → interpretation → suggested experiment (correlation, **not** causation)
-- [ ] Evidence-clip retrieval per insight
+**Shipped checklist:**
 
-> This is research.md's concrete **Level 2 MVP** ("Queryable Retail CCTV Memory v0"). Start at shelf/product-group level, not SKU. Every number ships with evidence + uncertainty.
+- [x] **Shop camera analysis + zone annotation (entrance/exit/shelf/cashier/queue/display)** — retail zones are **ordinary kernel zones tagged via `kind`**; BakerySense interprets the kinds and requires a `detection` AI task running to produce anonymous events. (`rollup.rs`, `lib.rs`, kernel zone CRUD)
+- [x] **Footfall (entry/exit count) · queue dwell · browse dwell · occupancy · display engagement** — hourly `bakery_observations` from `zone_events`/`detections`: `footfall_in`/`footfall_out` (entry counts), `queue_dwell_avg`/`browse_dwell_avg` (`AVG(dwell_seconds)`), `occupancy_unique` (`COUNT(DISTINCT track_id)`), `display_engagement`. Idempotent upsert on a `BUCKETS_PER_TICK=3` recompute window. (`rollup.rs`)
+- [x] **Abandonment proxy (browse without checkout transition)** — distinct shelf-browsers `LEFT JOIN`ed to cashier-enterers within a windowed `[bucket, +2h)` grace, as `browse_sessions`/`abandoned_sessions`; per-camera `track_id`s with explicit caveats (can't see external purchases / staff / pass-through). (`rollup.rs`)
+- [x] **Daily diagnosis report: observation → evidence → interpretation → suggested experiment (correlation, not causation)** — every insight carries an explicit **confidence** (sample-size tiered) + **uncertainty** (the anonymity caveat); deterministic/heuristic, threshold-flagged (queue comfort, abandonment ratio). (`reports.rs`)
+- [x] **Evidence-clip retrieval per insight** — insights point at a `camera_id` + day window with a `clip_hint`; the operator requests footage from the **kernel** clip API (`POST /api/v1/cameras/{id}/clip`). BakerySense stores no video. (`reports.rs`, kernel playback)
+
+**Done when (status):** ✅ **Met.** With a detection task + retail-tagged zones on a shop
+camera, the rollup loop produces hourly footfall / dwell / occupancy / display /
+abandonment observations (`GET /api/v1/bakery/observations`, `…/summary`), and
+`POST /api/v1/bakery/reports` generates a daily diagnosis over any day/scope — each
+insight observation → evidence → interpretation → experiment with confidence +
+uncertainty and a clip pointer. The design (periodic idempotent rollup over stored
+kernel tables, own SQLite schema, own retention, off the ingest hot path) means a slow
+or crashed rollup cannot affect recording/ingest/live view. **Open:** detector/tracker
+*accuracy* on local shop footage is an evaluation task (see deferrals).
+
+**Deferred (honest scope):**
+
+- [ ] **Staff coverage + shelf/counter-empty state** (memo §7.7 signals) — need
+  **dedicated detectors** (staff-vs-customer classification, product-zone empty-state
+  detection) the current person-detection worker does not provide; the `staff` zone
+  `kind` is reserved in the schema but produces no metric yet.
+- [ ] **LLM/VLM report interpretation** — this stage's diagnosis is **deterministic and
+  heuristic** by design; natural-language synthesis / VLM interpretation is **Stage 7**
+  (research.md §27).
+- [ ] **SKU-level analysis** — out of scope: BakerySense works at **shelf / product-group**
+  level (research.md §24), not per-product.
+- [ ] **Cross-camera linking** — occupancy + abandonment are per-camera over ephemeral
+  `track_id`s; cross-camera journeys are **Stage 6** (ReID), under the same privacy gates.
+- [ ] **Detector/tracker accuracy on local footage** — the *engineering* (rollup SQL,
+  abandonment join, diagnosis model, API) is complete; *accuracy* is an evaluation task
+  per memo §15.3/§15.4, surfaced verbatim in every insight's `uncertainty`.
+
+**Cross-ref to memo §7.7 (retail behaviour) signals:**
+
+| Memo §7.7 signal | Status | Backed by |
+|---|---|---|
+| Footfall (entry/exit count) | ✅ | `footfall_in`/`footfall_out` (zone `enter` counts) |
+| Queue dwell | ✅ | `queue_dwell_avg` (`AVG(dwell_seconds)` on `queue` zones) |
+| Browse dwell | ✅ | `browse_dwell_avg` (`shelf` zones) |
+| Abandonment proxy (browse without checkout) | ✅ | `browse_sessions`/`abandoned_sessions` (shelf→cashier `LEFT JOIN`, +2h window) |
+| Display engagement | ✅ | `display_engagement` (`display` zone visits) |
+| Occupancy | ✅ | `occupancy_unique` (`COUNT(DISTINCT track_id)`) |
+| Staff coverage | ◻ deferred | needs a staff-vs-customer detector |
+| Shelf/counter-empty state | ◻ deferred | needs a product-zone empty-state detector |
+| Diagnosis output (obs → evidence → interpretation → experiment) | ✅ | `reports.rs` (+ confidence + uncertainty, correlation not causation) |
+
+> This is research.md's concrete **Level 2 MVP** ("Queryable Retail CCTV Memory v0"):
+> anonymous by construction, shelf/product-group level (not SKU), every number shipping
+> with its sample size + the anonymity caveat. **Engineering is production-grade; model
+> accuracy is not yet benchmarked (memo §15.3/§15.4)** — same posture as Stages 3/4. The
+> diagnosis report is a deterministic precursor to the Stage 7 LLM/VLM interpretation
+> layer.
 
 ---
 

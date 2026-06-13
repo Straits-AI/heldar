@@ -15,6 +15,7 @@ visionops-kernel = { path = "../visionops-kernel" }
 # Bundled proprietary domain apps for this deployment. A kernel-only / different deployment simply
 # omits these and the consumer/router registrations below.
 visionops-entry = { path = "../visionops-entry" }
+visionops-bakery = { path = "../visionops-bakery" }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }

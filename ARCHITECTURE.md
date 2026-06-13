@@ -44,6 +44,21 @@ and, for operators/integrators, in [`docs/CAMPUS-ENTRY.md`](docs/CAMPUS-ENTRY.md
 The ANPR/attribute *engineering* is production-grade; OCR + make/model *accuracy*
 needs the same local benchmark (memo §15.3/§15.4) before any hard access decision.
 
+**Stage 5 (BakerySense app) has also shipped** — a second vertical, **same kernel,
+different ontology**. It is a retail behaviour-analytics app
+(`crates/visionops-bakery`) that is **anonymous by construction**: it reads only the
+kernel's anonymous perception data (zone `enter`/`exit`/`dwell` events + person
+detections keyed by ephemeral ByteTrack ids) and rolls them into hourly behaviour
+metrics — footfall, queue/browse dwell, occupancy, display engagement, and an
+abandonment proxy. On top of those it generates a daily **diagnosis** report
+(*observation → evidence → interpretation → suggested experiment*, with confidence +
+uncertainty, framing correlation not causation). Unlike the ANPR engine it is **not** a
+`DetectionConsumer` on the ingest hot path — it is a periodic **rollup loop + report
+generator** reading already-stored kernel tables, composed (not welded) into the server
+with its own schema/config/loop/retention/routes; the kernel is unaware of it. It is
+documented in §18 below and, for operators/integrators, in
+[`docs/BAKERYSENSE.md`](docs/BAKERYSENSE.md).
+
 Stage 0 maps to **memo §14 "Stage 0 — Media kernel MVP"** (camera registry, RTSP
 ingest, recording segmenter, timeline index, playback API, clip export, basic live
 view, camera health) and is built on the layer model of **memo §5**. The recording
@@ -1368,3 +1383,191 @@ auto-rejections**. Two further deliberate deferrals: **directional entry/exit *l
 calibration** (only a per-camera `direction` config *hint* is accepted; no
 line-crossing/homography), and **extending the `Principal` guard to the legacy Stage
 0–3 routes** (today auth gates the Stage 4 + ingest surface).
+
+---
+
+## 18. Stage 5 — BakerySense app
+
+Stage 5 (memo §7.7 retail behaviour analytics, §14 "Stage 5"; research.md §24) is the
+second **vertical app** on the kernel — the **same media kernel, different ontology**.
+Where Campus Entry is identity-aware at a gate, BakerySense is **anonymous by
+construction**: a retail behaviour-analytics layer that reads the kernel's anonymous
+perception data and turns it into hourly metrics and a daily **diagnosis** report. It
+reuses everything below it (sampler, detector/tracker, zone engine, `zone_events` +
+`detections`, the `cameras` registry) **with no change to the Stage 0–3 paths and no new
+ingest path or decode**.
+
+The defining architectural fact: BakerySense is **not** a `DetectionConsumer`. The zone
+engine (Stage 3) and the ANPR engine (Stage 4) run **synchronously on the ingest hot
+path** as `DetectionConsumer`s. BakerySense deliberately sits **off** that path — it is a
+periodic **rollup loop + report generator** that reads tables the kernel has *already*
+written. This is the **analytics-layer-over-kernel-data** pattern: the app reasons over
+stored events and metadata, never over the live frame stream.
+
+New code (all in `crates/visionops-bakery`): `rollup.rs` (the aggregation loop + metric
+SQL), `reports.rs` (the diagnosis generator), `routes.rs` (HTTP surface), `schema.sql`
+(its two tables), `config.rs` (knobs), `models.rs` (`Observation` / `Report`), `lib.rs`
+(the anonymity stance). The operator/integrator guide is
+[`docs/BAKERYSENSE.md`](docs/BAKERYSENSE.md).
+
+```
+   shop camera ─► sampler ─► detection worker (YOLO+ByteTrack) ─► person boxes + track_id
+        │ POST /api/v1/ai/events
+        ▼
+   routes/ai.rs::ingest ── (sync consumers: ZoneEngine, AnprEngine) ──► detections + zone_events
+        │
+        │  ╌╌╌ kernel boundary; BakerySense reads, never consumes ╌╌╌
+        ▼
+   visionops-bakery::rollup::run   (spawn_supervised, every ROLLUP_INTERVAL_S)
+     sweep(): recompute last 3 hourly buckets from zone_events + detections + cameras
+              ─► upsert bakery_observations (idempotent)  ─► prune past retention
+        │
+        ▼
+   POST /api/v1/bakery/reports ─► reports::generate(day, scope)
+     read bakery_observations for the day ─► insights[]  ─► upsert bakery_reports
+     (observation → evidence{+clip_hint} → interpretation → experiment + confidence + uncertainty)
+```
+
+### 18.1 The rollup loop + metric SQL (`rollup.rs`)
+
+`rollup::run(pool, cfg)` is launched in `main.rs` via `spawn_supervised("bakery_rollup",
+…)` and ticks every `VISIONOPS_BAKERY_ROLLUP_INTERVAL_S` (default 300, min 30). Each tick
+calls `sweep()`; `run_once()` exposes the same `sweep()` for the manual trigger (§18.4)
+and tests. `sweep()`:
+
+1. Loads a `camera_id → site_id` map (`SELECT id, site_id FROM cameras`) so each
+   observation is stamped with its camera's site.
+2. Truncates `now` to the hour and recomputes the **last `BUCKETS_PER_TICK = 3` hourly
+   buckets** (`rollup_bucket(b0, b1)` for the current + two prior hours). Recomputing is
+   **idempotent** — the in-progress hour updates as data arrives and completed hours
+   settle; late data within the window is picked up.
+3. Prunes `bakery_observations` with `bucket_start < now − retention_days.max(1)` (the
+   app owns its own data lifecycle; this is **not** the kernel retention sweeper).
+
+`rollup_bucket` derives the metrics from kernel tables, grouping by `(camera_id, zone_id)`
+where applicable:
+
+| Metric | Source | Rule |
+|---|---|---|
+| `footfall_in` / `footfall_out` / `display_engagement` | `zone_events ⋈ zones` | `COUNT(*)` of `enter` events on `kind = entrance` / `exit` / `display`. `value = sample_count = COUNT` |
+| `queue_dwell_avg` / `browse_dwell_avg` | `zone_events ⋈ zones` | `AVG(dwell_seconds)` over `dwell` events (`dwell_seconds IS NOT NULL`) on `kind = queue` / `shelf`. `sample_count = COUNT` |
+| `occupancy_unique` | `detections` | `COUNT(DISTINCT track_id)` of `label='person'` per camera (`zone_id=''`, camera-wide) |
+| `browse_sessions` / `abandoned_sessions` | `zone_events ⋈ zones` | abandonment proxy (below); camera-wide |
+
+**Abandonment proxy** — distinct `(camera_id, track_id)` **shelf-browsers** in the bucket
+`[b0, b1)` `LEFT JOIN`ed to distinct `(camera_id, track_id)` **cashier-enterers** in a
+windowed grace period `[b0, b1 + 2h)`; `browse_sessions = COUNT(*)`, `abandoned_sessions =
+Σ(c.track_id IS NULL)`. Two structural caveats are baked in and surfaced in the report:
+the join is **per-camera** (`track_id`s are per-camera and can recycle — cross-camera
+journeys are not linked, Stage 6), and the **2-hour cashier window** bounds the lookahead
+for a browse-then-pay that spills past the hour while limiting id reuse. The
+`BUCKETS_PER_TICK = 3` recompute window is aligned with the 2h grace so the figure settles
+as late cashier events arrive.
+
+`upsert()` writes each metric `ON CONFLICT(camera_id, zone_id, metric, bucket_start) DO
+UPDATE` — the UNIQUE key (with `zone_id = ''` for camera-wide metrics) is what makes
+recomputation idempotent.
+
+### 18.2 The diagnosis report (`reports.rs`)
+
+`generate(pool, cfg, date, scope)` reads a UTC day's observations (`scope` = a `camera_id`
+or `None` = all) and emits a JSON array of **insights**, each with the same diagnosis
+shape: **observation → evidence → interpretation → suggested experiment**, plus
+**confidence** and **uncertainty**. The philosophy is enforced in code:
+
+- **Correlation, never causation** — interpretation strings are phrased *"correlate(s)
+  with … not necessarily with any single cause"*; the report frames what to *investigate*
+  and pairs every insight with a concrete A/B `suggested_experiment` (research.md §13).
+- **Confidence from sample size** — `confidence(samples)`: `high` ≥ 50, `medium` ≥ 10,
+  else `low`. Small samples are explicitly low-confidence.
+- **Uncertainty on every number** — the `ANON` caveat (anonymous ephemeral tracks; counts
+  approximate; detector/tracker accuracy not yet benchmarked) ships with each insight; the
+  abandonment insight appends the per-camera/recyclable-`track_id` caveat.
+- **Evidence with a clip pointer** — the `evidence` block carries `scope`, the day window,
+  `sample_count`, and a `clip_hint` that points the operator at the kernel clip API
+  (§18.5). Insights reference a camera + window; they embed **no video**.
+- **Deterministic, not LLM** — flags are threshold-driven (`queue_comfort_seconds`,
+  `abandonment_flag_ratio`); day aggregates use **sample-weighted** means for dwell and
+  sums for counts. The LLM/VLM interpretation layer is **Stage 7** (research.md §27).
+
+Footfall, queue dwell, browse dwell, and the abandonment proxy each produce an insight
+when present; an empty day yields a single `none` insight instructing the operator to
+annotate retail zones and enable a detection task. Reports `upsert` per `(report_date,
+scope)`, so regenerating a day refreshes it in place.
+
+### 18.3 Data model (`schema.sql`)
+
+`schema::init(&pool)` applies two tables idempotently (`CREATE TABLE IF NOT EXISTS`)
+against the **shared kernel pool** at boot — owned by the app crate, single-tenant-per-
+deployment. Neither has a kernel FK; both are derived/append artifacts.
+
+**`bakery_observations`** — hourly behaviour metrics:
+
+| Column | Notes |
+|---|---|
+| `id` | PK, `obs_<uuid-simple>` |
+| `site_id` | the camera's site (looked up at rollup; nullable) |
+| `camera_id` | source camera |
+| `zone_id` | the zone, or `''` for camera-wide metrics (occupancy, abandonment) |
+| `zone_kind` | `entrance`/`exit`/`queue`/`shelf`/`display`/`cashier`/`staff` (nullable) |
+| `metric` | `footfall_in`/`footfall_out`/`display_engagement`/`queue_dwell_avg`/`browse_dwell_avg`/`occupancy_unique`/`browse_sessions`/`abandoned_sessions` |
+| `bucket_start` | hour bucket start (UTC RFC3339) |
+| `value` / `sample_count` | the metric value and the number of events behind it |
+| `updated_at` | last recompute time |
+
+`UNIQUE(camera_id, zone_id, metric, bucket_start)` (the idempotency key); indexes on
+`bucket_start` and `(metric, bucket_start)`.
+
+**`bakery_reports`** — daily diagnosis reports: `id` (`rep_<uuid>`), `site_id`,
+`report_date` (`YYYY-MM-DD` UTC), `scope` (`camera_id` or `all`), `insights` (JSON array,
+default `[]`), `generated_at`. `UNIQUE(report_date, scope)`; index on `report_date`.
+
+### 18.4 HTTP surface (`routes.rs`)
+
+The router takes the `BakeryConfig` as an `Extension` and is `merge`d into the server.
+Every endpoint requires the kernel **`view`** capability
+(`principal.require(principal.can_view(), …)`); with `VISIONOPS_AUTH_ENABLED=false` every
+caller is the synthetic system admin.
+
+| Method | Path | Role | Purpose |
+|---|---|---|---|
+| GET | `/api/v1/bakery/observations` | view | List metrics (`from`/`to`/`camera_id`/`metric`/`limit≤10000`), newest-first |
+| GET | `/api/v1/bakery/reports` | view | List reports (`date`/`scope`/`limit≤1000`), `report_date` DESC |
+| POST | `/api/v1/bakery/reports` | view | Generate+upsert a report (`{date?, scope?}`; default today/all) |
+| GET | `/api/v1/bakery/summary` | view | Per-metric daily totals `{sum, samples}` for a `date` |
+| POST | `/api/v1/bakery/rollup` | view | Force an immediate rollup of the recent buckets (ops/test) → `{ok:true}` |
+
+### 18.5 How it composes (composed, not welded) + retention + isolation
+
+BakerySense is wired in `crates/visionops-server/src/main.rs` purely as a bundled app:
+its schema is applied after the kernel migrations (`visionops_bakery::schema::init`), its
+config is loaded from the environment (`BakeryConfig::from_env`; the kernel `Config`
+carries none of it), its rollup loop is `spawn_supervised("bakery_rollup", …)`, and its
+router is `merge`d. Crucially it is **absent from the `consumers` vec** — it is not a
+`DetectionConsumer`, so it never runs on the ingest request.
+
+- **Retention** — the rollup loop prunes `bakery_observations` past
+  `VISIONOPS_BAKERY_RETENTION_DAYS` (default 180) itself; the kernel retention sweeper and
+  evidence lock are untouched. `bakery_reports` (small JSON) are not auto-pruned.
+- **Evidence clips** — insights point at a `camera_id` + window; the operator requests
+  footage from the **kernel** clip API (`POST /api/v1/cameras/{id}/clip`, §7). The
+  analytics layer stores no video.
+- **Isolation preserved** — because BakerySense reads stored tables on its own timer
+  rather than consuming the ingest batch, a slow or crashed rollup cannot back-pressure
+  ingest, recording, the sampler, or live view (a panic just respawns the loop). Adding
+  the app is a link + `merge` + `spawn_supervised` with **zero** change to the kernel
+  ingest handler — the cleanest expression yet of the "kernel-open, apps-bundled" seam.
+
+### 18.6 Honest scope — engineering done, accuracy + richer signals deferred
+
+The Stage 5 **engineering** is production-grade: the idempotent hourly bucketing, the
+metric SQL, the windowed abandonment join, the diagnosis model, and the API are complete.
+What is **not** validated is **accuracy** — the `ANON` caveat states the counts are
+subject to detector/tracker accuracy not yet benchmarked on local footage (memo
+§15.3/§15.4). Deliberate deferrals: **staff coverage** and **shelf/counter-empty state**
+(memo §7.7 signals) need **dedicated detectors** the person-detection worker does not
+provide (the `staff` zone kind is reserved but unused); the **LLM/VLM interpretation
+layer** is **Stage 7**; and analysis is at **shelf/product-group level, not SKU**
+(research.md §24). Cross-camera linking of the per-camera, ephemeral `track_id`s is
+Stage 6 (ReID). This is research.md's concrete **Level 2 MVP** — anonymous, approximate,
+and honest about both.
