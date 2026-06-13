@@ -15,7 +15,7 @@ This repository currently implements **Stage 0 — the media kernel**.
 
 ## Stage 0 feature set (implemented)
 
-The Rust control plane in `apps/core` provides:
+The Rust control plane in `crates/visionops-kernel` provides:
 
 - **Camera registry** — CRUD over cameras with per-camera recording/retention policy; RTSP URLs are
   either supplied explicitly or built from a vendor template (HikVision / Dahua).
@@ -97,7 +97,7 @@ Node.js is needed only for the frontend.
 rustup update
 
 # 1. Build the core control plane
-cargo build --manifest-path apps/core/Cargo.toml
+cargo build --workspace
 
 # 2. (optional) configure — defaults work out of the box
 cp .env.example .env   # edit if you want; never commit .env (holds camera credentials)

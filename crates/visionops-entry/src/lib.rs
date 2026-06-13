@@ -8,6 +8,7 @@
 //! the error/model types. The kernel has no dependency on this crate — the composing server links it.
 
 pub mod anpr;
+pub mod config;
 pub mod models;
 pub mod retention;
 pub mod routes;

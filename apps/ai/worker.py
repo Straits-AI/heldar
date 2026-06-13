@@ -6,7 +6,7 @@ worker contract. It proves and documents how a perception worker talks to
 VisionOps Core so that Stage 3 can drop in a real model (e.g. YOLO) by
 implementing a single `Analyzer` subclass — nothing else has to change.
 
-The contract (served by apps/core, see src/routes/ai.rs)
+The contract (served by the kernel; see crates/visionops-kernel/src/routes/ai.rs)
 -------------------------------------------------------
 1. Discover work:
        GET  {API}/api/v1/ai/tasks

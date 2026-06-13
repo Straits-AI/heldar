@@ -9,18 +9,20 @@ use chrono::Utc;
 use sqlx::SqlitePool;
 use visionops_kernel::config::Config;
 
-pub async fn run(pool: SqlitePool, cfg: Arc<Config>) {
+use crate::config::EntryConfig;
+
+pub async fn run(pool: SqlitePool, cfg: Arc<Config>, ecfg: Arc<EntryConfig>) {
     let mut tick = tokio::time::interval(Duration::from_secs(cfg.retention_interval_s.max(30)));
     loop {
         tick.tick().await;
-        if let Err(e) = sweep(&pool, &cfg).await {
+        if let Err(e) = sweep(&pool, &cfg, &ecfg).await {
             tracing::error!(error = %e, "entry retention: sweep failed");
         }
     }
 }
 
-async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
-    let cutoff = Utc::now() - chrono::Duration::days(cfg.entry_retention_days.max(1));
+async fn sweep(pool: &SqlitePool, cfg: &Config, ecfg: &EntryConfig) -> anyhow::Result<()> {
+    let cutoff = Utc::now() - chrono::Duration::days(ecfg.entry_retention_days.max(1));
     let old: Vec<(String, sqlx::types::Json<serde_json::Value>)> =
         sqlx::query_as("SELECT id, evidence FROM entry_events WHERE created_at < ?")
             .bind(cutoff)
@@ -44,6 +46,9 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         .execute(pool)
         .await?
         .rows_affected();
-    tracing::info!(deleted = n, "entry retention: pruned old entry events + evidence");
+    tracing::info!(
+        deleted = n,
+        "entry retention: pruned old entry events + evidence"
+    );
     Ok(())
 }

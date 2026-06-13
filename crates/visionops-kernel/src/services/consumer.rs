@@ -21,15 +21,12 @@ use crate::models::DetectionIngest;
 pub struct DetectionBatch<'a> {
     pub camera_id: &'a str,
     pub site_id: Option<&'a str>,
-    // `task_type` and `timestamp` are part of the stable seam contract for consumers that need them
-    // (e.g. BakerySense will window by time); the current consumers select by task_type at the
-    // registry level and use server time, so they are not read here yet. (Once the kernel is its own
-    // library crate these are externally-public and the lint is moot.)
-    #[allow(dead_code)]
+    /// The task type that produced this batch (consumers self-select on it; e.g. BakerySense may also
+    /// inspect it). Part of the stable seam contract.
     pub task_type: &'a str,
     pub detections: &'a [DetectionIngest],
-    /// Worker-supplied capture time (engines that need trustworthy timing use server time instead).
-    #[allow(dead_code)]
+    /// Worker-supplied capture time (engines that need trustworthy timing use server time instead;
+    /// time-windowing consumers like BakerySense use this).
     pub timestamp: DateTime<Utc>,
 }
 

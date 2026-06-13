@@ -6,6 +6,8 @@ use sqlx::SqlitePool;
 /// Create the Campus Entry tables if they do not exist. Called by the composing server after the
 /// kernel migrations have run.
 pub async fn init(pool: &SqlitePool) -> sqlx::Result<()> {
-    sqlx::raw_sql(include_str!("schema.sql")).execute(pool).await?;
+    sqlx::raw_sql(include_str!("schema.sql"))
+        .execute(pool)
+        .await?;
     Ok(())
 }

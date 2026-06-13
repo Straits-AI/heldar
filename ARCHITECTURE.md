@@ -1,7 +1,7 @@
 # VisionOps Core — Stage 0 Media Kernel Architecture
 
 This document describes the Stage 0 "media kernel" of VisionOps Core **as actually
-built** in `apps/core` (Rust / Axum / Tokio / SQLx), not as aspirationally planned.
+built** in `crates/visionops-kernel` (Rust / Axum / Tokio / SQLx), not as aspirationally planned.
 It is the base VMS/NVR control plane: camera registry, RTSP ingest, segment
 recording, timeline index, playback / clip / snapshot, brokered live view, and
 camera health. The detection/tracking **models** are a later stage (Stage 3) and
@@ -902,7 +902,7 @@ and BakerySense apps. It has two halves that meet at the Stage 2 `POST
    confidence, normalized `bbox`, `track_id`) through the unchanged ingest endpoint.
    This is documented for integrators in [`docs/AI-WORKERS.md`](docs/AI-WORKERS.md)
    §11; the kernel does not know or care which model produced the boxes.
-2. **In the kernel (`apps/core`)** — a **zone engine** (`services/zones.rs`)
+2. **In the kernel (`crates/visionops-kernel`)** — a **zone engine** (`services/zones.rs`)
    evaluates each tracked detection against the camera's polygon **zones** and
    raises **`enter` / `exit` / `dwell`** zone events (with an evidence frame). Zone
    CRUD + a zone-events query live in `routes/zones.rs`; the schema is
@@ -915,7 +915,7 @@ has **no background loop** — it is driven synchronously from the detection-ing
 path.
 
 ```
-   AI worker (apps/ai)                 media kernel (apps/core)
+   AI worker (apps/ai)                 media kernel (crates/visionops-kernel)
    ┌────────────────────┐
    │ YOLO detector      │  frame → person/vehicle boxes
    │ ByteTrack tracker  │  boxes → stable track_id per object
@@ -1143,7 +1143,7 @@ in `config.rs`, and `migrations/0005_entry.sql`. The `AnprEngine` is built in
 background loop** — it is driven synchronously from the detection-ingest path.
 
 ```
-   AI worker (apps/ai)                    media kernel (apps/core)
+   AI worker (apps/ai)                    media kernel (crates/visionops-kernel)
    ┌────────────────────┐
    │ AnprAnalyzer       │  vehicle boxes → color → (optional) OCR plate, per frame
    │ YOLO+ByteTrack+OCR │  attributes:{plate, plate_confidence, vehicle_type, color, direction, …}

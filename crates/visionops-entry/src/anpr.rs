@@ -107,7 +107,10 @@ struct CommitJob {
 
 pub struct AnprEngine {
     pool: SqlitePool,
+    /// Kernel config — used for media paths (evidence frames).
     cfg: Arc<Config>,
+    /// Entry-app config — voting threshold.
+    ecfg: Arc<crate::config::EntryConfig>,
     state: Mutex<HashMap<String, TrackVoteState>>,
 }
 
@@ -131,10 +134,15 @@ impl visionops_kernel::services::consumer::DetectionConsumer for AnprEngine {
 }
 
 impl AnprEngine {
-    pub fn new(pool: SqlitePool, cfg: Arc<Config>) -> Arc<Self> {
+    pub fn new(
+        pool: SqlitePool,
+        cfg: Arc<Config>,
+        ecfg: Arc<crate::config::EntryConfig>,
+    ) -> Arc<Self> {
         Arc::new(Self {
             pool,
             cfg,
+            ecfg,
             state: Mutex::new(HashMap::new()),
         })
     }
@@ -149,7 +157,7 @@ impl AnprEngine {
         detections: &[DetectionIngest],
     ) {
         let now = Utc::now();
-        let min_votes = self.cfg.anpr_min_votes;
+        let min_votes = self.ecfg.anpr_min_votes;
         let mut jobs: Vec<CommitJob> = Vec::new();
         {
             let mut state = self.state.lock().await;

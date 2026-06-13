@@ -280,9 +280,9 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
 
     // 6) Prune kernel auth bookkeeping: stale audit log + expired sessions. (Domain entry events +
     //    their evidence frames are pruned by the entry app's own retention loop, not the kernel.)
-    let entry_cutoff = Utc::now() - chrono::Duration::days(cfg.entry_retention_days.max(1));
+    let audit_cutoff = Utc::now() - chrono::Duration::days(cfg.audit_retention_days.max(1));
     let apruned = sqlx::query("DELETE FROM audit_log WHERE created_at < ?")
-        .bind(entry_cutoff)
+        .bind(audit_cutoff)
         .execute(pool)
         .await?
         .rows_affected();
@@ -303,7 +303,7 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
     //    a durable cursor over recent rows, so deleting rows older than the (long) entry TTL — which
     //    are far past delivery — is safe.
     let evpruned = sqlx::query("DELETE FROM events WHERE created_at < ?")
-        .bind(entry_cutoff)
+        .bind(audit_cutoff)
         .execute(pool)
         .await?
         .rows_affected();

@@ -111,7 +111,7 @@ Reference table at **1080p @ 4 Mbps** (1 TB = 1000 GB, matching the decimal 10.8
 ## 3. Recording footprint cap in VisionOps
 
 VisionOps does **not** record blindly until the disk is full. The core
-(`apps/core/src/services/retention.rs`) runs a retention sweeper that enforces two policies
+(`crates/visionops-kernel/src/services/retention.rs`) runs a retention sweeper that enforces two policies
 on every pass.
 
 ### The two retention controls
@@ -121,7 +121,7 @@ on every pass.
 | `retention_hours` | per camera (DB column, settable via the camera API; falls back to `VISIONOPS_DEFAULT_RETENTION_HOURS`) | one camera | 24 h |
 | `VISIONOPS_MAX_RECORDINGS_GB` | environment variable | whole install | 20 GB |
 
-`VISIONOPS_MAX_RECORDINGS_GB` is parsed in `apps/core/src/config.rs` into
+`VISIONOPS_MAX_RECORDINGS_GB` is parsed in `crates/visionops-kernel/src/config.rs` into
 `max_recordings_bytes` (GB × 1024³) and surfaced in the system status endpoint as
 `max_recordings_gb`.
 
@@ -315,5 +315,5 @@ Fill in the blanks for your deployment.
 ---
 
 *Sources: `memo.md` §12 (deployment topology), §13 (sizing model). Config behavior:
-`apps/core/src/config.rs`, `apps/core/src/services/retention.rs`,
-`apps/core/src/routes/system.rs`.*
+`crates/visionops-kernel/src/config.rs`, `crates/visionops-kernel/src/services/retention.rs`,
+`crates/visionops-kernel/src/routes/system.rs`.*

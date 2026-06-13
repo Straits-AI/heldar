@@ -413,8 +413,7 @@ pub struct LoginRequest {
 pub struct ApiKey {
     pub id: String,
     pub name: String,
-    /// Mapped from the row for completeness; never exposed (see [`ApiKeyView`]) or read in code.
-    #[allow(dead_code)]
+    /// Mapped from the row for completeness; never exposed (see [`ApiKeyView`]).
     pub key_hash: String,
     pub key_prefix: String,
     pub role: String,
@@ -453,4 +452,3 @@ pub struct ApiKeyCreate {
     pub name: String,
     pub role: Option<String>,
 }
-

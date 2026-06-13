@@ -5,7 +5,7 @@ alive, how to scrape its metrics, how to get paged when a camera or disk goes ba
 and how recordings are kept inside their storage budget without ever deleting
 evidence.
 
-This document is **grounded in the code as built** (`apps/core/src`). Endpoint
+This document is **grounded in the code as built** (`crates/visionops-kernel/src`). Endpoint
 shapes, metric names, event types, and env vars below are the real ones — if a
 field or metric is not listed here, it is not emitted. The authoritative sources
 are: `routes/health.rs`, `routes/system.rs`, `routes/recordings.rs`,

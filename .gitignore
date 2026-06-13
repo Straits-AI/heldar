@@ -1,8 +1,7 @@
 # VisionOps Core — gitignore
 
-# Rust (commit Cargo.lock for the binary; ignore build output)
+# Rust (commit the workspace Cargo.lock; ignore build output)
 target/
-apps/core/target/
 
 # Python
 __pycache__/

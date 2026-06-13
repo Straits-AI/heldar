@@ -30,7 +30,7 @@ Maturity ladder (research.md §5): **L1** task-specific analytics (industry base
 
 ## ✅ Stage 0 — Media kernel MVP  — **DONE**
 
-Goal (memo §14): *own the base VMS.* Record compressed packets without decode; index, play back, export, and keep cameras healthy. Built in `apps/core` (Rust / Axum / Tokio / SQLx-SQLite) with MediaMTX + FFmpeg as the media engine.
+Goal (memo §14): *own the base VMS.* Record compressed packets without decode; index, play back, export, and keep cameras healthy. Built in `crates/visionops-kernel` (Rust / Axum / Tokio / SQLx-SQLite) with MediaMTX + FFmpeg as the media engine.
 
 **Shipped checklist** (memo §14 build list + §16 immediate technical actions):
 

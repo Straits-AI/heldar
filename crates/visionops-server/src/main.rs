@@ -1,7 +1,10 @@
-//! VisionOps Core — Stage 0 media kernel control plane.
+//! VisionOps composing server — links the open kernel with the bundled (proprietary) domain apps
+//! for a deployment.
 //!
-//! Boots the SQLite store, starts a recorder supervisor per camera, runs the timeline indexer,
-//! health monitor and retention sweeper, and serves the HTTP API + recorded media.
+//! Boots the SQLite store + kernel migrations, applies bundled apps' schemas, registers their
+//! perception consumers and routers, starts the recorder/sampler supervisors + background services
+//! (indexer, health, retention, app retention, notifier), and serves the HTTP API + recorded media.
+//! A different deployment (e.g. a bakery) simply links different app crates here.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -52,12 +55,14 @@ async fn main() -> anyhow::Result<()> {
     // Register the perception consumers (zones = kernel-open spatial primitive; ANPR = Campus Entry
     // app). The kernel ingest path fans batches out to these without naming them — adding an app
     // (e.g. BakerySense) is a push here, not an edit to the ingest handler.
+    // Bundled domain apps load their own config from the environment (the kernel carries none).
+    let entry_cfg = Arc::new(visionops_entry::config::EntryConfig::from_env());
     use services::consumer::DetectionConsumer;
     let consumers: Arc<Vec<Arc<dyn DetectionConsumer>>> = Arc::new(vec![
         // Zone engine = kernel-open spatial primitive.
         services::zones::ZoneEngine::new(pool.clone(), cfg.clone()),
         // Campus Entry (proprietary) ANPR engine, registered as a consumer over the kernel seam.
-        visionops_entry::anpr::AnprEngine::new(pool.clone(), cfg.clone()),
+        visionops_entry::anpr::AnprEngine::new(pool.clone(), cfg.clone(), entry_cfg.clone()),
     ]);
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -90,9 +95,9 @@ async fn main() -> anyhow::Result<()> {
             services::retention::run(p.clone(), c.clone())
         });
         // Bundled domain apps run their own retention loops (they own their data lifecycle).
-        let (p, c) = (pool.clone(), cfg.clone());
+        let (p, c, e) = (pool.clone(), cfg.clone(), entry_cfg.clone());
         spawn_supervised("entry_retention", move || {
-            visionops_entry::retention::run(p.clone(), c.clone())
+            visionops_entry::retention::run(p.clone(), c.clone(), e.clone())
         });
         // Only supervise the notifier when a webhook is configured — otherwise run() returns
         // immediately and the supervisor would respawn it in a tight loop.

@@ -3,7 +3,7 @@
 This is the integration guide for **AI workers** against the VisionOps Core media
 kernel. It documents the Stage 2 **frame sampler** and the **worker contract**
 (§§1–10) plus the Stage 3 **detection + tracking analyzer and zone engine** (§11)
-exactly as built in `apps/core` (`services/sampler.rs`, `services/zones.rs`,
+exactly as built in `crates/visionops-kernel` (`services/sampler.rs`, `services/zones.rs`,
 `routes/ai.rs`, `routes/zones.rs`, `models.rs`, `config.rs`, `migrations/0003_ai.sql`,
 `migrations/0004_zones.sql`).
 
