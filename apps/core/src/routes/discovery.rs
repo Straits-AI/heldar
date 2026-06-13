@@ -26,14 +26,7 @@ async fn discover_handler(
             .iter()
             .filter(|d| d.verified && !d.already_registered)
         {
-            match discovery::add_device(
-                &st.pool,
-                d,
-                opts.username.as_deref(),
-                opts.password.as_deref(),
-            )
-            .await
-            {
+            match discovery::add_device(&st.pool, d).await {
                 Ok(id) => {
                     st.recorder.reconcile(&id).await;
                     added.push(id);
