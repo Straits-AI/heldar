@@ -1,0 +1,15 @@
+# VisionOps Cargo workspace.
+#
+# Open-core layout: `visionops-kernel` is the domain-agnostic platform (media/DVR, perception ingest,
+# zone engine, worker SDK contract) destined to be open-sourced (Apache-2.0) once the proprietary
+# Campus Entry app is extracted into its own crate. `visionops-server` is the composing binary that
+# links the kernel and the bundled apps for a deployment.
+[workspace]
+resolver = "2"
+members = ["crates/visionops-kernel", "crates/visionops-server"]
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 2

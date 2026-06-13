@@ -23,7 +23,7 @@ VISIONOPS_API_PORT=$PORT \
 VISIONOPS_RECORDER_ENABLED=false \
 VISIONOPS_AI_ENABLED=false \
 VISIONOPS_MEDIAMTX_API_URL=http://127.0.0.1:65599 \
-./apps/core/target/debug/visionops-core >"$TMP/core.log" 2>&1 &
+./target/debug/visionops-core >"$TMP/core.log" 2>&1 &
 CORE_PID=$!
 trap 'kill $CORE_PID 2>/dev/null; rm -rf "$TMP"' EXIT
 

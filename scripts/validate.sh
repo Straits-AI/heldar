@@ -5,7 +5,7 @@
 set -u
 ROOT=/home/soh/cctv
 MTX="$ROOT/infra/mediamtx/mediamtx"
-CORE="$ROOT/apps/core/target/debug/visionops-core"
+CORE="$ROOT/target/debug/visionops-core"
 API=http://127.0.0.1:8000
 REPORT="$ROOT/data/validate_report.txt"
 LOGDIR="$ROOT/data/validate_logs"

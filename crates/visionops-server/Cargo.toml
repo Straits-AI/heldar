@@ -1,0 +1,23 @@
+[package]
+name = "visionops-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "VisionOps composing server: links the kernel with the bundled domain apps for a deployment."
+license = "Proprietary"
+
+[[bin]]
+name = "visionops-core"
+path = "src/main.rs"
+
+[dependencies]
+visionops-kernel = { path = "../visionops-kernel" }
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"

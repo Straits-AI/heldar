@@ -3,18 +3,6 @@
 //! Boots the SQLite store, starts a recorder supervisor per camera, runs the timeline indexer,
 //! health monitor and retention sweeper, and serves the HTTP API + recorded media.
 
-mod auth;
-mod camera_url;
-mod config;
-mod db;
-mod error;
-mod models;
-mod repo;
-mod routes;
-mod services;
-mod state;
-mod util;
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,10 +14,12 @@ use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
-use crate::config::Config;
-use crate::services::recorder::RecorderManager;
-use crate::services::sampler::SamplerManager;
-use crate::state::AppState;
+// The composing binary links the kernel library and (later) the app crates.
+use visionops_kernel::config::Config;
+use visionops_kernel::services::recorder::RecorderManager;
+use visionops_kernel::services::sampler::SamplerManager;
+use visionops_kernel::state::AppState;
+use visionops_kernel::{auth, db, routes, services};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -58,10 +48,10 @@ async fn main() -> anyhow::Result<()> {
     // Register the perception consumers (zones = kernel-open spatial primitive; ANPR = Campus Entry
     // app). The kernel ingest path fans batches out to these without naming them — adding an app
     // (e.g. BakerySense) is a push here, not an edit to the ingest handler.
-    use crate::services::consumer::DetectionConsumer;
+    use services::consumer::DetectionConsumer;
     let consumers: Arc<Vec<Arc<dyn DetectionConsumer>>> = Arc::new(vec![
-        crate::services::zones::ZoneEngine::new(pool.clone(), cfg.clone()),
-        crate::services::anpr::AnprEngine::new(pool.clone(), cfg.clone()),
+        services::zones::ZoneEngine::new(pool.clone(), cfg.clone()),
+        services::anpr::AnprEngine::new(pool.clone(), cfg.clone()),
     ]);
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))

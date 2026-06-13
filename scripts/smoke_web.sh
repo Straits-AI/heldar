@@ -4,7 +4,7 @@
 set -u
 ROOT=/home/soh/cctv
 MTX="$ROOT/infra/mediamtx/mediamtx"
-CORE="$ROOT/apps/core/target/debug/visionops-core"
+CORE="$ROOT/target/debug/visionops-core"
 REPORT="$ROOT/data/web_smoke.txt"
 LOG="$ROOT/data/web_logs"; mkdir -p "$LOG"
 : > "$REPORT"

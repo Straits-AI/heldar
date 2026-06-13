@@ -13,7 +13,8 @@ services:
 
   core:
     build:
-      context: ./apps/core
+      context: .
+      dockerfile: Dockerfile
     restart: unless-stopped
     network_mode: host
     environment:

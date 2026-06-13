@@ -22,7 +22,7 @@ VISIONOPS_DATA_DIR="$ROOT/data" \
 VISIONOPS_MAX_RECORDINGS_GB=3 \
 VISIONOPS_DEFAULT_RETENTION_HOURS=2 \
 VISIONOPS_LOG="info,visionops_core=info" \
-"$ROOT/apps/core/target/debug/visionops-core" >"$LOG/core.log" 2>&1 &
+"$ROOT/target/debug/visionops-core" >"$LOG/core.log" 2>&1 &
 CORE_PID=$!
 
 ( cd "$ROOT/apps/web" && npm run dev >"$LOG/vite.log" 2>&1 ) &
