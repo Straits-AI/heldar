@@ -1,0 +1,40 @@
+# VisionOps Core — dev/single-node stack.
+# Host networking keeps things simple on Linux: the control plane's default MediaMTX URLs
+# (127.0.0.1:9997/8888/8554/8889) work as-is, and cameras on the LAN are directly reachable.
+name: visionops
+
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./infra/mediamtx/mediamtx.yml:/mediamtx.yml:ro
+
+  core:
+    build:
+      context: ./apps/core
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      VISIONOPS_DATA_DIR: /data
+      VISIONOPS_DATABASE_URL: sqlite:///data/visionops.db
+      VISIONOPS_API_HOST: 0.0.0.0
+      VISIONOPS_API_PORT: "8000"
+      # MediaMTX runs on the host network at these addresses:
+      VISIONOPS_MEDIAMTX_API_URL: http://127.0.0.1:9997
+      VISIONOPS_MEDIAMTX_HLS_BASE: http://127.0.0.1:8888
+      VISIONOPS_MEDIAMTX_RTSP_BASE: rtsp://127.0.0.1:8554
+      VISIONOPS_MEDIAMTX_WEBRTC_BASE: http://127.0.0.1:8889
+    volumes:
+      - ./data:/data
+    depends_on:
+      - mediamtx
+
+  web:
+    build:
+      context: ./apps/web
+    restart: unless-stopped
+    network_mode: host   # nginx listens on :8080 and proxies /api,/media,/healthz to 127.0.0.1:8000
+    depends_on:
+      - core

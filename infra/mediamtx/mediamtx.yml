@@ -1,0 +1,28 @@
+# VisionOps Core — MediaMTX configuration (live-view gateway + dev RTSP server).
+# Minimal config; unspecified keys use MediaMTX defaults.
+
+logLevel: info
+
+# Control API — VisionOps registers camera paths through this.
+api: yes
+apiAddress: :9997
+
+# RTSP server: ingests published streams (the dev synthetic camera) and proxies cameras.
+rtsp: yes
+rtspAddress: :8554
+
+# HLS output (browser live view). mpegts variant is the most broadly hls.js-compatible.
+hls: yes
+hlsAddress: :8888
+hlsVariant: mpegts
+
+# WebRTC output (lower-latency live view).
+webrtc: yes
+webrtcAddress: :8889
+
+rtmp: no
+srt: no
+
+# Allow any path to be published/read; VisionOps adds named camera proxy paths via the API.
+paths:
+  all_others:

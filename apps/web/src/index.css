@@ -1,0 +1,73 @@
+@import "tailwindcss";
+@config "../tailwind.config.js";
+
+:root {
+  color-scheme: dark;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: #0a0e15;
+  color: #e2e8f0;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Thin dark scrollbars to keep the dense layout calm. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2a3444 transparent;
+}
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #2a3444;
+  border-radius: 4px;
+}
+
+@layer components {
+  .panel {
+    @apply rounded-lg border border-line bg-panel;
+  }
+  .panel-head {
+    @apply flex items-center justify-between border-b border-line px-4 py-2.5;
+  }
+  .panel-title {
+    @apply text-sm font-semibold tracking-tight text-slate-100;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md border border-line bg-panel2 px-3 py-1.5 text-sm font-medium text-slate-200 transition-colors hover:bg-line hover:text-white disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-sm {
+    @apply px-2 py-1 text-xs;
+  }
+  .btn-primary {
+    @apply border-transparent bg-accent text-slate-950 hover:bg-sky-300 hover:text-slate-950;
+  }
+  .btn-danger {
+    @apply border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/20 hover:text-red-200;
+  }
+
+  .input {
+    @apply w-full rounded-md border border-line bg-ink px-3 py-1.5 text-sm text-slate-100 placeholder:text-slate-600 focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent;
+  }
+  .label {
+    @apply mb-1 block text-[11px] font-medium uppercase tracking-wide text-slate-400;
+  }
+
+  .stat-k {
+    @apply text-[10px] font-medium uppercase tracking-wide text-slate-500;
+  }
+  .stat-v {
+    @apply text-sm font-semibold text-slate-100;
+  }
+}
