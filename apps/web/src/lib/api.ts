@@ -12,6 +12,7 @@ import type {
   ClipResult,
   DiscoverOptions,
   DiscoverResponse,
+  Gaps,
   LiveUrls,
   SegmentView,
   SystemInfo,
@@ -104,6 +105,9 @@ export const api = {
     request<SegmentView[]>(`/api/v1/cameras/${enc(id)}/segments${qs(q)}`),
   getTimeline: (id: string, q: TimelineQuery = {}) =>
     request<Timeline>(`/api/v1/cameras/${enc(id)}/timeline${qs(q)}`),
+  /** Holes in recording coverage over an optional [from,to] window. */
+  cameraGaps: (id: string, from?: string, to?: string) =>
+    request<Gaps>(`/api/v1/cameras/${enc(id)}/gaps${qs({ from, to })}`),
 
   // ---- Playback ----
   exportClip: (id: string, from: string, to: string) =>

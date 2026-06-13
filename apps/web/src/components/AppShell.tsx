@@ -65,10 +65,27 @@ function AddCameraIcon({ className }: IconProps) {
   );
 }
 
+function SystemIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M2.5 12.5h3l1.5-5 2.5 9 2-7 1.5 3h4" />
+    </svg>
+  );
+}
+
 const NAV_ITEMS: { to: string; label: string; end?: boolean; Icon: (p: IconProps) => ReactNode }[] = [
   { to: "/", label: "Wall", end: true, Icon: WallIcon },
   { to: "/discover", label: "Discover", Icon: DiscoverIcon },
   { to: "/cameras/new", label: "Add Camera", Icon: AddCameraIcon },
+  { to: "/system", label: "System", Icon: SystemIcon },
 ];
 
 function NavRail({ version }: { version?: string }) {

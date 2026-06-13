@@ -92,22 +92,26 @@ pub async fn record_segment_indexed(
     camera_id: &str,
     last_segment_at: DateTime<Utc>,
     bitrate_kbps: Option<f64>,
+    fps_observed: Option<f64>,
 ) -> sqlx::Result<()> {
     let now = Utc::now();
     sqlx::query(
-        "INSERT INTO camera_status (camera_id, state, last_segment_at, segments_written, bitrate_kbps, updated_at)
-         VALUES (?, 'recording', ?, 1, ?, ?)
+        "INSERT INTO camera_status
+           (camera_id, state, last_segment_at, segments_written, bitrate_kbps, fps_observed, updated_at)
+         VALUES (?, 'recording', ?, 1, ?, ?, ?)
          ON CONFLICT(camera_id) DO UPDATE SET
             state = 'recording',
             last_segment_at = excluded.last_segment_at,
             segments_written = camera_status.segments_written + 1,
             bitrate_kbps = excluded.bitrate_kbps,
+            fps_observed = excluded.fps_observed,
             last_error = NULL,
             updated_at = excluded.updated_at",
     )
     .bind(camera_id)
     .bind(last_segment_at)
     .bind(bitrate_kbps)
+    .bind(fps_observed)
     .bind(now)
     .execute(pool)
     .await?;

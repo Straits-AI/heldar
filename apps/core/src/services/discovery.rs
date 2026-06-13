@@ -149,8 +149,14 @@ pub fn parse_targets(spec: &str) -> Result<Vec<Ipv4Addr>, String> {
                 push(a, &mut out)?;
             }
         } else if let Some((a, b)) = token.split_once('-') {
-            let a: Ipv4Addr = a.trim().parse().map_err(|_| format!("bad range start: {a}"))?;
-            let b: Ipv4Addr = b.trim().parse().map_err(|_| format!("bad range end: {b}"))?;
+            let a: Ipv4Addr = a
+                .trim()
+                .parse()
+                .map_err(|_| format!("bad range start: {a}"))?;
+            let b: Ipv4Addr = b
+                .trim()
+                .parse()
+                .map_err(|_| format!("bad range end: {b}"))?;
             let (a, b) = (u32::from(a), u32::from(b));
             if b < a {
                 return Err("range end precedes start".into());
@@ -179,13 +185,21 @@ async fn port_open(ip: Ipv4Addr, port: u16, timeout: Duration) -> bool {
 fn guess_vendor(server: Option<&str>, body: &str) -> String {
     let s = server.unwrap_or("").to_ascii_lowercase();
     let b = body.to_ascii_lowercase();
-    if s.contains("hikvision") || b.contains("hikvision") || s == "webserver" || b.contains("/doc/page/login") {
+    if s.contains("hikvision")
+        || b.contains("hikvision")
+        || s == "webserver"
+        || b.contains("/doc/page/login")
+    {
         "hikvision".into()
     } else if s.contains("app-webs") || b.contains("dahua") {
         "dahua".into()
     } else if s.contains("axis") || b.contains("axis") {
         "axis".into()
-    } else if b.contains("boa") || s.contains("boa") || s.contains("hipcam") || s.contains("uc-httpd") {
+    } else if b.contains("boa")
+        || s.contains("boa")
+        || s.contains("hipcam")
+        || s.contains("uc-httpd")
+    {
         "generic".into()
     } else {
         "unknown".into()
@@ -245,7 +259,8 @@ async fn probe_host(
             }
             attempts += 1;
             let url = build_rtsp_url(host, port, user, pass, path);
-            match tokio::time::timeout(PROBE_TIMEOUT, util::ffprobe_stream(ffprobe_bin, &url)).await {
+            match tokio::time::timeout(PROBE_TIMEOUT, util::ffprobe_stream(ffprobe_bin, &url)).await
+            {
                 Ok(Ok(info)) if info.codec.is_some() => {
                     return Some(ProbeMatch {
                         vendor: (*vendor).to_string(),
@@ -369,8 +384,15 @@ pub async fn discover(
             };
 
             if verify {
-                if let Some(m) =
-                    probe_host(&ffprobe_bin, &addr, rtsp_port, &vendor_guess, &creds, try_default).await
+                if let Some(m) = probe_host(
+                    &ffprobe_bin,
+                    &addr,
+                    rtsp_port,
+                    &vendor_guess,
+                    &creds,
+                    try_default,
+                )
+                .await
                 {
                     device.verified = true;
                     // The working path is stronger vendor evidence than the banner.
@@ -428,7 +450,11 @@ pub async fn add_device(pool: &SqlitePool, device: &DiscoveredDevice) -> sqlx::R
             )
         })
     };
-    let store_vendor = if vendor == "unknown" { "generic" } else { vendor };
+    let store_vendor = if vendor == "unknown" {
+        "generic"
+    } else {
+        vendor
+    };
 
     let now = Utc::now();
     sqlx::query(

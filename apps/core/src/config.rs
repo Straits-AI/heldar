@@ -26,6 +26,13 @@ pub struct Config {
     pub cors_origins: Vec<String>,
     /// Soft cap on total recording footprint; oldest unlocked segments are pruned above this.
     pub max_recordings_bytes: u64,
+    /// Hard floor on free disk space; when free space drops below this, oldest unlocked segments
+    /// are pruned regardless of age/size policy (protects the host from a full disk).
+    pub min_free_disk_bytes: u64,
+    /// Optional webhook URL that receives warning/critical events as JSON (alerting).
+    pub alert_webhook_url: Option<String>,
+    /// How often the alert notifier polls for new events to deliver.
+    pub notifier_interval_s: u64,
 }
 
 fn var(key: &str) -> Option<String> {
@@ -67,6 +74,7 @@ impl Config {
             .collect();
 
         let max_recordings_gb: f64 = parse_or("VISIONOPS_MAX_RECORDINGS_GB", 20.0);
+        let min_free_disk_gb: f64 = parse_or("VISIONOPS_MIN_FREE_DISK_GB", 5.0);
 
         Config {
             database_url: var_or("VISIONOPS_DATABASE_URL", "sqlite://./data/visionops.db"),
@@ -90,6 +98,9 @@ impl Config {
             api_port: parse_or("VISIONOPS_API_PORT", 8000),
             cors_origins,
             max_recordings_bytes: (max_recordings_gb * 1024.0 * 1024.0 * 1024.0) as u64,
+            min_free_disk_bytes: (min_free_disk_gb * 1024.0 * 1024.0 * 1024.0) as u64,
+            alert_webhook_url: var("VISIONOPS_ALERT_WEBHOOK_URL"),
+            notifier_interval_s: parse_or("VISIONOPS_NOTIFIER_INTERVAL_S", 15),
         }
     }
 

@@ -33,6 +33,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 thiserror = "1"
 dotenvy = "0.15"
+libc = "0.2"
 
 [profile.dev]
 opt-level = 0

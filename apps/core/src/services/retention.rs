@@ -10,6 +10,7 @@ use sqlx::SqlitePool;
 
 use crate::config::Config;
 use crate::repo;
+use crate::services::storage;
 
 pub async fn run(pool: SqlitePool, cfg: Arc<Config>) {
     let mut tick = tokio::time::interval(Duration::from_secs(cfg.retention_interval_s.max(30)));
@@ -130,6 +131,108 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         )
         .await;
         tracing::warn!(deleted = size_deleted, "retention: size-cap cleanup");
+    }
+
+    // 3) Disk-free floor: if the recordings filesystem drops below the free-space floor, prune the
+    //    oldest unlocked segments until back above it. Self-limiting: it stops if a delete batch
+    //    does not actually recover free space (disk filled by non-recording data), and refuses to
+    //    run if the floor exceeds the whole disk — so it never destroys the footprint for nothing.
+    let floor = cfg.min_free_disk_bytes;
+    let mut disk_deleted: u64 = 0;
+    match storage::disk_stats_async(cfg.recordings_dir.clone()).await {
+        None => {
+            tracing::warn!(
+                "retention: could not read disk stats; free-floor check skipped this sweep"
+            );
+            let _ = repo::log_event(
+                pool,
+                None,
+                "disk_pressure",
+                "warning",
+                json!({ "reason": "disk_stats_unavailable" }),
+            )
+            .await;
+        }
+        Some(d) if floor >= d.total_bytes => {
+            if d.free_bytes < floor {
+                tracing::warn!(
+                    floor,
+                    total = d.total_bytes,
+                    "retention: free-disk floor exceeds total disk size; refusing to prune (misconfigured?)"
+                );
+                let _ = repo::log_event(
+                    pool,
+                    None,
+                    "disk_pressure",
+                    "critical",
+                    json!({ "reason": "floor_unsatisfiable", "min_free_bytes": floor, "total_bytes": d.total_bytes }),
+                )
+                .await;
+            }
+        }
+        Some(mut prev) => {
+            let mut guard = 0;
+            let mut futile = false;
+            while prev.free_bytes < floor && guard < 200 {
+                guard += 1;
+                let before = prev.free_bytes;
+                let batch: Vec<(String, String)> = sqlx::query_as(
+                    "SELECT id, path FROM segments WHERE locked = 0 ORDER BY end_time ASC LIMIT 20",
+                )
+                .fetch_all(pool)
+                .await?;
+                if batch.is_empty() {
+                    tracing::warn!(
+                        free_bytes = before,
+                        floor,
+                        "retention: below disk-free floor but no unlocked segments remain to prune"
+                    );
+                    break;
+                }
+                for (seg_id, path) in batch {
+                    let _ = tokio::fs::remove_file(&path).await;
+                    sqlx::query("DELETE FROM segments WHERE id = ?")
+                        .bind(&seg_id)
+                        .execute(pool)
+                        .await?;
+                    disk_deleted += 1;
+                }
+                match storage::disk_stats_async(cfg.recordings_dir.clone()).await {
+                    Some(d) if d.free_bytes > before => prev = d,
+                    Some(_) => {
+                        futile = true;
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            if futile {
+                tracing::error!(
+                    free_bytes = prev.free_bytes,
+                    floor,
+                    "retention: pruning recordings is not recovering free space (disk filled by non-recording data?); stopping"
+                );
+                let _ = repo::log_event(
+                    pool,
+                    None,
+                    "disk_pressure",
+                    "critical",
+                    json!({ "reason": "prune_not_recovering_space", "min_free_bytes": floor, "deleted": disk_deleted }),
+                )
+                .await;
+            }
+        }
+    }
+    if disk_deleted > 0 {
+        let _ = repo::log_event(
+            pool,
+            None,
+            "disk_pressure",
+            "critical",
+            json!({ "deleted": disk_deleted, "reason": "free_floor", "min_free_bytes": floor }),
+        )
+        .await;
+        tracing::warn!(deleted = disk_deleted, "retention: disk-free-floor cleanup");
     }
     Ok(())
 }

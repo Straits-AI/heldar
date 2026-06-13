@@ -6,6 +6,7 @@ pub mod cameras;
 pub mod discovery;
 pub mod health;
 pub mod liveview;
+pub mod metrics;
 pub mod playback;
 pub mod recordings;
 pub mod system;

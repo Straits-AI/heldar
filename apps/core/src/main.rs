@@ -61,9 +61,29 @@ async fn main() -> anyhow::Result<()> {
     };
 
     recorder.start_all().await.context("starting recorders")?;
-    tokio::spawn(services::indexer::run(pool.clone(), cfg.clone()));
-    tokio::spawn(services::health::run(pool.clone(), cfg.clone()));
-    tokio::spawn(services::retention::run(pool.clone(), cfg.clone()));
+    // Supervise the background services: if one panics, it is respawned (production resilience).
+    {
+        let (p, c) = (pool.clone(), cfg.clone());
+        spawn_supervised("indexer", move || {
+            services::indexer::run(p.clone(), c.clone())
+        });
+        let (p, c) = (pool.clone(), cfg.clone());
+        spawn_supervised("health", move || {
+            services::health::run(p.clone(), c.clone())
+        });
+        let (p, c) = (pool.clone(), cfg.clone());
+        spawn_supervised("retention", move || {
+            services::retention::run(p.clone(), c.clone())
+        });
+        // Only supervise the notifier when a webhook is configured — otherwise run() returns
+        // immediately and the supervisor would respawn it in a tight loop.
+        if cfg.alert_webhook_url.is_some() {
+            let (p, c) = (pool.clone(), cfg.clone());
+            spawn_supervised("notifier", move || {
+                services::notifier::run(p.clone(), c.clone())
+            });
+        }
+    }
 
     // Allow all origins if configured with "*" or left empty; otherwise restrict to the list.
     let allow_all = cfg.cors_origins.is_empty() || cfg.cors_origins.iter().any(|o| o == "*");
@@ -86,6 +106,7 @@ async fn main() -> anyhow::Result<()> {
 
     let app = Router::new()
         .merge(routes::api_router())
+        .merge(routes::metrics::router())
         .nest_service("/media/recordings", ServeDir::new(&cfg.recordings_dir))
         .nest_service("/media/clips", ServeDir::new(&cfg.clips_dir))
         .nest_service("/media/snapshots", ServeDir::new(&cfg.snapshots_dir))
@@ -114,6 +135,36 @@ fn init_tracing() {
         .with(filter)
         .with(tracing_subscriber::fmt::layer())
         .init();
+}
+
+/// Spawn a long-lived background task that is respawned (after a short delay) if it ever returns or
+/// panics. The service `run` loops are not expected to return, so this is a resilience backstop.
+fn spawn_supervised<F, Fut>(name: &'static str, make: F)
+where
+    F: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    tokio::spawn(async move {
+        loop {
+            let handle = tokio::spawn(make());
+            match handle.await {
+                Ok(()) => {
+                    tracing::error!(
+                        task = name,
+                        "background task returned unexpectedly; respawning in 5s"
+                    )
+                }
+                Err(e) if e.is_panic() => {
+                    tracing::error!(task = name, "background task panicked; respawning in 5s")
+                }
+                Err(_) => {
+                    tracing::info!(task = name, "background task cancelled");
+                    break;
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        }
+    });
 }
 
 async fn shutdown_signal(recorder: Arc<RecorderManager>) {

@@ -1,4 +1,6 @@
 use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
@@ -6,16 +8,37 @@ use serde::Serialize;
 use serde_json::{json, Value};
 
 use crate::error::AppResult;
+use crate::services::storage::{self, StorageReport};
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
         .route("/healthz", get(healthz))
+        .route("/readyz", get(readyz))
         .route("/api/v1/system", get(system_info))
 }
 
+/// Liveness: the process is up.
 async fn healthz() -> Json<Value> {
     Json(json!({ "status": "ok" }))
+}
+
+/// Readiness: the database is reachable (returns 503 otherwise).
+async fn readyz(State(st): State<AppState>) -> Response {
+    match sqlx::query_scalar::<_, i64>("SELECT 1")
+        .fetch_one(&st.pool)
+        .await
+    {
+        Ok(_) => (StatusCode::OK, Json(json!({ "ready": true }))).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "readyz: database not reachable");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "ready": false, "reason": "database" })),
+            )
+                .into_response()
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -32,6 +55,7 @@ struct SystemInfo {
     recordings_bytes: i64,
     recordings_gb: f64,
     max_recordings_gb: f64,
+    storage: StorageReport,
 }
 
 async fn system_info(State(st): State<AppState>) -> AppResult<Json<SystemInfo>> {
@@ -50,6 +74,7 @@ async fn system_info(State(st): State<AppState>) -> AppResult<Json<SystemInfo>> 
             .fetch_one(&st.pool)
             .await?;
     let active_recorders = st.recorder.active_ids().await.len();
+    let storage = storage::storage_report(&st.pool, &st.cfg).await?;
 
     Ok(Json(SystemInfo {
         name: "VisionOps Core",
@@ -64,5 +89,6 @@ async fn system_info(State(st): State<AppState>) -> AppResult<Json<SystemInfo>> 
         recordings_bytes,
         recordings_gb: recordings_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
         max_recordings_gb: st.cfg.max_recordings_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
+        storage,
     }))
 }

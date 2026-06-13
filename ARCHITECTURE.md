@@ -7,6 +7,12 @@ recording, timeline index, playback / clip / snapshot, brokered live view, and
 camera health. Python AI workers and the detection/tracking kernel are later stages
 and are intentionally absent here.
 
+**Stage 1 (observability & reliability) has since shipped** on top of this kernel —
+storage/disk monitoring, Prometheus metrics, an alert webhook, a disk-free
+retention floor, recording-gap reporting, observed fps/bitrate, a `/readyz`
+readiness probe, and supervised background tasks. It is documented in §14 below and,
+for operators, in [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
+
 Stage 0 maps to **memo §14 "Stage 0 — Media kernel MVP"** (camera registry, RTSP
 ingest, recording segmenter, timeline index, playback API, clip export, basic live
 view, camera health) and is built on the layer model of **memo §5**. The recording
@@ -82,7 +88,8 @@ sampler) is deliberately out of scope for Stage 0.
 3. Open SQLite pool (`db::init_pool`), run embedded migrations (`db::run_migrations`).
 4. Construct `RecorderManager` and shared `reqwest::Client` (10s timeout).
 5. `recorder.start_all()` — spawn one supervisor task per recordable camera.
-6. `tokio::spawn` the indexer, health monitor, and retention sweeper loops.
+6. Launch the indexer, health monitor, retention sweeper, and alert notifier as
+   **supervised** background loops (`spawn_supervised` — respawn on return/panic, §14).
 7. Build the Axum router: API routes + three `ServeDir` mounts (`/media/recordings`,
    `/media/clips`, `/media/snapshots`) + `TraceLayer` + CORS.
 8. Bind `api_host:api_port` (default `0.0.0.0:8000`) and serve with graceful shutdown
@@ -460,13 +467,16 @@ unreserved set) and assembled as `rtsp://user:pass@host:port/path`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| GET | `/healthz` | Liveness `{status:"ok"}` |
-| GET | `/api/v1/system` | Version, uptime, camera/segment counts, footprint vs cap |
+| GET | `/healthz` | Liveness `{status:"ok"}` (no dependency check) |
+| GET | `/readyz` | Readiness — runs `SELECT 1`; `200 {ready:true}` / `503 {ready:false,reason:"database"}` |
+| GET | `/metrics` | Prometheus exposition (system + per-camera gauges/counters) |
+| GET | `/api/v1/system` | Version, uptime, camera/segment counts, footprint vs cap, + `storage` block (disk/footprint/projection) |
 | GET / POST | `/api/v1/cameras` | List / create cameras |
 | GET / PATCH / DELETE | `/api/v1/cameras/{id}` | Read / partial update / delete (+stop recorder, +purge files) |
 | GET / POST | `/api/v1/cameras/{id}/test` | Probe the record stream for reachability/codec/dims |
 | GET | `/api/v1/cameras/{id}/segments` | Timeline index rows (with media URLs) |
 | GET | `/api/v1/cameras/{id}/timeline` | Coalesced availability ranges |
+| GET | `/api/v1/cameras/{id}/gaps` | Recording-coverage gaps for `[from,to]` (holes between availability ranges) |
 | POST | `/api/v1/cameras/{id}/clip` | Export `-c copy` MP4 for `[from,to]` |
 | GET | `/api/v1/cameras/{id}/snapshot` | JPEG frame (recorded `?at` or live) |
 | GET / POST | `/api/v1/cameras/{id}/liveview` | Register MediaMTX path, return HLS/WebRTC/RTSP URLs |
@@ -496,9 +506,15 @@ All via `VISIONOPS_*` env vars (see `.env.example`). Notable defaults:
 | `VISIONOPS_DEFAULT_SEGMENT_SECONDS` | `60` | segment length |
 | `VISIONOPS_DEFAULT_RETENTION_HOURS` | `24` | age policy |
 | `VISIONOPS_INDEXER_INTERVAL_S` / `HEALTH_INTERVAL_S` / `RETENTION_INTERVAL_S` | `10` / `15` / `300` | loop cadences |
-| `VISIONOPS_MAX_RECORDINGS_GB` | `20` | global size cap |
+| `VISIONOPS_MAX_RECORDINGS_GB` | `20` | global size cap (soft footprint budget) |
+| `VISIONOPS_MIN_FREE_DISK_GB` | `5` | disk-free floor (hard host-protection floor) |
+| `VISIONOPS_ALERT_WEBHOOK_URL` | *(unset)* | alert webhook; unset disables the notifier |
+| `VISIONOPS_NOTIFIER_INTERVAL_S` | `15` (min 5) | notifier poll cadence |
 | `VISIONOPS_API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | bind address |
 | `VISIONOPS_CORS_ORIGINS` | `http://localhost:5173` | `*`/empty = allow all |
+
+> Stage 1 observability/reliability config is documented end-to-end in
+> [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
 
 ---
 
@@ -513,8 +529,13 @@ All via `VISIONOPS_*` env vars (see `.env.example`). Notable defaults:
 | **Audio dropped** (`-an`) | Video-first VMS; halves edge cases | Audio capture can be re-enabled when needed |
 | **Evidence lock has no mutating API** (`locked`/`incident_id` columns only) | Retention already honors the flag | `lockEvidence(...)` endpoint (memo §5 Layer 3 playback API) |
 | **No AI / frame sampler / decode pipeline** | Stage 0 is the media kernel; clean ingest/record/decode/infer separation already in place (memo §6.1) | Stage 2 frame sampler + Stage 3 detection kernel; `events`/`capabilities` schema pre-shaped |
-| **`fps_observed` not populated; storage = byte cap only (no disk-throughput/SMART monitor)** | Bitrate + footprint cover sizing for now | Stage 1 "Observability and reliability": disk health monitor, stream metrics, service watchdog |
-| **Single-node, raw video stays local** | Matches memo §4.3 core principle | Stage 1 edge offline buffer + cloud sync retry |
+| **No SMART / disk-throughput monitoring** | statvfs free-space + footprint + write-rate projection cover capacity planning (Stage 1, §14); per-byte throughput/SMART is lower-value on the edge box | Future hardware-health probe if a deployment needs it |
+| **Single-node, raw video stays local** | Matches memo §4.3 core principle | Stage 1 edge offline buffer + cloud sync retry (still planned; alerting webhook ships the metadata/alert upstream path) |
+
+> Resolved in **Stage 1** (see §14): `fps_observed` is now populated by the indexer,
+> storage gained a free-disk floor + free-space projection + Prometheus metrics, the
+> service watchdog is the supervised-task respawner, and the gap detector +
+> `/api/v1/cameras/{id}/gaps` make every recording hole explainable.
 
 ---
 
@@ -526,17 +547,152 @@ All via `VISIONOPS_*` env vars (see `.env.example`). Notable defaults:
    │     └─ per camera: tokio::spawn supervise(id)   ── owns 1 ffmpeg child
    │                         writes  recordings_dir/<id>/<UTC strftime>.mp4
    │
-   ├─ tokio::spawn indexer::run   (every ~10s)  scans dirs → segments rows, gaps
-   ├─ tokio::spawn health::run    (every ~15s)  recording→error on staleness
-   ├─ tokio::spawn retention::run (every ~300s) age purge + size-cap purge (skip locked)
+   ├─ spawn_supervised indexer::run   (every ~10s)  scans dirs → segments rows, gaps, fps/bitrate
+   ├─ spawn_supervised health::run    (every ~15s)  recording→error on staleness
+   ├─ spawn_supervised retention::run (every ~300s) age + size-cap + free-floor purge (skip locked)
+   ├─ spawn_supervised notifier::run  (every ~15s)  POST warning/critical events → webhook
+   │     (each spawn_supervised wrapper respawns its task 5s after any return/panic)
    │
-   └─ axum::serve(...)                          HTTP API + /media static files
+   └─ axum::serve(...)                          HTTP API + /metrics + /healthz + /readyz + /media
          on SIGINT/SIGTERM → recorder.shutdown() → kill every ffmpeg child
 ```
 
-All five concerns (1 supervisor-set + 3 loops + HTTP) share the single
+All concerns (1 supervisor-set + 4 supervised loops + HTTP) share the single
 `SqlitePool` and `Arc<Config>`; coordination between the recorder (writes files,
 sets `connecting`/`recording`/`offline`) and the indexer (reads files, confirms
-`recording`, computes bitrate) is entirely through the filesystem and the
+`recording`, computes bitrate/fps) is entirely through the filesystem and the
 `camera_status` row — there is no in-process channel between them, which keeps the
-write path non-blocking.
+write path non-blocking. The notifier reads only the `events` table (a polling
+cursor), so alerting is fully decoupled from the producers.
+
+---
+
+## 14. Stage 1 — Observability & Reliability
+
+Stage 1 (memo §14) makes the kernel **operable by a non-developer**: faults are
+visible without log-diving, recording gaps are explainable, and the host disk is
+protected. It adds no new tables — everything is computed over the existing
+`segments`, `camera_status`, and `events` tables, or read live from the OS. The
+operator/SRE-facing guide is [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md); this
+section documents the implementation.
+
+### 14.1 Storage monitoring (`services/storage.rs`)
+
+`disk_stats(path)` calls **`statvfs(3)`** via `libc` on `VISIONOPS_RECORDINGS_DIR`
+and reports `total/free/used_bytes` + `used_percent`. Free space is `f_bavail`
+(blocks available to a non-privileged user — the space we can actually write), not
+`f_bfree`. It returns `None` (serialized as `null`) if the syscall fails.
+
+`storage_report(pool, cfg)` (surfaced as the `storage` block on
+`GET /api/v1/system`, `routes/system.rs`) combines that disk view with the
+recordings footprint:
+
+| Field | Computed as |
+|---|---|
+| `disk` | `disk_stats(recordings_dir)` or `null` |
+| `recordings_bytes` / `segment_count` | `SUM(size_bytes)` / `COUNT(*)` over `segments` |
+| `oldest_segment` / `newest_segment` | `MIN(start_time)` / `MAX(end_time)` |
+| `write_rate_bytes_per_day` | `SUM(size_bytes)` of segments indexed (`created_at`) in the last 24 h |
+| `projected_days_remaining` | `disk.free_bytes / write_rate`; `null` if disk is null or rate is 0 |
+
+`projected_days_remaining` is a *free-disk-fill* horizon (ignores that retention
+recycles old segments), not a retention horizon.
+
+### 14.2 Prometheus metrics (`services/metrics.rs`, `routes/metrics.rs`)
+
+`GET /metrics` renders Prometheus text exposition
+(`text/plain; version=0.0.4`) directly from SQL each scrape (no in-process
+registry). System gauges: `visionops_build_info`, `visionops_cameras_total`,
+`visionops_cameras_recording`, `visionops_segments_total`,
+`visionops_recordings_bytes`, and (when statvfs succeeds)
+`visionops_disk_total_bytes` / `visionops_disk_free_bytes` /
+`visionops_disk_used_percent`. Per-camera series (labeled `camera`):
+`visionops_camera_up` (1 if `state='recording'`), `..._reconnects_total`,
+`..._segments_written`, `..._bitrate_kbps`, `..._last_segment_age_seconds`. The
+full table (types/labels/conditions) is in `docs/OBSERVABILITY.md` §2. Note there is
+**no fps metric** on `/metrics`; observed fps is health-API-only (§14.6).
+
+### 14.3 Alert notifier (`services/notifier.rs`)
+
+A supervised loop that **POSTs warning/critical events to a webhook** when
+`VISIONOPS_ALERT_WEBHOOK_URL` is set (no-op otherwise). Key properties:
+
+- **Starts from now:** the delivery cursor is `Utc::now()` at boot, so history is
+  never replayed on restart.
+- Polls every `VISIONOPS_NOTIFIER_INTERVAL_S` (default 15, min 5); each cycle pulls
+  up to 100 events with `severity IN ('warning','critical') AND created_at > cursor`
+  oldest-first and POSTs one JSON body per event
+  (`{source, event_id, event_type, severity, camera_id, timestamp, payload}`).
+- **Retry semantics:** a *transport* failure (no response) stops the cursor and
+  retries that event next cycle (at-least-once); a *non-2xx response* is logged but
+  the cursor advances (not retried). 10 s HTTP timeout.
+
+Delivered event types today: `camera_offline`, `recorder_error`, `recording_gap`
+(all warning), and `disk_pressure` (warning/critical). `retention_delete` (info) is
+**not** delivered.
+
+### 14.4 Disk-free retention floor (`services/retention.rs`)
+
+The sweeper gained a third phase on top of Stage 0's age policy + size cap:
+
+1. **Age** — delete unlocked segments older than each camera's `retention_hours`
+   (`retention_delete`/info).
+2. **Size cap** (`VISIONOPS_MAX_RECORDINGS_GB`, soft) — prune oldest *unlocked*
+   segments until the unlocked footprint fits `budget = cap − locked_bytes`
+   (`disk_pressure`/warning).
+3. **Disk-free floor** (`VISIONOPS_MIN_FREE_DISK_GB`, hard) — **new in Stage 1**:
+   while `statvfs` free space is below the floor, prune oldest unlocked segments
+   (batches of 20, capped at 200 iterations/sweep) until back above it
+   (`disk_pressure`/critical).
+
+The floor is a host-protection backstop independent of the size cap: it fires on
+the *whole filesystem's* free space, so it still protects recording if something
+else on the box consumes disk.
+
+**Locked/evidence guarantee (preserved & reinforced):** every delete query filters
+`locked = 0`, so evidence is never deleted by any phase. The size-cap budget
+subtracts locked bytes so evidence cannot force-delete all unlocked footage; if
+locked footage alone meets/exceeds the cap (`budget ≤ 0`) the sweeper logs a
+`disk_pressure` warning (`locked_exceeds_cap`) instead of deleting. If the disk is
+below the floor but no unlocked segments remain, it warns and stops rather than
+touching evidence.
+
+### 14.5 Gap reporting (`services/indexer.rs`, `routes/recordings.rs`)
+
+Two surfaces, both already backed by the timeline index:
+
+- **Live event** — when the indexer adds a segment whose `start_time` is > 3 s
+  after the previous segment's `end_time`, it logs `recording_gap` (warning) with
+  `{gap_seconds, prev_end, next_start}`.
+- **On-demand** — `GET /api/v1/cameras/{id}/gaps?from&to` coalesces segments into
+  availability ranges (2 s tolerance) and returns the holes between them
+  (`{camera_id, from, to, gaps:[{start,end,seconds}], gap_count, total_gap_seconds}`),
+  reusing the same `coalesce()` helper as `/timeline`.
+
+### 14.6 Observed fps & bitrate (`services/indexer.rs` → `repo.rs`)
+
+On indexing each segment the indexer computes `bitrate_kbps = size·8 / duration /
+1000` and reads `fps` from `ffprobe`, then upserts both onto the camera's
+`camera_status` row via `record_segment_indexed`. These are **last-value** (latest
+indexed segment), exposed through `GET /api/v1/health/cameras` /
+`/api/v1/cameras/{id}/health` (`CameraStatus.fps_observed`, `.bitrate_kbps`).
+Bitrate is also mirrored to Prometheus; fps is not.
+
+### 14.7 Readiness (`routes/health.rs`)
+
+`/healthz` (liveness, always 200, no dependency check) is joined by **`/readyz`**,
+which runs `SELECT 1` against the pool and returns `503 {ready:false,
+reason:"database"}` when the store is unreachable — a real readiness gate for
+orchestrators/load balancers, distinct from liveness.
+
+### 14.8 Supervised background tasks (`main.rs`)
+
+The indexer, health monitor, retention sweeper, and notifier are launched through
+`spawn_supervised(name, make)`: an outer task re-runs the inner `run()` loop, and
+if it ever **returns or panics** it logs the cause and respawns after 5 s
+(cancellation = clean stop). The `run()` loops are infinite by design, so this is a
+resilience backstop — a single panic (e.g. a transient DB hiccup) cannot
+permanently take metrics, alerting, or retention offline. This is Stage 1's
+"service watchdog / auto-restart" for the in-process services; per-camera FFmpeg
+recorders remain supervised by `RecorderManager` (reconnect with exponential
+backoff).

@@ -59,18 +59,35 @@ Goal (memo §14): *own the base VMS.* Record compressed packets without decode; 
 
 ---
 
-## ⬜ Stage 1 — Observability & reliability
+## ✅ Stage 1 — Observability & reliability  — **DONE**
 
-**Goal:** the system is operable by a non-developer; faults are visible; recording gaps are explainable. (memo §14)
+**Goal (memo §14):** the system is operable by a non-developer; faults are visible; recording gaps are explainable. Built on the Stage 0 kernel with no new tables — everything is computed over `segments` / `camera_status` / `events` or read live from the OS. Operator/SRE guide: [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md); implementation: `ARCHITECTURE.md` §14.
 
-- [ ] Per-camera health dashboard (frontend on top of the existing health/events API)
-- [ ] Recording **gap detector** (`recording_gap` events from the timeline index)
-- [ ] Stream metrics (fps/bitrate/packet-loss trends, not just last value)
-- [ ] Disk health monitor (capacity, write errors, throughput, `disk_pressure` events)
-- [ ] Service watchdog / auto-restart
-- [ ] Edge offline buffer + cloud sync retry (metadata/health/alerts upstream)
+**Shipped checklist:**
 
-**Done when:** faults surface without log-diving; every recording gap has a cause.
+- [x] **Recording gap detector** — `recording_gap` (warning) events emitted by the indexer when consecutive segments are >3 s apart, **plus** an on-demand `GET /api/v1/cameras/{id}/gaps?from&to` that reports the holes between coalesced availability ranges. (`services/indexer.rs`, `routes/recordings.rs`)
+- [x] **Stream metrics** — observed `fps_observed` + `bitrate_kbps` computed per indexed segment and stored on `camera_status`, surfaced via the health API and (bitrate) Prometheus. (`services/indexer.rs`, `repo.rs`, `routes/health.rs`)
+- [x] **Disk / storage health monitor** — `statvfs` free-space, recordings footprint, recent write rate, and free-disk-fill projection in the `/api/v1/system` `storage` block; `disk_pressure` events on pressure. (`services/storage.rs`, `routes/system.rs`)
+- [x] **Prometheus metrics + liveness/readiness** — `GET /metrics` (system + per-camera gauges/counters), `GET /healthz` (liveness), `GET /readyz` (readiness, 200/503 on DB reachability). (`services/metrics.rs`, `routes/metrics.rs`, `routes/health.rs`)
+- [x] **Alerting** — `VISIONOPS_ALERT_WEBHOOK_URL` notifier POSTs warning/critical events as JSON; starts-from-now (no replay on boot), retries on transport failure. (`services/notifier.rs`)
+- [x] **Disk-free retention floor** — `VISIONOPS_MIN_FREE_DISK_GB` hard floor prunes oldest *unlocked* segments when the filesystem gets tight, on top of the age policy + `VISIONOPS_MAX_RECORDINGS_GB` size cap; evidence-lock honored throughout. (`services/retention.rs`)
+- [x] **Service watchdog / auto-restart** — `spawn_supervised` respawns the indexer / health / retention / notifier loops 5 s after any return or panic. (`main.rs`)
+
+**Deferred (rolls into later edge/cloud work):**
+
+- [ ] Per-camera health **dashboard** UI (the health/events/metrics APIs exist; the web frontend view is still pending — `apps/web`)
+- [ ] Edge offline buffer + cloud sync retry (the webhook notifier is the first upstream alert path; full store-and-forward sync remains planned)
+- [ ] Packet-loss / throughput **trends** (current fps/bitrate are last-value, not time-series; trend storage is future work)
+
+**Cross-ref to memo §14 Stage 1 success criteria:**
+
+| Memo §14 success criterion | Status | Backed by |
+|---|---|---|
+| System operable by a non-developer | ✅ health/system/events/metrics APIs + webhook alerts surface state without log-diving | `routes/health.rs`, `routes/system.rs`, `routes/metrics.rs`, `services/notifier.rs` |
+| Faults are visible | ✅ `/metrics` + `/api/v1/events` + alert webhook; staleness → `error`, reconnect/offline/disk events logged | `services/metrics.rs`, `services/health.rs`, `services/notifier.rs` |
+| Recording gaps are explainable | ✅ live `recording_gap` events + `/gaps` endpoint, cross-referenced with `camera_offline`/`recorder_error` events | `services/indexer.rs`, `routes/recordings.rs`, `services/recorder.rs` |
+
+> Still research.md **Level 1** (operable substrate). Stage 1 hardens the kernel for unattended operation; AI begins at Stage 2.
 
 ---
 

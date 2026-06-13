@@ -17,6 +17,19 @@ pub struct ProbeInfo {
     pub codec: Option<String>,
     pub width: Option<i64>,
     pub height: Option<i64>,
+    pub fps: Option<f64>,
+}
+
+/// Parse an ffprobe rational like "20/1" or "30000/1001" into frames-per-second.
+fn parse_rational(s: &str) -> Option<f64> {
+    let (n, d) = s.split_once('/')?;
+    let n: f64 = n.parse().ok()?;
+    let d: f64 = d.parse().ok()?;
+    if d == 0.0 {
+        None
+    } else {
+        Some(n / d)
+    }
 }
 
 #[derive(Deserialize)]
@@ -31,6 +44,7 @@ struct FfprobeStream {
     codec_name: Option<String>,
     width: Option<i64>,
     height: Option<i64>,
+    avg_frame_rate: Option<String>,
 }
 #[derive(Deserialize)]
 struct FfprobeFormat {
@@ -47,7 +61,7 @@ pub async fn ffprobe_file(ffprobe_bin: &str, path: &Path) -> anyhow::Result<Prob
             "-show_entries",
             "format=duration",
             "-show_entries",
-            "stream=codec_type,codec_name,width,height",
+            "stream=codec_type,codec_name,width,height,avg_frame_rate",
             "-of",
             "json",
         ])
@@ -86,6 +100,9 @@ pub async fn ffprobe_file(ffprobe_bin: &str, path: &Path) -> anyhow::Result<Prob
         codec: video.and_then(|s| s.codec_name.clone()),
         width: video.and_then(|s| s.width),
         height: video.and_then(|s| s.height),
+        fps: video
+            .and_then(|s| s.avg_frame_rate.as_deref())
+            .and_then(parse_rational),
     })
 }
 
@@ -140,7 +157,7 @@ pub async fn ffprobe_stream(ffprobe_bin: &str, url: &str) -> anyhow::Result<Prob
             "-show_entries",
             "format=duration",
             "-show_entries",
-            "stream=codec_type,codec_name,width,height",
+            "stream=codec_type,codec_name,width,height,avg_frame_rate",
             "-of",
             "json",
             url,
@@ -170,6 +187,9 @@ pub async fn ffprobe_stream(ffprobe_bin: &str, url: &str) -> anyhow::Result<Prob
         codec: video.and_then(|s| s.codec_name.clone()),
         width: video.and_then(|s| s.width),
         height: video.and_then(|s| s.height),
+        fps: video
+            .and_then(|s| s.avg_frame_rate.as_deref())
+            .and_then(parse_rational),
     })
 }
 

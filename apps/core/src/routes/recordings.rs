@@ -14,6 +14,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/api/v1/cameras/{id}/segments", get(list_segments))
         .route("/api/v1/cameras/{id}/timeline", get(timeline))
+        .route("/api/v1/cameras/{id}/gaps", get(gaps))
 }
 
 #[derive(Debug, Deserialize)]
@@ -50,7 +51,14 @@ fn parse_range(q: &RangeQuery) -> AppResult<OptTimeRange> {
             None => Ok(None),
         }
     };
-    Ok((parse(&q.from, "from")?, parse(&q.to, "to")?))
+    let from = parse(&q.from, "from")?;
+    let to = parse(&q.to, "to")?;
+    if let (Some(f), Some(t)) = (from, to) {
+        if f > t {
+            return Err(AppError::BadRequest("`from` must be <= `to`".into()));
+        }
+    }
+    Ok((from, to))
 }
 
 async fn list_segments(
@@ -119,36 +127,37 @@ struct Timeline {
     segment_count: usize,
 }
 
-/// Coalesce contiguous segments into availability ranges (gaps > 2s split a range).
-async fn timeline(
-    State(st): State<AppState>,
-    Path(id): Path<String>,
-    Query(q): Query<RangeQuery>,
-) -> AppResult<Json<Timeline>> {
-    let _ = load_camera(&st.pool, &id).await?;
-    let (from, to) = parse_range(&q)?;
+/// Gaps below this many seconds between segments are treated as contiguous.
+const GAP_TOLERANCE_S: i64 = 2;
 
-    // Honor either or both bounds; with neither, returns the full timeline (bounded by retention).
-    let segments: Vec<Segment> = sqlx::query_as::<_, Segment>(
+/// Fetch a camera's segments, honoring either or both optional bounds (open-ended otherwise).
+async fn fetch_segments_in_range(
+    pool: &sqlx::SqlitePool,
+    id: &str,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+) -> AppResult<Vec<Segment>> {
+    let segments = sqlx::query_as::<_, Segment>(
         "SELECT * FROM segments
          WHERE camera_id = ?
            AND (? IS NULL OR start_time < ?)
            AND (? IS NULL OR end_time > ?)
          ORDER BY start_time ASC",
     )
-    .bind(&id)
+    .bind(id)
     .bind(to)
     .bind(to)
     .bind(from)
     .bind(from)
-    .fetch_all(&st.pool)
+    .fetch_all(pool)
     .await?;
+    Ok(segments)
+}
 
-    let segment_count = segments.len();
+/// Coalesce contiguous segments into availability ranges (gaps > tolerance split a range).
+fn coalesce(segments: &[Segment]) -> Vec<TimelineRange> {
     let mut ranges: Vec<TimelineRange> = Vec::new();
-    const GAP_TOLERANCE_S: i64 = 2;
-
-    for s in &segments {
+    for s in segments {
         if let Some(last) = ranges.last_mut() {
             if (s.start_time - last.end).num_seconds() <= GAP_TOLERANCE_S {
                 if s.end_time > last.end {
@@ -164,7 +173,19 @@ async fn timeline(
             seconds: (s.end_time - s.start_time).num_milliseconds() as f64 / 1000.0,
         });
     }
+    ranges
+}
 
+async fn timeline(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<RangeQuery>,
+) -> AppResult<Json<Timeline>> {
+    let _ = load_camera(&st.pool, &id).await?;
+    let (from, to) = parse_range(&q)?;
+    let segments = fetch_segments_in_range(&st.pool, &id, from, to).await?;
+    let segment_count = segments.len();
+    let ranges = coalesce(&segments);
     let recorded_seconds = ranges.iter().map(|r| r.seconds).sum();
     Ok(Json(Timeline {
         camera_id: id,
@@ -173,5 +194,64 @@ async fn timeline(
         ranges,
         recorded_seconds,
         segment_count,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+struct Gaps {
+    camera_id: String,
+    from: Option<DateTime<Utc>>,
+    to: Option<DateTime<Utc>>,
+    gaps: Vec<TimelineRange>,
+    gap_count: usize,
+    total_gap_seconds: f64,
+}
+
+/// Report holes in recording coverage (the spans between coalesced availability ranges).
+async fn gaps(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    Query(q): Query<RangeQuery>,
+) -> AppResult<Json<Gaps>> {
+    let _ = load_camera(&st.pool, &id).await?;
+    let (from, to) = parse_range(&q)?;
+    let segments = fetch_segments_in_range(&st.pool, &id, from, to).await?;
+    let ranges = coalesce(&segments);
+
+    let mk = |start: DateTime<Utc>, end: DateTime<Utc>| -> Option<TimelineRange> {
+        let seconds = (end - start).num_milliseconds() as f64 / 1000.0;
+        (seconds > GAP_TOLERANCE_S as f64).then_some(TimelineRange {
+            start,
+            end,
+            seconds,
+        })
+    };
+
+    let mut gaps = Vec::new();
+    // Leading edge: a hole between the requested window start and the first coverage (or the whole
+    // window when there is no coverage at all).
+    if let Some(f) = from {
+        match ranges.first() {
+            None => gaps.extend(to.and_then(|t| mk(f, t))),
+            Some(first) => gaps.extend(mk(f, first.start)),
+        }
+    }
+    // Interior holes between coalesced coverage ranges.
+    for w in ranges.windows(2) {
+        gaps.extend(mk(w[0].end, w[1].start));
+    }
+    // Trailing edge: a hole between the last coverage and the requested window end.
+    if let (Some(t), Some(last)) = (to, ranges.last()) {
+        gaps.extend(mk(last.end, t));
+    }
+    let total_gap_seconds = gaps.iter().map(|g| g.seconds).sum();
+    let gap_count = gaps.len();
+    Ok(Json(Gaps {
+        camera_id: id,
+        from,
+        to,
+        gaps,
+        gap_count,
+        total_gap_seconds,
     }))
 }

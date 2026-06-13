@@ -96,8 +96,8 @@ async fn index_camera_dir(
                 continue;
             }
         };
-        if probe.duration_s <= 0.05 || size == 0 {
-            continue; // empty/just-rotated stub
+        if !probe.duration_s.is_finite() || probe.duration_s <= 0.05 || size == 0 {
+            continue; // empty/just-rotated stub, or a bogus (NaN/inf) probed duration
         }
         let end = start + chrono::Duration::milliseconds((probe.duration_s * 1000.0) as i64);
         let bitrate_kbps = if probe.duration_s > 0.0 {
@@ -134,7 +134,7 @@ async fn index_camera_dir(
         .execute(pool)
         .await?;
 
-        let _ = repo::record_segment_indexed(pool, camera_id, end, bitrate_kbps).await;
+        let _ = repo::record_segment_indexed(pool, camera_id, end, bitrate_kbps, probe.fps).await;
 
         if let Some((pe,)) = prev_end {
             let gap = (start - pe).num_seconds();

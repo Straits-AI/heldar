@@ -5,6 +5,7 @@ import { Dashboard } from "./pages/Dashboard";
 import { CameraDetail } from "./pages/CameraDetail";
 import { AddCamera } from "./pages/AddCamera";
 import { Discover } from "./pages/Discover";
+import { System } from "./pages/System";
 
 function NotFound() {
   return (
@@ -26,6 +27,7 @@ export default function App() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/cameras/new" element={<AddCamera />} />
         <Route path="/discover" element={<Discover />} />
+        <Route path="/system" element={<System />} />
         <Route path="/cameras/:id" element={<CameraDetail />} />
         <Route path="*" element={<NotFound />} />
       </Routes>

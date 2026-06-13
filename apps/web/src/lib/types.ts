@@ -191,6 +191,27 @@ export interface DiscoverResponse {
   devices: DiscoveredDevice[];
 }
 
+/** Free/total space on the filesystem backing the recordings dir (statvfs). */
+export interface DiskStats {
+  total_bytes: number;
+  free_bytes: number;
+  used_bytes: number;
+  used_percent: number;
+}
+
+/** Storage observability: disk space + recordings footprint + projected retention. */
+export interface StorageReport {
+  disk: DiskStats | null;
+  recordings_bytes: number;
+  segment_count: number;
+  oldest_segment: string | null;
+  newest_segment: string | null;
+  /** Bytes/day written over the last 24h of indexed segments. */
+  write_rate_bytes_per_day: number;
+  /** Projected days of free space remaining at the recent write rate (null if idle/unknown). */
+  projected_days_remaining: number | null;
+}
+
 export interface SystemInfo {
   name: string;
   version: string;
@@ -204,4 +225,21 @@ export interface SystemInfo {
   recordings_bytes: number;
   recordings_gb: number;
   max_recordings_gb: number;
+  storage: StorageReport;
+}
+
+/** A hole in recording coverage (the span between two availability ranges). */
+export interface GapSpan {
+  start: string;
+  end: string;
+  seconds: number;
+}
+
+export interface Gaps {
+  camera_id: string;
+  from: string | null;
+  to: string | null;
+  gaps: GapSpan[];
+  gap_count: number;
+  total_gap_seconds: number;
 }
