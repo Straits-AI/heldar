@@ -123,6 +123,25 @@ function BakeryIcon({ className }: IconProps) {
   );
 }
 
+function MovementIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <circle cx="4.5" cy="5.5" r="2" />
+      <circle cx="15.5" cy="14.5" r="2" />
+      <path d="M6.4 6.6l7.2 6.8" />
+      <path d="M13.5 5l3 1-1 3" />
+    </svg>
+  );
+}
+
 function SystemIcon({ className }: IconProps) {
   return (
     <svg
@@ -146,6 +165,7 @@ const NAV_ITEMS: { to: string; label: string; end?: boolean; Icon: (p: IconProps
   { to: "/ai", label: "AI", Icon: AiIcon },
   { to: "/entry", label: "Entry", Icon: EntryIcon },
   { to: "/bakery", label: "Bakery", Icon: BakeryIcon },
+  { to: "/movement", label: "Movement", Icon: MovementIcon },
   { to: "/system", label: "System", Icon: SystemIcon },
 ];
 

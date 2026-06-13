@@ -631,5 +631,70 @@ export interface BakeryReport {
 
 export interface BakerySummary {
   date: string;
-  metrics: Record<string, { sum: number; samples: number }>;
+  metrics: Record<string, { sum?: number; avg?: number; samples: number }>;
+}
+
+// ---- Stage 6: Movement intelligence (ReID candidates, trails, breaches) ----
+
+export interface CameraLink {
+  id: string;
+  from_camera: string;
+  to_camera: string;
+  transit_seconds: number;
+  bidirectional: boolean;
+  note?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MovementCandidate {
+  id: string;
+  subject_type: string;
+  anchor?: string | null;
+  from_camera?: string | null;
+  from_ref?: string | null;
+  from_time?: string | null;
+  to_camera?: string | null;
+  to_ref?: string | null;
+  to_time?: string | null;
+  transit_seconds?: number | null;
+  score: number;
+  signals: Record<string, unknown>;
+  status: "pending" | "confirmed" | "rejected";
+  reviewed_by?: string | null;
+  reviewed_at?: string | null;
+  created_at: string;
+}
+
+export interface BreachAlert {
+  id: string;
+  camera_id?: string | null;
+  zone_id?: string | null;
+  zone_name?: string | null;
+  zone_event_id?: string | null;
+  rule: string;
+  subject_type?: string | null;
+  subject?: string | null;
+  track_id?: string | null;
+  severity: Severity;
+  status: "open" | "acknowledged" | "resolved";
+  detail: Record<string, unknown>;
+  evidence_path?: string | null;
+  created_at: string;
+  resolved_by?: string | null;
+  resolved_at?: string | null;
+}
+
+export interface PlateSearchResult {
+  plate: string;
+  appearances: Array<{
+    event_id: string;
+    camera_id?: string | null;
+    timestamp: string;
+    event_type: string;
+    auth_status: string;
+    direction: string;
+  }>;
+  candidates: MovementCandidate[];
+  note: string;
 }

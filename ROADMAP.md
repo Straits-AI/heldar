@@ -313,16 +313,98 @@ or crashed rollup cannot affect recording/ingest/live view. **Open:** detector/t
 
 ---
 
-## ⬜ Stage 6 — ReID & movement intelligence (client Phase 2)
+## ✅ Stage 6 — ReID & movement intelligence (client Phase 2)  — **DONE**
 
-**Goal:** cross-camera movement = client's "Movement intelligence" / VisionOps Security. (memo §2 Phase 2, §7.5–7.6, §14)
+**Goal:** cross-camera movement = client's "Movement intelligence" / VisionOps Security.
+(memo §2 Phase 2, §7.5–7.6, §15.5, §14) Built as a third **vertical app**
+(`crates/visionops-movement`) — the **same kernel, cross-camera**. Like BakerySense it is
+**not** a detection consumer on the hot path, but a **correlation layer**: two
+`spawn_supervised` loops (a ReID candidate **proposer** + a red-zone breach **rule
+engine**) plus an on-demand trigger/search surface, reading the kernel's + Campus Entry's
+stored `entry_events` / `detections` / `zone_events` / `zones`, **composed (not welded)**
+with its own schema/config/loops/retention/routes. Operator/integrator guide:
+[`docs/MOVEMENT.md`](docs/MOVEMENT.md); implementation: `ARCHITECTURE.md` §19.
 
-- [ ] Person ReID + vehicle ReID — **multi-signal**, never pure visual embedding (fuse plate/color/type/topology/time/direction)
-- [ ] Multi-camera topology graph + movement trails (tracklet/event graph)
-- [ ] Red/green zone breach alerts (rule engine + notification router)
-- [ ] Candidate search + **human-review workflow** (ReID = probabilistic correlation, not legal identity)
+**Shipped checklist:**
 
-> Privacy gates (memo §15.5, research.md §14): anonymous by default, ReID treated as candidate matching with human enforcement, local calibration set, confidence thresholds, audit trail on every identity-like query. Maps to research.md **Level 3** scene/event graph applied to security.
+- [x] **Person ReID + vehicle ReID — multi-signal, never pure visual embedding** — **no
+  appearance/visual embedding anywhere.** Vehicle ReID is anchored on the **plate**
+  (resolved by Campus Entry) and fused with transit-time plausibility + colour/type
+  agreement over the topology graph: `score_pair` = `0.8` plate anchor `±` transit (`+0.10`
+  in-window / `+0.05` ≤2× / else 0) `±` colour (`+0.05`/`−0.10`) `±` type (`+0.05`/`−0.10`),
+  proposed at `≥ VISIONOPS_MOVEMENT_MIN_SCORE` (default 0.5). Person ReID has no plate/no
+  embedding, so it is **never auto-proposed** — only the weak topology+time search (§5).
+  (`reid.rs::score_pair` / `propose_vehicle_candidates`, `routes.rs::search_person`)
+- [x] **Multi-camera topology graph + movement trails** — `camera_links` operator-defined
+  directed adjacency (`from`/`to`/`transit_seconds`/`bidirectional`) scopes all matching;
+  movement trail = all `entry_events` for a normalized plate, time-ordered
+  (`trail_for_plate`). Full CRUD API (manage-gated). (`schema.sql`, `routes.rs`,
+  `reid.rs::trail_for_plate`)
+- [x] **Red/green zone breach alerts (rule engine)** — `breach::sweep()` resolves red zones
+  by `kind` (`VISIONOPS_MOVEMENT_RED_ZONE_KINDS`, default `restricted,red`), records one
+  `breach_alerts` incident per zone `enter` event (`ON CONFLICT(zone_event_id) DO NOTHING`
+  dedup), correlates `track_id → plate` within ±5 min, and is worked open → acknowledged →
+  resolved. **Complements** the kernel's existing restricted-zone webhook (it adds the
+  tracked correlated incident, does **not** re-notify). (`breach.rs`)
+- [x] **Candidate search + human-review workflow (probabilistic, not legal identity)** —
+  every cross-camera link is a `pending` candidate a human (`operate_gate`) confirms or
+  rejects (`reviewed_by`/`reviewed_at`); nothing is auto-confirmed. Audited plate trail +
+  candidate search and weak person search; every identity-like query writes an `audit_log`
+  row **before** querying, and responses carry a "probabilistic, not identity" note.
+  (`routes.rs` confirm/reject + `search/plate` + `search/person`, `auth::audit`)
+
+**Done when (status):** ✅ **Met.** With a camera-topology graph configured, the ReID loop
+proposes vehicle candidates (same plate on two linked cameras within a plausible transit
+window, fused-scored) into a `pending` review queue, and the breach loop turns
+restricted-zone entries into deduped, subject-correlated incidents — both on
+`VISIONOPS_MOVEMENT_INTERVAL_S`, or via `POST /api/v1/movement/run`. An operator reviews
+candidates (`confirm`/`reject`), works breaches (`ack`/`resolve`), and runs audited plate /
+person searches; the design (two supervised loops over stored kernel/Entry tables, own
+SQLite schema, own retention off the ingest hot path) means a slow or crashed loop cannot
+affect recording/ingest/live view. **Open:** ReID *accuracy* (false-link/missed-link/path)
+is unbenchmarked on local footage — the human review gate is the safeguard (see deferrals).
+
+**Deferred (honest scope):**
+
+- [ ] **No visual / appearance ReID embedding** — by design (memo §7.5/§7.6/§15.5):
+  vehicle ReID is **anchored on the plate** (+ transit/colour/type fusion); person ReID is
+  **weak, topology + time only**. No visual-embedding vector search / FastReID-style model
+  is wired in — and adding one for *person* identity needs explicit legal/consent/governance
+  basis (memo §7.6), not just engineering.
+- [ ] **No homography / ground-plane calibration** — transit windows are operator-declared
+  `transit_seconds` per `camera_links` edge, not geometry-derived; no metric speed/distance
+  model; the proposer correlates only cameras joined by an explicit `camera_links` edge.
+- [ ] **ReID accuracy unbenchmarked on local footage** — the *engineering* (scoring, topology
+  scoping, candidate workflow, breach engine, schema, API) is complete; *accuracy*
+  (Rank-1/mAP/false-link/missed-link/site-path, memo §7.5/§15.3) is an evaluation task gated
+  on local data. Never an auto-decision — confirm/reject is always human.
+- [ ] **Cross-camera person journeys are low-confidence, human-triage only** — never
+  auto-proposed, capped at `0.4` (topology+time), and always audited; not a continuous
+  person-tracklet graph.
+
+**Cross-ref to memo §7.5–7.6 (ReID) + §15.5 (privacy):**
+
+| Memo §7.5/§7.6/§15.5 rule | Status | Backed by |
+|---|---|---|
+| Vehicle ReID multi-signal, **not** pure visual embedding | ✅ plate-anchored + transit + colour/type fusion; no embedding | `reid.rs::score_pair` |
+| Camera topology + time-window filter | ✅ `camera_links` join scopes all matching | `reid.rs`, `routes.rs::search_person`, `camera_links` |
+| Movement trail / path | ✅ plate appearances time-ordered | `reid.rs::trail_for_plate` |
+| Person ReID = probabilistic correlation, never legal identity | ✅ weak topology+time only, on-demand, human-triage | `routes.rs::search_person` (cap 0.4 + note) |
+| Candidate matching + human-review workflow | ✅ `pending` → human confirm/reject (`operate_gate`), nothing auto-confirmed | `routes.rs::resolve_candidate` |
+| Audit trail on every identity-like query | ✅ `auth::audit` before each search returns | `routes.rs` `search_plate`/`search_person` |
+| Red/green zone breach alerts (rule engine) | ✅ red-zone-entry incidents, dedup, subject correlation, worked lifecycle | `breach.rs` |
+| Role-based access | ✅ view / operate_gate / manage gating (Stage 4 RBAC) | `routes.rs` `principal.require(...)` |
+
+> **Engineering is production-grade; ReID accuracy is not yet benchmarked (memo §15.3),
+> and visual-embedding ReID is deliberately absent (memo §7.5/§7.6/§15.5).** Same posture
+> as Stages 3–5: the systems work (multi-signal plate-anchored scoring, topology graph,
+> candidate proposer, human-review workflow, breach rule engine with subject correlation,
+> audited searches, retention, RBAC) is complete; *accuracy* on local footage is an
+> evaluation task, and identity is always a **human** call. Privacy gates (memo §15.5,
+> research.md §14) are wired in: candidate-not-identity, human enforcement, confidence
+> thresholds, and an audit trail on every identity-like query. This is research.md **Level
+> 3** scene/event graph applied to security — typed, evidence-backed, audited cross-camera
+> correlation that stays explicitly probabilistic.
 
 ---
 

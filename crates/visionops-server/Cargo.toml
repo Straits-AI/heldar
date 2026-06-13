@@ -16,6 +16,7 @@ visionops-kernel = { path = "../visionops-kernel" }
 # omits these and the consumer/router registrations below.
 visionops-entry = { path = "../visionops-entry" }
 visionops-bakery = { path = "../visionops-bakery" }
+visionops-movement = { path = "../visionops-movement" }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }

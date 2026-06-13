@@ -13,7 +13,11 @@ import type {
   BakeryObservation,
   BakeryReport,
   BakerySummary,
+  BreachAlert,
   CameraCreate,
+  CameraLink,
+  MovementCandidate,
+  PlateSearchResult,
   CameraStatus,
   CameraTestResult,
   CameraUpdate,
@@ -371,4 +375,31 @@ export const api = {
     request<BakerySummary>(`/api/v1/bakery/summary${qs({ date })}`),
   triggerBakeryRollup: () =>
     request<{ ok: boolean }>("/api/v1/bakery/rollup", { method: "POST" }),
+
+  // ---- Movement intelligence (Stage 6) ----
+  movementLinks: () => request<CameraLink[]>("/api/v1/movement/links"),
+  createMovementLink: (body: {
+    from_camera: string;
+    to_camera: string;
+    transit_seconds?: number;
+    bidirectional?: boolean;
+    note?: string;
+  }) => request<CameraLink>("/api/v1/movement/links", { method: "POST", body: JSON.stringify(body) }),
+  deleteMovementLink: (id: string) =>
+    request<void>(`/api/v1/movement/links/${enc(id)}`, { method: "DELETE" }),
+  movementCandidates: (q: { status?: string; anchor?: string; limit?: number } = {}) =>
+    request<MovementCandidate[]>(`/api/v1/movement/candidates${qs(q)}`),
+  confirmMovementCandidate: (id: string) =>
+    request<MovementCandidate>(`/api/v1/movement/candidates/${enc(id)}/confirm`, { method: "POST" }),
+  rejectMovementCandidate: (id: string) =>
+    request<MovementCandidate>(`/api/v1/movement/candidates/${enc(id)}/reject`, { method: "POST" }),
+  movementBreaches: (q: { status?: string; limit?: number } = {}) =>
+    request<BreachAlert[]>(`/api/v1/movement/breaches${qs(q)}`),
+  ackBreach: (id: string) =>
+    request<BreachAlert>(`/api/v1/movement/breaches/${enc(id)}/ack`, { method: "POST" }),
+  resolveBreach: (id: string) =>
+    request<BreachAlert>(`/api/v1/movement/breaches/${enc(id)}/resolve`, { method: "POST" }),
+  searchPlate: (plate: string) =>
+    request<PlateSearchResult>(`/api/v1/movement/search/plate/${enc(plate)}`),
+  triggerMovement: () => request<{ ok: boolean }>("/api/v1/movement/run", { method: "POST" }),
 };

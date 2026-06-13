@@ -49,6 +49,9 @@ async fn main() -> anyhow::Result<()> {
     visionops_bakery::schema::init(&pool)
         .await
         .context("bakery schema init")?;
+    visionops_movement::schema::init(&pool)
+        .await
+        .context("movement schema init")?;
     auth::ensure_bootstrap(&pool, &cfg)
         .await
         .context("auth bootstrap")?;
@@ -61,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
     // Bundled domain apps load their own config from the environment (the kernel carries none).
     let entry_cfg = Arc::new(visionops_entry::config::EntryConfig::from_env());
     let bakery_cfg = Arc::new(visionops_bakery::config::BakeryConfig::from_env());
+    let movement_cfg = Arc::new(visionops_movement::config::MovementConfig::from_env());
     use services::consumer::DetectionConsumer;
     let consumers: Arc<Vec<Arc<dyn DetectionConsumer>>> = Arc::new(vec![
         // Zone engine = kernel-open spatial primitive.
@@ -108,6 +112,15 @@ async fn main() -> anyhow::Result<()> {
         spawn_supervised("bakery_rollup", move || {
             visionops_bakery::rollup::run(p.clone(), b.clone())
         });
+        // Movement: the ReID candidate proposer + the red-zone breach rule engine.
+        let (p, m) = (pool.clone(), movement_cfg.clone());
+        spawn_supervised("movement_reid", move || {
+            visionops_movement::reid::run(p.clone(), m.clone())
+        });
+        let (p, m) = (pool.clone(), movement_cfg.clone());
+        spawn_supervised("movement_breach", move || {
+            visionops_movement::breach::run(p.clone(), m.clone())
+        });
         // Only supervise the notifier when a webhook is configured — otherwise run() returns
         // immediately and the supervisor would respawn it in a tight loop.
         if cfg.alert_webhook_url.is_some() {
@@ -143,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
         // Bundled domain apps (proprietary) merge their routers here; the kernel router is unaware.
         .merge(visionops_entry::routes::router())
         .merge(visionops_bakery::routes::router(bakery_cfg.clone()))
+        .merge(visionops_movement::routes::router(movement_cfg.clone()))
         .nest_service("/media/recordings", ServeDir::new(&cfg.recordings_dir))
         .nest_service("/media/clips", ServeDir::new(&cfg.clips_dir))
         .nest_service("/media/snapshots", ServeDir::new(&cfg.snapshots_dir))

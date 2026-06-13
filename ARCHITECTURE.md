@@ -59,6 +59,23 @@ with its own schema/config/loop/retention/routes; the kernel is unaware of it. I
 documented in §18 below and, for operators/integrators, in
 [`docs/BAKERYSENSE.md`](docs/BAKERYSENSE.md).
 
+**Stage 6 (Movement intelligence app) has also shipped** — cross-camera correlation on
+the **same kernel data**, under strict privacy gates. It is the client's "Movement
+intelligence" (Phase 2) app (`crates/visionops-movement`): **multi-signal ReID, never a
+pure visual embedding.** Vehicle ReID is anchored on the **plate** (already resolved by
+Campus Entry into `entry_events`), fused with transit-time plausibility + colour/type
+agreement over an operator-defined **camera-topology graph**; person ReID has no plate and
+no appearance embedding, so it is offered only as a **low-confidence, on-demand**
+topology+time search. Every cross-camera link is a scored **candidate** a human confirms
+or rejects (**not** legal identity), and every identity-like **search is audited**. It
+also runs a **red-zone breach** rule engine that turns restricted-zone entries into worked
+incidents with track→plate subject correlation. Like BakerySense it is **not** a
+`DetectionConsumer` — it is a **correlation layer** of two `spawn_supervised` loops (a ReID
+candidate proposer + a breach engine) plus an on-demand search surface, reading
+already-stored kernel/Entry tables, composed (not welded) with its own schema/config/loops/
+retention/routes; the kernel is unaware of it. It is documented in §19 below and, for
+operators/integrators, in [`docs/MOVEMENT.md`](docs/MOVEMENT.md).
+
 Stage 0 maps to **memo §14 "Stage 0 — Media kernel MVP"** (camera registry, RTSP
 ingest, recording segmenter, timeline index, playback API, clip export, basic live
 view, camera health) and is built on the layer model of **memo §5**. The recording
@@ -1571,3 +1588,203 @@ layer** is **Stage 7**; and analysis is at **shelf/product-group level, not SKU*
 (research.md §24). Cross-camera linking of the per-camera, ephemeral `track_id`s is
 Stage 6 (ReID). This is research.md's concrete **Level 2 MVP** — anonymous, approximate,
 and honest about both.
+
+---
+
+## 19. Stage 6 — Movement intelligence
+
+Stage 6 (memo §2 Phase 2, §7.5–7.6 ReID, §15.5 privacy, §14 "Stage 6") is the client's
+**Movement intelligence** deliverable — the **same media kernel, cross-camera**. Where
+Stages 4/5 reason **within** a camera (an ANPR gate, a shop's anonymous footfall),
+Movement correlates the kernel's per-camera observations **across** cameras into
+candidate journeys, and flags **red-zone breaches** — under the strictest privacy gates
+in the stack. New code (all in `crates/visionops-movement`): `reid.rs` (the vehicle
+candidate proposer + scoring + plate trail), `breach.rs` (the red-zone rule engine +
+subject correlation), `routes.rs` (HTTP surface + audited searches), `schema.sql` (its
+three tables), `config.rs` (knobs), `models.rs` (`CameraLink` / `MovementCandidate` /
+`BreachAlert`), `lib.rs` (the privacy stance). The operator/integrator guide is
+[`docs/MOVEMENT.md`](docs/MOVEMENT.md).
+
+The defining architectural fact, like BakerySense, is what Movement **is not**: it is
+**not** a `DetectionConsumer`. The zone engine (Stage 3) and the ANPR engine (Stage 4)
+run **synchronously on the ingest hot path**. Movement sits **off** that path — it is a
+**correlation layer over stored kernel data**: two `spawn_supervised` background loops (a
+ReID candidate **proposer** and a red-zone breach **rule engine**) on a shared timer,
+plus an on-demand **trigger** and **search** surface. It reads tables the kernel and
+Campus Entry have *already* written (`entry_events`, `detections`, `zone_events`,
+`zones`) — never the live frame stream or the ingest batch. There is **no appearance/
+visual embedding anywhere** and **nothing is auto-confirmed**: every cross-camera link is
+a scored *candidate* a human reviews, and every identity-like *search* is audited.
+
+```
+   gate / corridor cameras ─► sampler ─► worker (YOLO+ByteTrack, ANPR) ─► detections + entry_events + zone_events
+        │ POST /api/v1/ai/events
+        ▼
+   routes/ai.rs::ingest ── (sync consumers: ZoneEngine, AnprEngine) ──► detections / zone_events / entry_events
+        │
+        │  ╌╌╌ kernel boundary; Movement reads, never consumes ╌╌╌
+        ▼
+   visionops-movement (spawn_supervised, every VISIONOPS_MOVEMENT_INTERVAL_S)
+     reid::run     propose_vehicle_candidates(): same plate on two topology-linked cameras
+                   within a plausible transit window ─► fused score ─► movement_candidates (pending)
+                   + prune()
+     breach::run   sweep(): zone 'enter' on red/restricted zones ─► breach_alerts (open),
+                   correlate track_id → plate (±5 min)
+        │
+        ▼
+   RBAC + audit gate (routes.rs)
+     GET /movement/candidates ─► confirm/reject (human; ReID ≠ identity)
+     GET /movement/breaches    ─► ack/resolve     (worked incident lifecycle)
+     GET /movement/search/{plate,person} ─► AUDITED identity-like queries
+```
+
+### 19.1 The vehicle candidate proposer + exact scoring (`reid.rs`)
+
+`reid::run` is launched in `main.rs` via `spawn_supervised("movement_reid", …)` and ticks
+every `VISIONOPS_MOVEMENT_INTERVAL_S`; each tick runs `propose_vehicle_candidates()` then
+`prune()`. `run_once()` exposes the proposer for the manual trigger (§19.6) and tests.
+
+**Pairing.** The proposer joins `entry_events` to itself on the **same normalized plate**
+appearing on **two different, topology-linked cameras**, `b` later than `a`, with `b`
+inside the scan window — gated by a `camera_links` join that honors link direction
+(bidirectional links also match the reverse edge). It rejects implausible gaps before
+scoring: `gap < 1 s`, or `gap > transit_seconds × 4`.
+
+**Scoring (`score_pair`)** fuses signals into `[0,1]` with the **plate as the anchor**:
+
+| Component | Contribution |
+|---|---|
+| Plate-exact anchor | base **`0.8`** (not 1.0 — OCR can err / plates can be cloned) |
+| Transit-time plausibility | `+0.10` if `gap ≤ transit`; `+0.05` if `transit < gap ≤ 2×transit`; else `0` |
+| Colour agreement | `+0.05` match · **`−0.10` conflict** · `0` if either unknown |
+| Vehicle-type agreement | `+0.05` match · **`−0.10` conflict** · `0` if either unknown |
+
+clamped to `[0,1]`. A plate-exact pair with plausible transit and no attribute data scores
+**0.9** (matching colour+type → **1.0**); an attribute **conflict lowers confidence** (a
+possible misread/clone) but, because the plate dominates, a double conflict still floors
+near **0.6**, above the default `MIN_SCORE = 0.5` — the conflict is surfaced in the
+candidate's `signals` for the reviewer, not silently suppressed. A pair scoring `≥
+MIN_SCORE` is written to `movement_candidates` as `subject_type='vehicle'`,
+`anchor=<plate>`, `from_*`/`to_*` referencing the two entry events, `status='pending'`,
+`ON CONFLICT(subject_type, from_ref, to_ref) DO NOTHING` so a human-reviewed pair is never
+clobbered.
+
+### 19.2 Person ReID — deliberately weak, on-demand only (`routes.rs::search_person`)
+
+Person ReID has **no plate and no appearance embedding**, so it is **never auto-proposed**.
+It exists only as an audited search: `GET /movement/search/person?camera&track&at` finds
+linked downstream cameras + their transit windows, lists **distinct downstream person
+tracks first seen** in `(at, at + transit×4]` from `detections` (`label='person'`), and
+scores each on **topology + time only** — `0.4` if it arrived within the expected transit,
+else `0.25`, with no appearance comparison. The deliberately low ceiling and the absence
+of any auto-proposal **are** the privacy design (memo §7.6/§15.5): person movement is
+human-triaged correlation, never asserted identity.
+
+### 19.3 Camera-topology graph (`camera_links`)
+
+`camera_links` is an **operator-configured directed adjacency** (*a subject leaving
+`from_camera` may appear at `to_camera` within ~`transit_seconds`*). It is the spatial
+prior that **scopes** all cross-camera matching — vehicle proposer and person search alike
+— so no link means no candidate. `transit_seconds` (default 120, clamp 1…86400) drives
+both the plausibility window and the transit score component; `bidirectional` makes the
+edge match both ways; `UNIQUE(from_camera, to_camera)` dedups edges. CRUD is `manage`-gated
+(create is audited as `movement_link_create`). The proposer only correlates cameras joined by an explicit `camera_links` row (no implicit fallback).
+
+### 19.4 The red-zone breach rule engine (`breach.rs`)
+
+`breach::run` (`spawn_supervised("movement_breach", …)`) ticks on the same interval and
+runs `sweep()`. It resolves red zones by **kind** (`VISIONOPS_MOVEMENT_RED_ZONE_KINDS`,
+default `restricted,red`; `zones WHERE kind=? AND enabled=1`) — so a red zone is just an
+ordinary Stage 3 kernel zone tagged `restricted`/`red`. For each red zone it reads recent
+**`enter`** events and records one `breach_alerts` incident per event
+(`rule='red_zone_entry'`, `status='open'`, inheriting the zone's `severity` and the Stage 3
+entry-frame `evidence_path`), **`ON CONFLICT(zone_event_id) DO NOTHING`** so a re-sweep of
+the overlapping window never duplicates an incident. `correlate()` enriches each incident
+best-effort: it joins the breach's `(camera_id, track_id)` to a **vehicle plate** in
+`entry_events` within **±5 min** → `subject_type='vehicle'` + the plate; otherwise
+`unknown` (person breaches stay unknown — no plate, no embedding).
+
+**Complements, does not duplicate, the kernel.** The kernel zone engine already mirrors
+`warning`/`critical` zone events into the `events` log + Stage 1 alert webhook (§16.3);
+the breach engine **does not re-notify** — it adds the **worked, deduped, subject-correlated
+incident** (open → acknowledged → resolved, with `resolved_by`/`resolved_at`). Real-time
+push stays with the kernel; accountability + triage live here.
+
+### 19.5 Data model (`schema.sql`)
+
+`schema::init(&pool)` applies three tables idempotently against the **shared kernel pool**
+at boot — owned by the app crate, **correlation/candidate data only, no legal-identity
+records**. **`camera_links`** (directed adjacency, §19.3); **`movement_candidates`**
+(`subject_type`, `anchor`=plate/`''`, `from_*`/`to_*` appearance refs, `score`, `signals`
+JSON, `status` pending/confirmed/rejected, `reviewed_by`/`reviewed_at`;
+`UNIQUE(subject_type, from_ref, to_ref)`; indexes on `(status,score)` + `anchor`); and
+**`breach_alerts`** (`zone_event_id` UNIQUE dedup key, `rule`, `subject_type`/`subject`,
+`severity`, `status` open/acknowledged/resolved, `detail` JSON
+`{zone_event_at, correlation}`, `evidence_path`; index on `(status, created_at)`). As with
+`zone_events`/`entry_events`, none of the three has an FK to the kernel source rows — the
+correlation record outlives the camera/zone/entry it was derived from (auditability).
+
+### 19.6 HTTP surface + the privacy gates (`routes.rs`)
+
+Reads need **`view`**, candidate/breach **reviews** need **`operate_gate`**, topology edits
++ the manual `run` need **`manage`** (the Campus Entry capability matrix, §17.4). The
+router takes `MovementConfig` as an `Extension` and is `merge`d in `main.rs`.
+
+| Method | Path | Cap | Purpose |
+|---|---|---|---|
+| POST | `/api/v1/movement/run` | manage | Run proposer + breach sweep once (both also run on the timer) |
+| GET / POST | `/api/v1/movement/links` | view / manage | List / create topology links (create audited) |
+| DELETE | `/api/v1/movement/links/{id}` | manage | Delete a link |
+| GET | `/api/v1/movement/candidates` | view | List candidates (`status`/`anchor`/`limit`), score DESC |
+| POST | `/api/v1/movement/candidates/{id}/confirm`·`/reject` | operate_gate | **Human** review (sets `reviewed_by/at`); **audited** |
+| GET | `/api/v1/movement/breaches` | view | List breach incidents (`status`/`limit`) |
+| POST | `/api/v1/movement/breaches/{id}/ack`·`/resolve` | operate_gate | Work an incident; **audited** |
+| GET | `/api/v1/movement/search/plate/{plate}` | view | **AUDITED** plate trail (appearances) + candidates |
+| GET | `/api/v1/movement/search/person` | view | **AUDITED** weak person candidates (`?camera&track&at`) |
+
+The three **privacy gates** are enforced in code: (1) candidate `confirm`/`reject` require
+`operate_gate` and stamp the human reviewer — **ReID is never an automatic identity
+assertion**; (2) both `search/*` endpoints call `auth::audit(...)` **before** querying, so
+no identity-like lookup can run without an audit-log record; (3) both search responses
+carry a `note` re-stating the result is probabilistic and requires human judgement, not
+legal identity. The review mutations and `links` create are audited too (link **delete** is
+capability-gated but not audit-logged).
+
+### 19.7 How it composes (composed, not welded) + retention + isolation
+
+Movement is wired in `crates/visionops-server/src/main.rs` purely as a bundled app: schema
+applied after the kernel migrations (`visionops_movement::schema::init`), config from the
+environment (`MovementConfig::from_env`), its two loops `spawn_supervised`, its router
+`merge`d. It is **absent from the `consumers` vec** — not a `DetectionConsumer`, never on
+the ingest request.
+
+- **Retention** — `reid::prune()` (each tick) deletes `movement_candidates` older than
+  `VISIONOPS_MOVEMENT_RETENTION_DAYS` (default 365), and `breach_alerts` older than the
+  cutoff **only when `status='resolved'`** (open/acknowledged incidents are kept until
+  worked). The app owns this lifecycle; the kernel retention sweeper + evidence-lock are
+  untouched.
+- **Evidence** — breach incidents reuse the Stage 3 zone entry-frame snapshot via
+  `evidence_path`; Movement stores no video and captures no new frame.
+- **Isolation preserved** — both engines read stored tables on their own timer (searches
+  are on-demand reads), so a slow or crashed Movement loop cannot back-pressure ingest,
+  recording, the sampler, or live view (a panic just respawns the loop after 5 s). Adding
+  Movement is a link + `merge` + two `spawn_supervised` calls with **zero** change to the
+  kernel ingest handler — the "kernel-open, apps-bundled" seam now correlating *across*
+  cameras instead of *within* one.
+
+### 19.8 Honest scope — engineering done, no embedding by design, accuracy deferred
+
+The Stage 6 **engineering** is production-grade: the plate-anchored multi-signal proposer
+with the exact fused scoring + transit gating, the human confirm/reject workflow, the
+operator topology graph, the audited plate-trail + low-confidence person search, the
+red-zone breach engine with `zone_event_id` dedup + track→plate correlation, the worked
+incident lifecycle, the schema, retention, and the RBAC-gated API. **Deliberate
+deferrals** (memo §7.5/§7.6/§15.5): **no visual/appearance ReID embedding** anywhere —
+vehicle ReID is anchored on the plate, person ReID is weak/topology-only; **no homography
+/ ground-plane calibration** (transit windows are operator-declared per link, not
+geometry-derived); **ReID accuracy is unbenchmarked on local footage** (false-link /
+missed-link / path accuracy, memo §15.3) — the human review gate is the safeguard, never
+an auto-decision; and **cross-camera person journeys are low-confidence, human-triage
+only** (never auto-proposed, capped at 0.4, always audited). This is research.md **Level 3**
+(scene/event graph) applied to security: a typed, evidence-backed, audited cross-camera
+correlation that stays explicitly probabilistic.

@@ -10,6 +10,7 @@ members = [
     "crates/visionops-kernel",
     "crates/visionops-entry",
     "crates/visionops-bakery",
+    "crates/visionops-movement",
     "crates/visionops-server",
 ]
 
