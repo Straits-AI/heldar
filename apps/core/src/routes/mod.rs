@@ -11,6 +11,7 @@ pub mod metrics;
 pub mod playback;
 pub mod recordings;
 pub mod system;
+pub mod zones;
 
 /// Assemble the full API router (absolute paths, mounted at root by `main`).
 pub fn api_router() -> Router<AppState> {
@@ -23,4 +24,5 @@ pub fn api_router() -> Router<AppState> {
         .merge(health::router())
         .merge(discovery::router())
         .merge(ai::router())
+        .merge(zones::router())
 }

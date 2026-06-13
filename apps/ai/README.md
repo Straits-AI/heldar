@@ -31,10 +31,21 @@ posts results back.
   - a detection `{ label: "motion", confidence: <changed_fraction>,
     bbox: [x, y, w, h] }` with the bbox of the changed region normalized 0..1,
   - an event `{ event_type: "motion", severity: "info" }`.
-- **anything else** (e.g. `detection`) — a **safe placeholder**. It pulls and
-  decodes the frame (exercising the full frame-pull/heartbeat path) but emits
-  **no detections** and logs, rate-limited, that a real model must be wired in.
-  It never fabricates results.
+- **`detection`** / **`yolo`** — **real** object detection + tracking via
+  [Ultralytics](https://docs.ultralytics.com/) YOLOv8 (nano, `yolov8n.pt`) with
+  **ByteTrack**. The `YoloAnalyzer` loads the model once and calls
+  `model.track(img, persist=True, tracker="bytetrack.yaml")` on every frame, so
+  boxes carry **stable track ids** across frames. Each box becomes a detection
+  `{ label: <COCO class>, confidence: <box.conf>, bbox: [x, y, w, h]
+  (normalized 0..1), track_id: <ByteTrack id> }`. When a person or vehicle
+  class appears it also raises an `object_detected` event. Requires the
+  `ultralytics` dependency (see GPU note below); if that import or the model
+  load fails, the worker logs the reason and falls back to the safe placeholder
+  rather than crashing.
+- **anything else** — a **safe placeholder**. It pulls and decodes the frame
+  (exercising the full frame-pull/heartbeat path) but emits **no detections**
+  and logs, rate-limited, that a real model must be wired in. It never
+  fabricates results.
 
 ### Production qualities
 
@@ -101,45 +112,78 @@ The `motion` analyzer reads these keys (all optional):
 | `pixel_delta` | `25` | Per-pixel grayscale delta counted as "changed" |
 | `scale_width` | `320` | Width the frame is downscaled to before diffing |
 
+The `detection`/`yolo` analyzer (`YoloAnalyzer`) reads these keys (all optional):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `weights` | `yolov8n.pt` | Ultralytics weights file/name (keep nano for speed) |
+| `threshold` | `0.25` | Minimum box confidence to keep |
+| `classes` | _(all)_ | Allowlist of class names and/or COCO indices to detect |
+| `imgsz` | model default | Inference image size |
+| `device` | `auto` | Force a device (`"cpu"`, `0`, …); `auto` = GPU if CUDA else CPU |
+| `emit_events` | `true` | Emit an `object_detected` event for person/vehicle classes |
+| `alert_classes` | person + vehicles | Class names that trigger the alert event |
+
 The placeholder analyzer reads `log_interval_s` (default `60`) to rate-limit its
 "no real model" warning.
 
-## Stage 3: plugging in a real model
+## Stage 3: the real model (YOLOv8 + ByteTrack)
 
-The extension point is the `Analyzer` base class in `worker.py`. Adding a real
-model is a self-contained change — the polling, threading, frame-pull, retry,
-and ingest plumbing all stay the same.
+Stage 3 is **already wired in**: the `YoloAnalyzer` class in `worker.py` is
+registered for the `detection` (and `yolo`) task types. The polling, threading,
+frame-pull, retry, and ingest plumbing from Stage 2 are unchanged — the model is
+the *only* new piece.
+
+How it works:
+
+- On construction (once per task thread) it loads `YOLO("yolov8n.pt")` and picks
+  a device automatically: GPU when `torch.cuda.is_available()`, else CPU.
+- On every frame it runs
+  `model.track(img, persist=True, tracker="bytetrack.yaml", verbose=False)`.
+  `persist=True` keeps ByteTrack state across calls, so each box has a **stable
+  `track_id`**. A model is created **per camera/task** so track ids never collide
+  between cameras.
+- Each box maps to a VisionOps detection: `label` from `model.names`,
+  `confidence` from `box.conf`, `bbox` = `[x, y, w, h]` **normalized to 0..1** by
+  the frame width/height, and `track_id = str(int(box.id))` when present. These
+  are POSTed to `/api/v1/ai/events` with the task's `camera_id` + `task_type`.
+- When a person or vehicle class is detected it also raises an `object_detected`
+  event (`severity: warning` for people, `info` otherwise) so Core can correlate
+  it with zone rules (e.g. the "Restricted-Right" zone) and surface alerts.
+
+Install the model dependency (large — pulls torch/torchvision/opencv):
+
+```bash
+cd apps/ai
+source .venv/bin/activate
+pip install ultralytics            # or: pip install -r requirements.txt
+```
+
+### GPU note
+
+YOLO runs on **CPU by default and that is fine** for the reference worker —
+yolov8n is small enough for real-time CPU inference at the sampled frame rate.
+If `torch` detects a compatible CUDA GPU it is used automatically; otherwise the
+analyzer logs `device=cpu` and proceeds. To pin a device, set `device` in the
+task `config` (e.g. `"device": "cpu"` or `"device": 0`). Note that a GPU build
+of torch still falls back to CPU if the installed NVIDIA driver is older than the
+CUDA toolkit the wheel was compiled against.
+
+### Adding another model
+
+The extension point is the `Analyzer` base class. Subclass it, implement
+`analyze(frame) -> AnalysisResult`, and register it for a task type:
 
 ```python
-# in worker.py (or a sidecar module that imports worker)
 from worker import Analyzer, AnalysisResult, Detection, FrameContext, register
 
-class YoloAnalyzer(Analyzer):
-    name = "yolo"
-
-    def __init__(self, config, log):
-        super().__init__(config, log)
-        import ultralytics
-        self.model = ultralytics.YOLO(config.get("weights", "yolov8n.pt"))
-        self.conf = float(config.get("threshold", 0.25))
-
+class MyAnalyzer(Analyzer):
+    name = "my-model"
     def analyze(self, frame: FrameContext) -> AnalysisResult:
-        img = frame.image()                 # PIL.Image
-        w, h = img.size
-        results = self.model(img, conf=self.conf, verbose=False)
-        dets = []
-        for r in results:
-            for b in r.boxes:
-                x1, y1, x2, y2 = b.xyxy[0].tolist()
-                dets.append(Detection(
-                    label=self.model.names[int(b.cls)],
-                    confidence=float(b.conf),
-                    bbox=[x1 / w, y1 / h, (x2 - x1) / w, (y2 - y1) / h],  # normalized
-                ))
-        return AnalysisResult(detections=dets)
+        ...
+        return AnalysisResult(detections=[...])
 
-# Map the task_type that should use it (replaces the placeholder for "detection"):
-register("detection", YoloAnalyzer)
+register("my_task_type", MyAnalyzer)
 ```
 
 Key contract for any `Analyzer`:

@@ -20,10 +20,15 @@ import type {
   LiveUrls,
   SamplerInfo,
   SegmentView,
+  StreamProfile,
   SystemInfo,
   Timeline,
   VisionEvent,
   WorkerTask,
+  Zone,
+  ZoneCreate,
+  ZoneEvent,
+  ZoneUpdate,
 } from "./types";
 
 export class ApiError extends Error {
@@ -94,6 +99,14 @@ export interface DetectionQuery {
   from?: string;
   to?: string;
   label?: string;
+  limit?: number;
+}
+
+export interface ZoneEventQuery {
+  from?: string;
+  to?: string;
+  zone_id?: string;
+  event_type?: string;
   limit?: number;
 }
 
@@ -173,5 +186,26 @@ export const api = {
   cameraDetections: (id: string, opts: DetectionQuery = {}) =>
     request<Detection[]>(`/api/v1/cameras/${enc(id)}/detections${qs(opts)}`),
   /** URL for the latest AI-sampled JPEG frame. Use directly as an <img> src. */
-  frameUrl: (id: string) => `/api/v1/cameras/${enc(id)}/frame`,
+  frameUrl: (id: string, profile?: StreamProfile) =>
+    `/api/v1/cameras/${enc(id)}/frame${profile ? qs({ profile }) : ""}`,
+
+  // ---- Zones (Stage 3) ----
+  /** Zones configured on one camera, oldest first. */
+  listZones: (cameraId: string) =>
+    request<Zone[]>(`/api/v1/cameras/${enc(cameraId)}/zones`),
+  createZone: (cameraId: string, body: ZoneCreate) =>
+    request<Zone>(`/api/v1/cameras/${enc(cameraId)}/zones`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateZone: (zoneId: string, body: ZoneUpdate) =>
+    request<Zone>(`/api/v1/zones/${enc(zoneId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteZone: (zoneId: string) =>
+    request<void>(`/api/v1/zones/${enc(zoneId)}`, { method: "DELETE" }),
+  /** Zone enter/exit/dwell events for one camera, newest first. */
+  cameraZoneEvents: (id: string, q: ZoneEventQuery = {}) =>
+    request<ZoneEvent[]>(`/api/v1/cameras/${enc(id)}/zone-events${qs(q)}`),
 };

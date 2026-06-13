@@ -1,4 +1,14 @@
-# VisionOps reference AI worker — intentionally light (no GPU, no model deps).
+# VisionOps reference AI worker.
+#
+# Core runtime (always required) — intentionally light: HTTP + frame decode.
 requests>=2.32
 pillow>=10.4
 numpy>=1.26
+
+# Stage 3 real model: Ultralytics YOLOv8 + ByteTrack (used by YoloAnalyzer for
+# the "detection"/"yolo" task types). This pulls in torch/torchvision/opencv,
+# which are large (~2 GB) and download on first install. It is only imported
+# lazily when a YOLO task actually runs, so motion-only deployments can omit it.
+# GPU is used automatically when torch detects CUDA; otherwise it runs on CPU.
+ultralytics>=8.3
+lap>=0.5            # ByteTrack data-association solver (model.track tracker)

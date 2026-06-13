@@ -319,3 +319,61 @@ export interface Detection {
   attributes: Record<string, unknown>;
   created_at: string;
 }
+
+// ---- Stage 3: zones + zone events ----
+
+/** A polygon vertex, normalized [x, y] in 0..1 over the sampled frame. */
+export type ZonePoint = [number, number];
+
+/** Zone geometry / behavior kind (free-form; common values below). */
+export type ZoneKind = "region" | "line" | "dwell" | (string & {});
+
+/** Zone event verbs raised by the tracking engine. */
+export type ZoneEventType = "enter" | "exit" | "dwell";
+
+/** A polygon region on a camera; tracked detections crossing it raise enter/exit/dwell events. */
+export interface Zone {
+  id: string;
+  camera_id: string;
+  name: string;
+  kind: string;
+  /** Array of [x, y] vertices, normalized 0..1 over the sampled frame. */
+  polygon: ZonePoint[];
+  dwell_seconds: number;
+  /** Detection labels that count toward this zone (empty = all labels). */
+  labels: string[];
+  severity: Severity;
+  config: Record<string, unknown>;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ZoneCreate {
+  name: string;
+  polygon: ZonePoint[];
+  kind?: string;
+  dwell_seconds?: number;
+  labels?: string[];
+  severity?: Severity;
+  config?: Record<string, unknown>;
+  enabled?: boolean;
+}
+
+export type ZoneUpdate = Partial<ZoneCreate>;
+
+/** A zone enter/exit/dwell event raised by the tracking engine. */
+export interface ZoneEvent {
+  id: string;
+  camera_id: string;
+  zone_id: string;
+  zone_name: string;
+  track_id?: string | null;
+  event_type: ZoneEventType;
+  label?: string | null;
+  timestamp: string;
+  dwell_seconds?: number | null;
+  /** Served URL of the captured evidence frame (under /media/...), if any. */
+  evidence_path?: string | null;
+  created_at: string;
+}

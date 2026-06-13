@@ -245,5 +245,28 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
     if pruned > 0 {
         tracing::info!(deleted = pruned, "retention: pruned old detections");
     }
+
+    // 5) Prune old zone events and delete their evidence frames (same TTL as detections).
+    let old_zone_events: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT id, evidence_path FROM zone_events WHERE created_at < ?")
+            .bind(det_cutoff)
+            .fetch_all(pool)
+            .await?;
+    if !old_zone_events.is_empty() {
+        for (_id, evidence) in &old_zone_events {
+            if let Some(name) = evidence.as_deref().and_then(|u| u.rsplit('/').next()) {
+                let _ = tokio::fs::remove_file(cfg.snapshots_dir.join(name)).await;
+            }
+        }
+        let zpruned = sqlx::query("DELETE FROM zone_events WHERE created_at < ?")
+            .bind(det_cutoff)
+            .execute(pool)
+            .await?
+            .rows_affected();
+        tracing::info!(
+            deleted = zpruned,
+            "retention: pruned old zone events + evidence"
+        );
+    }
     Ok(())
 }

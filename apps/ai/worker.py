@@ -471,9 +471,197 @@ class PlaceholderAnalyzer(Analyzer):
         return AnalysisResult()
 
 
-# Registry: task_type -> Analyzer subclass. Stage 3 adds e.g. "detection".
+# COCO class groups used for optional alert events. These are the default class
+# names emitted by the bundled yolov8n weights.
+_PERSON_CLASSES = frozenset({"person"})
+_VEHICLE_CLASSES = frozenset({"bicycle", "car", "motorcycle", "bus", "truck", "train"})
+
+
+class YoloAnalyzer(Analyzer):
+    """Real object detector + tracker: Ultralytics YOLOv8 (nano) + ByteTrack.
+
+    This is the Stage 3 model that replaces the placeholder for ``detection``
+    (and ``yolo``) tasks. It loads ``yolov8n.pt`` once per task thread and, on
+    every frame, calls ``model.track(..., persist=True, tracker="bytetrack.yaml")``
+    so each box carries a stable ByteTrack ``track_id`` across frames.
+
+    A model instance is intentionally created *per task thread* (not shared
+    process-wide): ByteTrack keeps its tracker state on the model/predictor, so
+    one model per camera keeps each camera's track ids independent.
+
+    Per-task ``config`` keys (all optional):
+      * ``weights``      — weights file/name (default ``yolov8n.pt``; keep nano
+                           for speed).
+      * ``threshold``    — minimum confidence to keep a box (default ``0.25``).
+      * ``classes``      — allowlist of class names and/or COCO indices; when
+                           set, only these classes are detected (filtered at
+                           inference for speed).
+      * ``imgsz``        — inference image size (default model native).
+      * ``device``       — force a device (e.g. ``"cpu"``, ``0``); default auto:
+                           GPU if ``torch.cuda.is_available()`` else CPU.
+      * ``emit_events``  — emit an alert event when person/vehicle classes
+                           appear (default ``True``).
+      * ``alert_classes``— class names that trigger the alert event
+                           (default: person + common vehicle classes).
+    """
+
+    name = "yolo"
+
+    def __init__(self, config: Dict[str, Any], log: logging.LoggerAdapter):
+        super().__init__(config, log)
+        # Lazy imports keep the worker (and motion-only deployments) free of the
+        # heavy torch/ultralytics dependency unless a YOLO task is actually run.
+        import torch
+        from ultralytics import YOLO
+
+        self.weights = str(self.config.get("weights", "yolov8n.pt"))
+        self.conf = float(self.config.get("threshold", 0.25))
+        self.imgsz = self.config.get("imgsz")  # None -> model default
+
+        # Device: explicit override, else auto-detect CUDA, else CPU.
+        device = self.config.get("device")
+        if device is None or device == "auto":
+            device = 0 if torch.cuda.is_available() else "cpu"
+        self.device = device
+
+        # Load the model once (weights auto-download on first use if absent).
+        self.model = YOLO(self.weights)
+        self.names: Dict[int, str] = dict(self.model.names)
+
+        # Optional class allowlist: accept names and/or integer indices.
+        self.classes: Optional[List[int]] = self._resolve_classes(self.config.get("classes"))
+
+        # Optional alert event configuration.
+        self.emit_events = bool(self.config.get("emit_events", True))
+        alert = self.config.get("alert_classes")
+        if alert:
+            self.alert_classes = frozenset(str(c).lower() for c in alert)
+        else:
+            self.alert_classes = _PERSON_CLASSES | _VEHICLE_CLASSES
+
+        self.log.info(
+            "YOLO loaded weights=%s device=%s conf=%.2f classes=%s",
+            self.weights,
+            self.device,
+            self.conf,
+            self.classes if self.classes is not None else "all",
+        )
+
+    def _resolve_classes(self, raw: Any) -> Optional[List[int]]:
+        """Map a mixed list of class names/indices to COCO class indices."""
+        if not raw:
+            return None
+        name_to_idx = {name.lower(): idx for idx, name in self.names.items()}
+        out: List[int] = []
+        for item in raw:
+            if isinstance(item, bool):  # guard: bool is an int subclass
+                continue
+            if isinstance(item, int):
+                if item in self.names:
+                    out.append(item)
+                continue
+            key = str(item).strip().lower()
+            if key.isdigit() and int(key) in self.names:
+                out.append(int(key))
+            elif key in name_to_idx:
+                out.append(name_to_idx[key])
+            else:
+                self.log.warning("ignoring unknown class filter %r", item)
+        return sorted(set(out)) or None
+
+    def analyze(self, frame: FrameContext) -> AnalysisResult:
+        img = frame.image().convert("RGB")
+        width, height = img.size
+
+        track_kwargs: Dict[str, Any] = {
+            "persist": True,                 # keep ByteTrack state across frames
+            "tracker": "bytetrack.yaml",
+            "conf": self.conf,
+            "device": self.device,
+            "verbose": False,
+        }
+        if self.classes is not None:
+            track_kwargs["classes"] = self.classes
+        if self.imgsz:
+            track_kwargs["imgsz"] = self.imgsz
+
+        results = self.model.track(img, **track_kwargs)
+        if not results:
+            return AnalysisResult()
+        result = results[0]
+
+        # Normalize by the model's view of the frame; fall back to PIL size.
+        oh, ow = getattr(result, "orig_shape", (height, width))
+        ow = ow or width
+        oh = oh or height
+
+        detections: List[Detection] = []
+        label_counts: Dict[str, int] = {}
+        boxes = result.boxes
+        if boxes is not None:
+            for box in boxes:
+                cls_idx = int(box.cls.item())
+                label = self.names.get(cls_idx, str(cls_idx))
+                confidence = float(box.conf.item())
+
+                x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
+                bbox = [
+                    round(max(0.0, x1) / ow, 5),
+                    round(max(0.0, y1) / oh, 5),
+                    round((x2 - x1) / ow, 5),
+                    round((y2 - y1) / oh, 5),
+                ]
+
+                track_id = None
+                if box.id is not None:
+                    track_id = str(int(box.id.item()))
+
+                detections.append(
+                    Detection(
+                        label=label,
+                        confidence=round(confidence, 4),
+                        bbox=bbox,
+                        track_id=track_id,
+                        attributes={"class_id": cls_idx},
+                    )
+                )
+                label_counts[label] = label_counts.get(label, 0) + 1
+
+        # `result.speed` is a dict of ms timings {preprocess, inference, postprocess}.
+        speed = getattr(result, "speed", {}) or {}
+        infer_ms = float(speed.get("inference", 0.0))
+        self.log.debug(
+            "yolo dets=%d inference=%.1fms device=%s labels=%s",
+            len(detections),
+            infer_ms,
+            self.device,
+            label_counts or "{}",
+        )
+
+        event = self._maybe_event(label_counts) if self.emit_events else None
+        return AnalysisResult(detections=detections, event=event)
+
+    def _maybe_event(self, label_counts: Dict[str, int]) -> Optional[Event]:
+        """Raise an alert event when configured person/vehicle classes appear."""
+        triggered = {
+            lbl: n for lbl, n in label_counts.items() if lbl.lower() in self.alert_classes
+        }
+        if not triggered:
+            return None
+        has_person = any(lbl.lower() in _PERSON_CLASSES for lbl in triggered)
+        return Event(
+            event_type="object_detected",
+            severity="warning" if has_person else "info",
+            payload={"counts": triggered, "total": sum(triggered.values())},
+        )
+
+
+# Registry: task_type -> Analyzer subclass. Stage 3 wires the real YOLO model
+# in for "detection" (and the explicit "yolo" alias); motion stays available.
 ANALYZERS: Dict[str, type] = {
     "motion": MotionAnalyzer,
+    "detection": YoloAnalyzer,
+    "yolo": YoloAnalyzer,
 }
 
 
@@ -485,7 +673,20 @@ def register(task_type: str, analyzer_cls: type) -> None:
 def build_analyzer(task: Task, log: logging.LoggerAdapter) -> Analyzer:
     cls = ANALYZERS.get(task.task_type)
     if cls is not None:
-        return cls(task.config, log)
+        try:
+            return cls(task.config, log)
+        except Exception as exc:  # noqa: BLE001
+            # A registered analyzer that can't be constructed (e.g. ultralytics
+            # not installed, or weights can't be fetched) must not crash the
+            # supervisor — fall back to the safe placeholder, which never
+            # fabricates detections, and keep the rest of the worker running.
+            log.error(
+                "failed to construct %s analyzer for task_type=%r (%s); "
+                "falling back to placeholder",
+                getattr(cls, "name", cls.__name__),
+                task.task_type,
+                exc,
+            )
     return PlaceholderAnalyzer(task.task_type, task.config, log)
 
 

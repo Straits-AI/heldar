@@ -10,3 +10,4 @@ pub mod retention;
 pub mod sampler;
 pub mod snapshot;
 pub mod storage;
+pub mod zones;

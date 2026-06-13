@@ -279,3 +279,63 @@ pub struct AiIngest {
     pub detections: Vec<DetectionIngest>,
     pub event: Option<IngestEvent>,
 }
+
+// ---- Stage 3: zones + zone events ----
+
+/// A polygon region on a camera; tracked detections crossing it raise enter/exit/dwell events.
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct Zone {
+    pub id: String,
+    pub camera_id: String,
+    pub name: String,
+    pub kind: String,
+    /// JSON array of [x, y] vertices, normalized 0..1.
+    pub polygon: Json<Value>,
+    pub dwell_seconds: f64,
+    /// JSON array of detection labels that count toward this zone (empty = all labels).
+    pub labels: Json<Value>,
+    pub severity: String,
+    pub config: Json<Value>,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ZoneCreate {
+    pub name: String,
+    pub kind: Option<String>,
+    pub polygon: Value,
+    pub dwell_seconds: Option<f64>,
+    pub labels: Option<Value>,
+    pub severity: Option<String>,
+    pub config: Option<Value>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct ZoneUpdate {
+    pub name: Option<String>,
+    pub kind: Option<String>,
+    pub polygon: Option<Value>,
+    pub dwell_seconds: Option<f64>,
+    pub labels: Option<Value>,
+    pub severity: Option<String>,
+    pub config: Option<Value>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct ZoneEvent {
+    pub id: String,
+    pub camera_id: String,
+    pub zone_id: String,
+    pub zone_name: String,
+    pub track_id: Option<String>,
+    pub event_type: String,
+    pub label: Option<String>,
+    pub timestamp: DateTime<Utc>,
+    pub dwell_seconds: Option<f64>,
+    pub evidence_path: Option<String>,
+    pub created_at: DateTime<Utc>,
+}

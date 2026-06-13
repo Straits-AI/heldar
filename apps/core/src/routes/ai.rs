@@ -337,6 +337,10 @@ async fn ingest(State(st): State<AppState>, Json(body): Json<AiIngest>) -> AppRe
     }
     tx.commit().await?;
 
+    // Feed tracked detections to the zone engine (raises enter/exit/dwell events with evidence).
+    // The engine drives membership off server time, not the worker-supplied timestamp.
+    st.zones.process(&body.camera_id, &body.detections).await;
+
     if let Some(ev) = &body.event {
         let severity = ev.severity.clone().unwrap_or_else(|| "info".into());
         let payload = ev.payload.clone().unwrap_or_else(|| json!({}));

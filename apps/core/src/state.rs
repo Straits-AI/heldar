@@ -6,6 +6,7 @@ use sqlx::SqlitePool;
 use crate::config::Config;
 use crate::services::recorder::RecorderManager;
 use crate::services::sampler::SamplerManager;
+use crate::services::zones::ZoneEngine;
 
 /// Shared application state, cloned cheaply into every handler and background task.
 #[derive(Clone)]
@@ -14,6 +15,7 @@ pub struct AppState {
     pub cfg: Arc<Config>,
     pub recorder: Arc<RecorderManager>,
     pub sampler: Arc<SamplerManager>,
+    pub zones: Arc<ZoneEngine>,
     pub http: reqwest::Client,
     pub started_at: DateTime<Utc>,
 }

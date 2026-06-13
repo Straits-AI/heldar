@@ -228,6 +228,22 @@ async fn delete_camera(
 ) -> AppResult<StatusCode> {
     let _ = load_camera(&st.pool, &id).await?; // 404 if missing
     st.recorder.stop(&id).await;
+    // Clean up zone-event evidence files + rows for this camera (zone_events has no FK cascade).
+    let evidence: Vec<(Option<String>,)> =
+        sqlx::query_as("SELECT evidence_path FROM zone_events WHERE camera_id = ?")
+            .bind(&id)
+            .fetch_all(&st.pool)
+            .await
+            .unwrap_or_default();
+    for (ev,) in &evidence {
+        if let Some(name) = ev.as_deref().and_then(|u| u.rsplit('/').next()) {
+            let _ = tokio::fs::remove_file(st.cfg.snapshots_dir.join(name)).await;
+        }
+    }
+    let _ = sqlx::query("DELETE FROM zone_events WHERE camera_id = ?")
+        .bind(&id)
+        .execute(&st.pool)
+        .await;
     sqlx::query("DELETE FROM cameras WHERE id = ?")
         .bind(&id)
         .execute(&st.pool)

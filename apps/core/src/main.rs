@@ -51,6 +51,7 @@ async fn main() -> anyhow::Result<()> {
 
     let recorder = RecorderManager::new(pool.clone(), cfg.clone());
     let sampler = SamplerManager::new(pool.clone(), cfg.clone());
+    let zones = crate::services::zones::ZoneEngine::new(pool.clone(), cfg.clone());
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -60,6 +61,7 @@ async fn main() -> anyhow::Result<()> {
         cfg: cfg.clone(),
         recorder: recorder.clone(),
         sampler: sampler.clone(),
+        zones,
         http,
         started_at: chrono::Utc::now(),
     };

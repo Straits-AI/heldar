@@ -20,6 +20,18 @@ pull the latest sampled frame → post detections/events). AI workers never touc
 RTSP. It is documented in §15 below and, for integrators, in
 [`docs/AI-WORKERS.md`](docs/AI-WORKERS.md); the reference worker lives in `apps/ai`.
 
+**Stage 3 (detection / tracking / zone kernel) has also shipped** — frames become
+**events**. The AI worker now runs a real detector + tracker (YOLO + ByteTrack
+behind the Stage 2 `Analyzer` seam) and posts **tracked** detections (`track_id`
+per object); the kernel gains a **zone engine** that evaluates those tracked
+detections against per-camera polygon zones and raises `enter` / `exit` / `dwell`
+events with an evidence frame. New schema: `zones` + `zone_events`
+(`migrations/0004_zones.sql`). It is documented in §16 below and, for integrators,
+in [`docs/AI-WORKERS.md`](docs/AI-WORKERS.md). The detection/tracking *engineering*
+is production-grade; model *accuracy* on local footage (Malaysian vehicles/plates,
+crowded ReID) still needs a local benchmark set before any hard decision is made on
+it (memo §15.3/§15.4).
+
 Stage 0 maps to **memo §14 "Stage 0 — Media kernel MVP"** (camera registry, RTSP
 ingest, recording segmenter, timeline index, playback API, clip export, basic live
 view, camera health) and is built on the layer model of **memo §5**. The recording
@@ -861,3 +873,239 @@ slow, or absent AI worker only stops *frames being read*; the sampler keeps writ
 and recording/live view are unaffected. This satisfies memo §14 Stage 2: *"AI
 consumes frames without breaking recording/live view."* Detection/tracking models
 themselves are Stage 3, plugging into the reference worker's `Analyzer` seam.
+
+---
+
+## 16. Stage 3 — Detection / tracking / zone kernel
+
+Stage 3 (memo §7.1–7.2 detection/tracking, §8 event model, §14 "Stage 3") is the
+inflection where **frames become events** — the shared base for both the Security
+and BakerySense apps. It has two halves that meet at the Stage 2 `POST
+/api/v1/ai/events` contract:
+
+1. **In the worker (`apps/ai`)** — a real **detector + tracker** runs behind the
+   Stage 2 `Analyzer` seam: a YOLO/RT-DETR detector turns each sampled frame into
+   person/vehicle boxes, and a **ByteTrack** associator stitches boxes across frames
+   into stable **`track_id`s**. The worker posts these *tracked* detections (label,
+   confidence, normalized `bbox`, `track_id`) through the unchanged ingest endpoint.
+   This is documented for integrators in [`docs/AI-WORKERS.md`](docs/AI-WORKERS.md)
+   §11; the kernel does not know or care which model produced the boxes.
+2. **In the kernel (`apps/core`)** — a **zone engine** (`services/zones.rs`)
+   evaluates each tracked detection against the camera's polygon **zones** and
+   raises **`enter` / `exit` / `dwell`** zone events (with an evidence frame). Zone
+   CRUD + a zone-events query live in `routes/zones.rs`; the schema is
+   `migrations/0004_zones.sql`. This section documents the kernel half.
+
+New code: `services/zones.rs`, `routes/zones.rs`, the `Zone` / `ZoneCreate` /
+`ZoneUpdate` / `ZoneEvent` types in `models.rs`, and `migrations/0004_zones.sql`.
+The `ZoneEngine` is built in `main.rs` and held in `AppState` (`state.zones`); it
+has **no background loop** — it is driven synchronously from the detection-ingest
+path.
+
+```
+   AI worker (apps/ai)                 media kernel (apps/core)
+   ┌────────────────────┐
+   │ YOLO detector      │  frame → person/vehicle boxes
+   │ ByteTrack tracker  │  boxes → stable track_id per object
+   └─────────┬──────────┘
+             │ POST /api/v1/ai/events  { detections:[{label,confidence,bbox,track_id}], ... }
+             ▼
+   routes/ai.rs::ingest ── tx: insert detections ──► detections table
+             │
+             │ st.zones.process(camera_id, ts, &detections)        (synchronous, in-proc)
+             ▼
+   services/zones.rs::ZoneEngine
+     load enabled zones for camera ─► for each tracked detection:
+        ground point = bbox bottom-center ─► point-in-polygon per zone
+        per-(camera,zone,track) state machine ─► enter / exit / dwell
+             │                                     │
+             ▼                                     ▼
+        zone_events table                  repo::log_event "zone_{enter,exit,dwell}"
+        (+ evidence frame copy)            (severity = zone.severity → Stage 1 notifier)
+```
+
+### 16.1 The detection → tracking pipeline (worker side, summarized)
+
+The kernel's only requirement is the Stage 2 ingest shape. Stage 3 simply makes a
+worker that fills in the optional `track_id`:
+
+- **Detection** — a YOLO/RT-DETR baseline (memo §7.1) produces class-labelled boxes
+  per frame (`person`, `car`, `truck`, `motorcycle`, …). *"Detection is not the
+  product; detection is the input to events"* (memo §7.1).
+- **Tracking** — **ByteTrack** (memo §7.2 baseline) associates boxes across frames —
+  including low-confidence ones — into continuous tracks, emitting a stable
+  `track_id` per object. Because the Stage 2 reference worker creates **one
+  `Analyzer` instance per task thread**, the tracker's per-camera Kalman/track state
+  lives on `self` and persists across the camera's frame sequence.
+- **Anonymous by default** — `track_id` is a per-session track handle, **not** an
+  identity. Cross-camera ReID / identity resolution is Stage 6 (memo §15.5 privacy:
+  anonymous tracking by default).
+- The worker posts `{label, confidence, bbox:[x,y,w,h] normalized 0..1, track_id}`
+  via `POST /api/v1/ai/events` — the **same** endpoint and shape as Stage 2. No
+  kernel or contract change was needed to light up tracking.
+
+### 16.2 The zone engine (`services/zones.rs`)
+
+`ZoneEngine::process(camera_id, ts, detections)` is invoked by
+`routes/ai.rs::ingest` **after** the detections batch is committed. It turns
+tracked detections into zone events:
+
+1. **Gate** — return immediately if **no** detection in the batch has *both* a
+   `track_id` and a `bbox`. Only tracked, boxed detections can drive zone
+   membership; un-tracked detections (e.g. raw motion) are ignored here.
+2. **Load zones** — `SELECT * FROM zones WHERE camera_id=? AND enabled=1`. If the
+   camera has no enabled zones, return. Each zone's `polygon` and `labels` JSON are
+   parsed once per call.
+3. **Ground point** — a detection's position is the **bottom-center of its bbox**:
+   for `bbox = [x, y, w, h]` (normalized, top-left origin) the point is
+   `[x + w/2, y + h]`. Using the bbox's *ground contact* (feet of a person, tyres of
+   a vehicle) rather than its centroid is what makes "is the object standing inside
+   this floor region?" correct.
+4. **Point-in-polygon** — a standard **ray-casting** test on the zone's normalized
+   `[[x,y], …]` vertices (`point_in_polygon`); polygons with <3 vertices are never
+   "inside".
+5. **Label filter** — if a zone's `labels` array is non-empty, only detections whose
+   `label` is in that list are evaluated against it (e.g. a "vehicle queue" zone can
+   ignore `person`). An empty `labels` means *all* labels count.
+6. **Per-track state machine** — keyed by `"{camera_id}|{zone_id}|{track_id}"`, the
+   engine holds `TrackZoneState { inside, entered_at, dwell_emitted, last_seen }` in
+   an in-memory `Mutex<HashMap>`. Transitions per evaluation:
+
+   | Previous | Now inside? | Action |
+   |---|---|---|
+   | outside | inside | **`enter`** event; set `inside`, `entered_at=ts`, clear `dwell_emitted` |
+   | inside | inside | if `dwell_seconds>0` and not yet emitted and `ts−entered_at ≥ dwell_seconds`: **`dwell`** event (once), set `dwell_emitted` |
+   | inside | outside | **`exit`** event; clear `inside` |
+   | outside | outside | (no event) |
+
+   `dwell` carries the measured dwell in seconds and fires **at most once** per
+   entry (re-arms on the next `enter`). `last_seen` is updated every evaluation.
+7. **State pruning** — after processing the batch, any track state not seen within
+   `STATE_TTL_SECS = 120` s is dropped, so the map can't grow unbounded as tracks
+   churn. (A track that leaves the frame without an `exit` simply ages out; it is not
+   force-exited.)
+
+The engine evaluates against the **batch timestamp `ts`** passed from ingest (the
+ingest envelope's `timestamp`, else server `now()`), so dwell math is anchored to
+capture time, not wall-clock arrival.
+
+### 16.3 Event emission + evidence (`ZoneEngine::emit`)
+
+For each transition the engine writes **two** records and (on entry) captures
+evidence:
+
+- **`zone_events` row** — `id = zev_<uuid>`, with `camera_id`, `zone_id`,
+  denormalized `zone_name`, `track_id`, `event_type` (`enter`|`exit`|`dwell`),
+  `label`, `timestamp = ts`, `dwell_seconds` (only on `dwell`), `evidence_path`, and
+  `created_at`.
+- **Kernel event-log entry** — via the **same `repo::log_event`** the rest of the
+  kernel uses: `event_type = "zone_enter" | "zone_exit" | "zone_dwell"`,
+  `severity = zone.severity` (`info`/`warning`/`critical`), and a payload of
+  `{zone_id, zone, kind, track_id, label, dwell_seconds, evidence}`. Because it goes
+  through `events`, a `warning`/`critical` zone event flows straight into the
+  **Stage 1 alert notifier/webhook** (§14.3) with no extra wiring.
+- **Evidence frame (entry only)** — `copy_evidence` copies the camera's latest
+  sampled sub-stream frame (`frames/<cam>/latest_sub.jpg`) to
+  `snapshots/zoneevt_<id>.jpg` and stores the served URL
+  (`/media/snapshots/zoneevt_<id>.jpg`) as `evidence_path`. This is a **cheap file
+  copy — no decode, no extra ffmpeg** — reusing the Stage 2 sampler's always-current
+  frame. If the copy fails (no frame yet), `evidence_path` is `null`. `exit`/`dwell`
+  events do not re-capture (the `enter` evidence anchors the visit).
+
+This is the memo §8.2 **zone engine + evidence builder** modules, and a first
+concrete **canonical event** (memo §8.1): a typed event with a subject (`track_id` +
+`label`), a location (`zone_id`/`zone_name`), a timestamp, confidence-carrying
+detections behind it, and an evidence pointer. Identity/authorization/workflow
+fields of the full §8.1 model arrive with Stages 4/6.
+
+### 16.4 Data model (`migrations/0004_zones.sql`)
+
+Two tables. `zones` is camera-scoped and editable; `zone_events` is an append-only
+log.
+
+**`zones`** — polygon regions per camera:
+
+| Column | Notes |
+|---|---|
+| `id` | PK, `zone_<uuid-simple>` |
+| `camera_id` | FK → `cameras(id)` `ON DELETE CASCADE` |
+| `name` | required |
+| `kind` | default `region`; free-form (`region`/`restricted`/`count`/…) — semantics live in the app, not the engine |
+| `polygon` | JSON `[[x,y], …]` **normalized 0..1**; validated as ≥3 points on write |
+| `dwell_seconds` | REAL, default 0; `>0` arms the `dwell` event past this threshold |
+| `labels` | JSON array of detection labels that count (empty = all) |
+| `severity` | `info`/`warning`/`critical` — severity stamped on emitted events |
+| `config` | JSON blob (default `{}`) — reserved for per-zone tuning |
+| `enabled` | only enabled zones are evaluated |
+| `created_at`/`updated_at` | RFC3339 |
+
+Index: `idx_zones_camera (camera_id)`.
+
+**`zone_events`** — enter/exit/dwell log:
+
+| Column | Notes |
+|---|---|
+| `id` | PK, `zev_<uuid-simple>` |
+| `camera_id`, `zone_id` | the camera and zone; `zone_name` is **denormalized** so the event is self-describing even after the zone is renamed/deleted |
+| `track_id` | the object whose path crossed the zone (nullable) |
+| `event_type` | `enter` / `exit` / `dwell` |
+| `label` | the detection label that triggered it |
+| `timestamp` | event time (ingest batch ts) |
+| `dwell_seconds` | set only on `dwell` |
+| `evidence_path` | served URL of the copied entry frame (nullable) |
+| `created_at` | server-assigned |
+
+Indexes: `idx_zone_events_cam_time (camera_id, timestamp)`,
+`idx_zone_events_zone (zone_id, timestamp)`. Note `zone_events` has **no FK** to
+`zones` — events deliberately outlive the zone definition (auditability), which is
+why `zone_name` is copied in.
+
+### 16.5 HTTP surface (`routes/zones.rs`)
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/api/v1/cameras/{id}/zones` | list a camera's zones (incl. disabled), oldest-first |
+| POST | `/api/v1/cameras/{id}/zones` | create a zone → `201` + the zone |
+| PATCH | `/api/v1/zones/{zone_id}` | partial update (any subset of fields) |
+| DELETE | `/api/v1/zones/{zone_id}` | delete → `204` (`404` if unknown) |
+| GET | `/api/v1/cameras/{id}/zone-events` | query zone events (`from`/`to`/`zone_id`/`event_type`/`limit≤5000`, newest-first) |
+
+Validation: `name` required; `polygon` must be an array of ≥3 `[x,y]` points;
+`severity ∈ {info,warning,critical}`; `dwell_seconds` floored at 0; `kind` defaults
+to `region`, `labels` to `[]`, `config` to `{}`, `enabled` to `true`. The router is
+`merge`d in `routes/mod.rs`.
+
+### 16.6 How it composes with Stages 0–2
+
+- **Stage 0 (kernel)** — zones reference `cameras` (FK CASCADE: deleting a camera
+  drops its zones); evidence frames are served by the existing
+  `/media/snapshots` `ServeDir`; zone events are written through the same `events`
+  table as recorder/health events.
+- **Stage 1 (observability)** — zone events at `warning`/`critical` reuse the alert
+  notifier/webhook path unchanged; they appear in `/api/v1/events` alongside
+  `camera_offline`/`recording_gap`/etc.
+- **Stage 2 (sampler + worker contract)** — the zone engine consumes the **exact**
+  detections posted to `POST /api/v1/ai/events`, and its evidence frame is the
+  sampler's `latest_sub.jpg`. The detector/tracker plugs into the reference worker's
+  `Analyzer` seam with **no kernel or contract change** — Stage 3 added the
+  `track_id`-aware *consumer* (the zone engine) and the worker-side *producer* (the
+  tracker), meeting in the middle at the unchanged HTTP contract.
+
+The zone engine adds **no new background task** and **no decode**: it runs inline on
+the ingest request and only ever copies an already-sampled JPEG, so it cannot affect
+recording, live view, or the sampler (the Stage 2 isolation guarantee is preserved).
+
+### 16.7 Honest scope — engineering done, accuracy needs local data
+
+The Stage 3 **engineering** is production-grade: the tracked-detection contract, the
+polygon/point-in-polygon zone evaluation, the enter/exit/dwell state machine with
+TTL pruning, evidence capture, the schema, and the query/CRUD API are complete and
+tested (`services/zones.rs` unit tests cover point-in-polygon, ground-point, and
+parsing). What is **not** yet validated is model **accuracy on local footage**:
+per memo **§15.4**, public/pretrained detectors may not reflect Malaysian vehicle
+distribution, plate/camera angles, motorcycles, night-IR, or rain, and per **§15.3**
+ReID/association degrades on new sites and in crowds. The mitigation is explicit:
+start with type + color, treat make/model and any identity-like association as
+assistive (top-5) candidates, **benchmark on local gate/shop footage**, fine-tune
+only after local data collection, and never use model recognition as a hard access
+decision. Accuracy benchmarking is gated on collecting that local footage set.

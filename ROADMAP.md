@@ -120,18 +120,59 @@ Goal (memo §14): *own the base VMS.* Record compressed packets without decode; 
 
 ---
 
-## ⬜ Stage 3 — Detection / tracking / zone kernel
+## ✅ Stage 3 — Detection / tracking / zone kernel  — **DONE**
 
-**Goal:** turn frames into **events** — the shared base for Security *and* BakerySense. (memo §7.1–7.2, §8)
+**Goal (memo §14, §7.1–7.2, §8):** *turn frames into **events** — the shared base
+for Security **and** BakerySense.* Memo Stage 3 build list: *person/vehicle
+detector · tracker · zone annotation · zone entry/exit events · dwell-time events ·
+evidence snapshot/clip.* Built across both halves of the Stage 2 contract: a
+worker-side **YOLO + ByteTrack** analyzer behind the `Analyzer` seam, and a
+kernel-side **zone engine** that turns tracked detections into events — **with no
+change to the `POST /api/v1/ai/events` contract.** Integrator guide:
+[`docs/AI-WORKERS.md`](docs/AI-WORKERS.md) §11; implementation: `ARCHITECTURE.md` §16.
+Reference worker: `apps/ai`.
 
-- [ ] Person / vehicle detector (YOLO / RT-DETR baseline)
-- [ ] Multi-object tracker (ByteTrack / BoT-SORT) — **anonymous session tracking by default**
-- [ ] Zone annotation + spatial calibration (entry/exit lines, red/green/queue/shelf zones)
-- [ ] Zone entry/exit + dwell-time events
-- [ ] Canonical event model + evidence builder (snapshot + clip + recording segment refs + confidence + model versions) — extends the existing `events` table
-- [ ] Event/search API: by time, camera, zone, object, event type
+**Shipped checklist:**
 
-> This is the inflection to research.md **Level 2 → 3** (event memory → scene/event graph). The canonical event = research.md's "claim level 2" with evidence pointers. Build the graph-relational event schema here, not later.
+- [x] **Person / vehicle detector (YOLO / RT-DETR baseline)** — runs in the worker behind the §8 `Analyzer` seam, emitting class-labelled boxes (`bbox` normalized `[x,y,w,h]` 0…1). No kernel/contract change. (`apps/ai/worker.py` `Analyzer`, `docs/AI-WORKERS.md` §11.1)
+- [x] **Multi-object tracker (ByteTrack)** — associates boxes across frames into stable `track_id`s, one tracker instance per task thread (per-camera state on `self`); **anonymous session tracking by default** (`track_id` ≠ identity; ReID is Stage 6). (`apps/ai/worker.py`, memo §7.2/§15.5)
+- [x] **Zone annotation** — per-camera **polygon** zones (normalized 0…1 vertices), with `kind`, per-zone `labels` filter, `dwell_seconds`, `severity`, `enabled`; full CRUD API. (`routes/zones.rs`, `migrations/0004_zones.sql`, `models.rs::Zone`)
+- [x] **Zone entry/exit + dwell-time events** — `ZoneEngine` evaluates each tracked detection's **bbox ground point** (bottom-center) with point-in-polygon + a per-`(camera,zone,track)` state machine → `enter` / `exit` / `dwell` events (dwell fires once per visit; state TTL-pruned at 120 s). Fed synchronously from detection ingest. (`services/zones.rs`)
+- [x] **Evidence builder (snapshot)** — on `enter`, the engine copies the camera's latest sampled sub-stream frame to `/media/snapshots/zoneevt_<id>.jpg` (cheap copy, no decode) and stores it as the event's `evidence_path`. (`services/zones.rs::copy_evidence`)
+- [x] **Canonical event (first concrete instance) + alert reuse** — each zone event is written to both `zone_events` **and** the kernel `events` log as `zone_{enter,exit,dwell}` at the zone's severity, so `warning`/`critical` zone events flow through the **Stage 1 alert webhook** unchanged. The event carries subject (`track_id`+`label`), location (`zone_id`/`zone_name`), timestamp, and an evidence pointer. (`services/zones.rs`, `repo::log_event`, `migrations/0004_zones.sql`)
+- [x] **Event/search API** — `GET /api/v1/cameras/{id}/zone-events` (filter by `from`/`to`/`zone_id`/`event_type`, newest-first), alongside Stage 2's `/detections` (by time/label) and the kernel `/events` log. (`routes/zones.rs`, `routes/ai.rs`)
+
+**Deferred (rolls into Stage 4+ / the fuller §8.1 event model):**
+
+- [ ] **Full canonical event model fields** — `subject` enrichment (plate/color/make), `authorization`, `workflow`, `audit.model_versions`, and **clip + recording-segment refs** on the event are not yet attached (today's evidence is a snapshot frame; segment-linked clip evidence + model-version stamping arrive with Stages 4/6 and the evidence-lock API). (memo §8.1)
+- [ ] **Directional entry/exit *lines* + spatial calibration** — realized today as region enter/exit (in/out of a polygon); a dedicated directional line-crossing primitive and homography/ground-plane calibration are future work.
+- [ ] **Search by object/track + zone counts** — `zone-events` filters by zone/type/time but not yet by `track_id`; count/occupancy aggregates (`kind:"count"`) are stored as a zone kind but not yet aggregated server-side.
+- [ ] **BoT-SORT option** — ByteTrack is the shipped baseline; BoT-SORT (appearance + camera-motion comp) is a drop-in alternative behind the same seam when ReID-grade association is needed.
+
+**Cross-ref to memo §14 Stage 3 goal:**
+
+| Memo §14 Stage 3 build item | Status | Backed by |
+|---|---|---|
+| person/vehicle detector | ✅ engineering | worker `Analyzer` (YOLO/RT-DETR), `docs/AI-WORKERS.md` §11.1 |
+| tracker | ✅ engineering | ByteTrack in worker, anonymous `track_id` |
+| zone annotation | ✅ | `routes/zones.rs`, `zones` table |
+| zone entry/exit events | ✅ | `services/zones.rs` state machine |
+| dwell-time events | ✅ | `services/zones.rs` (`dwell_seconds` threshold) |
+| evidence snapshot/clip | ◑ | snapshot frame on entry shipped; clip/segment refs deferred |
+
+> **Engineering is production-grade; model accuracy is not yet benchmarked (memo §15.3/§15.4).**
+> The Stage 3 *systems engineering* — the tracked-detection contract, polygon/point-in-polygon
+> zone evaluation, the enter/exit/dwell state machine with TTL pruning, evidence capture, the
+> schema, and the CRUD/query API — is complete and unit-tested. What is **not** yet validated is
+> the detector/tracker **accuracy on local footage**: per **§15.4**, public/pretrained models may
+> not reflect Malaysian vehicle distribution, plate/camera angles, motorcycles, night-IR, or rain;
+> per **§15.3**, ReID/association degrades on new sites and in crowds. The required path is explicit:
+> start with type + color, treat make/model and any identity-like match as **top-5 assistive
+> candidates with human review**, **benchmark on local gate/shop footage**, fine-tune only after
+> local data collection, and **never** use model recognition as a hard access decision. Accuracy
+> benchmarking is gated on collecting that local footage set — an evaluation, not an engineering, task.
+
+> This is the inflection to research.md **Level 2 → 3** (event memory → scene/event graph). The zone event is research.md's "claim level 2" with an evidence pointer; the graph-relational event schema is seeded here (`zone_events` denormalizes `zone_name` and outlives its zone for auditability) and deepens in Stages 6–7.
 
 ---
 
