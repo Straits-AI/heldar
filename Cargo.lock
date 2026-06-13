@@ -2392,6 +2392,7 @@ dependencies = [
  "chrono",
  "dotenvy",
  "reqwest",
+ "sqlx",
  "tokio",
  "tower-http",
  "tracing",

@@ -26,6 +26,11 @@ use visionops_kernel::services::sampler::SamplerManager;
 use visionops_kernel::state::AppState;
 use visionops_kernel::{auth, db, routes, services};
 
+// Proprietary vertical composition is isolated behind this seam. In the OPEN repo `verticals.rs` is a
+// no-op stub; the private workspace ships the real module (BakerySense, …). Keeps main.rs identical
+// and free of any proprietary-crate reference in the open build.
+mod verticals;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     dotenvy::dotenv().ok();
@@ -44,20 +49,20 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = db::init_pool(&cfg).await.context("init database pool")?;
     db::run_migrations(&pool).await.context("run migrations")?;
-    // Bundled domain apps apply their own schema (idempotently) against the shared pool.
+    // Composed apps apply their own schema (idempotently) against the shared pool.
     visionops_entry::schema::init(&pool)
         .await
         .context("entry schema init")?;
-    #[cfg(feature = "verticals")]
-    visionops_bakery::schema::init(&pool)
-        .await
-        .context("bakery schema init")?;
     visionops_movement::schema::init(&pool)
         .await
         .context("movement schema init")?;
     visionops_search::schema::init(&pool)
         .await
         .context("search schema init")?;
+    // Proprietary verticals (isolated behind the `verticals` seam; a no-op in the open build).
+    verticals::init_schema(&pool)
+        .await
+        .context("verticals schema init")?;
     auth::ensure_bootstrap(&pool, &cfg)
         .await
         .context("auth bootstrap")?;
@@ -69,8 +74,6 @@ async fn main() -> anyhow::Result<()> {
     // adding an app is a push here, not an edit to the ingest handler.
     // Each app loads its own config from the environment (the kernel carries none).
     let entry_cfg = Arc::new(visionops_entry::config::EntryConfig::from_env());
-    #[cfg(feature = "verticals")]
-    let bakery_cfg = Arc::new(visionops_bakery::config::BakeryConfig::from_env());
     let movement_cfg = Arc::new(visionops_movement::config::MovementConfig::from_env());
     let search_cfg = Arc::new(visionops_search::config::SearchConfig::from_env());
     use services::consumer::DetectionConsumer;
@@ -115,14 +118,8 @@ async fn main() -> anyhow::Result<()> {
         spawn_supervised("entry_retention", move || {
             visionops_entry::retention::run(p.clone(), c.clone(), e.clone())
         });
-        // BakerySense rollup loop (aggregates anonymous behaviour metrics + prunes its observations).
-        #[cfg(feature = "verticals")]
-        {
-            let (p, b) = (pool.clone(), bakery_cfg.clone());
-            spawn_supervised("bakery_rollup", move || {
-                visionops_bakery::rollup::run(p.clone(), b.clone())
-            });
-        }
+        // Proprietary verticals start their own background loops (no-op in the open build).
+        verticals::spawn_loops(&pool);
         // Movement: the ReID candidate proposer + the red-zone breach rule engine.
         let (p, m) = (pool.clone(), movement_cfg.clone());
         spawn_supervised("movement_reid", move || {
@@ -162,19 +159,14 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // Open generic apps merge their routers here; the kernel router is unaware of them.
-    #[allow(unused_mut)]
-    let mut app = Router::new()
+    let app = Router::new()
         .merge(routes::api_router())
         .merge(routes::metrics::router())
         .merge(visionops_entry::routes::router())
         .merge(visionops_movement::routes::router(movement_cfg.clone()))
         .merge(visionops_search::routes::router(search_cfg.clone()));
-    // Proprietary verticals merge here only when the `verticals` feature is enabled.
-    #[cfg(feature = "verticals")]
-    {
-        app = app.merge(visionops_bakery::routes::router(bakery_cfg.clone()));
-    }
-    let app = app
+    // Proprietary verticals merge their routers via the seam (a no-op in the open build).
+    let app = verticals::merge_routes(app)
         .nest_service("/media/recordings", ServeDir::new(&cfg.recordings_dir))
         .nest_service("/media/clips", ServeDir::new(&cfg.clips_dir))
         .nest_service("/media/snapshots", ServeDir::new(&cfg.snapshots_dir))

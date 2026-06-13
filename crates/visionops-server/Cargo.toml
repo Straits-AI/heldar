@@ -27,6 +27,7 @@ visionops-search = { path = "../visionops-search" }
 # Proprietary verticals — optional, gated by the `verticals` feature.
 visionops-bakery = { path = "../visionops-bakery", optional = true }
 tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 chrono = { version = "0.4", features = ["serde"] }
