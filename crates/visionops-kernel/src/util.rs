@@ -10,6 +10,26 @@ use tokio::process::Command;
 /// Hard cap for a single ffprobe invocation so one pathological file cannot wedge the indexer.
 const FFPROBE_TIMEOUT: Duration = Duration::from_secs(20);
 
+/// Fail fast at startup if the configured ffmpeg/ffprobe binaries aren't runnable. They are required
+/// for recording, clip/snapshot export, sampling, and indexing; a missing binary otherwise surfaces
+/// only later as silent per-camera failures (cameras stuck "connecting", empty timelines).
+pub fn check_media_binaries(cfg: &crate::config::Config) -> anyhow::Result<()> {
+    for (label, bin) in [("ffmpeg", &cfg.ffmpeg_bin), ("ffprobe", &cfg.ffprobe_bin)] {
+        std::process::Command::new(bin)
+            .arg("-version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map_err(|e| {
+                anyhow!(
+                    "required media binary `{label}` (`{bin}`) is not runnable: {e}. \
+                     Install ffmpeg, or set VISIONOPS_FFMPEG_BIN / VISIONOPS_FFPROBE_BIN to its path."
+                )
+            })?;
+    }
+    Ok(())
+}
+
 /// Subset of media properties extracted via ffprobe.
 #[derive(Debug, Clone)]
 pub struct ProbeInfo {

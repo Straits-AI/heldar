@@ -77,76 +77,88 @@ pub async fn export_clip(
     let out_path = state.cfg.clips_dir.join(&filename);
     let list_path = state.cfg.clips_dir.join(format!("{id}.txt"));
 
-    let mut list = String::new();
-    for s in &segments {
-        let escaped = s.path.replace('\'', "'\\''");
-        list.push_str(&format!("file '{escaped}'\n"));
-    }
-    tokio::fs::write(&list_path, list)
-        .await
-        .map_err(|e| AppError::Other(e.into()))?;
+    // Read-lock the source segments so the retention sweeper can't delete them out from under ffmpeg
+    // mid-export (TOCTOU). Released on EVERY outcome below.
+    let seg_ids: Vec<String> = segments.iter().map(|s| s.id.clone()).collect();
+    crate::repo::set_segments_locked(&state.pool, &seg_ids, true).await;
 
-    let first_start = segments[0].start_time;
-    let ss = ((from - first_start).num_milliseconds() as f64 / 1000.0).max(0.0);
-
-    let mut cmd = Command::new(&state.cfg.ffmpeg_bin);
-    cmd.kill_on_drop(true)
-        .args([
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "concat",
-            "-safe",
-            "0",
-        ])
-        .arg("-i")
-        .arg(&list_path)
-        .args(["-ss", &format!("{ss:.3}")])
-        .args(["-t", &format!("{requested:.3}")])
-        .args([
-            "-c",
-            "copy",
-            "-avoid_negative_ts",
-            "make_zero",
-            "-movflags",
-            "+faststart",
-        ])
-        .arg(&out_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::piped());
-
-    // Remux of even an hour of footage is fast; bound it so a hung/cancelled job can't wedge the
-    // request or orphan ffmpeg (kill_on_drop kills the child when the timed-out future is dropped).
-    let result = tokio::time::timeout(Duration::from_secs(180), cmd.output()).await;
-    // Always remove the temp concat list, on every outcome.
-    let _ = tokio::fs::remove_file(&list_path).await;
-
-    let out = match result {
-        Err(_) => {
-            let _ = tokio::fs::remove_file(&out_path).await;
-            return Err(AppError::Other(anyhow::anyhow!("clip export timed out")));
+    let size_outcome: AppResult<u64> = async {
+        let mut list = String::new();
+        for s in &segments {
+            let escaped = s.path.replace('\'', "'\\''");
+            list.push_str(&format!("file '{escaped}'\n"));
         }
-        Ok(Err(e)) => {
+        tokio::fs::write(&list_path, list)
+            .await
+            .map_err(|e| AppError::Other(e.into()))?;
+
+        let first_start = segments[0].start_time;
+        let ss = ((from - first_start).num_milliseconds() as f64 / 1000.0).max(0.0);
+
+        let mut cmd = Command::new(&state.cfg.ffmpeg_bin);
+        cmd.kill_on_drop(true)
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+            ])
+            .arg("-i")
+            .arg(&list_path)
+            .args(["-ss", &format!("{ss:.3}")])
+            .args(["-t", &format!("{requested:.3}")])
+            .args([
+                "-c",
+                "copy",
+                "-avoid_negative_ts",
+                "make_zero",
+                "-movflags",
+                "+faststart",
+            ])
+            .arg(&out_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+
+        // Remux of even an hour of footage is fast; bound it so a hung/cancelled job can't wedge the
+        // request or orphan ffmpeg (kill_on_drop kills the child when the timed-out future is dropped).
+        let result = tokio::time::timeout(Duration::from_secs(180), cmd.output()).await;
+        // Always remove the temp concat list, on every outcome.
+        let _ = tokio::fs::remove_file(&list_path).await;
+
+        let out = match result {
+            Err(_) => {
+                let _ = tokio::fs::remove_file(&out_path).await;
+                return Err(AppError::Other(anyhow::anyhow!("clip export timed out")));
+            }
+            Ok(Err(e)) => {
+                let _ = tokio::fs::remove_file(&out_path).await;
+                return Err(AppError::Other(e.into()));
+            }
+            Ok(Ok(out)) => out,
+        };
+
+        if !out.status.success() {
             let _ = tokio::fs::remove_file(&out_path).await;
-            return Err(AppError::Other(e.into()));
+            return Err(AppError::Other(anyhow::anyhow!(
+                "ffmpeg clip export failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
         }
-        Ok(Ok(out)) => out,
-    };
 
-    if !out.status.success() {
-        let _ = tokio::fs::remove_file(&out_path).await;
-        return Err(AppError::Other(anyhow::anyhow!(
-            "ffmpeg clip export failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
+        Ok(tokio::fs::metadata(&out_path)
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0))
     }
+    .await;
 
-    let size_bytes = tokio::fs::metadata(&out_path)
-        .await
-        .map(|m| m.len())
-        .unwrap_or(0);
+    // Release the read-lock on every outcome, then surface any error.
+    crate::repo::set_segments_locked(&state.pool, &seg_ids, false).await;
+    let size_bytes = size_outcome?;
 
     Ok(ClipResult {
         id,

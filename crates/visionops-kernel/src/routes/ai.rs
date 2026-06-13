@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
+use crate::auth::Principal;
 use crate::error::{AppError, AppResult};
 use crate::models::{AiIngest, AiTask, AiTaskCreate, AiTaskUpdate, Detection};
 use crate::routes::cameras::load_camera;
@@ -49,7 +50,9 @@ fn validate_profile(p: &str) -> AppResult<()> {
 async fn list_camera_tasks(
     State(st): State<AppState>,
     Path(id): Path<String>,
+    principal: Principal,
 ) -> AppResult<Json<Vec<AiTask>>> {
+    principal.require(principal.can_view(), "view AI tasks")?;
     let _ = load_camera(&st.pool, &id).await?;
     let tasks = sqlx::query_as::<_, AiTask>(
         "SELECT * FROM ai_tasks WHERE camera_id = ? ORDER BY created_at ASC",
@@ -63,8 +66,10 @@ async fn list_camera_tasks(
 async fn create_task(
     State(st): State<AppState>,
     Path(id): Path<String>,
+    principal: Principal,
     Json(body): Json<AiTaskCreate>,
 ) -> AppResult<(StatusCode, Json<AiTask>)> {
+    principal.require(principal.can_manage_registry(), "create AI tasks")?;
     let _ = load_camera(&st.pool, &id).await?;
     if body.task_type.trim().is_empty() {
         return Err(AppError::BadRequest("`task_type` is required".into()));
@@ -110,8 +115,10 @@ async fn create_task(
 async fn update_task(
     State(st): State<AppState>,
     Path(task_id): Path<String>,
+    principal: Principal,
     Json(body): Json<AiTaskUpdate>,
 ) -> AppResult<Json<AiTask>> {
+    principal.require(principal.can_manage_registry(), "update AI tasks")?;
     let cur = sqlx::query_as::<_, AiTask>("SELECT * FROM ai_tasks WHERE id = ?")
         .bind(&task_id)
         .fetch_optional(&st.pool)
@@ -152,7 +159,9 @@ async fn update_task(
 async fn delete_task(
     State(st): State<AppState>,
     Path(task_id): Path<String>,
+    principal: Principal,
 ) -> AppResult<StatusCode> {
+    principal.require(principal.can_manage_registry(), "delete AI tasks")?;
     let res = sqlx::query("DELETE FROM ai_tasks WHERE id = ?")
         .bind(&task_id)
         .execute(&st.pool)
@@ -210,7 +219,11 @@ async fn list_all_tasks(
     Ok(Json(out))
 }
 
-async fn sampler_status(State(st): State<AppState>) -> AppResult<Json<Vec<SamplerInfo>>> {
+async fn sampler_status(
+    State(st): State<AppState>,
+    principal: Principal,
+) -> AppResult<Json<Vec<SamplerInfo>>> {
+    principal.require(principal.can_view(), "view sampler status")?;
     Ok(Json(st.sampler.statuses().await))
 }
 

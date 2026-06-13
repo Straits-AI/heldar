@@ -12,6 +12,21 @@ use crate::config::Config;
 use crate::repo;
 use crate::services::storage;
 
+/// Delete a segment's file and report whether its DB row should now be removed. The row is removed
+/// only when the file is actually gone — deleted just now, or already absent (`NotFound`). If the
+/// delete fails for any other reason (permissions, I/O error), we keep the DB row so the file is not
+/// orphaned-yet-forgotten: the next sweep retries it, and the size/disk accounting stays truthful.
+async fn unlink_segment(path: &str) -> bool {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            tracing::error!(path, error = %e, "retention: failed to delete segment file; keeping DB row to retry next sweep");
+            false
+        }
+    }
+}
+
 pub async fn run(pool: SqlitePool, cfg: Arc<Config>) {
     let mut tick = tokio::time::interval(Duration::from_secs(cfg.retention_interval_s.max(30)));
     loop {
@@ -38,12 +53,13 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         .fetch_all(pool)
         .await?;
         for (seg_id, path) in rows {
-            let _ = tokio::fs::remove_file(&path).await;
-            sqlx::query("DELETE FROM segments WHERE id = ?")
-                .bind(&seg_id)
-                .execute(pool)
-                .await?;
-            age_deleted += 1;
+            if unlink_segment(&path).await {
+                sqlx::query("DELETE FROM segments WHERE id = ?")
+                    .bind(&seg_id)
+                    .execute(pool)
+                    .await?;
+                age_deleted += 1;
+            }
         }
     }
     if age_deleted > 0 {
@@ -110,13 +126,21 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
             if batch.is_empty() {
                 break;
             }
+            let mut progressed = 0u64;
             for (seg_id, path) in batch {
-                let _ = tokio::fs::remove_file(&path).await;
-                sqlx::query("DELETE FROM segments WHERE id = ?")
-                    .bind(&seg_id)
-                    .execute(pool)
-                    .await?;
-                size_deleted += 1;
+                if unlink_segment(&path).await {
+                    sqlx::query("DELETE FROM segments WHERE id = ?")
+                        .bind(&seg_id)
+                        .execute(pool)
+                        .await?;
+                    size_deleted += 1;
+                    progressed += 1;
+                }
+            }
+            if progressed == 0 {
+                // Every file in the batch failed to delete; we'd re-select the same rows forever.
+                tracing::error!("retention: size-cap prune made no progress (segment file deletes failing); stopping this sweep");
+                break;
             }
         }
     }
@@ -190,12 +214,13 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
                     break;
                 }
                 for (seg_id, path) in batch {
-                    let _ = tokio::fs::remove_file(&path).await;
-                    sqlx::query("DELETE FROM segments WHERE id = ?")
-                        .bind(&seg_id)
-                        .execute(pool)
-                        .await?;
-                    disk_deleted += 1;
+                    if unlink_segment(&path).await {
+                        sqlx::query("DELETE FROM segments WHERE id = ?")
+                            .bind(&seg_id)
+                            .execute(pool)
+                            .await?;
+                        disk_deleted += 1;
+                    }
                 }
                 match storage::disk_stats_async(cfg.recordings_dir.clone()).await {
                     Some(d) if d.free_bytes > before => prev = d,

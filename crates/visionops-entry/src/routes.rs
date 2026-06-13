@@ -620,9 +620,13 @@ async fn list_watchlist(
     principal: Principal,
 ) -> AppResult<Json<Vec<Watchlist>>> {
     principal.require(principal.can_view(), "view watchlist")?;
-    let rows = sqlx::query_as::<_, Watchlist>("SELECT * FROM watchlist ORDER BY created_at DESC")
-        .fetch_all(&st.pool)
-        .await?;
+    // Bound the result set: the watchlist can grow large, and an unbounded SELECT * would load every
+    // row into memory at once (OOM/latency risk). 1000 is well above any realistic operator view.
+    let rows = sqlx::query_as::<_, Watchlist>(
+        "SELECT * FROM watchlist ORDER BY created_at DESC LIMIT 1000",
+    )
+    .fetch_all(&st.pool)
+    .await?;
     Ok(Json(rows))
 }
 

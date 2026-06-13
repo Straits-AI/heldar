@@ -10,6 +10,7 @@ use serde_json::json;
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
+use crate::auth::Principal;
 use crate::error::{AppError, AppResult};
 use crate::models::{Zone, ZoneCreate, ZoneEvent, ZoneUpdate};
 use crate::routes::cameras::load_camera;
@@ -108,8 +109,10 @@ async fn list_zones(
 async fn create_zone(
     State(st): State<AppState>,
     Path(id): Path<String>,
+    principal: Principal,
     Json(body): Json<ZoneCreate>,
 ) -> AppResult<(StatusCode, Json<Zone>)> {
+    principal.require(principal.can_manage_registry(), "create zones")?;
     let _ = load_camera(&st.pool, &id).await?;
     if body.name.trim().is_empty() {
         return Err(AppError::BadRequest("`name` is required".into()));
@@ -158,8 +161,10 @@ async fn create_zone(
 async fn update_zone(
     State(st): State<AppState>,
     Path(zone_id): Path<String>,
+    principal: Principal,
     Json(body): Json<ZoneUpdate>,
 ) -> AppResult<Json<Zone>> {
+    principal.require(principal.can_manage_registry(), "update zones")?;
     let cur = sqlx::query_as::<_, Zone>("SELECT * FROM zones WHERE id = ?")
         .bind(&zone_id)
         .fetch_optional(&st.pool)
@@ -215,7 +220,9 @@ async fn update_zone(
 async fn delete_zone(
     State(st): State<AppState>,
     Path(zone_id): Path<String>,
+    principal: Principal,
 ) -> AppResult<StatusCode> {
+    principal.require(principal.can_manage_registry(), "delete zones")?;
     let res = sqlx::query("DELETE FROM zones WHERE id = ?")
         .bind(&zone_id)
         .execute(&st.pool)

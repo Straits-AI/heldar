@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use sqlx::types::Json as SqlxJson;
 use sqlx::SqlitePool;
 
+use crate::auth::Principal;
 use crate::camera_url;
 use crate::error::{AppError, AppResult};
 use crate::models::{Camera, CameraCreate, CameraUpdate, CameraView};
@@ -52,8 +53,10 @@ async fn get_camera_handler(
 
 async fn create_camera(
     State(st): State<AppState>,
+    principal: Principal,
     Json(body): Json<CameraCreate>,
 ) -> AppResult<(StatusCode, Json<CameraView>)> {
+    principal.require(principal.can_manage_registry(), "create cameras")?;
     let id = body
         .id
         .as_deref()
@@ -149,8 +152,10 @@ async fn create_camera(
 async fn update_camera(
     State(st): State<AppState>,
     Path(id): Path<String>,
+    principal: Principal,
     Json(body): Json<CameraUpdate>,
 ) -> AppResult<Json<CameraView>> {
+    principal.require(principal.can_manage_registry(), "update cameras")?;
     let cur = load_camera(&st.pool, &id).await?;
 
     let record_stream = body.record_stream.unwrap_or(cur.record_stream);
@@ -225,7 +230,9 @@ async fn update_camera(
 async fn delete_camera(
     State(st): State<AppState>,
     Path(id): Path<String>,
+    principal: Principal,
 ) -> AppResult<StatusCode> {
+    principal.require(principal.can_manage_registry(), "delete cameras")?;
     let _ = load_camera(&st.pool, &id).await?; // 404 if missing
     st.recorder.stop(&id).await;
     // Clean up zone-event evidence files + rows for this camera (zone_events has no FK cascade).

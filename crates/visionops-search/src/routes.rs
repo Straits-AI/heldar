@@ -94,6 +94,9 @@ async fn search_events(
     Json(plan): Json<QueryPlan>,
 ) -> AppResult<Json<Value>> {
     principal.require(principal.can_view(), "search events")?;
+    // Sanitize the caller-supplied plan (clamp out-of-range hours, etc.) before executing — the same
+    // guard applied to LLM-produced plans — so a hand-crafted QueryPlan can't smuggle invalid filters.
+    let plan = crate::planner::sanitize(plan);
     let hits = query::execute(&st.pool, &plan, cfg.max_results).await?;
     log_search(
         &st,

@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use serde_json::json;
@@ -284,6 +284,7 @@ impl SamplerManager {
                 }
             };
             self.set_info(&camera_id, &profile, "sampling", fps).await;
+            let started = Instant::now();
 
             let stderr = child.stderr.take();
             let stderr_task = tokio::spawn(async move {
@@ -314,7 +315,10 @@ impl SamplerManager {
                     self.set_info(&camera_id, &profile, "offline", fps).await;
                     let _ = repo::log_event(&self.pool, Some(&camera_id), "sampler_offline", "warning",
                         json!({ "profile": profile, "detail": masked })).await;
-                    backoff = (backoff * 2).min(30);
+                    // Reset backoff after a healthy run (>30s); otherwise grow it (exponential up to
+                    // 30s) so a persistently-failing camera doesn't hot-loop ffmpeg restarts. Mirrors
+                    // the recorder so a camera that flaps then recovers retries promptly.
+                    backoff = if started.elapsed().as_secs() > 30 { 1 } else { (backoff * 2).min(30) };
                     if sleep_or_stop(&mut stop, backoff).await {
                         return;
                     }

@@ -85,12 +85,18 @@ struct TrackVoteState {
     last_seen: DateTime<Utc>,
     committed: bool,
     model_versions: Value,
+    /// Unique per instance (see [`AnprEngine::next_uid`]); distinguishes a track from a successor
+    /// that reused the same map key.
+    uid: u64,
 }
 
 /// A consolidated track ready to resolve + emit (built under the lock, processed after release).
 struct CommitJob {
     /// State-map key, so a failed insert can clear `committed` and let the track retry.
     key: String,
+    /// Identity of the track-state this job was built from. A failed insert clears `committed` only
+    /// if the live state entry STILL has this uid (else the key was reused by a different vehicle).
+    uid: u64,
     camera_id: String,
     site_id: Option<String>,
     track: Option<String>,
@@ -112,6 +118,9 @@ pub struct AnprEngine {
     /// Entry-app config — voting threshold.
     ecfg: Arc<crate::config::EntryConfig>,
     state: Mutex<HashMap<String, TrackVoteState>>,
+    /// Monotonic id stamped on each track-state instance. Lets a failed commit clear `committed`
+    /// only on the SAME track it committed — never on a successor that reused the (track-id) key.
+    next_uid: std::sync::atomic::AtomicU64,
 }
 
 fn attr_str<'a>(attrs: &'a Value, key: &str) -> Option<&'a str> {
@@ -144,6 +153,7 @@ impl AnprEngine {
             cfg,
             ecfg,
             state: Mutex::new(HashMap::new()),
+            next_uid: std::sync::atomic::AtomicU64::new(1),
         })
     }
 
@@ -198,6 +208,9 @@ impl AnprEngine {
                     last_seen: now,
                     committed: false,
                     model_versions: json!({}),
+                    uid: self
+                        .next_uid
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 });
                 entry.last_seen = now;
 
@@ -266,13 +279,17 @@ impl AnprEngine {
         }
 
         for job in jobs {
-            let key = job.key.clone();
+            let (key, uid) = (job.key.clone(), job.uid);
             // If the insert fails, clear `committed` so a still-live track retries next batch
-            // instead of silently dropping the event.
+            // instead of silently dropping the event — but ONLY if the live state entry is still the
+            // same track (matching uid). A concurrent batch may have pruned it and a reused track-id
+            // key now points to a different vehicle; clearing that one would duplicate its event.
             if !self.commit(job, now).await {
                 let mut state = self.state.lock().await;
                 if let Some(s) = state.get_mut(&key) {
-                    s.committed = false;
+                    if s.uid == uid {
+                        s.committed = false;
+                    }
                 }
             }
         }
@@ -709,6 +726,7 @@ fn build_job(key: &str, st: &TrackVoteState) -> Option<CommitJob> {
         .unwrap_or_else(|| plate_norm.clone());
     Some(CommitJob {
         key: key.to_string(),
+        uid: st.uid,
         camera_id: st.camera_id.clone(),
         site_id: st.site_id.clone(),
         track: st.track.clone(),

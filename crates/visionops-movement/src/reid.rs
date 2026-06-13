@@ -181,12 +181,19 @@ pub struct Appearance {
 }
 
 /// All appearances of a plate across cameras, time-ordered = its movement trail. Caller MUST audit.
+/// Bounded to the most recent [`TRAIL_MAX`] appearances: a heavily-travelled plate could otherwise
+/// match tens of thousands of rows and load them all into memory (OOM/latency). We take the newest
+/// rows (`DESC LIMIT`) then return them oldest-first for the trail.
 pub async fn trail_for_plate(pool: &SqlitePool, plate_norm: &str) -> sqlx::Result<Vec<Appearance>> {
-    sqlx::query_as::<_, Appearance>(
+    const TRAIL_MAX: i64 = 10_000;
+    let mut rows = sqlx::query_as::<_, Appearance>(
         "SELECT id AS event_id, camera_id, timestamp, event_type, auth_status, direction
-           FROM entry_events WHERE plate = ? ORDER BY timestamp ASC",
+           FROM entry_events WHERE plate = ? ORDER BY timestamp DESC LIMIT ?",
     )
     .bind(plate_norm)
+    .bind(TRAIL_MAX)
     .fetch_all(pool)
-    .await
+    .await?;
+    rows.reverse(); // newest-first capped → oldest-first trail
+    Ok(rows)
 }

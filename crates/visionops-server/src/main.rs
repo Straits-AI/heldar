@@ -37,6 +37,8 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     let cfg = Arc::new(Config::from_env());
+    // Fail fast if the media toolchain is missing — recording/clip/snapshot/sampling all need it.
+    visionops_kernel::util::check_media_binaries(&cfg).context("media-binary preflight")?;
     for dir in [
         &cfg.data_dir,
         &cfg.recordings_dir,
@@ -49,6 +51,10 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = db::init_pool(&cfg).await.context("init database pool")?;
     db::run_migrations(&pool).await.context("run migrations")?;
+    // Release any transient segment read-locks left by a crash mid clip/snapshot export.
+    db::clear_segment_read_locks(&pool)
+        .await
+        .context("clear stale segment read-locks")?;
     // Composed apps apply their own schema (idempotently) against the shared pool.
     visionops_entry::schema::init(&pool)
         .await

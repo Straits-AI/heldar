@@ -30,40 +30,50 @@ pub async fn snapshot_at(
     .await?;
     let seg = seg.ok_or_else(|| AppError::NotFound("no footage at that timestamp".into()))?;
 
-    let offset = ((at - seg.start_time).num_milliseconds() as f64 / 1000.0).max(0.0);
-    let mut cmd = Command::new(&state.cfg.ffmpeg_bin);
-    cmd.kill_on_drop(true)
-        .args(["-hide_banner", "-loglevel", "error"])
-        .args(["-ss", &format!("{offset:.3}")])
-        .arg("-i")
-        .arg(&seg.path)
-        .args([
-            "-frames:v",
-            "1",
-            "-q:v",
-            "3",
-            "-f",
-            "image2",
-            "-c:v",
-            "mjpeg",
-            "pipe:1",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    // Read-lock the source segment so retention can't delete it out from under ffmpeg (TOCTOU).
+    let seg_ids = vec![seg.id.clone()];
+    crate::repo::set_segments_locked(&state.pool, &seg_ids, true).await;
 
-    let out = tokio::time::timeout(Duration::from_secs(20), cmd.output())
-        .await
-        .map_err(|_| AppError::Other(anyhow::anyhow!("snapshot timed out")))?
-        .map_err(|e| AppError::Other(e.into()))?;
+    let outcome: AppResult<Vec<u8>> = async {
+        let offset = ((at - seg.start_time).num_milliseconds() as f64 / 1000.0).max(0.0);
+        let mut cmd = Command::new(&state.cfg.ffmpeg_bin);
+        cmd.kill_on_drop(true)
+            .args(["-hide_banner", "-loglevel", "error"])
+            .args(["-ss", &format!("{offset:.3}")])
+            .arg("-i")
+            .arg(&seg.path)
+            .args([
+                "-frames:v",
+                "1",
+                "-q:v",
+                "3",
+                "-f",
+                "image2",
+                "-c:v",
+                "mjpeg",
+                "pipe:1",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
-    if !out.status.success() || out.stdout.is_empty() {
-        return Err(AppError::Other(anyhow::anyhow!(
-            "snapshot failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        )));
+        let out = tokio::time::timeout(Duration::from_secs(20), cmd.output())
+            .await
+            .map_err(|_| AppError::Other(anyhow::anyhow!("snapshot timed out")))?
+            .map_err(|e| AppError::Other(e.into()))?;
+
+        if !out.status.success() || out.stdout.is_empty() {
+            return Err(AppError::Other(anyhow::anyhow!(
+                "snapshot failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            )));
+        }
+        Ok(out.stdout)
     }
-    Ok(out.stdout)
+    .await;
+
+    crate::repo::set_segments_locked(&state.pool, &seg_ids, false).await;
+    outcome
 }
 
 /// Grab one frame live from the camera stream (sub-stream preferred).

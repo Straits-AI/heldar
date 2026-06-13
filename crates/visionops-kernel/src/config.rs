@@ -16,6 +16,9 @@ pub struct Config {
     pub mediamtx_hls_base: String,
     pub mediamtx_rtsp_base: String,
     pub mediamtx_webrtc_base: String,
+    /// Max SQLite pool connections. Tunable per deployment: more absorbs bursts of concurrent
+    /// requests (WAL serves reads concurrently; writes still serialize), at the cost of memory.
+    pub db_max_connections: u32,
     pub recorder_enabled: bool,
     pub default_segment_seconds: i64,
     pub default_retention_hours: i64,
@@ -124,6 +127,7 @@ impl Config {
             mediamtx_hls_base: var_or("VISIONOPS_MEDIAMTX_HLS_BASE", "http://127.0.0.1:8888"),
             mediamtx_rtsp_base: var_or("VISIONOPS_MEDIAMTX_RTSP_BASE", "rtsp://127.0.0.1:8554"),
             mediamtx_webrtc_base: var_or("VISIONOPS_MEDIAMTX_WEBRTC_BASE", "http://127.0.0.1:8889"),
+            db_max_connections: parse_or::<u32>("VISIONOPS_DB_MAX_CONNECTIONS", 16).clamp(2, 256),
             recorder_enabled: parse_bool("VISIONOPS_RECORDER_ENABLED", true),
             default_segment_seconds: parse_or("VISIONOPS_DEFAULT_SEGMENT_SECONDS", 60),
             default_retention_hours: parse_or("VISIONOPS_DEFAULT_RETENTION_HOURS", 24),
