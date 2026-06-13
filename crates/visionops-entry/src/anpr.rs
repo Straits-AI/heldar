@@ -21,9 +21,9 @@ use sqlx::SqlitePool;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use crate::config::Config;
-use crate::models::DetectionIngest;
-use crate::repo;
+use visionops_kernel::config::Config;
+use visionops_kernel::models::DetectionIngest;
+use visionops_kernel::repo;
 
 /// Retain a track's voting state this long (server time) after it was last seen before pruning.
 const STATE_TTL_SECS: i64 = 30;
@@ -116,7 +116,7 @@ fn attr_str<'a>(attrs: &'a Value, key: &str) -> Option<&'a str> {
 }
 
 #[async_trait::async_trait]
-impl crate::services::consumer::DetectionConsumer for AnprEngine {
+impl visionops_kernel::services::consumer::DetectionConsumer for AnprEngine {
     fn name(&self) -> &'static str {
         "anpr"
     }
@@ -124,7 +124,7 @@ impl crate::services::consumer::DetectionConsumer for AnprEngine {
     fn interested_in(&self, task_type: &str) -> bool {
         task_type.eq_ignore_ascii_case("anpr")
     }
-    async fn consume(&self, batch: &crate::services::consumer::DetectionBatch<'_>) {
+    async fn consume(&self, batch: &visionops_kernel::services::consumer::DetectionBatch<'_>) {
         self.process(batch.camera_id, batch.site_id, batch.detections)
             .await;
     }

@@ -1,0 +1,29 @@
+[package]
+name = "visionops-entry"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "VisionOps Campus Entry — PROPRIETARY domain app: ANPR authorization, vehicle/visitor/watchlist registry, guard workflow, entry reports. Built on the visionops-kernel platform."
+license = "Proprietary"
+
+[lib]
+name = "visionops_entry"
+path = "src/lib.rs"
+
+[dependencies]
+visionops-kernel = { path = "../visionops-kernel" }
+axum = { version = "0.8", features = ["macros"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+    "chrono",
+    "macros",
+    "json",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tokio = { version = "1", features = ["fs"] }
+async-trait = "0.1"

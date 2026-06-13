@@ -50,8 +50,10 @@ async fn main() -> anyhow::Result<()> {
     // (e.g. BakerySense) is a push here, not an edit to the ingest handler.
     use services::consumer::DetectionConsumer;
     let consumers: Arc<Vec<Arc<dyn DetectionConsumer>>> = Arc::new(vec![
+        // Zone engine = kernel-open spatial primitive.
         services::zones::ZoneEngine::new(pool.clone(), cfg.clone()),
-        services::anpr::AnprEngine::new(pool.clone(), cfg.clone()),
+        // Campus Entry (proprietary) ANPR engine, registered as a consumer over the kernel seam.
+        visionops_entry::anpr::AnprEngine::new(pool.clone(), cfg.clone()),
     ]);
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
@@ -115,6 +117,8 @@ async fn main() -> anyhow::Result<()> {
     let app = Router::new()
         .merge(routes::api_router())
         .merge(routes::metrics::router())
+        // Bundled domain apps (proprietary) merge their routers here; the kernel router is unaware.
+        .merge(visionops_entry::routes::router())
         .nest_service("/media/recordings", ServeDir::new(&cfg.recordings_dir))
         .nest_service("/media/clips", ServeDir::new(&cfg.clips_dir))
         .nest_service("/media/snapshots", ServeDir::new(&cfg.snapshots_dir))

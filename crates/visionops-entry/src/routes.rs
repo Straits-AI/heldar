@@ -13,14 +13,14 @@ use serde_json::{json, Value};
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
-use crate::auth::{self, Principal};
-use crate::error::{AppError, AppResult};
+use crate::anpr::normalize_plate;
 use crate::models::{
     AuditLog, EntryEvent, Vehicle, VehicleCreate, VehicleUpdate, VisitorPass, VisitorPassCreate,
     VisitorPassUpdate, Watchlist, WatchlistCreate, WatchlistUpdate,
 };
-use crate::services::anpr::normalize_plate;
-use crate::state::AppState;
+use visionops_kernel::auth::{self, Principal};
+use visionops_kernel::error::{AppError, AppResult};
+use visionops_kernel::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -58,7 +58,7 @@ const SEVERITIES: [&str; 3] = ["info", "warning", "critical"];
 
 fn parse_opt_ts(s: &Option<String>, field: &str) -> AppResult<Option<DateTime<Utc>>> {
     match s {
-        Some(v) if !v.trim().is_empty() => crate::util::parse_rfc3339(v)
+        Some(v) if !v.trim().is_empty() => visionops_kernel::util::parse_rfc3339(v)
             .map(Some)
             .ok_or_else(|| AppError::BadRequest(format!("invalid `{field}` timestamp"))),
         _ => Ok(None),
