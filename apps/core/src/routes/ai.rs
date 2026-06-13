@@ -177,7 +177,13 @@ struct WorkerTask {
 }
 
 /// Worker discovery: every enabled AI task on an enabled camera, with the frame URL to pull.
-async fn list_all_tasks(State(st): State<AppState>) -> AppResult<Json<Vec<WorkerTask>>> {
+async fn list_all_tasks(
+    State(st): State<AppState>,
+    principal: crate::auth::Principal,
+) -> AppResult<Json<Vec<WorkerTask>>> {
+    // Authentication floor: when auth is enabled this rejects anonymous callers (the worker sends an
+    // integration API key). When auth is disabled the principal is the synthetic system admin.
+    principal.require(principal.can_view(), "discover AI tasks")?;
     let tasks = sqlx::query_as::<_, AiTask>(
         "SELECT t.* FROM ai_tasks t JOIN cameras c ON c.id = t.camera_id
          WHERE t.enabled = 1 AND c.enabled = 1
@@ -216,9 +222,14 @@ struct FrameQuery {
 /// Serve the latest sampled frame for a camera + stream profile (the AI worker's input).
 async fn latest_frame(
     State(st): State<AppState>,
+    principal: crate::auth::Principal,
     Path(id): Path<String>,
     Query(q): Query<FrameQuery>,
 ) -> AppResult<Response> {
+    // Authentication floor (a frame can contain faces/plates). Note: when auth is enabled the SPA's
+    // <img> tags cannot send a bearer header — token-in-query / cookie for the media plane is handled
+    // in the auth-split work; the worker authenticates via X-API-Key.
+    principal.require(principal.can_view(), "read camera frames")?;
     // Defense in depth: the id becomes a path segment, so reject any separators/traversal.
     if id.contains('/') || id.contains('\\') || id.contains("..") {
         return Err(AppError::BadRequest("invalid camera id".into()));
@@ -265,9 +276,11 @@ struct DetectionQuery {
 
 async fn list_detections(
     State(st): State<AppState>,
+    principal: crate::auth::Principal,
     Path(id): Path<String>,
     Query(q): Query<DetectionQuery>,
 ) -> AppResult<Json<Vec<Detection>>> {
+    principal.require(principal.can_view(), "read detections")?;
     let _ = load_camera(&st.pool, &id).await?;
     let limit = q.limit.unwrap_or(200).clamp(1, 5000);
     let from = parse_opt_ts(&q.from, "from")?;

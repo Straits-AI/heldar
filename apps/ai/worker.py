@@ -90,6 +90,7 @@ class Settings:
     backoff_cap: float
     log_level: str
     log_format: str
+    api_key: Optional[str]
 
 
 def _env(key: str, default: str) -> str:
@@ -148,6 +149,12 @@ def parse_settings(argv: Optional[List[str]] = None) -> Settings:
         default=_env("VISIONOPS_LOG_FORMAT", "text"),
         help="Log output format (env VISIONOPS_LOG_FORMAT).",
     )
+    parser.add_argument(
+        "--api-key",
+        default=_env("VISIONOPS_API_KEY", ""),
+        help="API key (integration role) sent as X-API-Key when Core auth is enabled "
+        "(env VISIONOPS_API_KEY). Optional when Core runs with auth disabled.",
+    )
     ns = parser.parse_args(argv)
     return Settings(
         api=ns.api.rstrip("/"),
@@ -158,6 +165,7 @@ def parse_settings(argv: Optional[List[str]] = None) -> Settings:
         backoff_cap=ns.backoff_cap,
         log_level=ns.log_level.upper(),
         log_format=ns.log_format,
+        api_key=ns.api_key.strip() or None,
     )
 
 
@@ -983,6 +991,10 @@ class CoreClient:
         self.s = settings
         self.session = requests.Session()
         self.session.headers["User-Agent"] = "visionops-ai-worker/1.0"
+        # When Core auth is enabled, the worker authenticates with an integration API key. Harmless
+        # when auth is disabled (Core ignores it). Sent on every request via the shared session.
+        if settings.api_key:
+            self.session.headers["X-API-Key"] = settings.api_key
 
     def close(self) -> None:
         self.session.close()

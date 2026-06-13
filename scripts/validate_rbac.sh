@@ -71,6 +71,12 @@ pass "$(code $API/users -H "X-API-Key: $KEY")" 403 "integration key lists users 
 pass "$(code $API/vehicles -H 'Authorization: Bearer vos_deadbeef')" 401 "bogus token -> 401"
 
 log ""
+log "## AI/worker surface authentication floor (Stage 0 security floor)"
+pass "$(code $API/ai/tasks)" 401 "GET /ai/tasks without token -> 401 (was open)"
+pass "$(code $API/ai/tasks -H "X-API-Key: $KEY")" 200 "GET /ai/tasks with integration key -> 200"
+pass "$(code $API/cameras/anycam/frame)" 401 "GET /cameras/{id}/frame without token -> 401 (was open)"
+
+log ""
 log "## logout revokes the session"
 curl -s -X POST $API/auth/logout -H "Authorization: Bearer $GUARD_TOK" >/dev/null
 pass "$(code $API/passes -H "Authorization: Bearer $GUARD_TOK")" 401 "guard token after logout -> 401"
