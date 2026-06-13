@@ -6,6 +6,8 @@ rust-version = "1.85"
 description = "VisionOps kernel — media/DVR control plane, perception ingest + sampler, zone engine, auth, and the worker SDK contract. The open, domain-agnostic platform that domain apps build on."
 license = "Apache-2.0"
 repository = "https://github.com/wms2537/visionops"
+keywords = ["cctv", "nvr", "rtsp", "surveillance", "video"]
+categories = ["multimedia::video", "web-programming::http-server"]
 
 [lib]
 name = "visionops_kernel"

@@ -1,10 +1,12 @@
-//! VisionOps composing server — links the open kernel with the bundled (proprietary) domain apps
-//! for a deployment.
+//! VisionOps composing server — links the open kernel with the open generic apps (access control,
+//! movement, search), plus optional proprietary verticals (e.g. bakery) behind the `verticals`
+//! feature.
 //!
-//! Boots the SQLite store + kernel migrations, applies bundled apps' schemas, registers their
-//! perception consumers and routers, starts the recorder/sampler supervisors + background services
-//! (indexer, health, retention, app retention, notifier), and serves the HTTP API + recorded media.
-//! A different deployment (e.g. a bakery) simply links different app crates here.
+//! Boots the SQLite store + kernel migrations, applies each app's schema, registers their perception
+//! consumers and routers, starts the recorder/sampler supervisors + background services (indexer,
+//! health, retention, app retention, notifier), and serves the HTTP API + recorded media. The OPEN
+//! reference build (`--no-default-features`) composes only kernel + the Apache-2.0 generic apps; a
+//! different deployment links a different set of app crates here.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -46,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
     visionops_entry::schema::init(&pool)
         .await
         .context("entry schema init")?;
+    #[cfg(feature = "verticals")]
     visionops_bakery::schema::init(&pool)
         .await
         .context("bakery schema init")?;
@@ -61,11 +64,12 @@ async fn main() -> anyhow::Result<()> {
 
     let recorder = RecorderManager::new(pool.clone(), cfg.clone());
     let sampler = SamplerManager::new(pool.clone(), cfg.clone());
-    // Register the perception consumers (zones = kernel-open spatial primitive; ANPR = Campus Entry
-    // app). The kernel ingest path fans batches out to these without naming them — adding an app
-    // (e.g. BakerySense) is a push here, not an edit to the ingest handler.
-    // Bundled domain apps load their own config from the environment (the kernel carries none).
+    // Register the perception consumers (zones = kernel-open spatial primitive; ANPR = the open
+    // access-control app). The kernel ingest path fans batches out to these without naming them —
+    // adding an app is a push here, not an edit to the ingest handler.
+    // Each app loads its own config from the environment (the kernel carries none).
     let entry_cfg = Arc::new(visionops_entry::config::EntryConfig::from_env());
+    #[cfg(feature = "verticals")]
     let bakery_cfg = Arc::new(visionops_bakery::config::BakeryConfig::from_env());
     let movement_cfg = Arc::new(visionops_movement::config::MovementConfig::from_env());
     let search_cfg = Arc::new(visionops_search::config::SearchConfig::from_env());
@@ -73,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
     let consumers: Arc<Vec<Arc<dyn DetectionConsumer>>> = Arc::new(vec![
         // Zone engine = kernel-open spatial primitive.
         services::zones::ZoneEngine::new(pool.clone(), cfg.clone()),
-        // Campus Entry (proprietary) ANPR engine, registered as a consumer over the kernel seam.
+        // Access-control ANPR engine (open generic app), registered as a consumer over the seam.
         visionops_entry::anpr::AnprEngine::new(pool.clone(), cfg.clone(), entry_cfg.clone()),
     ]);
     let http = reqwest::Client::builder()
@@ -112,10 +116,13 @@ async fn main() -> anyhow::Result<()> {
             visionops_entry::retention::run(p.clone(), c.clone(), e.clone())
         });
         // BakerySense rollup loop (aggregates anonymous behaviour metrics + prunes its observations).
-        let (p, b) = (pool.clone(), bakery_cfg.clone());
-        spawn_supervised("bakery_rollup", move || {
-            visionops_bakery::rollup::run(p.clone(), b.clone())
-        });
+        #[cfg(feature = "verticals")]
+        {
+            let (p, b) = (pool.clone(), bakery_cfg.clone());
+            spawn_supervised("bakery_rollup", move || {
+                visionops_bakery::rollup::run(p.clone(), b.clone())
+            });
+        }
         // Movement: the ReID candidate proposer + the red-zone breach rule engine.
         let (p, m) = (pool.clone(), movement_cfg.clone());
         spawn_supervised("movement_reid", move || {
@@ -154,14 +161,20 @@ async fn main() -> anyhow::Result<()> {
             .allow_headers(Any)
     };
 
-    let app = Router::new()
+    // Open generic apps merge their routers here; the kernel router is unaware of them.
+    #[allow(unused_mut)]
+    let mut app = Router::new()
         .merge(routes::api_router())
         .merge(routes::metrics::router())
-        // Bundled domain apps (proprietary) merge their routers here; the kernel router is unaware.
         .merge(visionops_entry::routes::router())
-        .merge(visionops_bakery::routes::router(bakery_cfg.clone()))
         .merge(visionops_movement::routes::router(movement_cfg.clone()))
-        .merge(visionops_search::routes::router(search_cfg.clone()))
+        .merge(visionops_search::routes::router(search_cfg.clone()));
+    // Proprietary verticals merge here only when the `verticals` feature is enabled.
+    #[cfg(feature = "verticals")]
+    {
+        app = app.merge(visionops_bakery::routes::router(bakery_cfg.clone()));
+    }
+    let app = app
         .nest_service("/media/recordings", ServeDir::new(&cfg.recordings_dir))
         .nest_service("/media/clips", ServeDir::new(&cfg.clips_dir))
         .nest_service("/media/snapshots", ServeDir::new(&cfg.snapshots_dir))
