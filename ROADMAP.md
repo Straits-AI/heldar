@@ -91,17 +91,32 @@ Goal (memo §14): *own the base VMS.* Record compressed packets without decode; 
 
 ---
 
-## ⬜ Stage 2 — AI frame sampler
+## ✅ Stage 2 — AI frame sampler  — **DONE**
 
-**Goal:** AI consumes normalized frames **without breaking recording or live view.** (memo §4 Layer 4, §14)
+**Goal (memo §4 Layer 4, §14):** AI consumes normalized frames **without breaking recording or live view.** Built on the kernel: a budgeted sub-stream sampler (the only component that decodes in the 24/7 path), an `ai_tasks` / `detections` data model, and a pull-based **worker contract** — workers never touch RTSP. Integrator guide: [`docs/AI-WORKERS.md`](docs/AI-WORKERS.md); implementation: `ARCHITECTURE.md` §15. Reference Python worker: `apps/ai`.
 
-- [ ] Substream frame sampler (decode only sampled frames; record stays decode-free)
-- [ ] FPS budgeting + per-task scheduler (`AITask`: camera, type, fps, resolution, zone, priority)
-- [ ] Frame queue / frame-sample object passed to workers (not raw RTSP)
-- [ ] High-res snapshot on trigger (main-stream crop for plate/face)
-- [ ] Backpressure policy: normal → high-load → severe → recovery (720p·5fps → 480p·1fps critical-only → restore)
+**Shipped checklist:**
 
-**Done when:** AI workers run at sustained load with recording/live view unaffected.
+- [x] **Substream frame sampler** — one supervised FFmpeg per AI-enabled camera, `-vf fps=<budgeted>,scale=<width>:-2` → `frames/<cam>/latest.jpg` (`-update 1`, overwritten in place). Decode happens **only** here; the recorder's 24/7 `-c copy` path stays decode-free. Sub-stream preferred (falls back to record URL); crash → `offline` + `sampler_offline` event + exponential backoff. (`services/sampler.rs`)
+- [x] **FPS budgeting + task model** — global `VISIONOPS_AI_MAX_TOTAL_FPS` (default 40) split across active cameras: per-camera `effective = min(MAX(task.fps), budget/active)`, floored at `MIN_FPS=0.5`. `ai_tasks` carries `task_type / enabled / stream_profile / fps / width / config`; any create/update/delete triggers `reconcile()` → rebalance. (`services/sampler.rs`, `routes/ai.rs`, `migrations/0003_ai.sql`, `models.rs`)
+- [x] **Frame delivery to workers (not raw RTSP)** — `GET /api/v1/cameras/{id}/frame` serves the latest sampled JPEG with `x-frame-age-ms` + `x-frame-captured-at` freshness headers; `GET /api/v1/ai/tasks` is worker discovery (each task + its `frame_url`); `GET /api/v1/ai/samplers` reports per-camera state + effective fps. (`routes/ai.rs`)
+- [x] **Detections / events ingestion** — `POST /api/v1/ai/events` writes detections (`bbox` normalized `[x,y,w,h]` 0…1, `track_id`, `attributes`) and an optional event through the **same** `events`/notifier path as the kernel, so `warning`/`critical` AI events reuse the Stage 1 alert webhook. `GET /api/v1/cameras/{id}/detections` queries them. (`routes/ai.rs`, `repo.rs`, `migrations/0003_ai.sql`)
+- [x] **Backpressure** — implemented as a **static** proportional fps split (adding AI cameras degrades per-camera fps, not the host). (`services/sampler.rs`)
+- [x] **Reference worker + `Analyzer` seam** — `apps/ai/worker.py`: supervisor + per-task threads, discover → pull → analyze → post, retry/backoff, graceful shutdown. Ships a model-free `MotionAnalyzer` (frame-differencing) so the full path validates with no GPU/model; Stage 3 registers a real model behind the same `Analyzer` interface. (`apps/ai/`)
+
+**Deferred (rolls into Stage 3 / later):**
+
+- [ ] **High-res snapshot on trigger** (main-stream crop for plate/face) — not in the sampler; a worker can use the Stage 0 `/snapshot` endpoint today. Per-task `stream_profile=main` is stored/validated but the sampler currently always samples the sub-stream.
+- [ ] **Dynamic backpressure ladder** (720p·5fps → 480p·1fps critical-only → recovery) — current split is static proportional fps; load-driven resolution downgrade + auto-recovery is future work.
+- [ ] **Frame queue / `frame_id` stream** — realized as a single last-value `latest.jpg` per camera (staleness via `x-frame-age-ms`), not a multi-frame queue.
+
+**Cross-ref to memo §14 Stage 2 success criterion:**
+
+| Memo §14 success criterion | Status | Backed by |
+|---|---|---|
+| AI consumes frames **without breaking recording/live view** | ✅ sampler is a separate supervised ffmpeg set decoding only the sub-stream at a bounded total fps; recorder `-c copy` + MediaMTX live view share no process/file/channel with it; a crashed/absent worker only stops frame *reads* | `services/sampler.rs`, `routes/ai.rs`, `ARCHITECTURE.md` §15.8 |
+
+> AI begins here. Detection/tracking **models** (YOLO/RT-DETR, ByteTrack/BoT-SORT) and the canonical event model are **Stage 3**, slotting into the worker's `Analyzer` interface with no change to the kernel or the HTTP contract. Still research.md **Level 1** substrate until Stage 3 turns frames into events.
 
 ---
 

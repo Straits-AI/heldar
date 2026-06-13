@@ -198,3 +198,84 @@ pub struct Event {
     pub payload: Json<Value>,
     pub created_at: DateTime<Utc>,
 }
+
+// ---- Stage 2: AI frame sampling ----
+
+/// A perception task to run on a camera (consumed by AI workers).
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct AiTask {
+    pub id: String,
+    pub camera_id: String,
+    pub task_type: String,
+    pub enabled: bool,
+    pub stream_profile: String,
+    pub fps: f64,
+    pub width: i64,
+    pub config: Json<Value>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AiTaskCreate {
+    pub task_type: String,
+    pub stream_profile: Option<String>,
+    pub fps: Option<f64>,
+    pub width: Option<i64>,
+    pub config: Option<Value>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct AiTaskUpdate {
+    pub task_type: Option<String>,
+    pub stream_profile: Option<String>,
+    pub fps: Option<f64>,
+    pub width: Option<i64>,
+    pub config: Option<Value>,
+    pub enabled: Option<bool>,
+}
+
+/// A detection result posted by an AI worker.
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct Detection {
+    pub id: String,
+    pub camera_id: String,
+    pub task_type: String,
+    pub timestamp: DateTime<Utc>,
+    pub label: Option<String>,
+    pub confidence: Option<f64>,
+    pub bbox: Option<Json<Value>>,
+    pub track_id: Option<String>,
+    pub attributes: Json<Value>,
+    pub created_at: DateTime<Utc>,
+}
+
+/// One detection inside an ingest request.
+#[derive(Debug, Deserialize)]
+pub struct DetectionIngest {
+    pub label: Option<String>,
+    pub confidence: Option<f64>,
+    pub bbox: Option<Value>,
+    pub track_id: Option<String>,
+    pub attributes: Option<Value>,
+}
+
+/// Optional event an AI worker can raise alongside its detections.
+#[derive(Debug, Deserialize)]
+pub struct IngestEvent {
+    pub event_type: String,
+    pub severity: Option<String>,
+    pub payload: Option<Value>,
+}
+
+/// Payload an AI worker POSTs to ingest detections (and optionally an event) for a camera.
+#[derive(Debug, Deserialize)]
+pub struct AiIngest {
+    pub camera_id: String,
+    pub task_type: String,
+    pub timestamp: Option<String>,
+    #[serde(default)]
+    pub detections: Vec<DetectionIngest>,
+    pub event: Option<IngestEvent>,
+}

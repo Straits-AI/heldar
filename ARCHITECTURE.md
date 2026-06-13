@@ -4,14 +4,21 @@ This document describes the Stage 0 "media kernel" of VisionOps Core **as actual
 built** in `apps/core` (Rust / Axum / Tokio / SQLx), not as aspirationally planned.
 It is the base VMS/NVR control plane: camera registry, RTSP ingest, segment
 recording, timeline index, playback / clip / snapshot, brokered live view, and
-camera health. Python AI workers and the detection/tracking kernel are later stages
-and are intentionally absent here.
+camera health. The detection/tracking **models** are a later stage (Stage 3) and
+are intentionally absent here.
 
 **Stage 1 (observability & reliability) has since shipped** on top of this kernel —
 storage/disk monitoring, Prometheus metrics, an alert webhook, a disk-free
 retention floor, recording-gap reporting, observed fps/bitrate, a `/readyz`
 readiness probe, and supervised background tasks. It is documented in §14 below and,
 for operators, in [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
+
+**Stage 2 (AI frame sampler) has also shipped** — a budgeted sub-stream frame
+sampler (the only component that decodes in the 24/7 path), an `ai_tasks` /
+`detections` data model, and a pull-based **worker contract** (discover tasks →
+pull the latest sampled frame → post detections/events). AI workers never touch
+RTSP. It is documented in §15 below and, for integrators, in
+[`docs/AI-WORKERS.md`](docs/AI-WORKERS.md); the reference worker lives in `apps/ai`.
 
 Stage 0 maps to **memo §14 "Stage 0 — Media kernel MVP"** (camera registry, RTSP
 ingest, recording segmenter, timeline index, playback API, clip export, basic live
@@ -79,7 +86,7 @@ sampler) is deliberately out of scope for Stage 0.
 | **Layer 3 — Playback** | Segment listing, coalesced timeline ranges, clip export, snapshot extraction | `routes/playback.rs`, `routes/recordings.rs`, `services/clip.rs`, `services/snapshot.rs` |
 | **Layer 3 — Live view (brokered)** | MediaMTX path registration + HLS/WebRTC/RTSP URL minting (server-side creds) | `services/mediamtx.rs`, `routes/liveview.rs` |
 | **Camera health** | Staleness downgrade monitor + status & event APIs | `services/health.rs`, `routes/health.rs` |
-| **Layer 4 — AI frame sampler** | **Not in Stage 0** (Stage 2+). `events`/`capabilities` schema is forward-shaped for it. | — |
+| **Layer 4 — AI frame sampler** | **Shipped in Stage 2** (§15): budgeted sub-stream sampler → `frames/<cam>/latest.jpg`; `ai_tasks`/`detections` tables; pull-based worker contract. Detection/tracking *models* are Stage 3. | `services/sampler.rs`, `routes/ai.rs`, `migrations/0003_ai.sql`, `apps/ai/worker.py` |
 
 ### Process boot order (`main.rs`)
 
@@ -528,7 +535,7 @@ All via `VISIONOPS_*` env vars (see `.env.example`). Notable defaults:
 | **No auth on the API** | Local/LAN dev; CORS is the only gate | AuthN/AuthZ + tenant scoping (the `tenants`/`sites` tables already exist) — memo §14 Stage 1+ |
 | **Audio dropped** (`-an`) | Video-first VMS; halves edge cases | Audio capture can be re-enabled when needed |
 | **Evidence lock has no mutating API** (`locked`/`incident_id` columns only) | Retention already honors the flag | `lockEvidence(...)` endpoint (memo §5 Layer 3 playback API) |
-| **No AI / frame sampler / decode pipeline** | Stage 0 is the media kernel; clean ingest/record/decode/infer separation already in place (memo §6.1) | Stage 2 frame sampler + Stage 3 detection kernel; `events`/`capabilities` schema pre-shaped |
+| **No AI / frame sampler / decode pipeline** *(Stage 0 only)* | Stage 0 is the media kernel; clean ingest/record/decode/infer separation already in place (memo §6.1) | **Resolved in Stage 2** — frame sampler + worker contract shipped (§15); detection/tracking *models* are Stage 3. `events`/`capabilities` schema was pre-shaped for it |
 | **No SMART / disk-throughput monitoring** | statvfs free-space + footprint + write-rate projection cover capacity planning (Stage 1, §14); per-byte throughput/SMART is lower-value on the edge box | Future hardware-health probe if a deployment needs it |
 | **Single-node, raw video stays local** | Matches memo §4.3 core principle | Stage 1 edge offline buffer + cloud sync retry (still planned; alerting webhook ships the metadata/alert upstream path) |
 
@@ -696,3 +703,161 @@ permanently take metrics, alerting, or retention offline. This is Stage 1's
 "service watchdog / auto-restart" for the in-process services; per-camera FFmpeg
 recorders remain supervised by `RecorderManager` (reconnect with exponential
 backoff).
+
+---
+
+## 15. Stage 2 — AI frame sampler
+
+Stage 2 (memo §5 Layer 4, §14) makes the kernel **feed AI without owning AI**: it
+decodes a budgeted sample of each camera's sub-stream to a JPEG that workers pull,
+stores a task model + detection results, and exposes a pull-based worker contract.
+AI workers never touch RTSP, and a slow/absent worker cannot affect recording or
+live view. The integrator-facing guide is [`docs/AI-WORKERS.md`](docs/AI-WORKERS.md);
+this section documents the implementation. New code: `services/sampler.rs`,
+`routes/ai.rs`, `migrations/0003_ai.sql`, the AI types in `models.rs`, and the
+`ai_*` settings in `config.rs`. The reference Python worker lives in `apps/ai`.
+
+```
+   AI tasks (DB)            SamplerManager (services/sampler.rs)             AI worker (apps/ai)
+   ai_tasks ──reconcile──►  rebalance(): one ffmpeg per AI-enabled camera   ┌──────────────┐
+   (enabled)                  ▼                                             │ GET /ai/tasks│ discover
+                       ffmpeg -vf fps=<budgeted>,scale=<w>:-2 ──► decode    │ GET /frame   │ pull JPEG
+                              ▼                                             │ POST /ai/    │ post results
+                    frames/<cam>/latest.jpg  (─update 1, overwritten)       │   events     │
+                              ▼                                             └──────┬───────┘
+              GET /api/v1/cameras/{id}/frame  (+ x-frame-age-ms / -captured-at)    │
+                                                                                   ▼
+                                          POST /api/v1/ai/events ──► detections table + events log
+```
+
+### 15.1 Sampler supervisor (`services/sampler.rs`)
+
+`SamplerManager` is constructed in `main.rs`, stored in `AppState`, started via
+`start_all()` and stopped on shutdown. It owns `Mutex<HashMap<camera_id,
+SamplerTask>>` (a `watch::Sender<bool>` stop channel + `JoinHandle` per camera), a
+parallel `info` map of `SamplerInfo {camera_id, state, fps}`, and a
+`rebalance_lock`.
+
+- **`rebalance()`** (also reached via `reconcile()`, and by `start_all()`) is the
+  single mutating path, **serialized by `rebalance_lock`** so concurrent AI-task
+  edits can't race into overlapping ffmpegs. It: stops every running sampler,
+  clears `info`, returns early if `!ai_enabled`, then queries the active set —
+  `SELECT c.id, MAX(t.fps), MAX(t.width) FROM cameras c JOIN ai_tasks t ON
+  t.camera_id=c.id WHERE c.enabled=1 AND t.enabled=1 GROUP BY c.id` — and spawns
+  one supervisor per camera at the budgeted fps. **One sampler per camera**, with
+  fps/width taken as the **MAX across that camera's enabled tasks** (all tasks on a
+  camera share one ffmpeg and one frame file).
+- **`supervise()` loop** per camera: loads the camera, resolves the source as
+  `stream_url(cam,"sub")` falling back to `record_url(cam)` (sub-stream preferred —
+  the per-task `stream_profile` is *advisory* here today), `create_dir_all` on the
+  frames dir, and spawns:
+
+  ```
+  ffmpeg -nostdin -hide_banner -loglevel warning -rtsp_transport tcp -timeout 15000000
+         -i <url> -an -vf "fps=<fps>,scale=<width>:-2" -q:v 5
+         -f image2 -update 1 -y  <frames_dir>/<cam>/latest.jpg
+  ```
+
+  stderr is drained concurrently (tail capped at 8 KB), `kill_on_drop(true)`
+  prevents orphans. On ffmpeg exit: state → `offline`, a **`sampler_offline`**
+  warning event is logged (masked tail), and it retries with exponential backoff
+  (doubling, capped at 30 s). On stop it kills the child and returns.
+- **States** (surfaced via `/api/v1/ai/samplers`): `connecting` → `sampling`, or
+  `offline` / `error` / `stopped`. `MIN_FPS = 0.5` is the per-camera floor.
+
+### 15.2 Frame storage
+
+`VISIONOPS_FRAMES_DIR` (default `<DATA_DIR>/frames`, via
+`Config::camera_frames_dir`) holds **one `latest.jpg` per camera** in
+`frames/<camera_id>/`. `-update 1` overwrites that single file in place — there is
+no growing frame directory and no per-frame id; it is the always-current frame
+(last-value). `GET /api/v1/cameras/{id}/frame` serves it with `Content-Type:
+image/jpeg`, `Cache-Control: no-store`, and two freshness headers computed from the
+file mtime: **`x-frame-age-ms`** and **`x-frame-captured-at`** (RFC3339). The `{id}`
+segment is rejected if it contains `/`, `\`, or `..` (path-traversal defense);
+missing file → `404` ("no sampled frame yet…").
+
+### 15.3 Budget & backpressure
+
+A single global fps budget is shared across AI-enabled cameras so adding cameras
+degrades per-camera fps instead of overloading the host (memo §5 backpressure):
+
+```
+active         = # enabled cameras with ≥1 enabled AI task
+budget         = VISIONOPS_AI_MAX_TOTAL_FPS  (default 40, floored at 1.0)
+per_camera_cap = budget / active
+effective_fps  = max( min(MAX(task.fps), per_camera_cap), 0.5 )
+```
+
+So with the default budget: 4 AI cameras → ≤10 fps each, 8 → ≤5, 20 → ≤2; a camera
+never exceeds its requested fps. The `MIN_FPS=0.5` floor wins over the strict budget
+(many cameras can push the summed rate slightly above budget rather than starve any
+camera to zero). Any AI-task create/update/delete triggers `reconcile()` →
+`rebalance()`, recomputing the split and restarting samplers. This is a **static**
+proportional fps split; the dynamic resolution-downgrade ladder + load-driven
+recovery from memo §5 is deferred (per-task `width` is honored as MAX, not
+auto-downgraded). High-res on-trigger capture is not in the sampler — a worker can
+use the Stage 0 `/snapshot` endpoint for a main-stream grab.
+
+### 15.4 Data model (`migrations/0003_ai.sql`)
+
+Two tables, both `camera_id` FK → `cameras` `ON DELETE CASCADE`:
+
+- **`ai_tasks`** — `id`, `camera_id`, `task_type` (free-form: detection/anpr/…),
+  `enabled` (default 1), `stream_profile` (`sub`|`main`, default `sub`), `fps`
+  (REAL, default 5, clamped 0.1…30 on write), `width` (INT, default 1280, clamped
+  160…3840), `config` (JSON blob: model params/zones/thresholds, default `{}`),
+  `created_at`/`updated_at`. Index `idx_ai_tasks_camera`.
+- **`detections`** — `id`, `camera_id`, `task_type`, `timestamp`, `label`,
+  `confidence`, `bbox` (JSON `[x,y,w,h]` normalized 0…1), `track_id`, `attributes`
+  (JSON, default `{}`), `created_at`. Indexes `idx_detections_cam_time
+  (camera_id,timestamp)`, `idx_detections_label`.
+
+### 15.5 HTTP surface (`routes/ai.rs`)
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET / POST | `/api/v1/cameras/{id}/ai-tasks` | list a camera's tasks / create a task (`201`) |
+| PATCH / DELETE | `/api/v1/ai-tasks/{task_id}` | partial update / delete (`204`) — both `reconcile()` |
+| GET | `/api/v1/ai/tasks` | **worker discovery**: every enabled task on an enabled camera + its `frame_url` |
+| GET | `/api/v1/ai/samplers` | per-camera sampler `{camera_id, state, fps}` (effective fps) |
+| GET | `/api/v1/cameras/{id}/frame` | latest sampled JPEG + `x-frame-age-ms` / `x-frame-captured-at` |
+| POST | `/api/v1/ai/events` | **ingest**: detections (+ optional event) for a camera |
+| GET | `/api/v1/cameras/{id}/detections` | query detections (`from`/`to`/`label`/`limit≤5000`, newest-first) |
+
+Create/update validate `stream_profile ∈ {sub,main}` and clamp fps/width; task ids
+are `ai_<uuid>`. The router is `merge`d in `routes/mod.rs`.
+
+### 15.6 Detections & events ingestion
+
+`POST /api/v1/ai/events` takes `AiIngest {camera_id, task_type, timestamp?,
+detections[], event?}`. The `camera_id` must exist (`404` otherwise). Each
+`DetectionIngest {label?, confidence?, bbox?, track_id?, attributes?}` is inserted
+as a `det_<uuid>` row stamped with the batch `timestamp` (RFC3339, or server `now()`
+if omitted/unparseable); the response is `{detections_ingested: N}`. An optional
+`event {event_type, severity?, payload?}` is written through the **same
+`repo::log_event`** the kernel uses (default severity `info`), so AI alerts at
+`warning`/`critical` flow straight into the Stage 1 notifier/webhook path (§14.3)
+with no extra wiring.
+
+### 15.7 Boot, wiring & config
+
+`main.rs` builds `SamplerManager::new(pool, cfg)`, puts it in `AppState`, and calls
+`sampler.start_all().await` after the recorders start; `shutdown_signal` calls
+`sampler.shutdown()` alongside the recorders. The sampler's internal per-camera
+tasks provide their own crash/backoff supervision (it is not wrapped in
+`spawn_supervised`). Config (`config.rs`): `VISIONOPS_AI_ENABLED` (default `true`;
+`false` runs no samplers), `VISIONOPS_AI_MAX_TOTAL_FPS` (40), `VISIONOPS_DEFAULT_AI_FPS`
+(5), `VISIONOPS_DEFAULT_AI_WIDTH` (1280), `VISIONOPS_FRAMES_DIR`
+(`<DATA_DIR>/frames`).
+
+### 15.8 Isolation (the Stage 2 success criterion)
+
+Sampling runs as a **separate set of supervised ffmpeg processes** that decode only
+the sub-stream at a bounded total fps, writing to their own `frames/` tree. The
+recorder's 24/7 `-c copy` path (no decode) and the MediaMTX live view are entirely
+independent — there is no shared process, channel, or file between them. A crashing,
+slow, or absent AI worker only stops *frames being read*; the sampler keeps writing,
+and recording/live view are unaffected. This satisfies memo §14 Stage 2: *"AI
+consumes frames without breaking recording/live view."* Detection/tracking models
+themselves are Stage 3, plugging into the reference worker's `Analyzer` seam.

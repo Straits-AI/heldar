@@ -243,3 +243,79 @@ export interface Gaps {
   gap_count: number;
   total_gap_seconds: number;
 }
+
+// ---- Stage 2: AI perception ----
+
+/** Which encoded stream the sampler decodes for a task. */
+export type StreamProfile = "sub" | "main";
+
+/** Sampler runtime states (distinct from camera/recorder states). */
+export type SamplerState =
+  | "sampling"
+  | "connecting"
+  | "offline"
+  | "error"
+  | "stopped";
+
+/** A perception task configured on a camera (consumed by AI workers). */
+export interface AiTask {
+  id: string;
+  camera_id: string;
+  /** Free-form: detection | anpr | tracking | … */
+  task_type: string;
+  enabled: boolean;
+  stream_profile: string;
+  /** Requested sample rate (the global budget may reduce the effective rate). */
+  fps: number;
+  /** Target sample width in px; height keeps aspect. */
+  width: number;
+  config: Record<string, unknown>;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface AiTaskCreate {
+  task_type: string;
+  fps?: number;
+  width?: number;
+  stream_profile?: StreamProfile;
+  config?: Record<string, unknown>;
+  enabled?: boolean;
+}
+
+export type AiTaskUpdate = Partial<AiTaskCreate>;
+
+/** Worker discovery view of an enabled task: includes the frame URL to pull. */
+export interface WorkerTask {
+  id: string;
+  camera_id: string;
+  task_type: string;
+  stream_profile: string;
+  fps: number;
+  width: number;
+  config: Record<string, unknown>;
+  /** Path to the latest sampled JPEG (GET, image/jpeg). */
+  frame_url: string;
+}
+
+/** Per-camera sampler status (state + effective fps after budgeting). */
+export interface SamplerInfo {
+  camera_id: string;
+  state: SamplerState;
+  fps: number;
+}
+
+/** A detection result posted by an AI worker. */
+export interface Detection {
+  id: string;
+  camera_id: string;
+  task_type: string;
+  timestamp: string;
+  label?: string | null;
+  confidence?: number | null;
+  /** Normalized [x, y, w, h] in 0..1, relative to the sampled frame. */
+  bbox?: number[] | null;
+  track_id?: string | null;
+  attributes: Record<string, unknown>;
+  created_at: string;
+}

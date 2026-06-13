@@ -78,6 +78,29 @@ pub async fn render(pool: &SqlitePool, cfg: &Config) -> sqlx::Result<String> {
         recordings_bytes as f64,
     );
 
+    let ai_tasks_enabled: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM ai_tasks WHERE enabled = 1")
+            .fetch_one(pool)
+            .await?;
+    let detections_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM detections")
+        .fetch_one(pool)
+        .await?;
+    metric(
+        &mut out,
+        "visionops_ai_tasks_enabled",
+        "Enabled AI tasks",
+        "gauge",
+        ai_tasks_enabled as f64,
+    );
+    // gauge (not counter): the stored count can decrease as the retention sweeper prunes old rows.
+    metric(
+        &mut out,
+        "visionops_detections_stored",
+        "AI detections currently stored",
+        "gauge",
+        detections_total as f64,
+    );
+
     if let Some(d) = storage::disk_stats_async(cfg.recordings_dir.clone()).await {
         metric(
             &mut out,

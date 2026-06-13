@@ -12,6 +12,7 @@ import type {
 } from "../lib/types";
 import { LiveView } from "../components/LiveView";
 import { Timeline } from "../components/Timeline";
+import { AiPanel } from "../components/AiPanel";
 import {
   Button,
   EmptyState,
@@ -402,6 +403,8 @@ export function CameraDetail() {
               </div>
             )}
           </Panel>
+
+          <AiPanel cameraId={id} />
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <Panel title="Snapshot" subtitle="Frame grab">

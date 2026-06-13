@@ -217,6 +217,8 @@ async fn update_camera(
     .await?;
 
     st.recorder.reconcile(&id).await;
+    // A disable / URL change / enable also affects AI sampling for this camera.
+    st.sampler.reconcile().await;
     Ok(Json(load_camera(&st.pool, &id).await?.into()))
 }
 
@@ -230,8 +232,10 @@ async fn delete_camera(
         .bind(&id)
         .execute(&st.pool)
         .await?;
-    let dir = st.cfg.camera_recordings_dir(&id);
-    let _ = tokio::fs::remove_dir_all(&dir).await;
+    // Stop any AI sampler for this camera (its ai_tasks cascade-deleted) and remove its on-disk data.
+    st.sampler.reconcile().await;
+    let _ = tokio::fs::remove_dir_all(st.cfg.camera_recordings_dir(&id)).await;
+    let _ = tokio::fs::remove_dir_all(st.cfg.camera_frames_dir(&id)).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

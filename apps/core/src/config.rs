@@ -9,6 +9,7 @@ pub struct Config {
     pub recordings_dir: PathBuf,
     pub clips_dir: PathBuf,
     pub snapshots_dir: PathBuf,
+    pub frames_dir: PathBuf,
     pub ffmpeg_bin: String,
     pub ffprobe_bin: String,
     pub mediamtx_api_url: String,
@@ -33,6 +34,15 @@ pub struct Config {
     pub alert_webhook_url: Option<String>,
     /// How often the alert notifier polls for new events to deliver.
     pub notifier_interval_s: u64,
+    /// Master switch for AI frame sampling (Stage 2). Cameras still need an enabled AI task.
+    pub ai_enabled: bool,
+    /// Global frame-sampling budget (frames/sec summed across all cameras); per-camera fps is
+    /// reduced proportionally above this so adding AI cameras degrades fps instead of overloading.
+    pub ai_max_total_fps: f64,
+    pub default_ai_fps: f64,
+    pub default_ai_width: i64,
+    /// How long detection rows are kept before the retention sweeper prunes them.
+    pub detection_retention_hours: i64,
 }
 
 fn var(key: &str) -> Option<String> {
@@ -66,6 +76,9 @@ impl Config {
         let snapshots_dir = var("VISIONOPS_SNAPSHOTS_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("snapshots"));
+        let frames_dir = var("VISIONOPS_FRAMES_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("frames"));
 
         let cors_origins = var_or("VISIONOPS_CORS_ORIGINS", "http://localhost:5173")
             .split(',')
@@ -82,6 +95,7 @@ impl Config {
             recordings_dir,
             clips_dir,
             snapshots_dir,
+            frames_dir,
             ffmpeg_bin: var_or("VISIONOPS_FFMPEG_BIN", "ffmpeg"),
             ffprobe_bin: var_or("VISIONOPS_FFPROBE_BIN", "ffprobe"),
             mediamtx_api_url: var_or("VISIONOPS_MEDIAMTX_API_URL", "http://127.0.0.1:9997"),
@@ -101,11 +115,21 @@ impl Config {
             min_free_disk_bytes: (min_free_disk_gb * 1024.0 * 1024.0 * 1024.0) as u64,
             alert_webhook_url: var("VISIONOPS_ALERT_WEBHOOK_URL"),
             notifier_interval_s: parse_or("VISIONOPS_NOTIFIER_INTERVAL_S", 15),
+            ai_enabled: parse_bool("VISIONOPS_AI_ENABLED", true),
+            ai_max_total_fps: parse_or("VISIONOPS_AI_MAX_TOTAL_FPS", 40.0),
+            default_ai_fps: parse_or("VISIONOPS_DEFAULT_AI_FPS", 5.0),
+            default_ai_width: parse_or("VISIONOPS_DEFAULT_AI_WIDTH", 1280),
+            detection_retention_hours: parse_or("VISIONOPS_DETECTION_RETENTION_HOURS", 168),
         }
     }
 
     /// Directory where a camera's segments are stored.
     pub fn camera_recordings_dir(&self, camera_id: &str) -> PathBuf {
         self.recordings_dir.join(camera_id)
+    }
+
+    /// Directory where a camera's sampled AI frames are written.
+    pub fn camera_frames_dir(&self, camera_id: &str) -> PathBuf {
+        self.frames_dir.join(camera_id)
     }
 }

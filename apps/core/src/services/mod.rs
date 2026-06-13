@@ -7,5 +7,6 @@ pub mod metrics;
 pub mod notifier;
 pub mod recorder;
 pub mod retention;
+pub mod sampler;
 pub mod snapshot;
 pub mod storage;

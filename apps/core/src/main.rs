@@ -27,6 +27,7 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilte
 
 use crate::config::Config;
 use crate::services::recorder::RecorderManager;
+use crate::services::sampler::SamplerManager;
 use crate::state::AppState;
 
 #[tokio::main]
@@ -40,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
         &cfg.recordings_dir,
         &cfg.clips_dir,
         &cfg.snapshots_dir,
+        &cfg.frames_dir,
     ] {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -48,6 +50,7 @@ async fn main() -> anyhow::Result<()> {
     db::run_migrations(&pool).await.context("run migrations")?;
 
     let recorder = RecorderManager::new(pool.clone(), cfg.clone());
+    let sampler = SamplerManager::new(pool.clone(), cfg.clone());
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -56,11 +59,13 @@ async fn main() -> anyhow::Result<()> {
         pool: pool.clone(),
         cfg: cfg.clone(),
         recorder: recorder.clone(),
+        sampler: sampler.clone(),
         http,
         started_at: chrono::Utc::now(),
     };
 
     recorder.start_all().await.context("starting recorders")?;
+    sampler.start_all().await;
     // Supervise the background services: if one panics, it is respawned (production resilience).
     {
         let (p, c) = (pool.clone(), cfg.clone());
@@ -121,7 +126,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("VisionOps Core listening on http://{addr}");
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(recorder.clone()))
+        .with_graceful_shutdown(shutdown_signal(recorder.clone(), sampler.clone()))
         .await
         .context("server error")?;
 
@@ -167,7 +172,7 @@ where
     });
 }
 
-async fn shutdown_signal(recorder: Arc<RecorderManager>) {
+async fn shutdown_signal(recorder: Arc<RecorderManager>, sampler: Arc<SamplerManager>) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -186,6 +191,7 @@ async fn shutdown_signal(recorder: Arc<RecorderManager>) {
         _ = ctrl_c => {},
         _ = terminate => {},
     }
-    tracing::info!("shutdown signal received; stopping recorders");
+    tracing::info!("shutdown signal received; stopping recorders + samplers");
     recorder.shutdown().await;
+    sampler.shutdown().await;
 }

@@ -4,20 +4,26 @@
 // in development and the same origin in production.
 
 import type {
+  AiTask,
+  AiTaskCreate,
+  AiTaskUpdate,
   CameraCreate,
   CameraStatus,
   CameraTestResult,
   CameraUpdate,
   CameraView,
   ClipResult,
+  Detection,
   DiscoverOptions,
   DiscoverResponse,
   Gaps,
   LiveUrls,
+  SamplerInfo,
   SegmentView,
   SystemInfo,
   Timeline,
   VisionEvent,
+  WorkerTask,
 } from "./types";
 
 export class ApiError extends Error {
@@ -84,6 +90,13 @@ export interface EventQuery {
   limit?: number;
 }
 
+export interface DetectionQuery {
+  from?: string;
+  to?: string;
+  label?: string;
+  limit?: number;
+}
+
 export const api = {
   // ---- Cameras ----
   listCameras: () => request<CameraView[]>("/api/v1/cameras"),
@@ -135,4 +148,30 @@ export const api = {
   cameraHealth: (id: string) => request<CameraStatus>(`/api/v1/cameras/${enc(id)}/health`),
   listEvents: (q: EventQuery = {}) => request<VisionEvent[]>(`/api/v1/events${qs(q)}`),
   system: () => request<SystemInfo>("/api/v1/system"),
+
+  // ---- AI (Stage 2) ----
+  /** AI tasks configured on one camera. */
+  listAiTasks: (cameraId: string) =>
+    request<AiTask[]>(`/api/v1/cameras/${enc(cameraId)}/ai-tasks`),
+  createAiTask: (cameraId: string, body: AiTaskCreate) =>
+    request<AiTask>(`/api/v1/cameras/${enc(cameraId)}/ai-tasks`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateAiTask: (taskId: string, body: AiTaskUpdate) =>
+    request<AiTask>(`/api/v1/ai-tasks/${enc(taskId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteAiTask: (taskId: string) =>
+    request<void>(`/api/v1/ai-tasks/${enc(taskId)}`, { method: "DELETE" }),
+  /** Every enabled task across enabled cameras (worker discovery view). */
+  aiTasks: () => request<WorkerTask[]>("/api/v1/ai/tasks"),
+  /** Per-camera sampler status (state + effective fps). */
+  samplers: () => request<SamplerInfo[]>("/api/v1/ai/samplers"),
+  /** Detections for one camera, newest first. */
+  cameraDetections: (id: string, opts: DetectionQuery = {}) =>
+    request<Detection[]>(`/api/v1/cameras/${enc(id)}/detections${qs(opts)}`),
+  /** URL for the latest AI-sampled JPEG frame. Use directly as an <img> src. */
+  frameUrl: (id: string) => `/api/v1/cameras/${enc(id)}/frame`,
 };

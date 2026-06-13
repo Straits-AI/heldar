@@ -2,6 +2,7 @@ use axum::Router;
 
 use crate::state::AppState;
 
+pub mod ai;
 pub mod cameras;
 pub mod discovery;
 pub mod health;
@@ -21,4 +22,5 @@ pub fn api_router() -> Router<AppState> {
         .merge(liveview::router())
         .merge(health::router())
         .merge(discovery::router())
+        .merge(ai::router())
 }

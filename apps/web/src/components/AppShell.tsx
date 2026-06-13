@@ -65,6 +65,24 @@ function AddCameraIcon({ className }: IconProps) {
   );
 }
 
+function AiIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <rect x="5.5" y="5.5" width="9" height="9" rx="1.5" />
+      <path d="M8 5.5V3M12 5.5V3M8 17v-2.5M12 17v-2.5M5.5 8H3M5.5 12H3M17 8h-2.5M17 12h-2.5" />
+      <circle cx="10" cy="10" r="1.6" />
+    </svg>
+  );
+}
+
 function SystemIcon({ className }: IconProps) {
   return (
     <svg
@@ -85,6 +103,7 @@ const NAV_ITEMS: { to: string; label: string; end?: boolean; Icon: (p: IconProps
   { to: "/", label: "Wall", end: true, Icon: WallIcon },
   { to: "/discover", label: "Discover", Icon: DiscoverIcon },
   { to: "/cameras/new", label: "Add Camera", Icon: AddCameraIcon },
+  { to: "/ai", label: "AI", Icon: AiIcon },
   { to: "/system", label: "System", Icon: SystemIcon },
 ];
 

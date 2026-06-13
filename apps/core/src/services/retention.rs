@@ -234,5 +234,16 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         .await;
         tracing::warn!(deleted = disk_deleted, "retention: disk-free-floor cleanup");
     }
+
+    // 4) Prune old AI detections (the table grows unbounded otherwise).
+    let det_cutoff = Utc::now() - chrono::Duration::hours(cfg.detection_retention_hours.max(1));
+    let pruned = sqlx::query("DELETE FROM detections WHERE created_at < ?")
+        .bind(det_cutoff)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    if pruned > 0 {
+        tracing::info!(deleted = pruned, "retention: pruned old detections");
+    }
     Ok(())
 }

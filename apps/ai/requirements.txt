@@ -1,0 +1,4 @@
+# VisionOps reference AI worker — intentionally light (no GPU, no model deps).
+requests>=2.32
+pillow>=10.4
+numpy>=1.26
