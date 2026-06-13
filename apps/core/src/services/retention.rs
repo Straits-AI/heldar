@@ -245,6 +245,15 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
     if pruned > 0 {
         tracing::info!(deleted = pruned, "retention: pruned old detections");
     }
+    // Prune the transactional outbox on the same TTL (until an edge→cloud relay acks + prunes by seq).
+    let ob_pruned = sqlx::query("DELETE FROM outbox WHERE created_at < ?")
+        .bind(det_cutoff)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    if ob_pruned > 0 {
+        tracing::info!(deleted = ob_pruned, "retention: pruned old outbox rows");
+    }
 
     // 5) Prune old zone events and delete their evidence frames (same TTL as detections).
     let old_zone_events: Vec<(String, Option<String>)> =

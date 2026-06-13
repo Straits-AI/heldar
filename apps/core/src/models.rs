@@ -248,6 +248,8 @@ pub struct Detection {
     pub bbox: Option<Json<Value>>,
     pub track_id: Option<String>,
     pub attributes: Json<Value>,
+    /// Worker-supplied per-camera frame id this detection belongs to (idempotency / batch grouping).
+    pub frame_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -275,6 +277,10 @@ pub struct AiIngest {
     pub camera_id: String,
     pub task_type: String,
     pub timestamp: Option<String>,
+    /// Optional per-camera monotonic frame id. When present, ingest is idempotent on
+    /// (camera_id, frame_id): a duplicate redelivery is a no-op (no double-insert, no re-fire of
+    /// consumer side effects). Omit it (e.g. the dependency-light client) to accept every batch.
+    pub frame_id: Option<String>,
     #[serde(default)]
     pub detections: Vec<DetectionIngest>,
     pub event: Option<IngestEvent>,

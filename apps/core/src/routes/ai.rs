@@ -331,13 +331,35 @@ async fn ingest(
 
     let mut inserted = 0u64;
     let mut tx = st.pool.begin().await?;
+    // Idempotency + atomic capture: record the batch in the outbox FIRST, in the same transaction.
+    // A duplicate (camera_id, frame_id) — i.e. an at-least-once redelivery — conflicts and inserts 0
+    // rows; we then skip both the detection writes and the consumer fan-out, so a replayed batch can
+    // never double-count ANPR votes or corrupt zone state. With no frame_id every batch is accepted.
+    let outbox_res = sqlx::query(
+        "INSERT INTO outbox (topic, camera_id, site_id, frame_id, task_type, detection_count, created_at)
+         VALUES ('detections', ?, ?, ?, ?, ?, ?)
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(&body.camera_id)
+    .bind(&cam.site_id)
+    .bind(&body.frame_id)
+    .bind(&body.task_type)
+    .bind(body.detections.len() as i64)
+    .bind(Utc::now())
+    .execute(&mut *tx)
+    .await?;
+    if outbox_res.rows_affected() == 0 {
+        // Duplicate frame already ingested — no-op (idempotent).
+        tx.commit().await?;
+        return Ok(Json(json!({ "detections_ingested": 0, "duplicate": true })));
+    }
     for d in &body.detections {
         let bbox = d.bbox.clone().map(SqlxJson);
         let attrs = SqlxJson(d.attributes.clone().unwrap_or_else(|| json!({})));
         sqlx::query(
             "INSERT INTO detections
-               (id, camera_id, task_type, timestamp, label, confidence, bbox, track_id, attributes, created_at)
-             VALUES (?,?,?,?,?,?,?,?,?,?)",
+               (id, camera_id, task_type, timestamp, label, confidence, bbox, track_id, attributes, frame_id, created_at)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         )
         .bind(format!("det_{}", Uuid::new_v4().simple()))
         .bind(&body.camera_id)
@@ -348,6 +370,7 @@ async fn ingest(
         .bind(bbox)
         .bind(&d.track_id)
         .bind(attrs)
+        .bind(&body.frame_id)
         .bind(Utc::now())
         .execute(&mut *tx)
         .await?;

@@ -1068,13 +1068,19 @@ class CoreClient:
             age_ms=int(age) if age and age.isdigit() else None,
         )
 
-    def post_results(self, task: Task, result: AnalysisResult) -> int:
+    def post_results(
+        self, task: Task, result: AnalysisResult, frame_id: Optional[str] = None
+    ) -> int:
         body: Dict[str, Any] = {
             "camera_id": task.camera_id,
             "task_type": task.task_type,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "detections": [d.to_json() for d in result.detections],
         }
+        # Idempotency key: lets Core dedup an at-least-once redelivery of this exact frame's batch
+        # (e.g. a retry after a committed-but-unacked POST) so consumer side effects don't double-fire.
+        if frame_id is not None:
+            body["frame_id"] = frame_id
         if result.event is not None:
             body["event"] = result.event.to_json()
         resp = self._request("POST", f"{self.s.api}/api/v1/ai/events", json=body)
@@ -1119,7 +1125,13 @@ class TaskRunner(threading.Thread):
         result = self.analyzer.analyze(frame)
         if result.is_empty:
             return
-        ingested = self.client.post_results(self.task, result)
+        # Per-frame idempotency key: the sampler's capture timestamp (monotonic, restart-safe),
+        # namespaced by task so multiple tasks on one camera don't collide. Omitted if the frame
+        # carried no capture time (then Core accepts every batch).
+        frame_id = (
+            f"{self.task.id}:{frame.captured_at}" if frame.captured_at else None
+        )
+        ingested = self.client.post_results(self.task, result, frame_id=frame_id)
         self.log.info(
             "posted %d detection(s)%s",
             len(result.detections),
