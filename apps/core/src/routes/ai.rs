@@ -342,15 +342,21 @@ async fn ingest(
     }
     tx.commit().await?;
 
-    // Feed tracked detections to the zone engine (raises enter/exit/dwell events with evidence).
-    // The engine drives membership off server time, not the worker-supplied timestamp.
-    st.zones.process(&body.camera_id, &body.detections).await;
-
-    // ANPR tasks feed the entry engine: temporal plate voting → registry lookup → entry event.
-    if body.task_type.eq_ignore_ascii_case("anpr") {
-        st.anpr
-            .process(&body.camera_id, cam.site_id.as_deref(), &body.detections)
-            .await;
+    // Fan the committed batch out to registered perception consumers (zones, ANPR/entry, future
+    // apps). The kernel does not know or branch on which apps exist — each consumer self-selects by
+    // task_type. Engines that need trustworthy timing use server time, not the worker timestamp.
+    let batch = crate::services::consumer::DetectionBatch {
+        camera_id: &body.camera_id,
+        site_id: cam.site_id.as_deref(),
+        task_type: &body.task_type,
+        detections: &body.detections,
+        timestamp: ts,
+    };
+    for consumer in st.consumers.iter() {
+        if consumer.interested_in(&body.task_type) {
+            tracing::trace!(consumer = consumer.name(), task_type = %body.task_type, "ingest fan-out");
+            consumer.consume(&batch).await;
+        }
     }
 
     if let Some(ev) = &body.event {

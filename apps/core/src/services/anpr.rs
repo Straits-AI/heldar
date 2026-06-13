@@ -115,6 +115,21 @@ fn attr_str<'a>(attrs: &'a Value, key: &str) -> Option<&'a str> {
     attrs.get(key).and_then(|v| v.as_str())
 }
 
+#[async_trait::async_trait]
+impl crate::services::consumer::DetectionConsumer for AnprEngine {
+    fn name(&self) -> &'static str {
+        "anpr"
+    }
+    /// Only the ANPR task feeds the entry engine.
+    fn interested_in(&self, task_type: &str) -> bool {
+        task_type.eq_ignore_ascii_case("anpr")
+    }
+    async fn consume(&self, batch: &crate::services::consumer::DetectionBatch<'_>) {
+        self.process(batch.camera_id, batch.site_id, batch.detections)
+            .await;
+    }
+}
+
 impl AnprEngine {
     pub fn new(pool: SqlitePool, cfg: Arc<Config>) -> Arc<Self> {
         Arc::new(Self {

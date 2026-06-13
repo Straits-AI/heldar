@@ -1,5 +1,6 @@
 pub mod anpr;
 pub mod clip;
+pub mod consumer;
 pub mod discovery;
 pub mod health;
 pub mod indexer;

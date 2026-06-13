@@ -34,6 +34,7 @@ anyhow = "1"
 thiserror = "1"
 dotenvy = "0.15"
 libc = "0.2"
+async-trait = "0.1"
 # Stage 4 (RBAC): argon2id password hashing + SHA-256 token hashing + CSPRNG for tokens/salts.
 argon2 = "0.5"
 sha2 = "0.10"

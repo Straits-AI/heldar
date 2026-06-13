@@ -55,8 +55,14 @@ async fn main() -> anyhow::Result<()> {
 
     let recorder = RecorderManager::new(pool.clone(), cfg.clone());
     let sampler = SamplerManager::new(pool.clone(), cfg.clone());
-    let zones = crate::services::zones::ZoneEngine::new(pool.clone(), cfg.clone());
-    let anpr = crate::services::anpr::AnprEngine::new(pool.clone(), cfg.clone());
+    // Register the perception consumers (zones = kernel-open spatial primitive; ANPR = Campus Entry
+    // app). The kernel ingest path fans batches out to these without naming them — adding an app
+    // (e.g. BakerySense) is a push here, not an edit to the ingest handler.
+    use crate::services::consumer::DetectionConsumer;
+    let consumers: Arc<Vec<Arc<dyn DetectionConsumer>>> = Arc::new(vec![
+        crate::services::zones::ZoneEngine::new(pool.clone(), cfg.clone()),
+        crate::services::anpr::AnprEngine::new(pool.clone(), cfg.clone()),
+    ]);
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -66,8 +72,7 @@ async fn main() -> anyhow::Result<()> {
         cfg: cfg.clone(),
         recorder: recorder.clone(),
         sampler: sampler.clone(),
-        zones,
-        anpr,
+        consumers,
         http,
         started_at: chrono::Utc::now(),
     };

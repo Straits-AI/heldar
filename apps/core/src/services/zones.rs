@@ -126,6 +126,20 @@ fn bbox_ground_point(v: &Value) -> Option<[f64; 2]> {
     Some([x + w / 2.0, y + h])
 }
 
+#[async_trait::async_trait]
+impl crate::services::consumer::DetectionConsumer for ZoneEngine {
+    fn name(&self) -> &'static str {
+        "zones"
+    }
+    /// The zone engine evaluates any tracked detection, regardless of task type.
+    fn interested_in(&self, _task_type: &str) -> bool {
+        true
+    }
+    async fn consume(&self, batch: &crate::services::consumer::DetectionBatch<'_>) {
+        self.process(batch.camera_id, batch.detections).await;
+    }
+}
+
 impl ZoneEngine {
     pub fn new(pool: SqlitePool, cfg: Arc<Config>) -> Arc<Self> {
         Arc::new(Self {
