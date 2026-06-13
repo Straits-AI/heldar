@@ -9,4 +9,6 @@
 
 pub mod anpr;
 pub mod models;
+pub mod retention;
 pub mod routes;
+pub mod schema;

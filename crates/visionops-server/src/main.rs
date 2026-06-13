@@ -39,6 +39,10 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = db::init_pool(&cfg).await.context("init database pool")?;
     db::run_migrations(&pool).await.context("run migrations")?;
+    // Bundled domain apps apply their own schema (idempotently) against the shared pool.
+    visionops_entry::schema::init(&pool)
+        .await
+        .context("entry schema init")?;
     auth::ensure_bootstrap(&pool, &cfg)
         .await
         .context("auth bootstrap")?;
@@ -84,6 +88,11 @@ async fn main() -> anyhow::Result<()> {
         let (p, c) = (pool.clone(), cfg.clone());
         spawn_supervised("retention", move || {
             services::retention::run(p.clone(), c.clone())
+        });
+        // Bundled domain apps run their own retention loops (they own their data lifecycle).
+        let (p, c) = (pool.clone(), cfg.clone());
+        spawn_supervised("entry_retention", move || {
+            visionops_entry::retention::run(p.clone(), c.clone())
         });
         // Only supervise the notifier when a webhook is configured — otherwise run() returns
         // immediately and the supervisor would respawn it in a tight loop.

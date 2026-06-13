@@ -278,31 +278,9 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         );
     }
 
-    // 6) Prune old entry events (+ evidence frames), stale audit log, and expired sessions.
+    // 6) Prune kernel auth bookkeeping: stale audit log + expired sessions. (Domain entry events +
+    //    their evidence frames are pruned by the entry app's own retention loop, not the kernel.)
     let entry_cutoff = Utc::now() - chrono::Duration::days(cfg.entry_retention_days.max(1));
-    let old_entries: Vec<(String, sqlx::types::Json<serde_json::Value>)> =
-        sqlx::query_as("SELECT id, evidence FROM entry_events WHERE created_at < ?")
-            .bind(entry_cutoff)
-            .fetch_all(pool)
-            .await?;
-    if !old_entries.is_empty() {
-        for (_id, evidence) in &old_entries {
-            if let Some(url) = evidence.0.get("snapshot_path").and_then(|v| v.as_str()) {
-                if let Some(name) = url.rsplit('/').next() {
-                    let _ = tokio::fs::remove_file(cfg.snapshots_dir.join(name)).await;
-                }
-            }
-        }
-        let epruned = sqlx::query("DELETE FROM entry_events WHERE created_at < ?")
-            .bind(entry_cutoff)
-            .execute(pool)
-            .await?
-            .rows_affected();
-        tracing::info!(
-            deleted = epruned,
-            "retention: pruned old entry events + evidence"
-        );
-    }
     let apruned = sqlx::query("DELETE FROM audit_log WHERE created_at < ?")
         .bind(entry_cutoff)
         .execute(pool)
