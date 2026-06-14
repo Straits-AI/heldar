@@ -29,6 +29,22 @@ pub fn router() -> Router<AppState> {
         )
 }
 
+/// Accepted `record_mode` values. `event` / `scheduled_event` event-triggering is wired in a later
+/// batch; this batch honors `continuous` (always) and the time-of-day window for `scheduled` /
+/// `scheduled_event`.
+fn validate_record_mode(mode: &str) -> AppResult<()> {
+    if matches!(
+        mode,
+        "continuous" | "scheduled" | "event" | "scheduled_event"
+    ) {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(
+            "`record_mode` must be continuous|scheduled|event|scheduled_event".into(),
+        ))
+    }
+}
+
 pub(crate) async fn load_camera(pool: &SqlitePool, id: &str) -> AppResult<Camera> {
     sqlx::query_as::<_, Camera>("SELECT * FROM cameras WHERE id = ?")
         .bind(id)
@@ -114,14 +130,25 @@ async fn create_camera(
         }
     });
     let record_audio = body.record_audio.unwrap_or(st.cfg.default_record_audio);
+    let record_mode = body.record_mode.unwrap_or_else(|| "continuous".into());
+    validate_record_mode(&record_mode)?;
+    let pre_roll_seconds = body
+        .pre_roll_seconds
+        .unwrap_or(st.cfg.default_pre_roll_seconds)
+        .clamp(0, 300);
+    let post_roll_seconds = body
+        .post_roll_seconds
+        .unwrap_or(st.cfg.default_post_roll_seconds)
+        .clamp(0, 3600);
 
     sqlx::query(
         "INSERT INTO cameras
            (id, site_id, name, vendor, model, address, rtsp_port, username, password,
             main_stream_url, sub_stream_url, record_stream, capabilities, record_enabled,
-            segment_seconds, retention_hours, storage_quota_bytes, record_audio, enabled,
+            segment_seconds, retention_hours, storage_quota_bytes, record_audio, record_mode,
+            pre_roll_seconds, post_roll_seconds, enabled,
             created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
     )
     .bind(&id)
     .bind(&body.site_id)
@@ -141,6 +168,9 @@ async fn create_camera(
     .bind(retention)
     .bind(storage_quota_bytes)
     .bind(record_audio)
+    .bind(&record_mode)
+    .bind(pre_roll_seconds)
+    .bind(post_roll_seconds)
     .bind(enabled)
     .bind(now)
     .bind(now)
@@ -215,13 +245,23 @@ async fn update_camera(
         .unwrap_or(cur.retention_hours);
     let storage_quota_bytes = body.storage_quota_bytes.or(cur.storage_quota_bytes);
     let record_audio = body.record_audio.unwrap_or(cur.record_audio);
+    let record_mode = body.record_mode.unwrap_or(cur.record_mode);
+    validate_record_mode(&record_mode)?;
+    let pre_roll_seconds = body
+        .pre_roll_seconds
+        .map(|v| v.clamp(0, 300))
+        .unwrap_or(cur.pre_roll_seconds);
+    let post_roll_seconds = body
+        .post_roll_seconds
+        .map(|v| v.clamp(0, 3600))
+        .unwrap_or(cur.post_roll_seconds);
 
     sqlx::query(
         "UPDATE cameras SET
             name=?, site_id=?, vendor=?, model=?, address=?, rtsp_port=?, username=?, password=?,
             main_stream_url=?, sub_stream_url=?, record_stream=?, capabilities=?, record_enabled=?,
-            segment_seconds=?, retention_hours=?, storage_quota_bytes=?, record_audio=?, enabled=?,
-            updated_at=?
+            segment_seconds=?, retention_hours=?, storage_quota_bytes=?, record_audio=?, record_mode=?,
+            pre_roll_seconds=?, post_roll_seconds=?, enabled=?, updated_at=?
          WHERE id=?",
     )
     .bind(&name)
@@ -241,6 +281,9 @@ async fn update_camera(
     .bind(retention)
     .bind(storage_quota_bytes)
     .bind(record_audio)
+    .bind(&record_mode)
+    .bind(pre_roll_seconds)
+    .bind(post_roll_seconds)
     .bind(enabled)
     .bind(Utc::now())
     .bind(&id)

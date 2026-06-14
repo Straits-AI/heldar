@@ -12,6 +12,11 @@ export type CameraStatusState =
 
 export type RecordStream = "main" | "sub";
 
+/** When the recorder runs for a camera: `continuous` (always), `scheduled` (time-of-day window),
+ * `event` (records only during a trigger window: a zone/breach event or a manual record-trigger
+ * extends it to now + post_roll_seconds), or `scheduled_event` (windows AND triggers). */
+export type RecordMode = "continuous" | "scheduled" | "event" | "scheduled_event";
+
 /** Known vendors with auto-built RTSP URLs, plus the catch-all. */
 export type Vendor = "hikvision" | "dahua" | "generic" | (string & {});
 
@@ -43,6 +48,13 @@ export interface CameraView {
   storage_quota_bytes?: number | null;
   /** Record the camera's audio stream (pass-through) instead of dropping it. */
   record_audio: boolean;
+  /** When the recorder runs (continuous | scheduled | event | scheduled_event). */
+  record_mode: RecordMode;
+  /** Event recording: footage desired BEFORE a trigger (best-effort; honored only from recent
+   * completed segments — no always-on ring buffer for idle event cameras). Clamped 0..300. */
+  pre_roll_seconds: number;
+  /** Event recording: how long the recorder keeps writing after a trigger (the window). 0..3600. */
+  post_roll_seconds: number;
   enabled: boolean;
   created_at: string;
   updated_at: string;
@@ -67,10 +79,23 @@ export interface CameraCreate {
   retention_hours?: number;
   storage_quota_bytes?: number | null;
   record_audio?: boolean;
+  record_mode?: RecordMode;
+  pre_roll_seconds?: number;
+  post_roll_seconds?: number;
   enabled?: boolean;
 }
 
 export type CameraUpdate = Partial<Omit<CameraCreate, "id">>;
+
+/** Result of POST /api/v1/cameras/{id}/record-trigger (manual event-recording trigger, manager+). */
+export interface RecordTriggerResult {
+  camera_id: string;
+  triggered: boolean;
+  /** When the post-roll recording window currently ends (server UTC time); repeated triggers extend it. */
+  window_end: string;
+  pre_roll_seconds: number;
+  post_roll_seconds: number;
+}
 
 export interface CameraTestResult {
   reachable: boolean;
@@ -137,6 +162,21 @@ export interface ClipResult {
   to: string;
   requested_seconds: number;
   size_bytes: number;
+  segment_count: number;
+}
+
+/** A segment-spanning HLS playback session over a recorded time range (POST
+ * /api/v1/cameras/{id}/playback/sessions). Players seek natively within the VOD playlist; DELETE
+ * /api/v1/playback/sessions/{id} tears it down. Sessions expire after HELDAR_PLAYBACK_SESSION_TTL_MINUTES. */
+export interface PlaybackSession {
+  id: string;
+  camera_id: string;
+  /** HLS VOD playlist under /media/playback/{id}/index.m3u8 — play with hls.js. */
+  playlist_url: string;
+  from: string;
+  to: string;
+  /** Requested window length in seconds (the playlist may be shorter where footage has gaps). */
+  duration_s: number;
   segment_count: number;
 }
 
@@ -262,6 +302,31 @@ export interface Gaps {
   gap_count: number;
   total_gap_seconds: number;
 }
+
+// ---- Per-camera recording schedule (time-of-day windows) ----
+
+/** A recurring per-camera recording window, applied when `record_mode` is `scheduled` or
+ * `scheduled_event`. `days` are weekday ints 0=Mon..6=Sun; `time_start`/`time_end` are "HH:MM" 24h
+ * in the SERVER's local timezone (start > end means an overnight window). */
+export interface RecordSchedule {
+  id: string;
+  camera_id: string;
+  days: number[];
+  time_start: string;
+  time_end: string;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface RecordScheduleCreate {
+  days: number[];
+  time_start: string;
+  time_end: string;
+  enabled?: boolean;
+}
+
+export type RecordScheduleUpdate = Partial<RecordScheduleCreate>;
 
 // ---- Scheduled interval snapshots ----
 

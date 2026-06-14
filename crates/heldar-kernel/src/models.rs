@@ -34,6 +34,12 @@ pub struct Camera {
     pub storage_quota_bytes: Option<i64>,
     /// Record the camera's audio stream (pass-through) instead of dropping it.
     pub record_audio: bool,
+    /// When the recorder runs: `continuous` | `scheduled` | `event` | `scheduled_event`.
+    pub record_mode: String,
+    /// Event recording: footage desired BEFORE a trigger (best-effort, see recorder service).
+    pub pre_roll_seconds: i64,
+    /// Event recording: how long the recorder keeps writing after a trigger (the trigger window).
+    pub post_roll_seconds: i64,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -72,6 +78,9 @@ pub struct CameraView {
     pub retention_hours: i64,
     pub storage_quota_bytes: Option<i64>,
     pub record_audio: bool,
+    pub record_mode: String,
+    pub pre_roll_seconds: i64,
+    pub post_roll_seconds: i64,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -107,6 +116,9 @@ impl From<Camera> for CameraView {
             retention_hours: c.retention_hours,
             storage_quota_bytes: c.storage_quota_bytes,
             record_audio: c.record_audio,
+            record_mode: c.record_mode,
+            pre_roll_seconds: c.pre_roll_seconds,
+            post_roll_seconds: c.post_roll_seconds,
             enabled: c.enabled,
             created_at: c.created_at,
             updated_at: c.updated_at,
@@ -136,6 +148,9 @@ pub struct CameraCreate {
     pub retention_hours: Option<i64>,
     pub storage_quota_bytes: Option<i64>,
     pub record_audio: Option<bool>,
+    pub record_mode: Option<String>,
+    pub pre_roll_seconds: Option<i64>,
+    pub post_roll_seconds: Option<i64>,
     pub enabled: Option<bool>,
 }
 
@@ -163,6 +178,9 @@ pub struct CameraUpdate {
     pub retention_hours: Option<i64>,
     pub storage_quota_bytes: Option<i64>,
     pub record_audio: Option<bool>,
+    pub record_mode: Option<String>,
+    pub pre_roll_seconds: Option<i64>,
+    pub post_roll_seconds: Option<i64>,
     pub enabled: Option<bool>,
 }
 
@@ -505,4 +523,42 @@ pub struct PersistedSnapshot {
     pub taken_at: DateTime<Utc>,
     pub size_bytes: i64,
     pub created_at: DateTime<Utc>,
+}
+
+// ---- Per-camera recording schedule (time-of-day windows) ----
+
+/// A recurring per-camera recording window, applied when the camera's `record_mode` is `scheduled`
+/// or `scheduled_event`. `days` is a JSON array of weekday ints (0=Mon..6=Sun); `time_start` /
+/// `time_end` are "HH:MM" 24h in the SERVER's LOCAL timezone (chrono::Local). When `time_start` >
+/// `time_end` the window wraps past midnight (its early-morning portion is attributed to the day it
+/// started on).
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct RecordSchedule {
+    pub id: String,
+    pub camera_id: String,
+    pub days: Json<Value>,
+    pub time_start: String,
+    pub time_end: String,
+    pub enabled: bool,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RecordScheduleCreate {
+    /// JSON array of weekday ints (0=Mon..6=Sun).
+    pub days: Value,
+    /// "HH:MM" 24h, server local time.
+    pub time_start: String,
+    /// "HH:MM" 24h, server local time (start > end means an overnight window).
+    pub time_end: String,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct RecordScheduleUpdate {
+    pub days: Option<Value>,
+    pub time_start: Option<String>,
+    pub time_end: Option<String>,
+    pub enabled: Option<bool>,
 }

@@ -10,6 +10,8 @@ pub struct Config {
     pub clips_dir: PathBuf,
     pub snapshots_dir: PathBuf,
     pub frames_dir: PathBuf,
+    /// Directory where segment-spanning HLS playback sessions are generated (one subdir per session).
+    pub playback_dir: PathBuf,
     pub ffmpeg_bin: String,
     pub ffprobe_bin: String,
     pub mediamtx_api_url: String,
@@ -28,6 +30,12 @@ pub struct Config {
     /// Default audio-recording toggle applied when a camera is created without an explicit
     /// `record_audio`. When false (default) the recorder drops audio (video only).
     pub default_record_audio: bool,
+    /// Default pre-roll seconds applied when a camera is created without an explicit
+    /// `pre_roll_seconds` (event / scheduled_event recording). Clamped to 0..300 in handlers.
+    pub default_pre_roll_seconds: i64,
+    /// Default post-roll seconds (the trigger recording window) applied when a camera is created
+    /// without an explicit `post_roll_seconds`. Clamped to 0..3600 in handlers.
+    pub default_post_roll_seconds: i64,
     pub indexer_interval_s: u64,
     pub health_interval_s: u64,
     pub retention_interval_s: u64,
@@ -59,6 +67,16 @@ pub struct Config {
     pub snapshot_scheduler_interval_s: u64,
     /// How long captured snapshots are kept before the retention sweeper prunes them. 0 = no pruning.
     pub snapshot_retention_hours: i64,
+    // ---- Per-camera recording schedule (time-of-day windows) ----
+    /// How often the schedule watcher ticks to open/close recording windows for `scheduled` /
+    /// `scheduled_event` cameras (seconds). Windows are evaluated against the SERVER's LOCAL timezone.
+    pub schedule_check_interval_s: u64,
+    // ---- Segment-spanning HLS playback sessions (kernel platform feature) ----
+    /// How long a generated playback session (its HLS dir + the segment read-locks it holds) is
+    /// retained before the cleanup sweeper removes the dir and releases its locks. Server time.
+    pub playback_session_ttl_minutes: i64,
+    /// Maximum playback session span (seconds); a longer requested range is rejected (HTTP 400).
+    pub max_playback_seconds: f64,
     // ---- Auth / RBAC (kernel platform feature) ----
     /// Master switch for authentication + RBAC. When false, the API is open (dev/single-tenant
     /// LAN appliance default) and a synthetic admin principal is used. When true, the auth/admin
@@ -120,6 +138,9 @@ impl Config {
         let frames_dir = var("HELDAR_FRAMES_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("frames"));
+        let playback_dir = var("HELDAR_PLAYBACK_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("playback"));
 
         let cors_origins = var_or("HELDAR_CORS_ORIGINS", "http://localhost:5173")
             .split(',')
@@ -138,6 +159,7 @@ impl Config {
             clips_dir,
             snapshots_dir,
             frames_dir,
+            playback_dir,
             ffmpeg_bin: var_or("HELDAR_FFMPEG_BIN", "ffmpeg"),
             ffprobe_bin: var_or("HELDAR_FFPROBE_BIN", "ffprobe"),
             mediamtx_api_url: var_or("HELDAR_MEDIAMTX_API_URL", "http://127.0.0.1:9997"),
@@ -150,6 +172,8 @@ impl Config {
             default_retention_hours: parse_or("HELDAR_DEFAULT_RETENTION_HOURS", 24),
             default_camera_quota_bytes: (default_camera_quota_gb * 1024.0 * 1024.0 * 1024.0) as u64,
             default_record_audio: parse_bool("HELDAR_DEFAULT_RECORD_AUDIO", false),
+            default_pre_roll_seconds: parse_or("HELDAR_DEFAULT_PRE_ROLL_SECONDS", 10),
+            default_post_roll_seconds: parse_or("HELDAR_DEFAULT_POST_ROLL_SECONDS", 30),
             indexer_interval_s: parse_or("HELDAR_INDEXER_INTERVAL_S", 10),
             health_interval_s: parse_or("HELDAR_HEALTH_INTERVAL_S", 15),
             retention_interval_s: parse_or("HELDAR_RETENTION_INTERVAL_S", 300),
@@ -168,6 +192,9 @@ impl Config {
             snapshot_scheduler_enabled: parse_bool("HELDAR_SNAPSHOT_SCHEDULER_ENABLED", true),
             snapshot_scheduler_interval_s: parse_or("HELDAR_SNAPSHOT_SCHEDULER_INTERVAL_S", 60),
             snapshot_retention_hours: parse_or("HELDAR_SNAPSHOT_RETENTION_HOURS", 168),
+            schedule_check_interval_s: parse_or("HELDAR_SCHEDULE_CHECK_INTERVAL_S", 30),
+            playback_session_ttl_minutes: parse_or("HELDAR_PLAYBACK_SESSION_TTL_MINUTES", 60),
+            max_playback_seconds: parse_or("HELDAR_MAX_PLAYBACK_SECONDS", 7200.0),
             auth_enabled: parse_bool("HELDAR_AUTH_ENABLED", false),
             session_ttl_hours: parse_or("HELDAR_SESSION_TTL_HOURS", 12),
             auth_cookie_secure: parse_bool("HELDAR_AUTH_COOKIE_SECURE", false),

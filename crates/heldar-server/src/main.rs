@@ -45,6 +45,7 @@ async fn main() -> anyhow::Result<()> {
         &cfg.clips_dir,
         &cfg.snapshots_dir,
         &cfg.frames_dir,
+        &cfg.playback_dir,
     ] {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -84,8 +85,9 @@ async fn main() -> anyhow::Result<()> {
     let search_cfg = Arc::new(heldar_search::config::SearchConfig::from_env());
     use services::consumer::DetectionConsumer;
     let consumers: Arc<Vec<Arc<dyn DetectionConsumer>>> = Arc::new(vec![
-        // Zone engine = kernel-open spatial primitive.
-        services::zones::ZoneEngine::new(pool.clone(), cfg.clone()),
+        // Zone engine = kernel-open spatial primitive. Holds the recorder so a committed zone event
+        // triggers event-mode recording (recorder is created above, before its consumers).
+        services::zones::ZoneEngine::new(pool.clone(), cfg.clone(), recorder.clone()),
         // Access-control ANPR engine (open generic app), registered as a consumer over the seam.
         heldar_entry::anpr::AnprEngine::new(pool.clone(), cfg.clone(), entry_cfg.clone()),
     ]);
@@ -142,6 +144,21 @@ async fn main() -> anyhow::Result<()> {
                 services::snapshot_scheduler::run(st.clone())
             });
         }
+        // Recording-schedule watcher (opens/closes time-of-day windows for scheduled cameras).
+        // Only meaningful when the recorder is enabled; the watcher itself also self-guards.
+        if cfg.recorder_enabled {
+            let st = state.clone();
+            spawn_supervised("schedule_watcher", move || {
+                services::schedule_watcher::run(st.clone())
+            });
+        }
+        // Playback-session cleanup: removes expired HLS playback dirs and releases their read-locks.
+        {
+            let st = state.clone();
+            spawn_supervised("playback_session_cleanup", move || {
+                services::playback_session::run(st.clone())
+            });
+        }
         // Only supervise the notifier when a webhook is configured — otherwise run() returns
         // immediately and the supervisor would respawn it in a tight loop.
         if cfg.alert_webhook_url.is_some() {
@@ -183,6 +200,7 @@ async fn main() -> anyhow::Result<()> {
         .nest_service("/media/recordings", ServeDir::new(&cfg.recordings_dir))
         .nest_service("/media/clips", ServeDir::new(&cfg.clips_dir))
         .nest_service("/media/snapshots", ServeDir::new(&cfg.snapshots_dir))
+        .nest_service("/media/playback", ServeDir::new(&cfg.playback_dir))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state);

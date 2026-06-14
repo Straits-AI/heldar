@@ -17,6 +17,7 @@ use uuid::Uuid;
 use crate::config::Config;
 use crate::models::{DetectionIngest, Zone};
 use crate::repo;
+use crate::services::recorder::RecorderManager;
 
 /// How long a track's zone state is retained (server time) without being seen before it is pruned.
 const STATE_TTL_SECS: i64 = 120;
@@ -53,6 +54,9 @@ struct ZoneEvt {
 pub struct ZoneEngine {
     pool: SqlitePool,
     cfg: Arc<Config>,
+    /// Recorder handle: a committed zone event triggers event-mode recording (no-op for cameras not
+    /// in `event` / `scheduled_event` mode — [`RecorderManager::trigger`] guards on the mode).
+    recorder: Arc<RecorderManager>,
     state: Mutex<HashMap<String, TrackZoneState>>,
 }
 
@@ -141,10 +145,11 @@ impl crate::services::consumer::DetectionConsumer for ZoneEngine {
 }
 
 impl ZoneEngine {
-    pub fn new(pool: SqlitePool, cfg: Arc<Config>) -> Arc<Self> {
+    pub fn new(pool: SqlitePool, cfg: Arc<Config>, recorder: Arc<RecorderManager>) -> Arc<Self> {
         Arc::new(Self {
             pool,
             cfg,
+            recorder,
             state: Mutex::new(HashMap::new()),
         })
     }
@@ -335,6 +340,10 @@ impl ZoneEngine {
         .await;
 
         tracing::info!(camera_id = %evt.camera_id, zone = %evt.zone_name, track = %evt.track, event = evt.event_type, "zone event");
+
+        // Event-triggered recording: extend the camera's trigger window. A no-op unless the camera's
+        // record_mode is `event` / `scheduled_event` (the recorder guards on the mode).
+        let _ = self.recorder.trigger(&evt.camera_id, "zone_event").await;
     }
 
     /// Copy the latest sampled sub-stream frame as evidence; returns its served URL.

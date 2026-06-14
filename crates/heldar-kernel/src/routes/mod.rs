@@ -11,7 +11,10 @@ pub mod incidents;
 pub mod liveview;
 pub mod metrics;
 pub mod playback;
+pub mod playback_sessions;
+pub mod recording_control;
 pub mod recordings;
+pub mod schedules;
 pub mod snapshot_schedules;
 pub mod system;
 pub mod zones;
@@ -24,12 +27,15 @@ pub fn api_router() -> Router<AppState> {
         .merge(system::router())
         .merge(cameras::router())
         .merge(recordings::router())
+        .merge(recording_control::router())
         .merge(playback::router())
+        .merge(playback_sessions::router())
         .merge(liveview::router())
         .merge(health::router())
         .merge(discovery::router())
         .merge(ai::router())
         .merge(zones::router())
+        .merge(schedules::router())
         .merge(snapshot_schedules::router())
         .merge(incidents::router())
         .merge(auth::router())
