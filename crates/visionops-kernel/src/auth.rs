@@ -226,7 +226,40 @@ pub fn token_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
             }
         }
     }
+    // Browser session: the HttpOnly `vo_session` cookie. Checked last so API clients/workers that
+    // present an explicit Bearer / X-API-Key header still take precedence.
+    if let Some(h) = headers.get(header::COOKIE) {
+        if let Ok(s) = h.to_str() {
+            let prefix = format!("{SESSION_COOKIE}=");
+            for part in s.split(';') {
+                if let Some(v) = part.trim().strip_prefix(&prefix) {
+                    let t = v.trim();
+                    if !t.is_empty() {
+                        return Some(t.to_string());
+                    }
+                }
+            }
+        }
+    }
     None
+}
+
+/// Name of the HttpOnly session cookie set on login.
+pub const SESSION_COOKIE: &str = "vo_session";
+
+/// Build the `Set-Cookie` value that stores a session token in an HttpOnly, SameSite=Strict cookie.
+/// HttpOnly keeps it unreadable to JS (no XSS exfiltration); SameSite=Strict blocks CSRF; the SPA is
+/// same-origin with the API so the cookie still reaches the media plane (`<img>`/`<video>`/HLS).
+pub fn session_cookie(token: &str, cfg: &Config) -> String {
+    let max_age = cfg.session_ttl_hours.max(1) * 3600;
+    let secure = if cfg.auth_cookie_secure { "; Secure" } else { "" };
+    format!("{SESSION_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age={max_age}{secure}")
+}
+
+/// Build the `Set-Cookie` value that clears the session cookie (logout).
+pub fn clear_session_cookie(cfg: &Config) -> String {
+    let secure = if cfg.auth_cookie_secure { "; Secure" } else { "" };
+    format!("{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{secure}")
 }
 
 /// Resolve a token to a principal, or None if it is unknown / expired / disabled.

@@ -5,7 +5,8 @@
 //! mutations are written to the immutable audit log.
 
 use axum::extract::{Path, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode};
+use axum::response::{AppendHeaders, IntoResponse};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
@@ -41,7 +42,7 @@ const MIN_PASSWORD_LEN: usize = 8;
 async fn login(
     State(st): State<AppState>,
     Json(body): Json<LoginRequest>,
-) -> AppResult<Json<Value>> {
+) -> AppResult<impl IntoResponse> {
     let candidate = sqlx::query_as::<_, User>("SELECT * FROM users WHERE username = ?")
         .bind(body.username.trim())
         .fetch_optional(&st.pool)
@@ -68,18 +69,28 @@ async fn login(
         kind: crate::auth::PrincipalKind::User,
     };
     auth::audit(&st.pool, &principal, "login", "user", &user.id, json!({})).await;
-    Ok(Json(json!({
+    // Set the session as an HttpOnly cookie (browser auth: not JS-readable, so XSS can't exfiltrate
+    // it; the media plane gets it automatically since the SPA is same-origin). The token is still in
+    // the body for non-browser clients; browsers should ignore it and rely on the cookie.
+    let cookie = auth::session_cookie(&token, &st.cfg);
+    let body = Json(json!({
         "token": token,
         "expires_at": expires_at,
         "user": UserView::from(user),
-    })))
+    }));
+    Ok((AppendHeaders([(header::SET_COOKIE, cookie)]), body))
 }
 
-async fn logout(State(st): State<AppState>, headers: HeaderMap) -> AppResult<StatusCode> {
+async fn logout(State(st): State<AppState>, headers: HeaderMap) -> AppResult<impl IntoResponse> {
     if let Some(tok) = auth::token_from_headers(&headers) {
         auth::revoke_session(&st.pool, &tok).await?;
     }
-    Ok(StatusCode::NO_CONTENT)
+    // Clear the session cookie regardless (idempotent logout).
+    let cookie = auth::clear_session_cookie(&st.cfg);
+    Ok((
+        StatusCode::NO_CONTENT,
+        AppendHeaders([(header::SET_COOKIE, cookie)]),
+    ))
 }
 
 async fn me(principal: Principal) -> AppResult<Json<Value>> {

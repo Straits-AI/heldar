@@ -53,6 +53,9 @@ pub struct Config {
     pub auth_enabled: bool,
     /// Lifetime of an issued login session token.
     pub session_ttl_hours: i64,
+    /// Add `Secure` to the session cookie (require HTTPS). Default false for HTTP LAN/overlay
+    /// appliances; set true when the deployment is served over TLS.
+    pub auth_cookie_secure: bool,
     /// Optional first-run admin bootstrap (only used when no users exist yet).
     pub bootstrap_admin_user: Option<String>,
     pub bootstrap_admin_password: Option<String>,
@@ -148,6 +151,7 @@ impl Config {
             detection_retention_hours: parse_or("VISIONOPS_DETECTION_RETENTION_HOURS", 168),
             auth_enabled: parse_bool("VISIONOPS_AUTH_ENABLED", false),
             session_ttl_hours: parse_or("VISIONOPS_SESSION_TTL_HOURS", 12),
+            auth_cookie_secure: parse_bool("VISIONOPS_AUTH_COOKIE_SECURE", false),
             bootstrap_admin_user: var("VISIONOPS_BOOTSTRAP_ADMIN_USER"),
             bootstrap_admin_password: var("VISIONOPS_BOOTSTRAP_ADMIN_PASSWORD"),
             audit_retention_days: parse_or("VISIONOPS_AUDIT_RETENTION_DAYS", 365),

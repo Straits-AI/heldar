@@ -1,6 +1,7 @@
 // VisionOps Core — operator sign-in.
 // Rendered by the Campus Entry console when the API reports auth is enabled (401 on /auth/me).
-// Flow: api.login -> persist bearer token -> re-fetch the Principal -> hand it to the parent.
+// Flow: api.login -> server sets the HttpOnly session cookie -> re-fetch the Principal -> hand it to
+// the parent. The token is NOT persisted in JS storage; the cookie carries the session (XSS-safe).
 
 import { useState } from "react";
 import type { FormEvent } from "react";

@@ -70,17 +70,17 @@ export class ApiError extends Error {
   }
 }
 
-// ---- Bearer token (RBAC) -------------------------------------------------
-// When auth is enabled, the login token is held here and persisted so a reload stays signed in.
-const TOKEN_KEY = "visionops.token";
-let authToken: string | null =
-  typeof localStorage !== "undefined" ? localStorage.getItem(TOKEN_KEY) : null;
+// ---- Session auth (RBAC) -------------------------------------------------
+// The login session lives in an HttpOnly `vo_session` cookie set by the server (see auth.rs), sent
+// automatically on every request via `credentials: "include"` — including the media plane
+// (<img>/<video>/HLS), since the SPA is same-origin with the API. The cookie is NOT readable by JS,
+// so it cannot be exfiltrated by XSS, and it survives reloads / new tabs. We deliberately do NOT
+// persist the token in localStorage. We keep it in memory only for the current tab as an
+// Authorization-header fallback; bootstrap/reload relies on the cookie + GET /auth/me.
+let authToken: string | null = null;
 
 export function setAuthToken(token: string | null): void {
   authToken = token;
-  if (typeof localStorage === "undefined") return;
-  if (token) localStorage.setItem(TOKEN_KEY, token);
-  else localStorage.removeItem(TOKEN_KEY);
 }
 
 export function getAuthToken(): string | null {
@@ -98,15 +98,32 @@ function qs(params: object = {}): string {
   return s ? `?${s}` : "";
 }
 
+const REQUEST_TIMEOUT_MS = 30000;
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json" };
   if (init?.body) headers["Content-Type"] = "application/json";
   if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
 
-  const res = await fetch(path, {
-    ...init,
-    headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) },
-  });
+  // Always bound a request with a timeout so a slow/hung Core can't leave the UI spinning forever;
+  // merge in the caller's signal (if any) so a component can also cancel on unmount / re-nav.
+  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
+
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      ...init,
+      signal,
+      credentials: "include", // send the HttpOnly session cookie (auth-enabled deployments)
+      headers: { ...headers, ...(init?.headers as Record<string, string> | undefined) },
+    });
+  } catch (e) {
+    // Caller-initiated cancellation (unmount/re-nav): re-throw so the caller's cleanup ignores it.
+    if (init?.signal?.aborted) throw e;
+    // Timeout or network failure → a clean ApiError the UI can surface instead of hanging.
+    throw new ApiError(0, "Network error or request timed out");
+  }
 
   if (!res.ok) {
     let message = `HTTP ${res.status} ${res.statusText}`;

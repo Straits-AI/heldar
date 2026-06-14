@@ -161,8 +161,10 @@ def parse_settings(argv: Optional[List[str]] = None) -> Settings:
         poll_interval=max(1.0, ns.poll_interval),
         http_timeout=ns.http_timeout,
         http_max_retries=max(0, ns.http_max_retries),
-        backoff_base=ns.backoff_base,
-        backoff_cap=ns.backoff_cap,
+        # Clamp to positive values: a 0/negative base or cap (env typo) would make the retry delay 0,
+        # turning transient failures into a tight, log-spamming retry loop against an unavailable Core.
+        backoff_base=max(0.001, ns.backoff_base),
+        backoff_cap=max(0.1, ns.backoff_cap),
         log_level=ns.log_level.upper(),
         log_format=ns.log_format,
         api_key=ns.api_key.strip() or None,
@@ -336,6 +338,39 @@ class AnalysisResult:
     @property
     def is_empty(self) -> bool:
         return not self.detections and self.event is None
+
+
+def safe_weights(config: Dict[str, Any]) -> str:
+    """Resolve the YOLO weights name from task config, rejecting path traversal / absolute paths so a
+    task can only name a local model file (or a known ultralytics name it downloads) — never an
+    arbitrary filesystem path or `..` escape from an untrusted task definition."""
+    w = str(config.get("weights", "yolov8n.pt"))
+    if "/" in w or "\\" in w or ".." in w or w.startswith("~"):
+        raise ValueError(f"unsafe weights path in task config: {w!r}")
+    return w
+
+
+def norm_bbox(
+    x1: float, y1: float, x2: float, y2: float, ow: float, oh: float
+) -> Optional[List[float]]:
+    """Normalize a pixel xyxy box to ``[x, y, w, h]`` in 0..1, clamped to the frame.
+
+    YOLO boxes routinely extend past the frame edge for objects at the border; clamping each
+    coordinate to [0,1] before differencing keeps w/h within the kernel contract (0..1) and stops the
+    dashboard from drawing boxes outside the frame. Returns ``None`` for a degenerate frame/box.
+    """
+    if ow <= 0 or oh <= 0:
+        return None
+    nx1 = min(1.0, max(0.0, x1 / ow))
+    ny1 = min(1.0, max(0.0, y1 / oh))
+    nx2 = min(1.0, max(0.0, x2 / ow))
+    ny2 = min(1.0, max(0.0, y2 / oh))
+    return [
+        round(nx1, 5),
+        round(ny1, 5),
+        round(max(0.0, nx2 - nx1), 5),
+        round(max(0.0, ny2 - ny1), 5),
+    ]
 
 
 # --------------------------------------------------------------------------- #
@@ -522,7 +557,7 @@ class YoloAnalyzer(Analyzer):
         import torch
         from ultralytics import YOLO
 
-        self.weights = str(self.config.get("weights", "yolov8n.pt"))
+        self.weights = safe_weights(self.config)
         self.conf = float(self.config.get("threshold", 0.25))
         self.imgsz = self.config.get("imgsz")  # None -> model default
 
@@ -613,12 +648,9 @@ class YoloAnalyzer(Analyzer):
                 confidence = float(box.conf.item())
 
                 x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
-                bbox = [
-                    round(max(0.0, x1) / ow, 5),
-                    round(max(0.0, y1) / oh, 5),
-                    round((x2 - x1) / ow, 5),
-                    round((y2 - y1) / oh, 5),
-                ]
+                bbox = norm_bbox(x1, y1, x2, y2, ow, oh)
+                if bbox is None:
+                    continue
 
                 track_id = None
                 if box.id is not None:
@@ -826,7 +858,7 @@ class AnprAnalyzer(Analyzer):
         import torch
         from ultralytics import YOLO
 
-        self.weights = str(self.config.get("weights", "yolov8n.pt"))
+        self.weights = safe_weights(self.config)
         self.conf = float(self.config.get("threshold", 0.3))
         self.imgsz = self.config.get("imgsz")
         device = self.config.get("device")
@@ -888,16 +920,12 @@ class AnprAnalyzer(Analyzer):
                 vtype = self.names.get(cls_idx, str(cls_idx))
                 confidence = float(box.conf.item())
                 x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
-                x1, y1 = max(0.0, x1), max(0.0, y1)
-                bw, bh = (x2 - x1), (y2 - y1)
-                if ow * oh > 0 and (bw * bh) / (ow * oh) < self.min_box_area:
+                bbox = norm_bbox(x1, y1, x2, y2, ow, oh)
+                if bbox is None:
                     continue
-                bbox = [
-                    round(x1 / ow, 5),
-                    round(y1 / oh, 5),
-                    round(bw / ow, 5),
-                    round(bh / oh, 5),
-                ]
+                # Normalized area = w*h; drop boxes below the minimum-area gate.
+                if bbox[2] * bbox[3] < self.min_box_area:
+                    continue
                 track_id = str(int(box.id.item())) if box.id is not None else None
 
                 attrs: Dict[str, Any] = {
@@ -1027,7 +1055,9 @@ class CoreClient:
                 if resp.status_code == 404 and allow_404:
                     return None
                 if 500 <= resp.status_code < 600:
-                    last_err = f"server error {resp.status_code}: {resp.text[:200]}"
+                    # Log only the status (no body): a 5xx body can echo internal detail/secrets, and
+                    # this line is logged at WARNING on every retry.
+                    last_err = f"server error {resp.status_code}"
                 elif resp.status_code >= 400:
                     # Client error: retrying won't help — surface immediately.
                     raise WorkerHTTPError(resp.status_code, resp.text[:200], url)
@@ -1051,13 +1081,21 @@ class CoreClient:
             self._sleep(delay)
 
     def fetch_tasks(self) -> List[Task]:
-        resp = self._request("GET", f"{self.s.api}/api/v1/ai/tasks")
-        assert resp is not None  # only None when allow_404
+        url = f"{self.s.api}/api/v1/ai/tasks"
+        resp = self._request("GET", url)
+        if resp is None:  # only None when allow_404, which we didn't set
+            raise WorkerHTTPError(None, "unexpected empty response from _request", url)
         return [Task.from_json(d) for d in resp.json()]
 
     def fetch_frame(self, task: Task) -> Optional[FrameContext]:
         """Pull the latest sampled frame; returns None if none exists yet (404)."""
-        resp = self._request("GET", f"{self.s.api}{task.frame_url}", allow_404=True)
+        # The frame URL comes from the server's task list; defend against SSRF / path escape by
+        # requiring a relative API path (no scheme/host, no `..`).
+        fu = task.frame_url
+        if not fu.startswith("/") or "://" in fu or ".." in fu:
+            log.error("rejecting unsafe frame_url %r for task %s", fu, task.id)
+            return None
+        resp = self._request("GET", f"{self.s.api}{fu}", allow_404=True)
         if resp is None:
             return None
         age = resp.headers.get("x-frame-age-ms")
@@ -1071,11 +1109,20 @@ class CoreClient:
     def post_results(
         self, task: Task, result: AnalysisResult, frame_id: Optional[str] = None
     ) -> int:
+        # Bound the batch to the kernel's per-request cap (MAX_INGEST_DETECTIONS = 1000): an
+        # over-cap POST is rejected wholesale (400), losing everything. Truncating keeps the bulk and
+        # is logged. Order is detector-confidence-descending, so the kept slice is the most salient.
+        dets = result.detections
+        if len(dets) > 1000:
+            log.warning(
+                "capping %d detections to 1000 (kernel per-request limit)", len(dets)
+            )
+            dets = dets[:1000]
         body: Dict[str, Any] = {
             "camera_id": task.camera_id,
             "task_type": task.task_type,
             "timestamp": datetime.now(timezone.utc).isoformat(),
-            "detections": [d.to_json() for d in result.detections],
+            "detections": [d.to_json() for d in dets],
         }
         # Idempotency key: lets Core dedup an at-least-once redelivery of this exact frame's batch
         # (e.g. a retry after a committed-but-unacked POST) so consumer side effects don't double-fire.
@@ -1083,11 +1130,14 @@ class CoreClient:
             body["frame_id"] = frame_id
         if result.event is not None:
             body["event"] = result.event.to_json()
-        resp = self._request("POST", f"{self.s.api}/api/v1/ai/events", json=body)
-        assert resp is not None
+        url = f"{self.s.api}/api/v1/ai/events"
+        resp = self._request("POST", url, json=body)
+        if resp is None:  # only None when allow_404, which we didn't set
+            raise WorkerHTTPError(None, "unexpected empty response from _request", url)
         try:
-            return int(resp.json().get("detections_ingested", 0))
-        except (ValueError, AttributeError):
+            val = resp.json().get("detections_ingested", 0)
+            return int(val) if val is not None else 0
+        except (ValueError, AttributeError, TypeError):
             return 0
 
 
@@ -1120,6 +1170,13 @@ class TaskRunner(threading.Thread):
         if frame.captured_at and frame.captured_at == self._last_captured:
             self.log.debug("frame unchanged (captured_at=%s); skipping", frame.captured_at)
             return
+        # Skip a stale frame (sampler stalled / network lag): analyzing seconds-old footage produces
+        # misleading events. Threshold = max(2s, 3× the task period) to tolerate normal jitter.
+        if frame.age_ms is not None:
+            stale_ms = max(2000.0, self.task.period * 1000.0 * 3.0)
+            if frame.age_ms > stale_ms:
+                self.log.debug("frame too old (age=%dms > %.0fms); skipping", frame.age_ms, stale_ms)
+                return
         self._last_captured = frame.captured_at
 
         result = self.analyzer.analyze(frame)

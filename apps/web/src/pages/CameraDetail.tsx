@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
@@ -106,6 +106,20 @@ export function CameraDetail() {
     [id, rangeHours],
   );
 
+  // Guards for async setState: `mountedRef` blocks updates after unmount; `idRef` (always the latest
+  // camera id) lets an in-flight response for a previous camera be discarded when the user navigates
+  // away rapidly (A→B→C), so a slow response for A can't overwrite C's view.
+  const mountedRef = useRef(true);
+  const idRef = useRef(id);
+  idRef.current = id;
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+  const liveForThisCamera = useCallback(() => mountedRef.current && idRef.current === id, [id]);
+
   // ---- Live view ----
   const [live, setLive] = useState<LiveUrls | null>(null);
   const [liveLoading, setLiveLoading] = useState(false);
@@ -115,13 +129,14 @@ export function CameraDetail() {
     setLiveLoading(true);
     setLiveError(null);
     try {
-      setLive(await api.liveview(id));
+      const urls = await api.liveview(id);
+      if (liveForThisCamera()) setLive(urls);
     } catch (e) {
-      setLiveError(e instanceof Error ? e.message : String(e));
+      if (liveForThisCamera()) setLiveError(e instanceof Error ? e.message : String(e));
     } finally {
-      setLiveLoading(false);
+      if (liveForThisCamera()) setLiveLoading(false);
     }
-  }, [id]);
+  }, [id, liveForThisCamera]);
 
   useEffect(() => {
     setLive(null);
@@ -171,12 +186,13 @@ export function CameraDetail() {
     setClipLoading(true);
     try {
       const result = await api.exportClip(id, from, to);
+      if (!liveForThisCamera()) return; // navigated away / unmounted — drop the stale result
       setClipResult(result);
       setPlayback({ src: result.url, label: `Clip ${result.filename}` });
     } catch (err) {
-      setClipError(err instanceof ApiError ? err.message : String(err));
+      if (liveForThisCamera()) setClipError(err instanceof ApiError ? err.message : String(err));
     } finally {
-      setClipLoading(false);
+      if (liveForThisCamera()) setClipLoading(false);
     }
   }
 
@@ -189,11 +205,13 @@ export function CameraDetail() {
     setTesting(true);
     setTestResult(null);
     try {
-      setTestResult(await api.testCamera(id));
+      const r = await api.testCamera(id);
+      if (liveForThisCamera()) setTestResult(r);
     } catch (e) {
-      setTestResult({ reachable: false, url: "", error: e instanceof Error ? e.message : String(e) });
+      if (liveForThisCamera())
+        setTestResult({ reachable: false, url: "", error: e instanceof Error ? e.message : String(e) });
     } finally {
-      setTesting(false);
+      if (liveForThisCamera()) setTesting(false);
     }
   }
 
