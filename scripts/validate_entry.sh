@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Stage 4 Campus Entry validation: registry → simulated ANPR reads → temporal voting → authorization
+# Stage 4 access-control validation: registry → simulated ANPR reads → temporal voting → authorization
 # resolution (matched / exception / blocked / unmatched / pass) → guard workflow → reports → audit.
 # Runs against the stack with AUTH disabled (default); see validate_rbac.sh for the RBAC path.
 set -u
