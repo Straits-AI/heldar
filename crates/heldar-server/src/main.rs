@@ -46,6 +46,7 @@ async fn main() -> anyhow::Result<()> {
         &cfg.snapshots_dir,
         &cfg.frames_dir,
         &cfg.playback_dir,
+        &cfg.archive_dir,
     ] {
         std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     }
@@ -75,6 +76,19 @@ async fn main() -> anyhow::Result<()> {
         .context("auth bootstrap")?;
 
     let recorder = RecorderManager::new(pool.clone(), cfg.clone());
+    // Dual/mirror recorder: present only when HELDAR_MIRROR_RECORDINGS_DIR is configured.
+    let mirror = match &cfg.mirror_recordings_dir {
+        Some(dir) => {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("creating mirror recordings dir {}", dir.display()))?;
+            Some(services::mirror::MirrorRecorderManager::new(
+                pool.clone(),
+                cfg.clone(),
+                dir.clone(),
+            ))
+        }
+        None => None,
+    };
     let sampler = SamplerManager::new(pool.clone(), cfg.clone());
     // Register the perception consumers (zones = kernel-open spatial primitive; ANPR = the open
     // access-control app). The kernel ingest path fans batches out to these without naming them —
@@ -99,6 +113,7 @@ async fn main() -> anyhow::Result<()> {
         pool: pool.clone(),
         cfg: cfg.clone(),
         recorder: recorder.clone(),
+        mirror: mirror.clone(),
         sampler: sampler.clone(),
         consumers,
         http,
@@ -106,6 +121,9 @@ async fn main() -> anyhow::Result<()> {
     };
 
     recorder.start_all().await.context("starting recorders")?;
+    if let Some(m) = &mirror {
+        m.start_all().await.context("starting mirror recorders")?;
+    }
     sampler.start_all().await;
     // Supervise the background services: if one panics, it is respawned (production resilience).
     {
@@ -144,6 +162,13 @@ async fn main() -> anyhow::Result<()> {
                 services::snapshot_scheduler::run(st.clone())
             });
         }
+        // ANR edge re-fill: re-fetch missed footage from camera onboard storage to fill recording
+        // gaps. Only supervise when enabled — run() returns immediately otherwise (avoids respawn
+        // churn, mirroring the notifier/backup guards).
+        if cfg.anr_enabled {
+            let (p, c) = (pool.clone(), cfg.clone());
+            spawn_supervised("anr", move || services::anr::run(p.clone(), c.clone()));
+        }
         // Recording-schedule watcher (opens/closes time-of-day windows for scheduled cameras).
         // Only meaningful when the recorder is enabled; the watcher itself also self-guards.
         if cfg.recorder_enabled {
@@ -157,6 +182,14 @@ async fn main() -> anyhow::Result<()> {
             let st = state.clone();
             spawn_supervised("playback_session_cleanup", move || {
                 services::playback_session::run(st.clone())
+            });
+        }
+        // Backup scheduler (scheduled policy jobs). Only supervise when enabled — run() returns
+        // immediately otherwise, which would respawn it in a tight loop (mirrors the notifier guard).
+        if cfg.backup_enabled {
+            let st = state.clone();
+            spawn_supervised("backup_scheduler", move || {
+                services::backup::run(st.clone())
             });
         }
         // Only supervise the notifier when a webhook is configured — otherwise run() returns
@@ -201,6 +234,7 @@ async fn main() -> anyhow::Result<()> {
         .nest_service("/media/clips", ServeDir::new(&cfg.clips_dir))
         .nest_service("/media/snapshots", ServeDir::new(&cfg.snapshots_dir))
         .nest_service("/media/playback", ServeDir::new(&cfg.playback_dir))
+        .nest_service("/media/archives", ServeDir::new(&cfg.archive_dir))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state);
@@ -212,7 +246,11 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Heldar Core listening on http://{addr}");
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal(recorder.clone(), sampler.clone()))
+        .with_graceful_shutdown(shutdown_signal(
+            recorder.clone(),
+            mirror.clone(),
+            sampler.clone(),
+        ))
         .await
         .context("server error")?;
 
@@ -258,7 +296,11 @@ where
     });
 }
 
-async fn shutdown_signal(recorder: Arc<RecorderManager>, sampler: Arc<SamplerManager>) {
+async fn shutdown_signal(
+    recorder: Arc<RecorderManager>,
+    mirror: Option<Arc<heldar_kernel::services::mirror::MirrorRecorderManager>>,
+    sampler: Arc<SamplerManager>,
+) {
     let ctrl_c = async {
         let _ = tokio::signal::ctrl_c().await;
     };
@@ -279,5 +321,8 @@ async fn shutdown_signal(recorder: Arc<RecorderManager>, sampler: Arc<SamplerMan
     }
     tracing::info!("shutdown signal received; stopping recorders + samplers");
     recorder.shutdown().await;
+    if let Some(m) = &mirror {
+        m.shutdown().await;
+    }
     sampler.shutdown().await;
 }

@@ -1,3 +1,5 @@
+pub mod anr;
+pub mod backup;
 pub mod clip;
 pub mod consumer;
 pub mod discovery;
@@ -5,7 +7,9 @@ pub mod health;
 pub mod indexer;
 pub mod mediamtx;
 pub mod metrics;
+pub mod mirror;
 pub mod notifier;
+pub mod onvif;
 pub mod playback_session;
 pub mod recorder;
 pub mod remote_access;

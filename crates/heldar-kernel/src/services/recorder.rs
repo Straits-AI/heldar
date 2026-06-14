@@ -403,41 +403,11 @@ impl RecorderManager {
         }
     }
 
-    /// Build the segmenting FFmpeg command for a camera's recorded stream. Shared verbatim by the
-    /// continuous ([`Self::run_supervise`]) and event ([`Self::run_event_supervise`]) supervisors so
-    /// both produce byte-identical recordings (stream-copy, fragmented-MP4 segments, UTC strftime
-    /// names). Video is always `-c copy`; audio is passed through only when the camera opts in.
+    /// Build the segmenting FFmpeg command for a camera's recorded stream. Delegates to the shared
+    /// [`build_record_command`] free fn so the continuous / event supervisors AND the mirror recorder
+    /// all produce byte-identical recordings.
     fn build_record_command(&self, cam: &Camera, url: &str, dir: &std::path::Path) -> Command {
-        let seg = cam.segment_seconds.max(2);
-        let pattern = dir.join("%Y%m%d_%H%M%S.mp4");
-        let audio_args: &[&str] = if cam.record_audio {
-            &["-c:a", "copy"]
-        } else {
-            &["-an"]
-        };
-        let mut cmd = Command::new(&self.cfg.ffmpeg_bin);
-        cmd.kill_on_drop(true)
-            .env("TZ", "UTC")
-            .args(["-nostdin", "-hide_banner", "-loglevel", "warning"])
-            .args(["-rtsp_transport", "tcp"])
-            .args(["-timeout", "15000000"]) // 15s RTSP socket I/O timeout -> exit on stall
-            .args(["-i", url])
-            .args(["-c", "copy"]) // stream-copy (no decode)
-            .args(audio_args) // audio: pass-through when record_audio, else dropped
-            .args(["-f", "segment"])
-            .args(["-segment_time", &seg.to_string()])
-            .args(["-segment_format", "mp4"])
-            .args([
-                "-segment_format_options",
-                "movflags=+frag_keyframe+empty_moov+default_base_moof",
-            ])
-            .args(["-reset_timestamps", "1"])
-            .args(["-strftime", "1"])
-            .arg(&pattern)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        cmd
+        build_record_command(&self.cfg, cam, url, dir)
     }
 
     /// Supervise an EVENT-capable camera (`event` / `scheduled_event`). The task is always ARMED: it
@@ -686,6 +656,49 @@ impl RecorderManager {
         tracing::info!(%camera_id, %reason, window_end = %window_end, "recorder: event trigger");
         Some(window_end)
     }
+}
+
+/// Build the segmenting FFmpeg command for a camera's recorded stream (stream-copy, fragmented-MP4
+/// segments, UTC strftime names). Shared verbatim by the continuous + event supervisors and the
+/// mirror recorder ([`crate::services::mirror`]) so every pipeline writes byte-identical segments.
+/// Video is always `-c copy`; audio is passed through only when the camera opts in. `dir` is the
+/// output directory (the primary recordings dir, or the mirror dir for the mirror recorder).
+pub(crate) fn build_record_command(
+    cfg: &Config,
+    cam: &Camera,
+    url: &str,
+    dir: &std::path::Path,
+) -> Command {
+    let seg = cam.segment_seconds.max(2);
+    let pattern = dir.join("%Y%m%d_%H%M%S.mp4");
+    let audio_args: &[&str] = if cam.record_audio {
+        &["-c:a", "copy"]
+    } else {
+        &["-an"]
+    };
+    let mut cmd = Command::new(&cfg.ffmpeg_bin);
+    cmd.kill_on_drop(true)
+        .env("TZ", "UTC")
+        .args(["-nostdin", "-hide_banner", "-loglevel", "warning"])
+        .args(["-rtsp_transport", "tcp"])
+        .args(["-timeout", "15000000"]) // 15s RTSP socket I/O timeout -> exit on stall
+        .args(["-i", url])
+        .args(["-c", "copy"]) // stream-copy (no decode)
+        .args(audio_args) // audio: pass-through when record_audio, else dropped
+        .args(["-f", "segment"])
+        .args(["-segment_time", &seg.to_string()])
+        .args(["-segment_format", "mp4"])
+        .args([
+            "-segment_format_options",
+            "movflags=+frag_keyframe+empty_moov+default_base_moof",
+        ])
+        .args(["-reset_timestamps", "1"])
+        .args(["-strftime", "1"])
+        .arg(&pattern)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    cmd
 }
 
 /// Sleep for `secs`, returning `true` if a stop was signaled during the wait.

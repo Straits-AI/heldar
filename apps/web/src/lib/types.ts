@@ -55,6 +55,14 @@ export interface CameraView {
   pre_roll_seconds: number;
   /** Event recording: how long the recorder keeps writing after a trigger (the window). 0..3600. */
   post_roll_seconds: number;
+  /** Run a SECOND ffmpeg pipeline writing identical segments to HELDAR_MIRROR_RECORDINGS_DIR
+   * (redundant DVR copy). No-op unless the mirror dir is configured server-side. */
+  mirror_enabled: boolean;
+  /** Let the ANR loop re-fetch missed footage from the camera's onboard storage to fill gaps. */
+  anr_enabled: boolean;
+  /** Replay URL template for ANR re-fill ({start}/{end} placeholders, Hikvision time format);
+   * null = default Hikvision RTSP playback built from address+credentials. */
+  anr_replay_url_template?: string | null;
   enabled: boolean;
   created_at: string;
   updated_at: string;
@@ -82,6 +90,9 @@ export interface CameraCreate {
   record_mode?: RecordMode;
   pre_roll_seconds?: number;
   post_roll_seconds?: number;
+  mirror_enabled?: boolean;
+  anr_enabled?: boolean;
+  anr_replay_url_template?: string | null;
   enabled?: boolean;
 }
 
@@ -285,6 +296,42 @@ export interface SystemInfo {
   recordings_gb: number;
   max_recordings_gb: number;
   storage: StorageReport;
+  /** No recent disk_smart_warning/raid_degraded events (SMART/RAID health pass). */
+  disk_health_ok: boolean;
+  /** Timestamp of the most recent disk-health alert (any time), or null if none. */
+  last_disk_alert_at?: string | null;
+  /** Active live-preview transcode engine (software | vaapi | nvenc). */
+  live_transcode_engine: string;
+}
+
+// ---- Fleet outbox + site identity (open-core seam, edge->cloud uplink foundation) ----
+
+/** One durable outbox row: a committed detection batch (GET /api/v1/outbox, admin-only). */
+export interface OutboxEntry {
+  seq: number;
+  topic: string;
+  camera_id?: string | null;
+  site_id?: string | null;
+  frame_id?: string | null;
+  task_type?: string | null;
+  detection_count: number;
+  created_at: string;
+}
+
+/** A page of outbox rows; pass `next_seq` as the next `since_seq` to continue draining. */
+export interface OutboxPage {
+  entries: OutboxEntry[];
+  /** Highest `seq` in this page; null when caught up (empty page). */
+  next_seq?: number | null;
+  count: number;
+}
+
+/** This node's fleet identity (GET /api/v1/site, no auth). */
+export interface SiteInfo {
+  site_id?: string | null;
+  name: string;
+  version: string;
+  started_at: string;
 }
 
 /** A hole in recording coverage (the span between two availability ranges). */
@@ -301,6 +348,25 @@ export interface Gaps {
   gaps: GapSpan[];
   gap_count: number;
   total_gap_seconds: number;
+}
+
+/** ANR fill lifecycle for a persisted recording gap. */
+export type GapFillState = "pending" | "filled" | "failed";
+
+/** A persisted recording gap detected by the indexer (a hole > 3s between segments). ANR re-fills it
+ * from the camera's onboard storage. Distinct from the computed coverage holes in `Gaps`:
+ * GET /api/v1/cameras/{id}/recording-gaps, POST .../recording-gaps/{gap_id}/retry. */
+export interface RecordingGap {
+  id: string;
+  camera_id: string;
+  gap_start: string;
+  gap_end: string;
+  gap_seconds: number;
+  fill_state: GapFillState;
+  fill_attempts: number;
+  last_attempt_at?: string | null;
+  filled_at?: string | null;
+  created_at: string;
 }
 
 // ---- Per-camera recording schedule (time-of-day windows) ----
@@ -867,4 +933,187 @@ export interface SearchPlanResponse {
   query: string;
   planner: string;
   plan: QueryPlan;
+}
+
+// ---- Backup subsystem: destinations, policies, jobs, archive export ----
+
+/** Transport for a backup destination. `local` copies via fs (NAS mounts); the rest use rclone. */
+export type BackupKind = "local" | "sftp" | "ftp" | "s3";
+
+/** Lifecycle of a backup job. */
+export type BackupJobStatus = "pending" | "running" | "completed" | "error";
+
+/** A backup destination as returned to clients — secret config values are masked to `***`. */
+export interface BackupDestinationView {
+  id: string;
+  name: string;
+  kind: BackupKind;
+  /** Kind-specific config blob with secret values (pass/secret_key/…) replaced by `***`. */
+  config: Record<string, unknown>;
+  /** Whether at least one secret credential is configured (the masked value hides whether it is set). */
+  has_credentials: boolean;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BackupDestinationCreate {
+  name: string;
+  kind: BackupKind;
+  /** local: {path}; sftp/ftp: {host,port,user,pass,path}; s3: {bucket,prefix,access_key,secret_key,endpoint,region}. */
+  config?: Record<string, unknown>;
+  enabled?: boolean;
+}
+
+/** Partial update; to keep an existing secret, send it back as the `***` placeholder (or omit it). */
+export type BackupDestinationUpdate = Partial<BackupDestinationCreate>;
+
+/** Result of POST /api/v1/backup/destinations/{id}/test. */
+export interface BackupTestResult {
+  ok: boolean;
+  error?: string | null;
+  latency_ms: number;
+}
+
+/** A scheduled backup policy: ship a camera selection's recent footage to a destination on an interval. */
+export interface BackupPolicy {
+  id: string;
+  name: string;
+  destination_id: string;
+  /** Camera ids to include; empty array means all cameras. */
+  camera_ids: string[];
+  incident_lock_only: boolean;
+  schedule_interval_s: number;
+  /** How far back each run reaches (0 = everything up to now). */
+  lookback_hours: number;
+  last_run_at?: string | null;
+  last_job_id?: string | null;
+  enabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface BackupPolicyCreate {
+  name: string;
+  destination_id: string;
+  camera_ids?: string[];
+  incident_lock_only?: boolean;
+  schedule_interval_s?: number;
+  lookback_hours?: number;
+  enabled?: boolean;
+}
+
+export type BackupPolicyUpdate = Partial<BackupPolicyCreate>;
+
+/** A single backup run (scheduled, manually triggered, or an on-demand archive export). */
+export interface BackupJob {
+  id: string;
+  policy_id?: string | null;
+  destination_id?: string | null;
+  /** `policy` | `on_demand_archive`. */
+  kind: string;
+  camera_ids: string[];
+  from_time?: string | null;
+  to_time?: string | null;
+  incident_lock_only: boolean;
+  status: BackupJobStatus;
+  files_total: number;
+  files_copied: number;
+  bytes_copied: number;
+  error?: string | null;
+  output_path?: string | null;
+  /** Browser-fetchable URL of the produced archive (under /media/archives/...), if any. */
+  output_url?: string | null;
+  started_at?: string | null;
+  finished_at?: string | null;
+  created_at: string;
+}
+
+/** Request body for POST /api/v1/archive/export. */
+export interface ArchiveExportRequest {
+  /** Camera ids to include; empty/omitted means all cameras. */
+  camera_ids?: string[];
+  from?: string;
+  to?: string;
+  incident_lock_only?: boolean;
+  /** Trim each segment to the [from, to] window (re-mux with -c copy); requires both bounds. */
+  trim?: boolean;
+}
+
+// ---- ONVIF (Profile S MVP): discovery, device profile, PTZ ----
+
+/** A device found by WS-Discovery (POST /api/v1/onvif/discover). */
+export interface DiscoveredOnvifDevice {
+  /** The device's wsa:EndpointReference Address (a urn:uuid: URN), if present. */
+  endpoint_reference?: string | null;
+  /** First transport address (the ONVIF device service URL to probe). */
+  device_url: string;
+  /** All advertised transport addresses. */
+  xaddrs: string[];
+  /** Host extracted from device_url (matches a camera's address). */
+  address?: string | null;
+  /** Advertised device types (e.g. `dn:NetworkVideoTransmitter`). */
+  types?: string | null;
+  /** Advertised scope URIs (name/hardware/location hints). */
+  scopes: string[];
+}
+
+/** Response of POST /api/v1/onvif/discover. */
+export interface OnvifDiscoverResponse {
+  found: number;
+  devices: DiscoveredOnvifDevice[];
+}
+
+/** Per-camera ONVIF device profile (GET /api/v1/cameras/{id}/onvif, POST .../onvif/probe). */
+export interface CameraOnvif {
+  camera_id: string;
+  /** ONVIF device service endpoint URL. */
+  device_url: string;
+  manufacturer?: string | null;
+  model?: string | null;
+  firmware_version?: string | null;
+  serial_number?: string | null;
+  hardware_id?: string | null;
+  /** ONVIF scope URIs (from WS-Discovery; empty when probed directly). */
+  scopes: string[];
+  /** Media service endpoint URL. */
+  media_url?: string | null;
+  /** PTZ service endpoint URL. */
+  ptz_url?: string | null;
+  /** Media profile token used for streaming + PTZ. */
+  profile_token?: string | null;
+  /** PTZ node bound to the chosen profile's PTZConfiguration. */
+  ptz_node_token?: string | null;
+  /** True when the device exposes PTZ AND the chosen profile carries a PTZConfiguration. */
+  ptz_enabled: boolean;
+  probed_at: string;
+}
+
+/** Optional request body for POST /api/v1/cameras/{id}/onvif/probe. */
+export interface OnvifProbeRequest {
+  /** Explicit ONVIF device service URL. Omit to derive from a prior probe or the camera's address. */
+  device_url?: string;
+}
+
+/** A PTZ preset fetched from a camera's ONVIF PTZ service. */
+export interface PtzPreset {
+  id: string;
+  camera_id: string;
+  /** The device's preset token. */
+  token: string;
+  name?: string | null;
+  fetched_at: string;
+}
+
+/** Request body for POST /api/v1/cameras/{id}/ptz/continuous (normalized velocities, -1.0..1.0). */
+export interface PtzContinuousMoveRequest {
+  pan?: number;
+  tilt?: number;
+  zoom?: number;
+}
+
+/** Request body for POST /api/v1/cameras/{id}/ptz/goto_preset. */
+export interface PtzGotoPresetRequest {
+  /** The device preset token to move to. */
+  token: string;
 }

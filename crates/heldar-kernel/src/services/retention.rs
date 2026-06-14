@@ -6,7 +6,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use serde_json::json;
 use sqlx::SqlitePool;
 
@@ -468,6 +468,45 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         }
         if snap_deleted > 0 {
             tracing::info!(deleted = snap_deleted, "retention: pruned old snapshots");
+        }
+    }
+
+    // 10) Prune on-demand archive exports + finished backup-job rows past the archive retention
+    //     window. Delete the .zip files by mtime, then drop any backup_jobs that have finished before
+    //     the cutoff (both policy runs and archive exports). Skipped entirely when hours = 0.
+    if cfg.archive_retention_hours > 0 {
+        let cutoff = Utc::now() - chrono::Duration::hours(cfg.archive_retention_hours);
+        if let Ok(mut entries) = tokio::fs::read_dir(&cfg.archive_dir).await {
+            let mut removed: u64 = 0;
+            while let Ok(Some(ent)) = entries.next_entry().await {
+                let path = ent.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("zip") {
+                    continue;
+                }
+                let stale = ent
+                    .metadata()
+                    .await
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .map(|t| DateTime::<Utc>::from(t) < cutoff)
+                    .unwrap_or(false);
+                if stale && tokio::fs::remove_file(&path).await.is_ok() {
+                    removed += 1;
+                }
+            }
+            if removed > 0 {
+                tracing::info!(deleted = removed, "retention: pruned old archive exports");
+            }
+        }
+        let jpruned = sqlx::query(
+            "DELETE FROM backup_jobs WHERE finished_at IS NOT NULL AND finished_at < ?",
+        )
+        .bind(cutoff)
+        .execute(pool)
+        .await?
+        .rows_affected();
+        if jpruned > 0 {
+            tracing::info!(deleted = jpruned, "retention: pruned old finished backup jobs");
         }
     }
     Ok(())

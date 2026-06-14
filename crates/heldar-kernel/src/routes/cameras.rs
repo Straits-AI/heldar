@@ -140,15 +140,23 @@ async fn create_camera(
         .post_roll_seconds
         .unwrap_or(st.cfg.default_post_roll_seconds)
         .clamp(0, 3600);
+    let mirror_enabled = body.mirror_enabled.unwrap_or(false);
+    let anr_enabled = body.anr_enabled.unwrap_or(false);
+    let anr_replay_url_template = body
+        .anr_replay_url_template
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
     sqlx::query(
         "INSERT INTO cameras
            (id, site_id, name, vendor, model, address, rtsp_port, username, password,
             main_stream_url, sub_stream_url, record_stream, capabilities, record_enabled,
             segment_seconds, retention_hours, storage_quota_bytes, record_audio, record_mode,
-            pre_roll_seconds, post_roll_seconds, enabled,
-            created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            pre_roll_seconds, post_roll_seconds, mirror_enabled, anr_enabled, anr_replay_url_template,
+            enabled, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
     )
     .bind(&id)
     .bind(&body.site_id)
@@ -171,6 +179,9 @@ async fn create_camera(
     .bind(&record_mode)
     .bind(pre_roll_seconds)
     .bind(post_roll_seconds)
+    .bind(mirror_enabled)
+    .bind(anr_enabled)
+    .bind(&anr_replay_url_template)
     .bind(enabled)
     .bind(now)
     .bind(now)
@@ -187,6 +198,9 @@ async fn create_camera(
     .await?;
 
     st.recorder.reconcile(&id).await;
+    if let Some(m) = &st.mirror {
+        m.reconcile(&id).await;
+    }
     let cam = load_camera(&st.pool, &id).await?;
     auth::audit(
         &st.pool,
@@ -255,13 +269,23 @@ async fn update_camera(
         .post_roll_seconds
         .map(|v| v.clamp(0, 3600))
         .unwrap_or(cur.post_roll_seconds);
+    let mirror_enabled = body.mirror_enabled.unwrap_or(cur.mirror_enabled);
+    let anr_enabled = body.anr_enabled.unwrap_or(cur.anr_enabled);
+    let anr_replay_url_template = body
+        .anr_replay_url_template
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or(cur.anr_replay_url_template);
 
     sqlx::query(
         "UPDATE cameras SET
             name=?, site_id=?, vendor=?, model=?, address=?, rtsp_port=?, username=?, password=?,
             main_stream_url=?, sub_stream_url=?, record_stream=?, capabilities=?, record_enabled=?,
             segment_seconds=?, retention_hours=?, storage_quota_bytes=?, record_audio=?, record_mode=?,
-            pre_roll_seconds=?, post_roll_seconds=?, enabled=?, updated_at=?
+            pre_roll_seconds=?, post_roll_seconds=?, mirror_enabled=?, anr_enabled=?,
+            anr_replay_url_template=?, enabled=?, updated_at=?
          WHERE id=?",
     )
     .bind(&name)
@@ -284,6 +308,9 @@ async fn update_camera(
     .bind(&record_mode)
     .bind(pre_roll_seconds)
     .bind(post_roll_seconds)
+    .bind(mirror_enabled)
+    .bind(anr_enabled)
+    .bind(&anr_replay_url_template)
     .bind(enabled)
     .bind(Utc::now())
     .bind(&id)
@@ -291,6 +318,9 @@ async fn update_camera(
     .await?;
 
     st.recorder.reconcile(&id).await;
+    if let Some(m) = &st.mirror {
+        m.reconcile(&id).await;
+    }
     // A disable / URL change / enable also affects AI sampling for this camera.
     st.sampler.reconcile().await;
     auth::audit(
@@ -313,6 +343,9 @@ async fn delete_camera(
     principal.require(principal.can_manage_registry(), "delete cameras")?;
     let _ = load_camera(&st.pool, &id).await?; // 404 if missing
     st.recorder.stop(&id).await;
+    if let Some(m) = &st.mirror {
+        m.stop(&id).await;
+    }
     // Clean up zone-event evidence files + rows for this camera (zone_events has no FK cascade).
     let evidence: Vec<(Option<String>,)> =
         sqlx::query_as("SELECT evidence_path FROM zone_events WHERE camera_id = ?")
@@ -337,6 +370,9 @@ async fn delete_camera(
     st.sampler.reconcile().await;
     let _ = tokio::fs::remove_dir_all(st.cfg.camera_recordings_dir(&id)).await;
     let _ = tokio::fs::remove_dir_all(st.cfg.camera_frames_dir(&id)).await;
+    if let Some(dir) = &st.cfg.mirror_recordings_dir {
+        let _ = tokio::fs::remove_dir_all(dir.join(&id)).await;
+    }
     auth::audit(
         &st.pool,
         &principal,

@@ -1,5 +1,7 @@
 //! RTSP URL construction from vendor templates, plus credential masking.
 
+use chrono::{DateTime, Utc};
+
 use crate::models::Camera;
 
 /// Map a logical stream name to a HikVision channel id (101 = main, 102 = sub).
@@ -70,6 +72,44 @@ pub fn stream_url(cam: &Camera, stream: &str) -> Option<String> {
 /// The RTSP URL for the stream this camera records.
 pub fn record_url(cam: &Camera) -> Option<String> {
     stream_url(cam, &cam.record_stream)
+}
+
+/// A Hikvision-style replay timestamp: `20260613T120500Z` (UTC, used by ISAPI/RTSP playback).
+fn hik_replay_time(t: DateTime<Utc>) -> String {
+    t.format("%Y%m%dT%H%M%SZ").to_string()
+}
+
+/// Build the replay (playback) URL used by ANR to pull a `[start, end]` window from the camera's
+/// ONBOARD storage. Honors a per-camera `anr_replay_url_template` (with `{start}` / `{end}`
+/// placeholders, filled with Hikvision-format timestamps); otherwise defaults to the Hikvision RTSP
+/// playback endpoint (`/Streaming/tracks/{channel}?starttime=..&endtime=..`) built from the camera's
+/// address + credentials. Returns `None` when there is no template and no host/credentials to build
+/// one from. Best-effort and camera-dependent — see `services/anr.rs`.
+pub fn anr_replay_url(cam: &Camera, start: DateTime<Utc>, end: DateTime<Utc>) -> Option<String> {
+    let s = hik_replay_time(start);
+    let e = hik_replay_time(end);
+    if let Some(tpl) = cam.anr_replay_url_template.as_deref() {
+        let tpl = tpl.trim();
+        if !tpl.is_empty() {
+            return Some(tpl.replace("{start}", &s).replace("{end}", &e));
+        }
+    }
+    let host = cam.address.as_deref()?.trim();
+    if host.is_empty() {
+        return None;
+    }
+    let port = cam.rtsp_port;
+    let creds = match (cam.username.as_deref(), cam.password.as_deref()) {
+        (Some(u), Some(p)) if !u.is_empty() => {
+            format!("{}:{}@", encode_userinfo(u), encode_userinfo(p))
+        }
+        (Some(u), _) if !u.is_empty() => format!("{}@", encode_userinfo(u)),
+        _ => String::new(),
+    };
+    let channel = hik_channel(&cam.record_stream);
+    Some(format!(
+        "rtsp://{creds}{host}:{port}/Streaming/tracks/{channel}?starttime={s}&endtime={e}"
+    ))
 }
 
 /// Schemes permitted for explicit camera stream URLs. Excludes `file:`, `gopher:`, etc., which
@@ -150,6 +190,9 @@ mod tests {
             record_mode: "continuous".into(),
             pre_roll_seconds: 10,
             post_roll_seconds: 30,
+            mirror_enabled: false,
+            anr_enabled: false,
+            anr_replay_url_template: None,
             enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),
@@ -203,6 +246,43 @@ mod tests {
             mask_url("rtsp://user:p@ss@10.0.0.1:554/x"),
             "rtsp://***@10.0.0.1:554/x"
         );
+    }
+
+    #[test]
+    fn anr_replay_url_default_hikvision_playback() {
+        let c = base();
+        let start = parse_t("2026-06-13T12:00:00Z");
+        let end = parse_t("2026-06-13T12:01:30Z");
+        assert_eq!(
+            anr_replay_url(&c, start, end).unwrap(),
+            "rtsp://admin:p%40ss%2Fw%3Ard@192.168.0.2:554/Streaming/tracks/101?\
+             starttime=20260613T120000Z&endtime=20260613T120130Z"
+        );
+    }
+
+    #[test]
+    fn anr_replay_url_honors_template_placeholders() {
+        let mut c = base();
+        c.anr_replay_url_template =
+            Some("rtsp://cam/replay?s={start}&e={end}".into());
+        assert_eq!(
+            anr_replay_url(&c, parse_t("2026-06-13T12:00:00Z"), parse_t("2026-06-13T12:00:05Z"))
+                .unwrap(),
+            "rtsp://cam/replay?s=20260613T120000Z&e=20260613T120005Z"
+        );
+    }
+
+    #[test]
+    fn anr_replay_url_none_without_host_or_template() {
+        let mut c = base();
+        c.vendor = "generic".into();
+        c.address = None;
+        c.anr_replay_url_template = None;
+        assert!(anr_replay_url(&c, Utc::now(), Utc::now()).is_none());
+    }
+
+    fn parse_t(s: &str) -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
     }
 
     #[test]

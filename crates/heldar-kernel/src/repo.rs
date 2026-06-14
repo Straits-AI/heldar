@@ -118,6 +118,34 @@ pub async fn record_segment_indexed(
     Ok(())
 }
 
+/// Record a detected recording gap (a hole > 3s between consecutive segments) for ANR re-fill.
+/// Ignore-on-conflict by `(camera_id, gap_start)` so re-scans never duplicate a gap. Best-effort:
+/// a failure is the caller's to log, not fatal to indexing.
+pub async fn upsert_recording_gap(
+    pool: &SqlitePool,
+    camera_id: &str,
+    gap_start: DateTime<Utc>,
+    gap_end: DateTime<Utc>,
+    gap_seconds: i64,
+) -> sqlx::Result<()> {
+    let id = format!("gap_{}", Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO recording_gaps
+           (id, camera_id, gap_start, gap_end, gap_seconds, fill_state, fill_attempts, created_at)
+         VALUES (?, ?, ?, ?, ?, 'pending', 0, ?)
+         ON CONFLICT(camera_id, gap_start) DO NOTHING",
+    )
+    .bind(id)
+    .bind(camera_id)
+    .bind(gap_start)
+    .bind(gap_end)
+    .bind(gap_seconds)
+    .bind(Utc::now())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 /// Insert an event into the event log.
 pub async fn log_event(
     pool: &SqlitePool,

@@ -5,6 +5,7 @@ use sqlx::SqlitePool;
 
 use crate::config::Config;
 use crate::services::consumer::DetectionConsumer;
+use crate::services::mirror::MirrorRecorderManager;
 use crate::services::recorder::RecorderManager;
 use crate::services::sampler::SamplerManager;
 
@@ -19,6 +20,8 @@ pub struct AppState {
     pub pool: SqlitePool,
     pub cfg: Arc<Config>,
     pub recorder: Arc<RecorderManager>,
+    /// Dual/mirror recorder, present only when `HELDAR_MIRROR_RECORDINGS_DIR` is configured.
+    pub mirror: Option<Arc<MirrorRecorderManager>>,
     pub sampler: Arc<SamplerManager>,
     /// Registered perception consumers, fanned out to from detection ingest.
     pub consumers: Arc<Vec<Arc<dyn DetectionConsumer>>>,

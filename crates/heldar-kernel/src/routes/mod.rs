@@ -3,13 +3,17 @@ use axum::Router;
 use crate::state::AppState;
 
 pub mod ai;
+pub mod anr;
 pub mod auth;
+pub mod backup;
 pub mod cameras;
 pub mod discovery;
 pub mod health;
 pub mod incidents;
 pub mod liveview;
 pub mod metrics;
+pub mod onvif;
+pub mod outbox;
 pub mod playback;
 pub mod playback_sessions;
 pub mod recording_control;
@@ -27,6 +31,7 @@ pub fn api_router() -> Router<AppState> {
         .merge(system::router())
         .merge(cameras::router())
         .merge(recordings::router())
+        .merge(anr::router())
         .merge(recording_control::router())
         .merge(playback::router())
         .merge(playback_sessions::router())
@@ -38,5 +43,8 @@ pub fn api_router() -> Router<AppState> {
         .merge(schedules::router())
         .merge(snapshot_schedules::router())
         .merge(incidents::router())
+        .merge(backup::router())
+        .merge(onvif::router())
+        .merge(outbox::router())
         .merge(auth::router())
 }

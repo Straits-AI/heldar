@@ -22,6 +22,19 @@ pub struct Config {
     /// requests (WAL serves reads concurrently; writes still serialize), at the cost of memory.
     pub db_max_connections: u32,
     pub recorder_enabled: bool,
+    /// Optional second recordings root for dual/mirror recording. When set, cameras with
+    /// `mirror_enabled` get a SECOND ffmpeg pipeline writing byte-identical segments here (a redundant
+    /// DVR copy on a separate volume). Empty/unset disables mirror recording entirely.
+    pub mirror_recordings_dir: Option<PathBuf>,
+    /// Master switch for ANR (Automatic Network Replenishment) edge re-fill: re-fetch missed footage
+    /// from a camera's onboard storage to fill recording gaps. Cameras still need `anr_enabled`.
+    pub anr_enabled: bool,
+    /// How often the ANR loop scans for pending gaps to fill (seconds).
+    pub anr_interval_s: u64,
+    /// Ignore gaps older than this many hours (most cameras only retain recent onboard footage).
+    pub anr_max_gap_hours: i64,
+    /// Give up on a gap after this many fill attempts (marked `failed`).
+    pub anr_max_attempts: i64,
     pub default_segment_seconds: i64,
     pub default_retention_hours: i64,
     /// Default per-camera storage quota (bytes) applied when a camera is created without an explicit
@@ -102,6 +115,56 @@ pub struct Config {
     pub overlay_kind: String,
     /// The overlay's network interface to probe (e.g. `tailscale0`, `wt0`, `wg0`).
     pub overlay_iface: Option<String>,
+    // ---- Backup subsystem (kernel platform feature) ----
+    /// Path to the `rclone` binary used for sftp/ftp/s3 remote backups. Local/NAS-mount backups use
+    /// std fs copy and never need it; remote backups degrade to a clear job error when it is missing.
+    pub rclone_bin: String,
+    /// Master switch for the background backup scheduler (scheduled policy jobs). On-demand archive
+    /// export still works when this is false.
+    pub backup_enabled: bool,
+    /// How often the backup scheduler ticks to look for due policies (seconds).
+    pub backup_scheduler_interval_s: u64,
+    /// Hard timeout for a single backup job's transfer (seconds); a job exceeding it is marked error.
+    pub backup_job_timeout_s: u64,
+    /// Maximum number of backup jobs running concurrently (a tokio Semaphore bounds the scheduler +
+    /// manual triggers).
+    pub backup_max_concurrent_jobs: usize,
+    /// Where on-demand archive (.zip) exports are written; also served at `/media/archives`.
+    pub archive_dir: PathBuf,
+    /// Maximum total source footprint (sum of segment sizes) for a single archive export; a larger
+    /// selection is rejected (HTTP 400).
+    pub archive_max_bytes: u64,
+    /// How long archive exports + finished backup-job rows are kept before retention prunes them.
+    pub archive_retention_hours: i64,
+    // ---- ONVIF (kernel platform feature; Profile S MVP) ----
+    /// How long the WS-Discovery probe listens for ProbeMatch replies (milliseconds).
+    pub onvif_discovery_timeout_ms: u64,
+    /// Per-request timeout for an ONVIF SOAP call (GetDeviceInformation, PTZ, etc.) in milliseconds.
+    pub onvif_request_timeout_ms: u64,
+    // ---- Disk / array health (HA ops; see docs/HA.md) ----
+    /// Run periodic SMART self-assessment checks (`smartctl -H`) inside the health loop. Off by
+    /// default; needs `smartmontools` on PATH. Missing binary degrades to a one-time log + skip.
+    pub smart_check_enabled: bool,
+    /// Block devices to query when SMART checks are enabled (e.g. `/dev/sda,/dev/sdb`).
+    pub smart_devices: Vec<String>,
+    /// Watch `/proc/mdstat` (Linux md/RAID) and emit `raid_degraded` when an array shows a down member.
+    pub mdstat_check_enabled: bool,
+    /// Cadence of the disk-health (SMART/RAID) check inside the health loop (seconds).
+    pub smart_check_interval_s: u64,
+    // ---- Readiness HA probe (see docs/HA.md) ----
+    /// When > 0, `/readyz` also requires at least this percent of enabled cameras to be actively
+    /// recording (503 `insufficient_recorders` otherwise). 0 (default) keeps DB-connectivity-only.
+    pub readyz_min_recording_percent: f64,
+    // ---- Live preview transcode (HEVC->H.264) hardware acceleration ----
+    /// Encoder engine for the live preview transcode path: `software` (libx264, default), `vaapi`,
+    /// or `nvenc`. Unknown values warn and fall back to software.
+    pub live_transcode_engine: String,
+    /// VAAPI render node used when `live_transcode_engine = vaapi`.
+    pub vaapi_device: String,
+    // ---- Fleet / multi-site identity ----
+    /// Optional site identifier stamped onto outbox rows and surfaced at `GET /api/v1/site` for the
+    /// edge->cloud fleet uplink. Empty/unset = a single unnamed site.
+    pub site_id: Option<String>,
 }
 
 fn var(key: &str) -> Option<String> {
@@ -141,6 +204,9 @@ impl Config {
         let playback_dir = var("HELDAR_PLAYBACK_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("playback"));
+        let archive_dir = var("HELDAR_ARCHIVE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("archives"));
 
         let cors_origins = var_or("HELDAR_CORS_ORIGINS", "http://localhost:5173")
             .split(',')
@@ -168,6 +234,11 @@ impl Config {
             mediamtx_webrtc_base: var_or("HELDAR_MEDIAMTX_WEBRTC_BASE", "http://127.0.0.1:8889"),
             db_max_connections: parse_or::<u32>("HELDAR_DB_MAX_CONNECTIONS", 16).clamp(2, 256),
             recorder_enabled: parse_bool("HELDAR_RECORDER_ENABLED", true),
+            mirror_recordings_dir: var("HELDAR_MIRROR_RECORDINGS_DIR").map(PathBuf::from),
+            anr_enabled: parse_bool("HELDAR_ANR_ENABLED", false),
+            anr_interval_s: parse_or("HELDAR_ANR_INTERVAL_S", 300),
+            anr_max_gap_hours: parse_or("HELDAR_ANR_MAX_GAP_HOURS", 24),
+            anr_max_attempts: parse_or("HELDAR_ANR_MAX_ATTEMPTS", 3),
             default_segment_seconds: parse_or("HELDAR_DEFAULT_SEGMENT_SECONDS", 60),
             default_retention_hours: parse_or("HELDAR_DEFAULT_RETENTION_HOURS", 24),
             default_camera_quota_bytes: (default_camera_quota_gb * 1024.0 * 1024.0 * 1024.0) as u64,
@@ -204,6 +275,32 @@ impl Config {
             overlay_enabled: parse_bool("HELDAR_OVERLAY_ENABLED", false),
             overlay_kind: var_or("HELDAR_OVERLAY_KIND", "none"),
             overlay_iface: var("HELDAR_OVERLAY_IFACE"),
+            rclone_bin: var_or("HELDAR_RCLONE_BIN", "rclone"),
+            backup_enabled: parse_bool("HELDAR_BACKUP_ENABLED", true),
+            backup_scheduler_interval_s: parse_or("HELDAR_BACKUP_SCHEDULER_INTERVAL_S", 60),
+            backup_job_timeout_s: parse_or("HELDAR_BACKUP_JOB_TIMEOUT_S", 3600),
+            backup_max_concurrent_jobs: parse_or::<usize>("HELDAR_BACKUP_MAX_CONCURRENT_JOBS", 2)
+                .max(1),
+            archive_dir,
+            archive_max_bytes: parse_or("HELDAR_ARCHIVE_MAX_BYTES", 10_737_418_240u64),
+            archive_retention_hours: parse_or("HELDAR_ARCHIVE_RETENTION_HOURS", 48),
+            onvif_discovery_timeout_ms: parse_or("HELDAR_ONVIF_DISCOVERY_TIMEOUT_MS", 2000),
+            onvif_request_timeout_ms: parse_or("HELDAR_ONVIF_REQUEST_TIMEOUT_MS", 5000),
+            smart_check_enabled: parse_bool("HELDAR_SMART_CHECK_ENABLED", false),
+            smart_devices: var("HELDAR_SMART_DEVICES")
+                .map(|v| {
+                    v.split(',')
+                        .map(|s| s.trim().to_string())
+                        .filter(|s| !s.is_empty())
+                        .collect()
+                })
+                .unwrap_or_default(),
+            mdstat_check_enabled: parse_bool("HELDAR_MDSTAT_CHECK_ENABLED", false),
+            smart_check_interval_s: parse_or("HELDAR_SMART_CHECK_INTERVAL_S", 300),
+            readyz_min_recording_percent: parse_or("HELDAR_READYZ_MIN_RECORDING_PERCENT", 0.0),
+            live_transcode_engine: var_or("HELDAR_LIVE_TRANSCODE_ENGINE", "software"),
+            vaapi_device: var_or("HELDAR_VAAPI_DEVICE", "/dev/dri/renderD128"),
+            site_id: var("HELDAR_SITE_ID"),
         }
     }
 

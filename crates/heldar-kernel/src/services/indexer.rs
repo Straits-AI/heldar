@@ -147,6 +147,8 @@ async fn index_camera_dir(
                     json!({ "gap_seconds": gap, "prev_end": pe, "next_start": start }),
                 )
                 .await;
+                // Persist the gap for ANR edge re-fill (ignore-on-conflict by camera_id + start).
+                let _ = repo::upsert_recording_gap(pool, camera_id, pe, start, gap).await;
             }
         }
         tracing::debug!(%camera_id, file = %name, dur = probe.duration_s, "indexer: indexed segment");
