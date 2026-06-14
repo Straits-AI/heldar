@@ -1,7 +1,7 @@
 # Heldar Core — Access Control (Stage 4) Operator & Integrator Guide
 
-This is the definitive guide to the **Access Control** app (memo §2 Phase 1, §7.3–7.4,
-§8.1) **as actually built** in `crates/heldar-entry`: RBAC authentication, a registered-vehicle
+This is the definitive guide to the **Access Control** app **as actually built** in
+`crates/heldar-entry`: RBAC authentication, a registered-vehicle
 / visitor-pass / watchlist registry, an **ANPR temporal-voting engine** that turns
 per-frame plate reads into one authoritative entry/exit event, a guard
 confirm/reject workflow, and daily/exception/audit reports.
@@ -39,13 +39,13 @@ task results into the entry engine. No new ingest path, no new decode.
         │                                                            │
         │  identity resolution (watchlist→vehicle→pass→vip→unmatched)│
         ▼                                                            ▼
-   entry_events row (canonical §8.1 event + evidence frame)   events log "entry_<status>"
+   entry_events row (canonical event + evidence frame)        events log "entry_<status>"
         │                                                      (warning/critical → Stage 1 webhook)
         ▼
    guard workflow:  GET /entry-events  →  confirm / reject       reports: entry-log / exceptions / audit
 ```
 
-The product stance (memo §7.3/§7.4) is wired into the engine: **plate/pass is the
+The product stance is wired into the engine: **plate/pass is the
 primary identity anchor**; vehicle attributes (type/color/make/model) are
 **secondary verification and search metadata only** — an attribute mismatch raises an
 *exception for guard review*, never an automatic rejection, and make/model is never a
@@ -128,10 +128,10 @@ is also a registered vehicle. The block lookup is the only branch that **fails c
 - Outside the `valid_from … valid_until` window (when set) → `exception`
   (`outside_validity_window`).
 - **Attribute check** — the engine compares **`color` and `vehicle_type` only**
-  (make/model is assistive metadata, never a mismatch trigger — memo §7.4/§15.4). A
+  (make/model is assistive metadata, never a mismatch trigger). A
   mismatch is recorded **only when both sides are known and differ**
-  (case-insensitive); any mismatch → `exception` carrying the `mismatches` list. This
-  is the memo §7.4 example: *registered White Myvi `ABC1234`, detected Black SUV
+  (case-insensitive); any mismatch → `exception` carrying the `mismatches` list. For
+  example: *registered White Myvi `ABC1234`, detected Black SUV
   `ABC1234` → exception for guard review.*
 - A clean match that is **also alert-listed** is **downgraded** from `matched`/`auto`
   to `exception`/`pending`.
@@ -143,7 +143,7 @@ read is auto-flipped to `checked_in`.
 
 ### 2.4 Canonical entry event + evidence
 
-On commit the engine writes one `entry_events` row (the canonical §8.1 event, §6
+On commit the engine writes one `entry_events` row (the canonical event, §6
 below). `event_type` is `vehicle_exit` when `direction == "outbound"`, else
 `vehicle_entry`. It captures an **evidence frame** by copying the camera's latest
 sampled frame (preferring `latest_main.jpg`, falling back to `latest_sub.jpg`) to
@@ -301,7 +301,7 @@ to `X-API-Key`. A key whose stored role is unparseable, or that is inactive, is 
 
 ---
 
-## 6. Canonical entry-event JSON (memo §8.1)
+## 6. Canonical entry-event JSON
 
 The `entry_events` row serializes to the canonical event model. Denormalized columns
 (`plate`, `auth_status`, `workflow_status`, `direction`, `timestamp`) back fast
@@ -346,9 +346,9 @@ queries/reports; the rich `subject` / `authorization` / `evidence` / `workflow` 
 }
 ```
 
-Mapping to memo §8.1 and honest deltas as built:
+Mapping to the canonical event model and honest deltas as built:
 
-| memo §8.1 field | As built |
+| Canonical field | As built |
 |---|---|
 | `event_id` | `id` (`evt_<uuid-simple>`) |
 | `tenant_id` | not on the event (site-scoped today; `tenants` table exists for later) |
@@ -387,8 +387,8 @@ Every entry event in the window plus an `auth_status` histogram.
 
 Everything that is **not** a clean automatic match:
 `auth_status IN ('blocked','exception','unmatched') OR workflow_status='rejected'`.
-Same window/limit params. Returns `{ from, to, total, events }`. This is the memo
-§7.3/§7.4 plate/vehicle-mismatch report (mismatches surface as `exception`s with a
+Same window/limit params. Returns `{ from, to, total, events }`. This is the
+plate/vehicle-mismatch report (mismatches surface as `exception`s with a
 `mismatches` list in `authorization`).
 
 ### 7.3 Audit report — `GET /api/v1/audit` (manager+)
@@ -503,10 +503,10 @@ normalized to the unique `plate_norm` key.
   single-direction). Deferred.
 - **OCR / make-model accuracy is not benchmarked.** The engineering — voting,
   resolution, workflow, schema, API — is production-grade and unit-tested, but plate
-  OCR and vehicle attributes need evaluation on **local Malaysian gate footage** per
-  memo §15.3/§15.4 before any hard claim. The reference worker emits **type + color**
+  OCR and vehicle attributes need evaluation on **local Malaysian gate footage**
+  before any hard claim. The reference worker emits **type + color**
   (no make/model classifier), and the engine treats attributes as **review
-  exceptions, never auto-rejections** — exactly the memo §7.4 stance.
+  exceptions, never auto-rejections**.
 - **Auth currently guards the Stage 4 (and ingest) surface.** Extending the
   `Principal` guard to the legacy Stage 0–3 routes (cameras, recordings, zones, …) is
   follow-up work; today those remain open even with auth enabled.

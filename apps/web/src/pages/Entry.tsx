@@ -1,4 +1,4 @@
-// Heldar Core — Stage 4 "Campus Entry" operator console.
+// Heldar Core — Stage 4 access-control operator console.
 // One screen for the gatehouse: live entry events with confirm/reject workflow,
 // visitor passes, the vehicle registry, the plate watchlist, daily reports, and
 // (for admins) user + API-key administration. Auth-gated via /auth/me.
@@ -1288,7 +1288,7 @@ export function Entry() {
           <div className="min-w-0">
             <SectionLabel>Operations · Entry</SectionLabel>
             <h1 className="mt-1 font-display text-2xl font-extrabold tracking-tight text-fg">
-              Campus Entry
+              Access Control
             </h1>
           </div>
           <div className="flex items-center gap-3">

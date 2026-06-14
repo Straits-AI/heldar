@@ -7,8 +7,7 @@ exactly as built in `crates/heldar-kernel` (`services/sampler.rs`, `services/zon
 `routes/ai.rs`, `routes/zones.rs`, `models.rs`, `config.rs`, `migrations/0003_ai.sql`,
 `migrations/0004_zones.sql`).
 
-Stage 2 maps to **memo §5 Layer 4 ("Frame sampler and AI task scheduler")** and
-**memo §14 "Stage 2 — AI frame sampler."** Its success criterion is:
+Stage 2 delivers the **frame sampler and AI task scheduler**. Its success criterion is:
 
 > *"AI consumes frames without breaking recording/live view."*
 
@@ -40,14 +39,14 @@ subclass + tracker in the worker and a `track_id`-aware consumer in the kernel �
 ```
 
 The kernel is the **only** thing that talks to cameras. The recorder keeps the
-24/7 compressed-segment path **decode-free** (memo §6.1); the sampler is the
+24/7 compressed-segment path **decode-free**; the sampler is the
 *only* component that decodes, and it decodes the **sub-stream** at a budgeted
 frame rate to a single JPEG per camera. Workers are pure HTTP clients: they
 **discover** tasks, **pull** the latest frame on their own cadence, and **post**
 detections back. A crashing, slow, or absent worker can never stall ingest or
 recording — the sampler writes frames regardless of whether anyone reads them.
 
-This is the memo §4.3 split made concrete:
+This is the capture/edge/AI split made concrete:
 
 ```
 Cameras capture.  Edge processes (kernel decodes + samples).  AI consumes normalized frames.
@@ -60,7 +59,7 @@ Cameras capture.  Edge processes (kernel decodes + samples).  AI consumes normal
 The host has finite decode capacity, so frame sampling is governed by a **single
 global frame-per-second budget** shared across every AI-enabled camera. As you
 enable AI on more cameras, each camera's sample rate **degrades** rather than the
-host overloading. This is the Stage 2 realization of memo §5's backpressure
+host overloading. This is the Stage 2 realization of the backpressure
 policy.
 
 The budget is computed in `SamplerManager::rebalance` (`services/sampler.rs`):
@@ -429,7 +428,7 @@ drops intermediate frames — acceptable for detection/tracking at these rates.
 - **`config` blob** — opaque to the kernel; the worker's contract with itself.
   Conventions to adopt: `{"classes": [...], "min_confidence": 0.4, "zones":
   [...], "model": "...", "model_version": "..."}`. Keep model versions here so
-  detections are reproducible/auditable (memo §8.1 `audit.model_versions`).
+  detections are reproducible/auditable (`audit.model_versions`).
 - **`task_type`** — free-form string; it is echoed onto every detection and is
   how `/detections?label=` consumers and downstream stages distinguish pipelines
   (`detection`, `anpr`, `tracking`, `vehicle_attr`, …).
@@ -519,7 +518,7 @@ model-free motion analyzer.** The actual perception — **person/vehicle detecti
 (YOLO / RT-DETR), multi-object tracking (ByteTrack / BoT-SORT), zones, and the
 canonical event model** — arrives in **Stage 3** and slots in behind the
 `Analyzer` interface with no change to the kernel or the HTTP contract (see
-`ROADMAP.md` Stage 3, memo §7.1–7.2 / §14). Concretely, Stage 3 adds a subclass
+`ROADMAP.md` Stage 3). Concretely, Stage 3 adds a subclass
 and one `register(...)` call:
 
 ```python
@@ -569,7 +568,7 @@ The **worker** side (`apps/ai/worker.py`) is configured separately: `HELDAR_API`
 
 ## 10. What's built vs. deferred (honest scope)
 
-| Memo §5/§14 Stage 2 item | Status in Stage 2 | Notes |
+| Stage 2 item | Status in Stage 2 | Notes |
 |---|---|---|
 | Substream sampler (decode only sampled frames) | ✅ | one ffmpeg per camera, `-vf fps,scale`, decode-free recording untouched |
 | FPS budgeting + task scheduler | ✅ | global `HELDAR_AI_MAX_TOTAL_FPS` split; per-camera = `min(task fps, budget/active)`, `MIN_FPS=0.5` floor |
@@ -583,7 +582,7 @@ The **worker** side (`apps/ai/worker.py`) is configured separately: `HELDAR_API`
 processes decoding only the sub-stream at a bounded total fps, with crash/backoff
 isolation; the recorder's 24/7 `-c copy` path and the MediaMTX live view are
 completely independent of it. AI consuming frames cannot break recording or live
-view (memo §14 Stage 2).
+view.
 
 ---
 
@@ -605,17 +604,17 @@ already defined. Nothing in §§1–10 changes: the worker still discovers tasks
 `latest_<profile>.jpg`, and POSTs to `/api/v1/ai/events`. The analyzer just fills in
 the optional **`track_id`** on each detection.
 
-- **Detector (YOLO / RT-DETR, memo §7.1)** — runs on each pulled frame, producing
+- **Detector (YOLO / RT-DETR)** — runs on each pulled frame, producing
   class-labelled boxes (`person`, `car`, `truck`, `motorcycle`, …). Boxes are
   emitted as `bbox = [x, y, w, h]` **normalized 0…1**, top-left origin (the §7
   convention) so they are resolution-independent.
-- **Tracker (ByteTrack, memo §7.2)** — associates boxes across consecutive frames
+- **Tracker (ByteTrack)** — associates boxes across consecutive frames
   (including low-confidence ones) into continuous tracks and assigns a **stable
   `track_id`** per object. Because §8 creates **one `Analyzer` instance per task
   thread**, the tracker's per-camera state (Kalman filters, active tracks) lives on
   `self` and naturally persists across that camera's frame stream — no global state,
   no cross-camera bleed.
-- **Anonymous by default** (memo §15.5) — `track_id` is a per-session track handle,
+- **Anonymous by default** — `track_id` is a per-session track handle,
   **not** an identity. Cross-camera ReID is Stage 6.
 - It is registered exactly like any analyzer:
 
@@ -655,14 +654,13 @@ the optional **`track_id`** on each detection.
 
   The exact import/model is an implementation detail; what the kernel relies on is
   only the posted shape: `{label, confidence, bbox:[x,y,w,h] 0..1, track_id}`. Keep
-  `model` / `model_version` in the task `config` for reproducibility (memo §8.1
-  `audit.model_versions`).
+  `model` / `model_version` in the task `config` for reproducibility (`audit.model_versions`).
 
-> **Engineering vs. accuracy (memo §15.3/§15.4).** The *plumbing* — detector +
+> **Engineering vs. accuracy.** The *plumbing* — detector +
 > tracker behind the seam, posting tracked detections that drive zone events — is
 > production-grade. Model **accuracy** is **not** yet validated on local footage:
-> Malaysian vehicle mix, plate/camera angles, motorcycles, night-IR and rain
-> (§15.4), and ReID/association degradation in crowds and across sites (§15.3). Use
+> Malaysian vehicle mix, plate/camera angles, motorcycles, night-IR and rain,
+> and ReID/association degradation in crowds and across sites. Use
 > type + color first, treat make/model and any identity-like match as top-5
 > assistive candidates with human review, benchmark on local gate/shop footage, and
 > never make a hard access decision on model recognition until it's locally
@@ -872,7 +870,7 @@ pip install paddleocr      # or: pip install easyocr
   50 % of the vehicle box → one of `black/white/gray/red/orange/yellow/green/blue/
   purple` or none. The names match what an operator types when registering a vehicle,
   so the core's **case-insensitive** mismatch check lines up. It is **assistive
-  metadata only** (memo §7.4/§15.4), never an access decision, and real accuracy needs
+  metadata only**, never an access decision, and real accuracy needs
   local benchmarking.
 - **Direction** is a **per-camera config hint**, not geometry: `config.direction =
   "inbound" | "outbound"`. There is **no calibrated line-crossing** in the worker or
@@ -924,7 +922,7 @@ Example posted detection:
 
 > **Accuracy needs local benchmarking.** As with Stage 3, the ANPR *engineering* is
 > production-grade, but plate OCR, color, and (future) make/model **accuracy** is not
-> validated on local Malaysian gate footage (memo §15.3/§15.4). Treat attributes as
+> validated on local Malaysian gate footage. Treat attributes as
 > assistive, surface mismatches as **guard-review exceptions**, and never make a hard
 > access decision on recognition until it is locally benchmarked.
 

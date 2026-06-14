@@ -6,7 +6,7 @@ not "live" until **Phase 7 — Verification** passes.
 
 > Why this matters: bad angle, lighting, framing, or stream config silently
 > destroys ANPR, ReID, tracking, and behaviour analytics downstream. The cheapest
-> place to fix a camera is on the ladder, not in the model. (memo §15.2)
+> place to fix a camera is on the ladder, not in the model.
 
 **Legend:** API base = `http://<core-host>:8000`. MediaMTX defaults: API `:9997`,
 HLS `:8888`, WebRTC `:8889`, RTSP `:8554`. Default segment length 60 s,
@@ -21,7 +21,7 @@ default retention 24 h.
 - [ ] Per-camera **purpose** declared up front — this drives everything below:
       - [ ] ANPR (plate capture at a gate/lane)
       - [ ] ReID / body (person re-identification, tracking across cameras)
-      - [ ] Face (detection / optional recognition — privacy rules apply, see §15.5)
+      - [ ] Face (detection / optional recognition — privacy rules apply)
       - [ ] General overview / situational awareness
 - [ ] IP plan ready: static IP or DHCP reservation per camera on the **CCTV VLAN**.
 - [ ] Bandwidth + storage budget sanity-checked
@@ -33,7 +33,7 @@ default retention 24 h.
 
 ---
 
-## Phase 1 — Network preparation (memo §12)
+## Phase 1 — Network preparation
 
 PoE cameras → managed switch → media/edge server → core switch → cloud control plane.
 Cameras must be on an isolated CCTV VLAN, never on the corp/guest network.
@@ -42,7 +42,7 @@ Cameras must be on an isolated CCTV VLAN, never on the corp/guest network.
       Confirm PoE class (802.3af / at / bt) matches each camera.
 - [ ] Cable runs tested (link up, no CRC errors); runs within 100 m copper limit
       or fibre/PoE extenders accounted for.
-- [ ] VLAN segregation in place (memo §12.3):
+- [ ] VLAN segregation in place:
       - [ ] **CCTV VLAN** — cameras only
       - [ ] **Media VLAN** — ingest/recording servers
       - [ ] **AI VLAN** — GPU/AI workers (Stage 1+)
@@ -65,7 +65,7 @@ Cameras must be on an isolated CCTV VLAN, never on the corp/guest network.
 
 ---
 
-## Phase 2 — Physical placement, angle & lighting (memo §15.2)
+## Phase 2 — Physical placement, angle & lighting
 
 - [ ] Mounting height and tilt match the purpose (low/frontal for plates & faces;
       higher/wider for overview & tracking).
@@ -129,7 +129,7 @@ appears (entry to the zone), not at the closest point. Useful reference scale
       fast enough to use it.
 - [ ] Dedicated/tuned IR or external illuminator on the plate region for night;
       verify no blowout on retroreflective plates (Phase 2).
-- [ ] (Malaysia, memo §15.4) expect motorcycles, rain, mixed plate styles — frame
+- [ ] (Malaysia) expect motorcycles, rain, mixed plate styles — frame
       for the worst case, not the brochure case.
 
 ### ReID / body / tracking
@@ -145,7 +145,7 @@ appears (entry to the zone), not at the closest point. Useful reference scale
 - [ ] Frontal, eye-level framing at a choke point; even frontal lighting.
 - [ ] Confirm face recognition is **permitted** for this site before relying on it —
       Heldar default is anonymous/behaviour analysis, **no face recognition by
-      default** (memo §15.5).
+      default**.
 
 ---
 

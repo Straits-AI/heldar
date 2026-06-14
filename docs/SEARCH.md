@@ -1,7 +1,6 @@
 # Heldar Core — Semantic Search (Stage 7) Operator & Integrator Guide
 
-This is the definitive guide to **Semantic Search** (memo §9 "Industrial frontier",
-§14 "Stage 7"; research.md §12–13 proof layer, Stage 3–4) **as actually built** in
+This is the definitive guide to **Semantic Search** **as actually built** in
 `crates/heldar-search`: turn the platform's accumulated event facts into a queryable
 **visual-event memory** — *who / what / where / when / confidence / evidence* — answered
 by **structured search**, by **natural-language search** (a question is *planned* into a
@@ -31,8 +30,7 @@ query log (history + accountability). The kernel is unaware it exists.
 
 > **The LLM is a query PLANNER, never the source of truth.**
 
-Everything in this stage follows from that one rule, taken straight from research.md §27
-and memo §9:
+Everything in this stage follows from that one rule:
 
 1. **The answer is always the executed query's rows — never anything a model "said".** A
    natural-language question is translated into a structured **query plan** (a
@@ -196,7 +194,7 @@ recognizes the patterns below and leaves everything else to the default window.
 
 ### Worked examples
 
-These are the memo §9 / research.md target queries, with the plan `parse_rules` produces
+These are the target queries, with the plan `parse_rules` produces
 (assuming a camera named `Gate B` with id `gate_b`):
 
 **`"unknown white cars entering Gate B after 6pm last week"`**
@@ -223,8 +221,8 @@ breach source further — the `breach` source *is* the restricted-zone signal he
 ```
 → best-effort only: the rule parser maps `customer`→person and `left`→`vehicle_exit`, but
 it **cannot** express a dwell threshold or a "no checkout" join. This is a behaviour query
-better served by **BakerySense** (Stage 5), which computes dwell + the abandonment proxy
-directly — a deliberate boundary, surfaced honestly rather than faked.
+better served by a proprietary retail-analytics vertical (`heldar-bakery`) that lives in a
+separate private repo, a deliberate boundary surfaced honestly rather than faked.
 
 > Use the [`/search/plan` dry-run](#9-http-api-surface-routesrs) to see exactly how any
 > question is parsed before running it.
@@ -257,7 +255,7 @@ rule-parsed one.
 
 ## 7. The proof layer (`proof.rs`)
 
-`build(query, planner, plan, hits)` decomposes every answer into the research.md §12–13
+`build(query, planner, plan, hits)` decomposes every answer into the
 **claim ladder**, lowest (most certain) to highest (most interpretive):
 
 ```
@@ -400,8 +398,8 @@ audit, the RBAC-gated HTTP surface, and the structured / NL / dry-run routes.
   arbitrary semantics — use `/search/plan` to confirm a question parsed as intended, or
   send a structured `QueryPlan` directly for full control.
 
-This is research.md **Level 3 → 4** (event memory → latent world memory) applied to search:
+This applies the event-memory-to-latent-world-memory progression to search:
 a typed, evidence-backed, deterministic query layer where the **only** inference is reading
-the question — and that inference is surfaced, fallible, and decoupled from the answer.
+the question, and that inference is surfaced, fallible, and decoupled from the answer.
 </content>
 </invoke>

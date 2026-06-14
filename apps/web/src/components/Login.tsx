@@ -1,5 +1,5 @@
 // Heldar Core — operator sign-in.
-// Rendered by the Campus Entry console when the API reports auth is enabled (401 on /auth/me).
+// Rendered by the access-control console when the API reports auth is enabled (401 on /auth/me).
 // Flow: api.login -> server sets the HttpOnly session cookie -> re-fetch the Principal -> hand it to
 // the parent. The token is NOT persisted in JS storage; the cookie carries the session (XSS-safe).
 
@@ -62,7 +62,7 @@ export function Login({ onSuccess }: { onSuccess: (principal: Principal) => void
           <div>
             <SectionLabel>Authenticate</SectionLabel>
             <p className="mt-1 text-xs leading-relaxed text-fg-secondary">
-              This console requires an operator account. Sign in to access the Campus Entry gate.
+              This console requires an operator account. Sign in to access the gate.
             </p>
           </div>
 

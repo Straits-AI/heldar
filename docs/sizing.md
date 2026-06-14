@@ -1,8 +1,8 @@
 # Heldar Sizing Guide — Server, Storage, Bandwidth, AI
 
-This guide turns the sizing model from `memo.md` §13 and the deployment topology from
-`memo.md` §12 into worked numbers you can plan a deployment against. Every formula and the
-anchor examples are kept consistent with the memo so the math lines up end to end.
+This guide turns the sizing model and the deployment topology into worked numbers you can plan a
+deployment against. Every formula and the anchor examples are kept internally consistent so the
+math lines up end to end.
 
 The four things you size for a camera deployment:
 
@@ -15,7 +15,7 @@ The four things you size for a camera deployment:
 
 ## 1. Bandwidth
 
-### Formula (memo §13.1)
+### Formula
 
 ```text
 Network Mbps ≈ camera_count × bitrate_per_camera_Mbps × overhead
@@ -25,7 +25,7 @@ Network Mbps ≈ camera_count × bitrate_per_camera_Mbps × overhead
   (not its sensor resolution). Use the main stream for recording; a substream is much smaller.
 - `overhead` — packetization, retransmits, headroom, and second/sub streams. Plan **1.25–1.5×**.
 
-### Worked example (memo's anchor)
+### Worked example
 
 ```text
 32 cameras × 4 Mbps              = 128 Mbps raw
@@ -33,7 +33,7 @@ Network Mbps ≈ camera_count × bitrate_per_camera_Mbps × overhead
 ```
 
 A 32-camera 1080p site fits comfortably on a 1 GbE backbone but should not share that link
-with bulk file traffic. Past ~64 cameras you are into 10 GbE core territory (see §6, medium site).
+with bulk file traffic. Past ~64 cameras you are into 10 GbE core territory (see §5, medium site).
 
 ### Bandwidth at a glance (raw, before overhead)
 
@@ -45,13 +45,13 @@ with bulk file traffic. Past ~64 cameras you are into 10 GbE core territory (see
 | 32      | 64 Mbps       | **128 Mbps**   | 192 Mbps      | 256 Mbps    |
 | 64      | 128 Mbps      | 256 Mbps       | 384 Mbps      | 512 Mbps    |
 
-> Multiply by 1.25–1.5 for the link you actually provision. The bold cell is the memo example.
+> Multiply by 1.25–1.5 for the link you actually provision. The bold cell is the worked example above.
 
 ---
 
 ## 2. Storage
 
-### Rule of thumb (memo §13.2)
+### Rule of thumb
 
 ```text
 1 Mbps ≈ 10.8 GB/day
@@ -68,13 +68,13 @@ So **per camera per day**: `bitrate_Mbps × 10.8 GB`.
 | 4 MP main          | 6 Mbps  | 64.8 GB                |
 | 4K (H.265) main    | 8 Mbps  | 86.4 GB                |
 
-### Worked example (memo's anchor)
+### Worked example
 
 ```text
 32 cameras × 4 Mbps × 10.8 GB/day ≈ 1.38 TB/day
 ```
 
-This is why the memo concludes: full recording retention must be local and carefully planned.
+This is why full recording retention must be local and carefully planned.
 A month of that 32-camera site is ~41 TB — NAS/array territory, not a single SSD.
 
 ### Total recording footprint
@@ -170,7 +170,7 @@ means only ~5.5 hours per camera actually survive, regardless of `retention_hour
 This is a Stage 2+ concern (frame sampler / AI tier), but size for it now because it dominates
 GPU choice.
 
-### Formula (memo §13.3)
+### Formula
 
 ```text
 AI pixels/sec = camera_count × width × height × sampled_fps
@@ -179,19 +179,18 @@ AI pixels/sec = camera_count × width × height × sampled_fps
 Note the two big levers that are independent of recording: **decode/inference resolution** and
 **sampled FPS**. You record at full bitrate but you can sample AI at 5 FPS and 720p.
 
-### Manageable vs dangerous (memo's anchors)
+### Manageable vs dangerous
 
 ```text
 Manageable:  32 × 1280 × 720  × 5 FPS  ≈ 147 million pixels/sec
 Dangerous:   32 × 3840 × 2160 × 25 FPS ≈ 6.6 billion pixels/sec
 ```
 
-Same 32 cameras — a **~45×** difference in pixel throughput, and "a totally different system"
-(memo §13.3). The takeaways:
+Same 32 cameras — a **~45×** difference in pixel throughput, and a totally different system. The takeaways:
 
 - Downscale before inference (720p is plenty for most detectors).
 - Sample frames (3–8 FPS), don't infer every frame.
-- Use a substream for AI where the camera provides one (memo §6.2).
+- Use a substream for AI where the camera provides one.
 - 4K @ 25 FPS on every camera is the trap — it turns a 1-GPU job into a cluster.
 
 | Profile (32 cams)        | Per-camera px/s | Total px/s     | Verdict     |
@@ -202,9 +201,9 @@ Same 32 cameras — a **~45×** difference in pixel throughput, and "a totally d
 
 ---
 
-## 5. Topology recommendations (memo §12)
+## 5. Topology recommendations
 
-### Small site — 4–16 cameras (§12.1)
+### Small site — 4–16 cameras
 
 ```text
 PoE cameras → managed switch → single edge server (ingest + record + playback + live + AI)
@@ -215,7 +214,7 @@ PoE cameras → managed switch → single edge server (ingest + record + playbac
 - Storage: one or two large HDDs/SSD; size from §2 against your retention window.
 - AI: a single mid-range GPU handles 720p @ 5 FPS across the fleet.
 
-### Medium site — 16–64 cameras (§12.2)
+### Medium site — 16–64 cameras
 
 ```text
 PoE camera switches → core 10GbE switch → media/recording server
@@ -229,7 +228,7 @@ PoE camera switches → core 10GbE switch → media/recording server
 - This is where `HELDAR_MAX_RECORDINGS_GB` and per-camera `retention_hours` must be tuned
   deliberately, not left at defaults.
 
-### Large site / campus (§12.3)
+### Large site / campus
 
 ```text
 Building A cameras → local media node ┐
@@ -239,7 +238,7 @@ Building C cameras → local media node ┘
 
 - Per-building media nodes do local ingest/record; only AI metadata and selected video go to
   the center — keeps multi-TB/day recording traffic off the campus backbone.
-- Segment the network into VLANs (memo §12.3): CCTV, Media, AI, Storage, Operator, Management,
+- Segment the network into VLANs: CCTV, Media, AI, Storage, Operator, Management,
   Guest/Corp (CCTV isolated from corp/guest).
 
 ---
@@ -310,10 +309,10 @@ Fill in the blanks for your deployment.
 - [ ] Retention footprint fits the disk/NAS **with** headroom for clips, snapshots, DB, OS.
 - [ ] `HELDAR_MAX_RECORDINGS_GB` ≥ retention footprint, or you accept shortened retention.
 - [ ] AI pixels/sec is in the "manageable" range for the available GPU (≈ 147 M/s on one GPU at
-      720p @ 5 FPS per the memo); downscale and sample if not.
+      720p @ 5 FPS); downscale and sample if not.
 
 ---
 
-*Sources: `memo.md` §12 (deployment topology), §13 (sizing model). Config behavior:
-`crates/heldar-kernel/src/config.rs`, `crates/heldar-kernel/src/services/retention.rs`,
+*Config behavior: `crates/heldar-kernel/src/config.rs`,
+`crates/heldar-kernel/src/services/retention.rs`,
 `crates/heldar-kernel/src/routes/system.rs`.*

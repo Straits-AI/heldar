@@ -1,6 +1,6 @@
 // TypeScript mirror of the Heldar HTTP API contract (serde JSON).
 // Field names match the Rust structs in crates/heldar-kernel/src/{models.rs,routes/*} (kernel)
-// and crates/heldar-entry/src/{models.rs,routes.rs} (Campus Entry app).
+// and crates/heldar-entry/src/{models.rs,routes.rs} (access-control app).
 
 export type CameraStatusState =
   | "disabled"
@@ -379,7 +379,7 @@ export interface ZoneEvent {
   created_at: string;
 }
 
-// ---- Stage 4: Campus Entry + RBAC ----
+// ---- Stage 4: Access control + RBAC ----
 
 export type Role = "admin" | "manager" | "guard" | "viewer" | "integration";
 
@@ -546,7 +546,7 @@ export type EntryEventType =
   | "visitor_checkin"
   | "visitor_checkout";
 
-/** Canonical entry/exit event (memo §8.1). */
+/** Canonical entry/exit event. */
 export interface EntryEvent {
   id: string;
   site_id?: string | null;

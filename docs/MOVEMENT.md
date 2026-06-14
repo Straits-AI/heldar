@@ -1,7 +1,6 @@
 # Heldar Core — Movement Intelligence (Stage 6) Operator & Integrator Guide
 
-This is the definitive guide to **Movement Intelligence** (the client's "Movement
-intelligence" / Heldar Security Phase 2; memo §2 Phase 2, §7.5–7.6, §15.5) **as
+This is the definitive guide to **Movement Intelligence** **as
 actually built** in `crates/heldar-movement`: cross-camera ReID as **probabilistic
 candidate matching with human review**, an operator-defined **camera-topology graph**,
 **movement trails**, and a **red-zone breach** incident engine — all under strict
@@ -52,7 +51,7 @@ kernel and Access Control have *already* written. The kernel is unaware it exist
      GET /movement/search/person?camera&track&at    → weak topology+time candidates (AUDITED)
 ```
 
-The product stance (memo §7.5/§7.6/§15.5) is wired into the code: **multi-signal, never
+The product stance is wired into the code: **multi-signal, never
 pure visual embedding**; **candidate matching, not identity**; **every identity-like
 query audited**. Vehicle ReID is anchored on the resolved **plate**; person ReID is
 **deliberately weak** (topology + time only, on demand, low confidence).
@@ -62,7 +61,7 @@ query audited**. Vehicle ReID is anchored on the resolved **plate**; person ReID
 ## 2. The privacy stance (`lib.rs`)
 
 Movement is the most identity-adjacent app in the stack, so its design is governed by
-three hard rules taken straight from memo §15.5 and §7.5/§7.6:
+three hard rules:
 
 1. **Multi-signal, never pure visual embedding.** There is **no appearance/visual ReID
    embedding anywhere in this crate.** Vehicle ReID is anchored on the **plate** (already
@@ -85,9 +84,9 @@ three hard rules taken straight from memo §15.5 and §7.5/§7.6:
    human judgement, not legal identity.
 
 Person ReID specifically has **no plate and no embedding** here, so it is **never
-auto-proposed** — it exists only as an on-demand, low-confidence search (§5). This is the
-memo §7.6 rule made concrete: *"For security: person ReID = probabilistic movement
-correlation"*, never legal identity verification.
+auto-proposed** — it exists only as an on-demand, low-confidence search (§5). For
+security, person ReID is probabilistic movement correlation, never legal identity
+verification.
 
 ---
 
@@ -96,7 +95,7 @@ correlation"*, never legal identity verification.
 `reid::run(pool, cfg)` is launched in `main.rs` via `spawn_supervised("movement_reid",
 …)` and ticks every `HELDAR_MOVEMENT_INTERVAL_S`. Each tick calls
 `propose_vehicle_candidates()` then `prune()`; `run_once()` exposes the same proposer for
-the manual trigger (§7) and tests.
+the manual trigger (§8) and tests.
 
 ### 3.1 Finding pairs
 
@@ -221,7 +220,7 @@ visibly low-confidence so an operator treats it as triage, not truth.
 
 The deliberately low ceiling (max 0.4) and the absence of any auto-proposal are the
 privacy design, not a missing feature: without consent/legal basis, person movement is
-human-triaged correlation only (memo §7.6, §15.5).
+human-triaged correlation only.
 
 ---
 
@@ -454,12 +453,12 @@ RBAC-gated API.
 
 - **No visual/appearance ReID embedding** anywhere. Vehicle ReID is **anchored on the
   plate** (+ transit/colour/type); person ReID is **weak, topology + time only**, on demand
-  and human-triaged. This is the memo §7.5/§7.6/§15.5 privacy stance, not a gap to "fix"
+  and human-triaged. This is the privacy stance, not a gap to "fix"
   with a face/appearance model.
 - **No homography / ground-plane calibration.** Transit windows are operator-declared
   `transit_seconds` per link, not geometry-derived; there is no metric speed/distance model.
 - **ReID accuracy is unbenchmarked on local footage** (false-link / missed-link / path
-  accuracy, memo §7.5/§15.3). The *engineering* is complete; *accuracy* is an evaluation
+  accuracy). The *engineering* is complete; *accuracy* is an evaluation
   task gated on collecting local data — and by design the human review gate is the
   safeguard, never an auto-decision.
 - **Cross-camera person journeys are low-confidence human-triage only** — never

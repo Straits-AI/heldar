@@ -1,40 +1,38 @@
 # Heldar Core — Roadmap
 
 > **Thesis:** Camera streams become structured events → events become workflows → workflows become operational intelligence.
-> We build the **media kernel first**, then AI as plugins on top, then vertical apps. The long arc (see `research.md`) is to turn continuous video into a **compressed, queryable, verifiable world memory** of a physical space — so analytical intent can be defined *after* collection, not before.
+> We build the **media kernel first**, then AI as plugins on top, then vertical apps. The long arc is to turn continuous video into a **compressed, queryable, verifiable world memory** of a physical space — so analytical intent can be defined *after* collection, not before.
 
 > **Status (2026-06):** Stages **0–7 are all shipped (✅ DONE)** — the media kernel, observability, the AI frame sampler, detection/tracking/zones, Access Control, BakerySense, Movement intelligence, and Semantic search. What remains is the research frontier below (Level 4–5) and the per-stage accuracy benchmarking gated on local footage.
-
-Source of truth: `memo.md` §14 (Build roadmap) and `research.md` §21 (Product Roadmap) + §5 (Level 1–5 maturity ladder). This file reconciles the two.
 
 ---
 
 ## Two roadmaps, one product
 
-`memo.md` is the **systems/vertical** roadmap (own the VMS, then ship Entry / Retail / Security apps). `research.md` is the **representation/intelligence** roadmap (event memory → scene graph → semantic search → world model). They are the same product viewed from two ends:
+There are two threads to one plan. The **systems/vertical** thread owns the VMS, then ships Entry / Retail / Security apps. The **representation/intelligence** thread runs event memory → scene graph → semantic search → world model. They are the same product viewed from two ends:
 
 ```
-memo.md           Stage 0 ── 1 ── 2 ── 3 ──── 4/5 ──── 6 ──────── 7
+systems           Stage 0 ── 1 ── 2 ── 3 ──── 4/5 ──── 6 ──────── 7
                   kernel  obs  sampler det/track  apps    ReID    semantic search
                     │      │     │      │          │       │           │
-research ladder    L1 ───────────────── L2 ────── L2/L3 ── L3 ──── L3→L4→L5
+maturity ladder    L1 ───────────────── L2 ────── L2/L3 ── L3 ──── L3→L4→L5
                   task     event memory   scene/event graph    world memory
 ```
 
-- **memo Stage 0–2** = build the substrate (Level 1 plumbing).
-- **memo Stage 3 + research Stage 1–2** = events + scene/event graph (**Level 2 → 3**).
-- **memo Stage 7 + research Stage 3–4** = semantic/causal query (**Level 3 → 4**).
-- **research Stage 5** = predictive bounded **world model** (**Level 5**, research frontier — not solved).
+- **Stage 0–2** = build the substrate (Level 1 plumbing).
+- **Stage 3** = events + scene/event graph (**Level 2 → 3**).
+- **Stage 7** = semantic/causal query (**Level 3 → 4**).
+- **The research frontier** = predictive bounded **world model** (**Level 5**, not solved).
 
-Maturity ladder (research.md §5): **L1** task-specific analytics (industry baseline) · **L2** event memory (buildable now, MVP target) · **L3** scene/event graph (buildable with engineering, the differentiator) · **L4** AI-native latent world memory (research frontier, the moat) · **L5** general physical world model (not solved).
+Maturity ladder: **L1** task-specific analytics (industry baseline) · **L2** event memory (buildable now, MVP target) · **L3** scene/event graph (buildable with engineering, the differentiator) · **L4** AI-native latent world memory (research frontier, the moat) · **L5** general physical world model (not solved).
 
 ---
 
 ## ✅ Stage 0 — Media kernel MVP  — **DONE**
 
-Goal (memo §14): *own the base VMS.* Record compressed packets without decode; index, play back, export, and keep cameras healthy. Built in `crates/heldar-kernel` (Rust / Axum / Tokio / SQLx-SQLite) with MediaMTX + FFmpeg as the media engine.
+Goal: *own the base VMS.* Record compressed packets without decode; index, play back, export, and keep cameras healthy. Built in `crates/heldar-kernel` (Rust / Axum / Tokio / SQLx-SQLite) with MediaMTX + FFmpeg as the media engine.
 
-**Shipped checklist** (memo §14 build list + §16 immediate technical actions):
+**Shipped checklist:**
 
 - [x] **Camera registry** — `tenants → sites → cameras` schema; CRUD API (`/api/v1/cameras`), vendor RTSP-URL templating + explicit override, main/sub stream + record-stream selection, capabilities JSON, connection test endpoint. (`routes/cameras.rs`, `camera_url.rs`, `migrations/0001_init.sql`)
 - [x] **RTSP ingest + recording** — per-camera recorder writing **compressed segments (no re-encode)**, configurable `segment_seconds`, reconnect/restart supervision. (`services/recorder.rs`)
@@ -47,9 +45,9 @@ Goal (memo §14): *own the base VMS.* Record compressed packets without decode; 
 - [x] **Retention** — per-camera age policy + global size cap sweeper; **evidence-lock** (`locked` segments never deleted); retention/disk events logged. (`services/retention.rs`)
 - [x] **System surface** — `/healthz`, `/api/v1/system` info; web frontend scaffolded (React + Vite + TS in `apps/web`).
 
-**Cross-ref to memo Stage 0 success criteria:**
+**Stage 0 success criteria:**
 
-| Memo §14 success criterion | Status | Backed by |
+| Success criterion | Status | Backed by |
 |---|---|---|
 | 8–16 cameras | ✅ multi-camera registry + per-camera recorder supervision | `recorder.rs`, validation run |
 | 7 days continuous operation | ✅ reconnect/watchdog + retention keep it running unattended | `recorder.rs`, `retention.rs` |
@@ -57,13 +55,13 @@ Goal (memo §14): *own the base VMS.* Record compressed packets without decode; 
 | Clip export works | ✅ MP4 export endpoint | `routes/playback.rs`, `clip.rs` |
 | Camera reconnect works | ✅ reconnect tracked in `camera_status`, surfaced via health/events | `recorder.rs`, `health.rs` |
 
-> Maps to research.md **Level 1** (the raw substrate) — the prerequisite for everything above it. No AI yet, by design.
+> Maps to **Level 1** (the raw substrate) — the prerequisite for everything above it. No AI yet, by design.
 
 ---
 
 ## ✅ Stage 1 — Observability & reliability  — **DONE**
 
-**Goal (memo §14):** the system is operable by a non-developer; faults are visible; recording gaps are explainable. Built on the Stage 0 kernel with no new tables — everything is computed over `segments` / `camera_status` / `events` or read live from the OS. Operator/SRE guide: [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md); implementation: `ARCHITECTURE.md` §14.
+**Goal:** the system is operable by a non-developer; faults are visible; recording gaps are explainable. Built on the Stage 0 kernel with no new tables — everything is computed over `segments` / `camera_status` / `events` or read live from the OS. Operator/SRE guide: [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md); implementation: `ARCHITECTURE.md` §14.
 
 **Shipped checklist:**
 
@@ -81,21 +79,21 @@ Goal (memo §14): *own the base VMS.* Record compressed packets without decode; 
 - [ ] Edge offline buffer + cloud sync retry (the webhook notifier is the first upstream alert path; full store-and-forward sync remains planned)
 - [ ] Packet-loss / throughput **trends** (current fps/bitrate are last-value, not time-series; trend storage is future work)
 
-**Cross-ref to memo §14 Stage 1 success criteria:**
+**Stage 1 success criteria:**
 
-| Memo §14 success criterion | Status | Backed by |
+| Success criterion | Status | Backed by |
 |---|---|---|
 | System operable by a non-developer | ✅ health/system/events/metrics APIs + webhook alerts surface state without log-diving | `routes/health.rs`, `routes/system.rs`, `routes/metrics.rs`, `services/notifier.rs` |
 | Faults are visible | ✅ `/metrics` + `/api/v1/events` + alert webhook; staleness → `error`, reconnect/offline/disk events logged | `services/metrics.rs`, `services/health.rs`, `services/notifier.rs` |
 | Recording gaps are explainable | ✅ live `recording_gap` events + `/gaps` endpoint, cross-referenced with `camera_offline`/`recorder_error` events | `services/indexer.rs`, `routes/recordings.rs`, `services/recorder.rs` |
 
-> Still research.md **Level 1** (operable substrate). Stage 1 hardens the kernel for unattended operation; AI begins at Stage 2.
+> Still **Level 1** (operable substrate). Stage 1 hardens the kernel for unattended operation; AI begins at Stage 2.
 
 ---
 
 ## ✅ Stage 2 — AI frame sampler  — **DONE**
 
-**Goal (memo §4 Layer 4, §14):** AI consumes normalized frames **without breaking recording or live view.** Built on the kernel: a budgeted sub-stream sampler (the only component that decodes in the 24/7 path), an `ai_tasks` / `detections` data model, and a pull-based **worker contract** — workers never touch RTSP. Integrator guide: [`docs/AI-WORKERS.md`](docs/AI-WORKERS.md); implementation: `ARCHITECTURE.md` §15. Reference Python worker: `apps/ai`.
+**Goal:** AI consumes normalized frames **without breaking recording or live view.** Built on the kernel: a budgeted sub-stream sampler (the only component that decodes in the 24/7 path), an `ai_tasks` / `detections` data model, and a pull-based **worker contract** — workers never touch RTSP. Integrator guide: [`docs/AI-WORKERS.md`](docs/AI-WORKERS.md); implementation: `ARCHITECTURE.md` §15. Reference Python worker: `apps/ai`.
 
 **Shipped checklist:**
 
@@ -112,20 +110,20 @@ Goal (memo §14): *own the base VMS.* Record compressed packets without decode; 
 - [ ] **Dynamic backpressure ladder** (720p·5fps → 480p·1fps critical-only → recovery) — current split is static proportional fps; load-driven resolution downgrade + auto-recovery is future work.
 - [ ] **Frame queue / `frame_id` stream** — realized as a single last-value `latest.jpg` per camera (staleness via `x-frame-age-ms`), not a multi-frame queue.
 
-**Cross-ref to memo §14 Stage 2 success criterion:**
+**Stage 2 success criterion:**
 
-| Memo §14 success criterion | Status | Backed by |
+| Success criterion | Status | Backed by |
 |---|---|---|
 | AI consumes frames **without breaking recording/live view** | ✅ sampler is a separate supervised ffmpeg set decoding only the sub-stream at a bounded total fps; recorder `-c copy` + MediaMTX live view share no process/file/channel with it; a crashed/absent worker only stops frame *reads* | `services/sampler.rs`, `routes/ai.rs`, `ARCHITECTURE.md` §15.8 |
 
-> AI begins here. Detection/tracking **models** (YOLO/RT-DETR, ByteTrack/BoT-SORT) and the canonical event model are **Stage 3**, slotting into the worker's `Analyzer` interface with no change to the kernel or the HTTP contract. Still research.md **Level 1** substrate until Stage 3 turns frames into events.
+> AI begins here. Detection/tracking **models** (YOLO/RT-DETR, ByteTrack/BoT-SORT) and the canonical event model are **Stage 3**, slotting into the worker's `Analyzer` interface with no change to the kernel or the HTTP contract. Still **Level 1** substrate until Stage 3 turns frames into events.
 
 ---
 
 ## ✅ Stage 3 — Detection / tracking / zone kernel  — **DONE**
 
-**Goal (memo §14, §7.1–7.2, §8):** *turn frames into **events** — the shared base
-for Security **and** BakerySense.* Memo Stage 3 build list: *person/vehicle
+**Goal:** *turn frames into **events** — the shared base
+for Security **and** BakerySense.* The build list: *person/vehicle
 detector · tracker · zone annotation · zone entry/exit events · dwell-time events ·
 evidence snapshot/clip.* Built across both halves of the Stage 2 contract: a
 worker-side **YOLO + ByteTrack** analyzer behind the `Analyzer` seam, and a
@@ -136,24 +134,24 @@ Reference worker: `apps/ai`.
 
 **Shipped checklist:**
 
-- [x] **Person / vehicle detector (YOLO / RT-DETR baseline)** — runs in the worker behind the §8 `Analyzer` seam, emitting class-labelled boxes (`bbox` normalized `[x,y,w,h]` 0…1). No kernel/contract change. (`apps/ai/worker.py` `Analyzer`, `docs/AI-WORKERS.md` §11.1)
-- [x] **Multi-object tracker (ByteTrack)** — associates boxes across frames into stable `track_id`s, one tracker instance per task thread (per-camera state on `self`); **anonymous session tracking by default** (`track_id` ≠ identity; ReID is Stage 6). (`apps/ai/worker.py`, memo §7.2/§15.5)
+- [x] **Person / vehicle detector (YOLO / RT-DETR baseline)** — runs in the worker behind the `Analyzer` seam, emitting class-labelled boxes (`bbox` normalized `[x,y,w,h]` 0…1). No kernel/contract change. (`apps/ai/worker.py` `Analyzer`, `docs/AI-WORKERS.md` §11.1)
+- [x] **Multi-object tracker (ByteTrack)** — associates boxes across frames into stable `track_id`s, one tracker instance per task thread (per-camera state on `self`); **anonymous session tracking by default** (`track_id` ≠ identity; ReID is Stage 6). (`apps/ai/worker.py`)
 - [x] **Zone annotation** — per-camera **polygon** zones (normalized 0…1 vertices), with `kind`, per-zone `labels` filter, `dwell_seconds`, `severity`, `enabled`; full CRUD API. (`routes/zones.rs`, `migrations/0004_zones.sql`, `models.rs::Zone`)
 - [x] **Zone entry/exit + dwell-time events** — `ZoneEngine` evaluates each tracked detection's **bbox ground point** (bottom-center) with point-in-polygon + a per-`(camera,zone,track)` state machine → `enter` / `exit` / `dwell` events (dwell fires once per visit; state TTL-pruned at 120 s). Fed synchronously from detection ingest. (`services/zones.rs`)
 - [x] **Evidence builder (snapshot)** — on `enter`, the engine copies the camera's latest sampled sub-stream frame to `/media/snapshots/zoneevt_<id>.jpg` (cheap copy, no decode) and stores it as the event's `evidence_path`. (`services/zones.rs::copy_evidence`)
 - [x] **Canonical event (first concrete instance) + alert reuse** — each zone event is written to both `zone_events` **and** the kernel `events` log as `zone_{enter,exit,dwell}` at the zone's severity, so `warning`/`critical` zone events flow through the **Stage 1 alert webhook** unchanged. The event carries subject (`track_id`+`label`), location (`zone_id`/`zone_name`), timestamp, and an evidence pointer. (`services/zones.rs`, `repo::log_event`, `migrations/0004_zones.sql`)
 - [x] **Event/search API** — `GET /api/v1/cameras/{id}/zone-events` (filter by `from`/`to`/`zone_id`/`event_type`, newest-first), alongside Stage 2's `/detections` (by time/label) and the kernel `/events` log. (`routes/zones.rs`, `routes/ai.rs`)
 
-**Deferred (rolls into Stage 4+ / the fuller §8.1 event model):**
+**Deferred (rolls into Stage 4+ / the fuller event model):**
 
-- [ ] **Full canonical event model fields** — `subject` enrichment (plate/color/make), `authorization`, `workflow`, `audit.model_versions`, and **clip + recording-segment refs** on the event are not yet attached (today's evidence is a snapshot frame; segment-linked clip evidence + model-version stamping arrive with Stages 4/6 and the evidence-lock API). (memo §8.1)
+- [ ] **Full canonical event model fields** — `subject` enrichment (plate/color/make), `authorization`, `workflow`, `audit.model_versions`, and **clip + recording-segment refs** on the event are not yet attached (today's evidence is a snapshot frame; segment-linked clip evidence + model-version stamping arrive with Stages 4/6 and the evidence-lock API).
 - [ ] **Directional entry/exit *lines* + spatial calibration** — realized today as region enter/exit (in/out of a polygon); a dedicated directional line-crossing primitive and homography/ground-plane calibration are future work.
 - [ ] **Search by object/track + zone counts** — `zone-events` filters by zone/type/time but not yet by `track_id`; count/occupancy aggregates (`kind:"count"`) are stored as a zone kind but not yet aggregated server-side.
 - [ ] **BoT-SORT option** — ByteTrack is the shipped baseline; BoT-SORT (appearance + camera-motion comp) is a drop-in alternative behind the same seam when ReID-grade association is needed.
 
-**Cross-ref to memo §14 Stage 3 goal:**
+**Stage 3 goal:**
 
-| Memo §14 Stage 3 build item | Status | Backed by |
+| Stage 3 build item | Status | Backed by |
 |---|---|---|
 | person/vehicle detector | ✅ engineering | worker `Analyzer` (YOLO/RT-DETR), `docs/AI-WORKERS.md` §11.1 |
 | tracker | ✅ engineering | ByteTrack in worker, anonymous `track_id` |
@@ -162,26 +160,25 @@ Reference worker: `apps/ai`.
 | dwell-time events | ✅ | `services/zones.rs` (`dwell_seconds` threshold) |
 | evidence snapshot/clip | ◑ | snapshot frame on entry shipped; clip/segment refs deferred |
 
-> **Engineering is production-grade; model accuracy is not yet benchmarked (memo §15.3/§15.4).**
+> **Engineering is production-grade; model accuracy is not yet benchmarked.**
 > The Stage 3 *systems engineering* — the tracked-detection contract, polygon/point-in-polygon
 > zone evaluation, the enter/exit/dwell state machine with TTL pruning, evidence capture, the
 > schema, and the CRUD/query API — is complete and unit-tested. What is **not** yet validated is
-> the detector/tracker **accuracy on local footage**: per **§15.4**, public/pretrained models may
+> the detector/tracker **accuracy on local footage**: public/pretrained models may
 > not reflect Malaysian vehicle distribution, plate/camera angles, motorcycles, night-IR, or rain;
-> per **§15.3**, ReID/association degrades on new sites and in crowds. The required path is explicit:
+> ReID/association degrades on new sites and in crowds. The required path is explicit:
 > start with type + color, treat make/model and any identity-like match as **top-5 assistive
 > candidates with human review**, **benchmark on local gate/shop footage**, fine-tune only after
 > local data collection, and **never** use model recognition as a hard access decision. Accuracy
 > benchmarking is gated on collecting that local footage set — an evaluation, not an engineering, task.
 
-> This is the inflection to research.md **Level 2 → 3** (event memory → scene/event graph). The zone event is research.md's "claim level 2" with an evidence pointer; the graph-relational event schema is seeded here (`zone_events` denormalizes `zone_name` and outlives its zone for auditability) and deepens in Stages 6–7.
+> This is the inflection to **Level 2 → 3** (event memory → scene/event graph). The zone event is a "claim level 2" with an evidence pointer; the graph-relational event schema is seeded here (`zone_events` denormalizes `zone_name` and outlives its zone for auditability) and deepens in Stages 6–7.
 
 ---
 
 ## ✅ Stage 4 — Access Control app (client Phase 1)  — **DONE**
 
-**Goal:** the client's "Premise Security / Entry intelligence" deliverable. (memo §2
-Phase 1, §7.3–7.4, §8.1, §14) Built as the first **vertical app** on the kernel: an
+**Goal:** the client's "Premise Security / Entry intelligence" deliverable. Built as the first **vertical app** on the kernel: an
 RBAC layer, an entry registry (vehicles / passes / watchlist), an **ANPR
 temporal-voting engine** producing canonical entry/exit events, a guard
 confirm/reject workflow, and reports — all on the **unchanged** Stage 2 ingest
@@ -193,7 +190,7 @@ integrator guide: [`docs/ACCESS-CONTROL.md`](docs/ACCESS-CONTROL.md); implementa
 
 - [x] **Visitor pre-registration + guard-booth check-in (operator dashboard surface)** — `visitor_passes` (auto `V-XXXXXX` code, validity window, `active→checked_in→checked_out`/`revoked` lifecycle) + check-in/out endpoints that also write a manual `visitor_checkin`/`visitor_checkout` entry event. Full CRUD API for the booth UI. (`routes/entry.rs`, `migrations/0005_entry.sql`)
 - [x] **ANPR / ALPR** — vehicle→plate→OCR (worker `AnprAnalyzer`) → **server-time temporal voting** per `(camera,track)` → format/plausibility validate → registry lookup, committing **one** canonical event per vehicle. Plate/pass = **primary** identity anchor; voting is on the plate (min `HELDAR_ANPR_MIN_VOTES`, default 3) with commit-on-prune for fast passers. (`services/anpr.rs`, `apps/ai/worker.py`)
-- [x] **Vehicle attributes (type → color → make → model)** — **secondary** verification + search metadata only: the engine compares **color + vehicle_type** for mismatch (→ *exception for guard review*, never auto-reject); make/model is assistive and never a hard access decision (memo §7.4/§15.4). The reference worker emits type + color (no make/model classifier yet). (`services/anpr.rs::check_mismatch`, `apps/ai/worker.py`)
+- [x] **Vehicle attributes (type → color → make → model)** — **secondary** verification + search metadata only: the engine compares **color + vehicle_type** for mismatch (→ *exception for guard review*, never auto-reject); make/model is assistive and never a hard access decision. The reference worker emits type + color (no make/model classifier yet). (`services/anpr.rs::check_mismatch`, `apps/ai/worker.py`)
 - [x] **Daily entry logs · exception reports · audit reports** — `GET /reports/entry-log` (window + `by_auth_status` counts), `GET /reports/exceptions` (blocked/exception/unmatched/rejected), `GET /audit` (immutable action log, manager+). (`routes/entry.rs`)
 - [x] **Role matrix (RBAC) + API integration layer** — five roles (`admin`/`manager`/`guard`/`viewer`/`integration`) × five capabilities; opaque `vos_` sessions + `vok_` API keys (SHA-256 at rest, argon2id passwords); `auth_enabled` gating with a synthetic system admin when off; env bootstrap admin. API keys (`X-API-Key` / `Bearer`) are the integration seam for the worker + external callers. (`auth.rs`, `routes/auth.rs`)
 
@@ -214,16 +211,16 @@ task pending local footage (see deferrals).
   Gate cameras are usually single-direction, so the hint covers the Phase 1 need.
 - [ ] **OCR + make/model *accuracy* benchmarking on local Malaysian gate footage** —
   the *engineering* (voting, resolution, workflow, schema, API) is production-grade and
-  unit-tested; *accuracy* is an evaluation task per memo §15.3/§15.4 (Malaysian plate
+  unit-tested; *accuracy* is an evaluation task (Malaysian plate
   shapes/angles, motorcycles, night-IR, rain; fine-grained make/model). Never a hard
   access decision until locally benchmarked.
 - [ ] **Auth on the legacy Stage 0–3 routes** — the `Principal` guard currently
   protects the Stage 4 entry/admin surface (+ ingest); extending it to cameras /
   recordings / zones / AI-task management is follow-up hardening.
 
-**Cross-ref to memo §14 Phase 1 items:**
+**Phase 1 items:**
 
-| Memo §14 Phase 1 (Access Control) item | Status | Backed by |
+| Phase 1 (Access Control) item | Status | Backed by |
 |---|---|---|
 | Visitor registration + guard-booth check-in | ✅ | `visitor_passes` + checkin/checkout (`routes/entry.rs`), manual entry events |
 | ANPR / ALPR (primary identity anchor) | ✅ engineering; ⚠️ accuracy unbenchmarked | `services/anpr.rs` temporal voting + resolution, worker `AnprAnalyzer` |
@@ -234,13 +231,12 @@ task pending local footage (see deferrals).
 | Role matrix (RBAC) | ✅ | `auth.rs` 5 roles × 5 capabilities; sessions + API keys; `auth_enabled` gating |
 | API integration layer | ✅ | `vok_` API keys (`X-API-Key`/`Bearer`), `integration` role = least-privilege ingest |
 
-> **Engineering is production-grade; OCR/make-model accuracy is not yet benchmarked
-> (memo §15.3/§15.4)** — same posture as Stage 3: the systems work (temporal voting,
+> **Engineering is production-grade; OCR/make-model accuracy is not yet benchmarked** — same posture as Stage 3: the systems work (temporal voting,
 > fail-closed block lookup, attribute-mismatch-as-exception, canonical event +
 > evidence, guard workflow, RBAC, reports) is complete and tested; recognition
 > *accuracy* on local Malaysian gate footage is an evaluation task gated on collecting
-> that footage set. This is research.md **Level 2 → 3** applied to premise security:
-> the canonical entry event is a typed §8.1 claim with subject + authorization +
+> that footage set. This is **Level 2 → 3** applied to premise security:
+> the canonical entry event is a typed claim with subject + authorization +
 > evidence + workflow + audit, and the registry resolution is the first identity-aware
 > event (anonymous tracking still the default elsewhere; cross-camera ReID is Stage 6).
 
@@ -250,75 +246,57 @@ task pending local footage (see deferrals).
 
 **Goal:** retail behaviour analytics on the **same kernel**, different ontology.
 Diagnosis-oriented, **anonymous by construction (no identity, no faces, no plates).**
-(memo §7.7, §14; research.md §24 MVP, Stage 1) Built as the second **vertical app**
-(`crates/heldar-bakery`) — **not** a detection consumer on the hot path, but a
-**rollup loop + report generator** reading the kernel's stored `zone_events` +
-`detections`, **composed (not welded)** into the server with its own schema/config/
-rollup/retention/routes. Operator/integrator guide:
-[`docs/BAKERYSENSE.md`](docs/BAKERYSENSE.md); implementation: `ARCHITECTURE.md` §18.
+BakerySense (`heldar-bakery`) is a **proprietary retail-analytics vertical that lives in a
+separate private repo**; it is not part of the open Apache-2.0 distribution. It is built
+on the open kernel as the second **vertical app**: not a detection consumer on the hot
+path, but a **rollup and report layer** that reads the kernel's stored `zone_events` and
+`detections` off the ingest path. It composes onto the open server through the kernel's
+vertical seam, with its own storage and routes, so a slow or crashed rollup cannot affect
+recording, ingest, or live view, and the kernel does not depend on it. Its internal
+schema, metrics, thresholds, and algorithms live in the private repo.
 
-**Shipped checklist:**
+**Capabilities (boundary level):**
 
-- [x] **Shop camera analysis + zone annotation (entrance/exit/shelf/cashier/queue/display)** — retail zones are **ordinary kernel zones tagged via `kind`**; BakerySense interprets the kinds and requires a `detection` AI task running to produce anonymous events. (`rollup.rs`, `lib.rs`, kernel zone CRUD)
-- [x] **Footfall (entry/exit count) · queue dwell · browse dwell · occupancy · display engagement** — hourly `bakery_observations` from `zone_events`/`detections`: `footfall_in`/`footfall_out` (entry counts), `queue_dwell_avg`/`browse_dwell_avg` (`AVG(dwell_seconds)`), `occupancy_unique` (`COUNT(DISTINCT track_id)`), `display_engagement`. Idempotent upsert on a `BUCKETS_PER_TICK=3` recompute window. (`rollup.rs`)
-- [x] **Abandonment proxy (browse without checkout transition)** — distinct shelf-browsers `LEFT JOIN`ed to cashier-enterers within a windowed `[bucket, +2h)` grace, as `browse_sessions`/`abandoned_sessions`; per-camera `track_id`s with explicit caveats (can't see external purchases / staff / pass-through). (`rollup.rs`)
-- [x] **Daily diagnosis report: observation → evidence → interpretation → suggested experiment (correlation, not causation)** — every insight carries an explicit **confidence** (sample-size tiered) + **uncertainty** (the anonymity caveat); deterministic/heuristic, threshold-flagged (queue comfort, abandonment ratio). (`reports.rs`)
-- [x] **Evidence-clip retrieval per insight** — insights point at a `camera_id` + day window with a `clip_hint`; the operator requests footage from the **kernel** clip API (`POST /api/v1/cameras/{id}/clip`). BakerySense stores no video. (`reports.rs`, kernel playback)
+- [x] **Shop camera analysis on ordinary kernel zones.** Retail zones are ordinary kernel zones tagged via `kind` (entrance / exit / shelf / cashier / queue / display); BakerySense interprets the kinds and requires a `detection` AI task running to produce anonymous events.
+- [x] **Footfall, queue and browse dwell, occupancy, display engagement.** Periodic anonymous rollups over the stored kernel facts, per camera.
+- [x] **Abandonment proxy (browse without a checkout transition).** Derived per camera over anonymous, ephemeral `track_id`s, with explicit caveats (it cannot see external purchases, staff, or pass-through).
+- [x] **Daily diagnosis report: observation, evidence, interpretation, suggested experiment (correlation, not causation).** Every insight carries an explicit **confidence** (sample-size tiered) and **uncertainty** (the anonymity caveat); the diagnosis is deterministic and heuristic.
+- [x] **Evidence-clip retrieval per insight.** Insights point at a `camera_id` and a day window; the operator requests footage from the **kernel** clip API (`POST /api/v1/cameras/{id}/clip`). BakerySense stores no video.
 
-**Done when (status):** ✅ **Met.** With a detection task + retail-tagged zones on a shop
-camera, the rollup loop produces hourly footfall / dwell / occupancy / display /
-abandonment observations (`GET /api/v1/bakery/observations`, `…/summary`), and
-`POST /api/v1/bakery/reports` generates a daily diagnosis over any day/scope — each
-insight observation → evidence → interpretation → experiment with confidence +
-uncertainty and a clip pointer. The design (periodic idempotent rollup over stored
-kernel tables, own SQLite schema, own retention, off the ingest hot path) means a slow
-or crashed rollup cannot affect recording/ingest/live view. **Open:** detector/tracker
-*accuracy* on local shop footage is an evaluation task (see deferrals).
+**Done when (status):** ✅ **Met.** With a detection task and retail-tagged zones on a shop
+camera, the rollup loop produces footfall / dwell / occupancy / display / abandonment
+observations, and generates a daily diagnosis over any day or scope, each insight running
+observation to evidence to interpretation to experiment with confidence, uncertainty, and
+a clip pointer. Because it runs periodically over stored kernel tables off the ingest hot
+path, a slow or crashed rollup cannot affect recording, ingest, or live view. **Open:**
+detector/tracker *accuracy* on local shop footage is an evaluation task (see deferrals).
 
 **Deferred (honest scope):**
 
-- [ ] **Staff coverage + shelf/counter-empty state** (memo §7.7 signals) — need
-  **dedicated detectors** (staff-vs-customer classification, product-zone empty-state
-  detection) the current person-detection worker does not provide; the `staff` zone
-  `kind` is reserved in the schema but produces no metric yet.
-- [ ] **LLM/VLM report interpretation** — this stage's diagnosis is **deterministic and
-  heuristic** by design; natural-language synthesis / VLM interpretation is **Stage 7**
-  (research.md §27).
-- [ ] **SKU-level analysis** — out of scope: BakerySense works at **shelf / product-group**
-  level (research.md §24), not per-product.
-- [ ] **Cross-camera linking** — occupancy + abandonment are per-camera over ephemeral
+- [ ] **Staff coverage and shelf/counter-empty state.** Need dedicated detectors
+  (staff-vs-customer classification, product-zone empty-state detection) that the current
+  person-detection worker does not provide.
+- [ ] **LLM/VLM report interpretation.** This stage's diagnosis is deterministic and
+  heuristic by design; natural-language synthesis and VLM interpretation are **Stage 7**.
+- [ ] **SKU-level analysis.** Out of scope: BakerySense works at shelf / product-group
+  level, not per-product.
+- [ ] **Cross-camera linking.** Occupancy and abandonment are per-camera over ephemeral
   `track_id`s; cross-camera journeys are **Stage 6** (ReID), under the same privacy gates.
-- [ ] **Detector/tracker accuracy on local footage** — the *engineering* (rollup SQL,
-  abandonment join, diagnosis model, API) is complete; *accuracy* is an evaluation task
-  per memo §15.3/§15.4, surfaced verbatim in every insight's `uncertainty`.
+- [ ] **Detector/tracker accuracy on local footage.** The *engineering* is complete;
+  *accuracy* is an evaluation task, surfaced verbatim in every insight's uncertainty note.
 
-**Cross-ref to memo §7.7 (retail behaviour) signals:**
-
-| Memo §7.7 signal | Status | Backed by |
-|---|---|---|
-| Footfall (entry/exit count) | ✅ | `footfall_in`/`footfall_out` (zone `enter` counts) |
-| Queue dwell | ✅ | `queue_dwell_avg` (`AVG(dwell_seconds)` on `queue` zones) |
-| Browse dwell | ✅ | `browse_dwell_avg` (`shelf` zones) |
-| Abandonment proxy (browse without checkout) | ✅ | `browse_sessions`/`abandoned_sessions` (shelf→cashier `LEFT JOIN`, +2h window) |
-| Display engagement | ✅ | `display_engagement` (`display` zone visits) |
-| Occupancy | ✅ | `occupancy_unique` (`COUNT(DISTINCT track_id)`) |
-| Staff coverage | ◻ deferred | needs a staff-vs-customer detector |
-| Shelf/counter-empty state | ◻ deferred | needs a product-zone empty-state detector |
-| Diagnosis output (obs → evidence → interpretation → experiment) | ✅ | `reports.rs` (+ confidence + uncertainty, correlation not causation) |
-
-> This is research.md's concrete **Level 2 MVP** ("Queryable Retail CCTV Memory v0"):
+> This is the concrete **Level 2 MVP** ("Queryable Retail CCTV Memory v0"):
 > anonymous by construction, shelf/product-group level (not SKU), every number shipping
-> with its sample size + the anonymity caveat. **Engineering is production-grade; model
-> accuracy is not yet benchmarked (memo §15.3/§15.4)** — same posture as Stages 3/4. The
-> diagnosis report is a deterministic precursor to the Stage 7 LLM/VLM interpretation
-> layer.
+> with its sample size and the anonymity caveat. **Engineering is production-grade; model
+> accuracy is not yet benchmarked**, the same posture as Stages 3 and 4. The diagnosis
+> report is a deterministic precursor to the Stage 7 LLM/VLM interpretation layer.
 
 ---
 
 ## ✅ Stage 6 — ReID & movement intelligence (client Phase 2)  — **DONE**
 
 **Goal:** cross-camera movement = client's "Movement intelligence" / Heldar Security.
-(memo §2 Phase 2, §7.5–7.6, §15.5, §14) Built as a third **vertical app**
+Built as a third **vertical app**
 (`crates/heldar-movement`) — the **same kernel, cross-camera**. Like BakerySense it is
 **not** a detection consumer on the hot path, but a **correlation layer**: two
 `spawn_supervised` loops (a ReID candidate **proposer** + a red-zone breach **rule
@@ -335,7 +313,7 @@ with its own schema/config/loops/retention/routes. Operator/integrator guide:
   agreement over the topology graph: `score_pair` = `0.8` plate anchor `±` transit (`+0.10`
   in-window / `+0.05` ≤2× / else 0) `±` colour (`+0.05`/`−0.10`) `±` type (`+0.05`/`−0.10`),
   proposed at `≥ HELDAR_MOVEMENT_MIN_SCORE` (default 0.5). Person ReID has no plate/no
-  embedding, so it is **never auto-proposed** — only the weak topology+time search (§5).
+  embedding, so it is **never auto-proposed** — only the weak topology+time search.
   (`reid.rs::score_pair` / `propose_vehicle_candidates`, `routes.rs::search_person`)
 - [x] **Multi-camera topology graph + movement trails** — `camera_links` operator-defined
   directed adjacency (`from`/`to`/`transit_seconds`/`bidirectional`) scopes all matching;
@@ -368,25 +346,25 @@ is unbenchmarked on local footage — the human review gate is the safeguard (se
 
 **Deferred (honest scope):**
 
-- [ ] **No visual / appearance ReID embedding** — by design (memo §7.5/§7.6/§15.5):
+- [ ] **No visual / appearance ReID embedding** — by design:
   vehicle ReID is **anchored on the plate** (+ transit/colour/type fusion); person ReID is
   **weak, topology + time only**. No visual-embedding vector search / FastReID-style model
   is wired in — and adding one for *person* identity needs explicit legal/consent/governance
-  basis (memo §7.6), not just engineering.
+  basis, not just engineering.
 - [ ] **No homography / ground-plane calibration** — transit windows are operator-declared
   `transit_seconds` per `camera_links` edge, not geometry-derived; no metric speed/distance
   model; the proposer correlates only cameras joined by an explicit `camera_links` edge.
 - [ ] **ReID accuracy unbenchmarked on local footage** — the *engineering* (scoring, topology
   scoping, candidate workflow, breach engine, schema, API) is complete; *accuracy*
-  (Rank-1/mAP/false-link/missed-link/site-path, memo §7.5/§15.3) is an evaluation task gated
+  (Rank-1/mAP/false-link/missed-link/site-path) is an evaluation task gated
   on local data. Never an auto-decision — confirm/reject is always human.
 - [ ] **Cross-camera person journeys are low-confidence, human-triage only** — never
   auto-proposed, capped at `0.4` (topology+time), and always audited; not a continuous
   person-tracklet graph.
 
-**Cross-ref to memo §7.5–7.6 (ReID) + §15.5 (privacy):**
+**ReID and privacy rules:**
 
-| Memo §7.5/§7.6/§15.5 rule | Status | Backed by |
+| ReID / privacy rule | Status | Backed by |
 |---|---|---|
 | Vehicle ReID multi-signal, **not** pure visual embedding | ✅ plate-anchored + transit + colour/type fusion; no embedding | `reid.rs::score_pair` |
 | Camera topology + time-window filter | ✅ `camera_links` join scopes all matching | `reid.rs`, `routes.rs::search_person`, `camera_links` |
@@ -397,14 +375,13 @@ is unbenchmarked on local footage — the human review gate is the safeguard (se
 | Red/green zone breach alerts (rule engine) | ✅ red-zone-entry incidents, dedup, subject correlation, worked lifecycle | `breach.rs` |
 | Role-based access | ✅ view / operate_gate / manage gating (Stage 4 RBAC) | `routes.rs` `principal.require(...)` |
 
-> **Engineering is production-grade; ReID accuracy is not yet benchmarked (memo §15.3),
-> and visual-embedding ReID is deliberately absent (memo §7.5/§7.6/§15.5).** Same posture
+> **Engineering is production-grade; ReID accuracy is not yet benchmarked,
+> and visual-embedding ReID is deliberately absent.** Same posture
 > as Stages 3–5: the systems work (multi-signal plate-anchored scoring, topology graph,
 > candidate proposer, human-review workflow, breach rule engine with subject correlation,
 > audited searches, retention, RBAC) is complete; *accuracy* on local footage is an
-> evaluation task, and identity is always a **human** call. Privacy gates (memo §15.5,
-> research.md §14) are wired in: candidate-not-identity, human enforcement, confidence
-> thresholds, and an audit trail on every identity-like query. This is research.md **Level
+> evaluation task, and identity is always a **human** call. Privacy gates are wired in: candidate-not-identity, human enforcement, confidence
+> thresholds, and an audit trail on every identity-like query. This is **Level
 > 3** scene/event graph applied to security — typed, evidence-backed, audited cross-camera
 > correlation that stays explicitly probabilistic.
 
@@ -413,7 +390,7 @@ is unbenchmarked on local footage — the human review gate is the safeguard (se
 ## ✅ Stage 7 — Semantic video search  — **DONE**
 
 **Goal:** searchable visual event memory — *who/what/where/when/confidence/evidence/workflow.*
-(memo §9, §14; research.md Stage 3–4) Built as a fourth **vertical app**
+Built as a fourth **vertical app**
 (`crates/heldar-search`) — and the most "composed, not welded" of all: **not** a
 `DetectionConsumer` and **not** even a background loop, but a **read-only query layer over
 kernel facts** (three HTTP routes + one query log) reading the tables Stages 3/4/6 already
@@ -439,7 +416,7 @@ Operator/integrator guide: [`docs/SEARCH.md`](docs/SEARCH.md); implementation:
 - [x] **Proof layer** — every answer decomposed into claim levels
   (observation → track → event → aggregate → inference) with evidence + confidence; the
   NL→plan reading is the **single** step marked `fallible: true`; no layer asserts identity
-  or causation. (`proof.rs`, research.md §12–13)
+  or causation. (`proof.rs`)
 - [ ] **Search by vehicle image · by person crop** — **deferred** (needs event/clip
   embeddings; see below).
 - [ ] **VLM-based report interpretation** — **deferred** (by design; see below).
@@ -478,9 +455,9 @@ retrieval seam (search-by-image) is documented, not built (see deferrals).
   multi-condition joins (use `/search/plan` to confirm a parse, or send a structured
   `QueryPlan` for full control).
 
-**Cross-ref to memo §9 / research.md §12–13:**
+**Semantic search targets:**
 
-| Memo §9 / research.md target | Status | Backed by |
+| Target | Status | Backed by |
 |---|---|---|
 | Searchable visual event memory (who/what/where/when) | ✅ | `query.rs` structured + NL search over `entry_events`/`zone_events`/`breach_alerts` |
 | Natural-language search, **LLM as query planner** | ✅ | `planner.rs` (offline rules default + optional LLM seam, falls back) |
@@ -495,28 +472,28 @@ retrieval seam (search-by-image) is documented, not built (see deferrals).
 > time-bounded executor, the offline rule parser + optional LLM planner-with-fallback, the
 > proof/claim ladder, the search log + identity-query audit, the RBAC-gated routes) is
 > complete; visual/embedding retrieval is documented future work needing an embedding/VLM
-> worker. This is research.md **Level 3 → 4** (event memory → latent world memory): a typed,
+> worker. This is **Level 3 → 4** (event memory → latent world memory): a typed,
 > evidence-backed, deterministic query layer whose **only** inference — reading the question
 > — is surfaced, fallible, and decoupled from the answer.
 
 ---
 
-## 🔭 Beyond the staged plan — research frontier (research.md §21 Stage 5, Level 4–5)
+## 🔭 Beyond the staged plan — research frontier (Level 4–5)
 
 Not committed deliverables; the long-term moat that Stages 3–7 are deliberately architected toward:
 
 - [ ] Event-causal memory (State-Event-State graph, baseline/before-after comparison, hypothesis generation with caveats)
-- [ ] Salience-aware compression & memory policy (JEPA-style: store what is surprising/agentic/risky/business-relevant; summarize the predictable) — research.md §9, §17
+- [ ] Salience-aware compression & memory policy (JEPA-style: store what is surprising/agentic/risky/business-relevant; summarize the predictable)
 - [ ] Predictive **bounded world model**: queue-buildup / abandonment / incident-risk forecasting, layout & staffing simulation (**Level 5 — not solved**)
-- [ ] Internal **CCTV World Memory Bench** to drive R&D before claiming intelligence (research.md §20)
+- [ ] Internal **CCTV World Memory Bench** to drive R&D before claiming intelligence
 
 ---
 
 ## Principles carried across every stage
 
-1. **Kernel first, AI as plugins, apps last** — never build AI before the substrate (memo §17).
-2. **Record compressed, decode only when sampling** — recording avoids decode; AI consumes substream frames (memo §6.1, §15.1).
-3. **Privacy by architecture** — anonymous by default, no face recognition by default, RBAC, audit logs, evidence-lock, short raw retention (memo §15.5, research.md §14).
-4. **LLM is the planner, not the source of truth** — every answer carries evidence, confidence, and uncertainty (research.md §27).
-5. **Separate observation / correlation / hypothesis / causation** — CCTV proves sequences, not causes (research.md §13).
-6. **Product benchmarks > leaderboard metrics** — reconnect time, recording-gap rate, guard correction rate, cost/camera/month (memo §10.2).
+1. **Kernel first, AI as plugins, apps last** — never build AI before the substrate.
+2. **Record compressed, decode only when sampling** — recording avoids decode; AI consumes substream frames.
+3. **Privacy by architecture** — anonymous by default, no face recognition by default, RBAC, audit logs, evidence-lock, short raw retention.
+4. **LLM is the planner, not the source of truth** — every answer carries evidence, confidence, and uncertainty.
+5. **Separate observation / correlation / hypothesis / causation** — CCTV proves sequences, not causes.
+6. **Product benchmarks > leaderboard metrics** — reconnect time, recording-gap rate, guard correction rate, cost/camera/month.

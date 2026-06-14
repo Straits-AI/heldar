@@ -321,7 +321,7 @@ export const api = {
     }),
   deleteApiKey: (id: string) => request<void>(`/api/v1/api-keys/${enc(id)}`, { method: "DELETE" }),
 
-  // ---- Campus Entry: registry (Stage 4) ----
+  // ---- Access control: registry (Stage 4) ----
   listVehicles: (q: { plate?: string; owner_type?: string; q?: string; limit?: number } = {}) =>
     request<Vehicle[]>(`/api/v1/vehicles${qs(q)}`),
   getVehicle: (id: string) => request<Vehicle>(`/api/v1/vehicles/${enc(id)}`),
@@ -360,7 +360,7 @@ export const api = {
     }),
   deleteWatch: (id: string) => request<void>(`/api/v1/watchlist/${enc(id)}`, { method: "DELETE" }),
 
-  // ---- Campus Entry: events + workflow + reports (Stage 4) ----
+  // ---- Access control: events + workflow + reports (Stage 4) ----
   listEntryEvents: (q: EntryEventQuery = {}) =>
     request<EntryEvent[]>(`/api/v1/entry-events${qs(q)}`),
   getEntryEvent: (id: string) => request<EntryEvent>(`/api/v1/entry-events/${enc(id)}`),

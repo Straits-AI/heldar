@@ -704,7 +704,7 @@ _COLOR_NAMES = ("black", "white", "gray", "red", "orange", "yellow", "green", "b
 def _estimate_color(img_rgb: "Image.Image", bbox_px: tuple) -> Optional[str]:
     """Crude dominant-color estimate over the centre of a vehicle box (assistive metadata only).
 
-    Returns a coarse color name or None. This is deliberately simple — per memo §7.4/§15.4, color is
+    Returns a coarse color name or None. This is deliberately simple — color is
     secondary verification, not an access decision, and real accuracy needs local benchmarking.
     """
     x1, y1, x2, y2 = bbox_px

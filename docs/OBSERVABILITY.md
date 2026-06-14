@@ -13,7 +13,7 @@ are: `routes/health.rs`, `routes/system.rs`, `routes/recordings.rs`,
 `services/notifier.rs`, `services/retention.rs`, `services/health.rs`,
 `services/indexer.rs`, `config.rs`, and `.env.example`.
 
-Maps to **memo §14 "Stage 1 — Observability and reliability"** (faults visible,
+Covers observability and reliability (faults visible,
 recording gaps explainable, operable by a non-developer).
 
 ---
