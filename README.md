@@ -1,64 +1,76 @@
 # VisionOps Core
 
-**A visual event intelligence operating system for physical spaces.** VisionOps Core turns camera
-streams into structured events, events into workflows, and workflows into operational intelligence —
-the opposite of a camera-centric VMS. Rather than starting with AI features or wrapping an existing
-DVR/NVR, we build our own **media kernel** first (camera registry, ingest, recording, playback, live
-view) and treat AI perception, event intelligence, and vertical apps (campus entry, security,
-retail/BakerySense) as consumers layered on top. Owning the kernel means owning the metadata model,
-the event engine, and the product logic — without re-implementing codecs (we lean on FFmpeg and
-MediaMTX for the low-level media work).
+**A visual event-intelligence operating system for physical spaces.** VisionOps turns camera streams
+into structured events, events into workflows, and workflows into operational intelligence — the
+opposite of a camera-centric VMS. Rather than starting from AI features or wrapping an existing
+DVR/NVR, it builds its own **media kernel** first (camera registry, RTSP ingest, recording, playback,
+live view), then layers perception, an event engine, and vertical apps on top as *consumers*. Owning
+the kernel means owning the metadata model, the event engine, and the product logic — without
+re-implementing codecs (FFmpeg + MediaMTX do the low-level media work).
 
-This repository currently implements **Stage 0 — the media kernel**.
+The platform is **open-core**: an Apache-2.0 kernel + generic reference apps, with vertical/client
+products as separate proprietary crates. See [LICENSING.md](./LICENSING.md).
 
 ---
 
-## Stage 0 feature set (implemented)
+## Status
 
-The Rust control plane in `crates/visionops-kernel` provides:
+Roadmap **Stages 0–7 are shipped** (see [ROADMAP.md](./ROADMAP.md)):
 
-- **Camera registry** — CRUD over cameras with per-camera recording/retention policy; RTSP URLs are
-  either supplied explicitly or built from a vendor template (HikVision / Dahua).
-- **Network discovery** — scan a CIDR/range for cameras (open RTSP), guess the vendor from the HTTP
-  banner, verify credentials via ffprobe, and optionally auto-register found devices (`POST
-  /api/v1/discover`); also a "Discover" page in the dashboard.
-- **RTSP ingest + recorder supervisor** — one FFmpeg process per camera, one supervised Tokio task
-  each, with automatic reconnect (exponential backoff up to 30s) and live status tracking.
-- **Segment recording** — `-c copy` (no decode / no re-encode), audio dropped in Stage 0, written as
-  time-segmented **fragmented MP4** files.
-- **Timeline index** — a background indexer `ffprobe`s new segment files and records
-  start/end/duration/codec/dimensions/size; a timeline endpoint coalesces them into availability
-  ranges (gaps > 2s split a range).
-- **Playback** — list segment files (with browser-playable URLs) and query the coalesced timeline.
-- **Clip export** — concatenate the segments overlapping a time window and trim with `-c copy`
-  (keyframe-aligned precision), served as a downloadable MP4.
-- **Snapshots** — JPEG frame either from recorded footage at a timestamp (`?at=`) or grabbed live.
-- **Live view** — registers the camera as a [MediaMTX](https://github.com/bluenviron/mediamtx) path
-  server-side (credentials never reach the browser) and returns HLS / WebRTC / RTSP playback URLs.
-  Cameras that emit HEVC (which browsers can't play over HLS/WebRTC) are transcoded to H.264 on demand,
-  only while a viewer is connected — the recorded stream stays untouched.
-- **Camera health & events** — per-camera state (`recording` / `connecting` / `offline` / `error` /
-  `disabled`), reconnect counts, last segment/error, plus a generic event log.
-- **Retention** — per-camera age-based deletion **and** a global size cap; locked (evidence)
-  segments are never deleted.
+| Stage | Capability |
+| --- | --- |
+| 0 | Media kernel — registry, RTSP ingest, segment recording (`-c copy`), timeline, playback, clip, snapshot, live view, camera health |
+| 1 | Observability & reliability — health/metrics/events APIs, alert webhook, recording-gap tracking |
+| 2 | AI frame sampler — bounded sub-stream frame extraction feeding a pluggable worker, isolated from recording |
+| 3 | Detection / tracking / zones — `DetectionConsumer` ingest, zone enter/exit/dwell engine |
+| 4 | Campus Entry / access control — ANPR temporal-voting plate resolution, vehicle/visitor/watchlist registry, guard workflow, RBAC |
+| 5 | BakerySense — anonymous retail behaviour analytics (footfall / queue / dwell / occupancy) |
+| 6 | Movement intelligence — multi-signal cross-camera ReID *candidates* (human-reviewed) + red-zone breach alerts |
+| 7 | Semantic search — deterministic query over event facts + LLM-as-*planner* (offline rule parser default) + a proof/claim ladder |
 
-> Not yet implemented (later stages): AI frame sampler, detection/tracking/zones, ANPR, ReID,
-> semantic search, and the vertical apps. See [What's next](#whats-next).
+The full perception pipeline has been **validated end-to-end on real HikVision cameras**
+(`RTSP → sampler → YOLO+ByteTrack worker → detections → zone events → breach alerts`). Per-stage
+*accuracy* benchmarking (precision/recall) is still pending labelled ground truth.
+
+---
+
+## Architecture (open-core)
+
+```text
+                    ┌─────────────────────────────────────────────┐
+   cameras ──RTSP──▶│  visionops-kernel  (Apache-2.0)             │
+                    │  media/DVR · perception ingest + sampler ·   │
+                    │  zone engine · auth/RBAC · observability ·   │
+                    │  retention · remote-access overlay status ·  │
+                    │  the DetectionConsumer + worker SDK seams     │
+                    └───────────────┬──────────────┬──────────────┘
+   AI worker ──/ai/events──▶ (perception)          │ composed by visionops-server
+   (apps/ai, YOLO)                                 │
+                    ┌──────────────────────────────┴──────────────┐
+   OPEN generic apps (Apache-2.0)        PROPRIETARY verticals     │
+   visionops-entry  (access control)     visionops-bakery          │
+   visionops-movement (ReID/breach)      visionops-campus-* (future)│
+   visionops-search (semantic search)                              │
+                    └───────────────────────────────────────────────┘
+```
+
+Apps plug into the kernel only through public seams — the `DetectionConsumer` trait, `Router<AppState>`
+merging, a self-installed schema, and the auth primitive — so the kernel has **no** dependency on any
+app. A deployment is *composed* from the kernel + whichever apps a client needs (single-tenant per
+deployment). See [ARCHITECTURE.md](./ARCHITECTURE.md).
 
 ---
 
 ## Tech stack
 
-| Layer        | Technology                                                                       |
-| ------------ | -------------------------------------------------------------------------------- |
-| Core / API   | Rust — [Axum](https://github.com/tokio-rs/axum) 0.8 · Tokio · [SQLx](https://github.com/launchbadge/sqlx) 0.8 |
-| Database     | SQLite (default, zero-setup; embedded migrations)                                |
-| Media engine | FFmpeg + ffprobe (record / clip / snapshot) · MediaMTX (live-view gateway)        |
-| Frontend     | React + Vite + TypeScript (`apps/web`, scaffolded)                                |
-| AI workers   | Python (planned, later stages)                                                   |
-
-SQLite is the implemented Stage 0 store (`VISIONOPS_DATABASE_URL=sqlite://./data/visionops.db`).
-The `.env.example` also lists a PostgreSQL URL as the production-style direction.
+| Layer | Technology |
+| --- | --- |
+| Core / API | Rust — [Axum](https://github.com/tokio-rs/axum) 0.8 · Tokio · [SQLx](https://github.com/launchbadge/sqlx) 0.8 |
+| Database | SQLite (default, zero-setup, WAL, embedded migrations) |
+| Media engine | FFmpeg + ffprobe (record / clip / snapshot / sample) · [MediaMTX](https://github.com/bluenviron/mediamtx) (live-view gateway) |
+| AI worker | Python — Ultralytics YOLO + ByteTrack (`apps/ai`); optional ANPR OCR backend (paddleocr/easyocr) |
+| Frontend | React + Vite + TypeScript (`apps/web`) |
+| Remote access | WireGuard overlay (Tailscale / NetBird), external daemon — see [docs/REMOTE-ACCESS.md](./docs/REMOTE-ACCESS.md) |
 
 ---
 
@@ -66,195 +78,97 @@ The `.env.example` also lists a PostgreSQL URL as the production-style direction
 
 ```text
 cctv/
+├── crates/
+│   ├── visionops-kernel/     # Apache-2.0 platform (media/DVR, perception, zones, auth, seams)
+│   ├── visionops-entry/      # Apache-2.0 generic access control (ANPR, registry, guard workflow)
+│   ├── visionops-movement/   # Apache-2.0 generic cross-camera ReID + breach engine
+│   ├── visionops-search/     # Apache-2.0 generic semantic search (plan → execute → proof)
+│   ├── visionops-bakery/     # PROPRIETARY retail-analytics vertical
+│   └── visionops-server/     # composing binary `visionops-core` (verticals behind a Cargo feature)
 ├── apps/
-│   ├── core/            # Rust media-kernel control plane (Axum + Tokio + SQLx)
-│   │   ├── src/
-│   │   │   ├── routes/      # HTTP handlers (cameras, recordings, playback, liveview, health, system)
-│   │   │   ├── services/    # recorder, indexer, retention, health, clip, snapshot, mediamtx
-│   │   │   ├── camera_url.rs # vendor RTSP URL building + credential masking
-│   │   │   ├── config.rs / db.rs / models.rs / repo.rs / state.rs / util.rs
-│   │   │   └── main.rs
-│   │   └── migrations/      # 0001_init.sql (SQLite schema)
-│   └── web/             # React + Vite + TS frontend (scaffolded: src/{components,lib,pages})
-├── infra/
-│   └── mediamtx/        # MediaMTX binary (fetched) + mediamtx.yml
-├── scripts/             # dev.sh, setup_mediamtx.sh, synth_camera.sh, validate.sh
-├── docs/                # documentation
-├── data/                # runtime: SQLite db, recordings/, clips/, snapshots/ (gitignored)
-├── memo.md              # product vision + build roadmap
-└── research.md          # background research
+│   ├── ai/                   # Python reference AI worker (YOLO/ByteTrack)
+│   └── web/                  # React + Vite + TS dashboard
+├── infra/mediamtx/           # MediaMTX binary (fetched) + mediamtx.yml
+├── scripts/                  # run_stack.sh, setup_mediamtx.sh, validate_*.sh, prepare-open-repo.sh
+├── docs/                     # per-stage guides + REMOTE-ACCESS + OPEN-CORE-SPLIT
+├── ARCHITECTURE.md · ROADMAP.md · LICENSING.md   # top-level docs
+└── data/                     # runtime: SQLite db, recordings/clips/snapshots/frames (gitignored)
 ```
 
 ---
 
 ## Quickstart
 
-**Prerequisites:** Rust (via `rustup`), FFmpeg + ffprobe on `PATH`, and `curl` (for MediaMTX setup).
-Node.js is needed only for the frontend.
+**Prerequisites:** Rust (via `rustup`), FFmpeg + ffprobe on `PATH`, `curl`. Node.js for the frontend;
+Python 3 for the AI worker.
 
 ```bash
-# 0. Keep the Rust toolchain current (the project tracks latest stable)
-rustup update
-
-# 1. Build the core control plane
+rustup update                        # the project tracks latest stable
 cargo build --workspace
-
-# 2. (optional) configure — defaults work out of the box
-cp .env.example .env   # edit if you want; never commit .env (holds camera credentials)
-
-# 3. Download the MediaMTX live-view gateway binary into infra/mediamtx/
-scripts/setup_mediamtx.sh
-
-# 4. Run the dev stack (MediaMTX + the Rust core on http://localhost:8000)
-scripts/dev.sh
+cp .env.example .env                 # defaults work out of the box; never commit .env
+scripts/setup_mediamtx.sh            # fetch the MediaMTX live-view gateway
+scripts/run_stack.sh                 # MediaMTX + core (http://localhost:8000) + web (Vite)
 ```
 
-In a second terminal, publish a synthetic RTSP camera so you can exercise the kernel without real
-hardware or credentials:
+Onboard a real camera (the RTSP URL is built from the vendor template — you only supply address +
+credentials):
 
 ```bash
-scripts/synth_camera.sh                 # publishes rtsp://127.0.0.1:8554/cam_test (1280x720 @ 15fps)
+curl -X POST http://localhost:8000/api/v1/cameras -H 'content-type: application/json' -d '{
+  "id":"gate_a","name":"Gate A","vendor":"hikvision",
+  "address":"192.168.0.2","username":"admin","password":"YOUR_PASSWORD"}'
+
+curl http://localhost:8000/api/v1/system                     # uptime, camera/segment counts, remote_access
+curl http://localhost:8000/api/v1/cameras/gate_a/timeline    # recorded ranges
 ```
 
-Then onboard it as a camera:
+> **Do not brute-force camera credentials** — HikVision devices lock out after failed attempts.
+
+Run the AI worker (detection) against onboarded cameras:
 
 ```bash
-curl -X POST http://localhost:8000/api/v1/cameras \
-  -H 'content-type: application/json' \
-  -d '{"id":"cam_test","name":"Synthetic Test Camera","vendor":"generic",
-       "main_stream_url":"rtsp://127.0.0.1:8554/cam_test","segment_seconds":5}'
-
-curl http://localhost:8000/api/v1/system                       # stats
-curl http://localhost:8000/api/v1/cameras/cam_test/timeline    # recorded ranges
+# enable a detection task on a camera, then:
+cd apps/ai && python -m venv .venv && .venv/bin/pip install -r requirements.txt
+VISIONOPS_API=http://localhost:8000 .venv/bin/python worker.py
 ```
 
-`scripts/validate.sh` runs this whole flow end-to-end (MediaMTX → synthetic camera → core →
-every Stage 0 endpoint, including reconnect) and writes a report to `data/validate_report.txt`.
-
-**Frontend** (React + Vite + TS, scaffolded in `apps/web`):
-
-```bash
-cd apps/web && npm install && npm run dev
-```
-
-The dev server defaults to `http://localhost:5173`, which is the default allowed CORS origin.
+Per-stage validation scripts (`scripts/validate_*.sh`) exercise each stage end-to-end against a
+running stack and write reports to `data/`.
 
 ### Default ports
 
-| Port | Service                         |
-| ---- | ------------------------------- |
-| 8000 | VisionOps Core HTTP API         |
-| 5173 | Web frontend (Vite dev server)  |
-| 8554 | MediaMTX RTSP                   |
-| 8888 | MediaMTX HLS                    |
-| 8889 | MediaMTX WebRTC                 |
-| 9997 | MediaMTX control API            |
+| Port | Service |
+| --- | --- |
+| 8000 | VisionOps Core HTTP API |
+| 5173 | Web frontend (Vite dev server) |
+| 8554 / 8888 / 8889 | MediaMTX RTSP / HLS / WebRTC |
+| 9997 | MediaMTX control API (loopback) |
 
 ---
 
-## Onboarding a real HikVision camera
+## Security & auth
 
-For vendor cameras you don't need to know the RTSP path — supply the address and credentials and the
-URL is built from the vendor template (HikVision `…/Streaming/Channels/101` for main, `102` for sub):
+- **Auth/RBAC is opt-in** (`VISIONOPS_AUTH_ENABLED`, default false = open LAN appliance). When enabled,
+  the API requires a session (login) or `X-API-Key`, and enforces five roles
+  (`admin` / `manager` / `guard` / `viewer` / `integration`) across capabilities; every mutation is
+  written to an immutable audit log.
+- **Sessions use an HttpOnly, SameSite=Strict cookie** (not JS-readable → not XSS-exfiltratable); the
+  same-origin SPA sends it automatically, including to the media plane.
+- **Camera credentials** are masked (`***@host`) in logs/errors, and live view is brokered server-side
+  through MediaMTX so credentials never reach the browser. Credentials are stored in the DB; use
+  disk/secret encryption at rest for sensitive deployments.
+- **Remote access** for sites behind CGNAT is a WireGuard overlay (P2P-first, end-to-end encrypted, no
+  proxy sees the video) — see [docs/REMOTE-ACCESS.md](./docs/REMOTE-ACCESS.md).
 
-```bash
-curl -X POST http://localhost:8000/api/v1/cameras \
-  -H 'content-type: application/json' \
-  -d '{
-    "id": "gate_a_01",
-    "name": "Gate A Camera 1",
-    "vendor": "hikvision",
-    "address": "192.168.0.2",
-    "username": "admin",
-    "password": "YOUR_PASSWORD",
-    "record_stream": "main"
-  }'
-
-curl -X POST http://localhost:8000/api/v1/cameras/gate_a_01/test   # probe reachability + codec
-```
-
-> The real test cameras live at **192.168.0.2 – 192.168.0.12** and require valid credentials.
-> **Do not brute-force them** — HikVision devices lock out after failed attempts. Use the actual
-> credentials provided for the site.
+The codebase has been through adversarial production-readiness audits across the Rust crates, the
+Python worker, and the frontend (correctness, concurrency, resource lifecycle, security, ops), with
+the confirmed findings fixed.
 
 ---
 
-## API reference
+## Documentation
 
-Base URL: `http://localhost:8000`. All bodies and responses are JSON unless noted.
-
-| Method        | Path                                   | Description                                                          |
-| ------------- | -------------------------------------- | ------------------------------------------------------------------- |
-| `GET`         | `/healthz`                             | Liveness probe.                                                     |
-| `GET`         | `/api/v1/system`                       | System info: uptime, camera/segment counts, recording footprint.   |
-| `GET`         | `/api/v1/cameras`                      | List cameras.                                                       |
-| `POST`        | `/api/v1/cameras`                      | Create / onboard a camera.                                          |
-| `GET`         | `/api/v1/cameras/{id}`                 | Get one camera.                                                     |
-| `PATCH`       | `/api/v1/cameras/{id}`                 | Partial update (re-reconciles the recorder).                        |
-| `DELETE`      | `/api/v1/cameras/{id}`                 | Delete camera, stop its recorder, remove its footage.               |
-| `GET`/`POST`  | `/api/v1/cameras/{id}/test`            | Probe the stream via ffprobe; returns reachability + codec/size.    |
-| `POST`        | `/api/v1/discover`                     | Scan a network range for cameras; verify creds, optionally auto-add. |
-| `GET`         | `/api/v1/cameras/{id}/segments`        | List recorded segment files (`?from&to&limit`), each with a URL.    |
-| `GET`         | `/api/v1/cameras/{id}/timeline`        | Coalesced recorded ranges (`?from&to`).                             |
-| `POST`        | `/api/v1/cameras/{id}/clip`            | Export an MP4 clip for a `{from,to}` window (`-c copy`).             |
-| `GET`         | `/api/v1/cameras/{id}/snapshot`        | JPEG frame; `?at=<rfc3339>` for recorded, omit for live.            |
-| `GET`/`POST`  | `/api/v1/cameras/{id}/liveview`        | Register MediaMTX path; returns HLS / WebRTC / RTSP URLs.           |
-| `GET`         | `/api/v1/health/cameras`               | Status of all cameras.                                              |
-| `GET`         | `/api/v1/cameras/{id}/health`          | Status of one camera.                                               |
-| `GET`         | `/api/v1/events`                       | Event log (`?camera_id&event_type&severity&limit`).                 |
-| `GET`         | `/media/recordings/{camera}/{file}`    | Static segment files.                                               |
-| `GET`         | `/media/clips/{file}`                  | Static exported clips.                                              |
-| `GET`         | `/media/snapshots/{file}`              | Static snapshots.                                                   |
-
----
-
-## Recording model
-
-```text
-RTSP (over TCP)
-   → FFmpeg (-c copy, no decode, audio dropped)
-   → segment muxer → fragmented MP4 files (strftime-named: %Y%m%d_%H%M%S.mp4)
-   → timeline indexer (ffprobe) → segments table
-   → retention sweeper (age + size cap)
-```
-
-- **Copy codec, no decode.** The recorder remuxes compressed packets straight to disk
-  (`-rtsp_transport tcp`, `-c copy -an`), so CPU stays low and the original codec/quality is
-  preserved. Decoding is reserved for snapshots and (later) AI.
-- **Fragmented MP4 segments.** Each segment uses
-  `movflags=+frag_keyframe+empty_moov+default_base_moof` so in-progress segments remain playable.
-  Segment length is per-camera `segment_seconds` (default 60s; clamped 2–3600).
-- **Timeline index.** A background indexer (`VISIONOPS_INDEXER_INTERVAL_S`, default 10s) ffprobes
-  closed segment files and writes one `segments` row each (path, start/end, duration, codec, w/h,
-  bytes). The timeline endpoint merges contiguous segments into availability ranges.
-- **Clip export** concatenates the segments overlapping the requested window and trims with
-  `-c copy` — fast, lossless, keyframe-aligned (max 1h per clip).
-- **Retention + size cap.** Per-camera age policy (`retention_hours`, default 24) deletes old
-  segments; a global soft cap (`VISIONOPS_MAX_RECORDINGS_GB`, default 20 GB) prunes the oldest
-  **unlocked** segments under disk pressure. Locked/evidence segments are never deleted.
-- **Reliability.** On stream loss the supervisor logs a `camera_offline` event, bumps
-  `reconnect_count`, and retries with exponential backoff (reset after a healthy run).
-
----
-
-## Security notes (Stage 0)
-
-- **Credentials are stored in plaintext** in the `cameras` table (SQLite). This is a Stage 0
-  shortcut — move to a secret store / encryption-at-rest before any real deployment. Never commit
-  `.env` or the `data/` directory (both are gitignored).
-- **Credentials are masked** (`***@host`) in logs, error messages, and the `test` endpoint output.
-- **Live view is brokered server-side** through MediaMTX, so camera credentials never reach the
-  browser.
-- **CORS** is configurable via `VISIONOPS_CORS_ORIGINS` (default `http://localhost:5173`); setting it
-  to `*` or leaving it empty allows any origin.
-- **No authentication** sits in front of the API in Stage 0, and it binds `0.0.0.0:8000` by default.
-  Keep it on a trusted network and add an auth layer before exposing it.
-
----
-
-## What's next
-
-Stage 0 is the foundation. The staged plan — observability/reliability, AI frame sampler,
-detection/tracking/zone kernel, campus entry app, BakerySense Vision, ReID/movement intelligence,
-and semantic video search — is in **[ROADMAP.md](./ROADMAP.md)**. Full product vision and background
-live in [`memo.md`](./memo.md) and [`research.md`](./research.md).
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — the seams + every stage's design
+- [ROADMAP.md](./ROADMAP.md) — stage status and the research frontier
+- [LICENSING.md](./LICENSING.md) · [docs/OPEN-CORE-SPLIT.md](./docs/OPEN-CORE-SPLIT.md) — open-core boundary + how the public repo is produced
+- `docs/` — per-stage guides (Campus Entry, BakerySense, Movement, Search, AI workers, observability) + [REMOTE-ACCESS.md](./docs/REMOTE-ACCESS.md)

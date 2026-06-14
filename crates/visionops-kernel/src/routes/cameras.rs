@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use sqlx::types::Json as SqlxJson;
 use sqlx::SqlitePool;
 
-use crate::auth::Principal;
+use crate::auth::{self, Principal};
 use crate::camera_url;
 use crate::error::{AppError, AppResult};
 use crate::models::{Camera, CameraCreate, CameraUpdate, CameraView};
@@ -146,6 +146,15 @@ async fn create_camera(
 
     st.recorder.reconcile(&id).await;
     let cam = load_camera(&st.pool, &id).await?;
+    auth::audit(
+        &st.pool,
+        &principal,
+        "create_camera",
+        "camera",
+        &id,
+        json!({ "name": &body.name, "vendor": &body.vendor }),
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(cam.into())))
 }
 
@@ -224,6 +233,7 @@ async fn update_camera(
     st.recorder.reconcile(&id).await;
     // A disable / URL change / enable also affects AI sampling for this camera.
     st.sampler.reconcile().await;
+    auth::audit(&st.pool, &principal, "update_camera", "camera", &id, json!({})).await;
     Ok(Json(load_camera(&st.pool, &id).await?.into()))
 }
 
@@ -259,6 +269,7 @@ async fn delete_camera(
     st.sampler.reconcile().await;
     let _ = tokio::fs::remove_dir_all(st.cfg.camera_recordings_dir(&id)).await;
     let _ = tokio::fs::remove_dir_all(st.cfg.camera_frames_dir(&id)).await;
+    auth::audit(&st.pool, &principal, "delete_camera", "camera", &id, json!({})).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

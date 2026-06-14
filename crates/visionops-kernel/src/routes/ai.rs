@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
-use crate::auth::Principal;
+use crate::auth::{self, Principal};
 use crate::error::{AppError, AppResult};
 use crate::models::{AiIngest, AiTask, AiTaskCreate, AiTaskUpdate, Detection};
 use crate::routes::cameras::load_camera;
@@ -109,6 +109,15 @@ async fn create_task(
         .bind(&task_id)
         .fetch_one(&st.pool)
         .await?;
+    auth::audit(
+        &st.pool,
+        &principal,
+        "create_ai_task",
+        "ai_task",
+        &task_id,
+        json!({ "camera_id": &id, "task_type": &task.task_type }),
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(task)))
 }
 
@@ -153,6 +162,7 @@ async fn update_task(
         .bind(&task_id)
         .fetch_one(&st.pool)
         .await?;
+    auth::audit(&st.pool, &principal, "update_ai_task", "ai_task", &task_id, json!({})).await;
     Ok(Json(task))
 }
 
@@ -170,6 +180,7 @@ async fn delete_task(
         return Err(AppError::NotFound(format!("ai task {task_id} not found")));
     }
     st.sampler.reconcile().await;
+    auth::audit(&st.pool, &principal, "delete_ai_task", "ai_task", &task_id, json!({})).await;
     Ok(StatusCode::NO_CONTENT)
 }
 

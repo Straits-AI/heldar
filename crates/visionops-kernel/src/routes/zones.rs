@@ -10,7 +10,7 @@ use serde_json::json;
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
-use crate::auth::Principal;
+use crate::auth::{self, Principal};
 use crate::error::{AppError, AppResult};
 use crate::models::{Zone, ZoneCreate, ZoneEvent, ZoneUpdate};
 use crate::routes::cameras::load_camera;
@@ -155,6 +155,15 @@ async fn create_zone(
         .bind(&zone_id)
         .fetch_one(&st.pool)
         .await?;
+    auth::audit(
+        &st.pool,
+        &principal,
+        "create_zone",
+        "zone",
+        &zone_id,
+        json!({ "camera_id": &id, "name": &zone.name, "kind": &zone.kind }),
+    )
+    .await;
     Ok((StatusCode::CREATED, Json(zone)))
 }
 
@@ -214,6 +223,7 @@ async fn update_zone(
         .bind(&zone_id)
         .fetch_one(&st.pool)
         .await?;
+    auth::audit(&st.pool, &principal, "update_zone", "zone", &zone_id, json!({})).await;
     Ok(Json(zone))
 }
 
@@ -230,6 +240,7 @@ async fn delete_zone(
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound(format!("zone {zone_id} not found")));
     }
+    auth::audit(&st.pool, &principal, "delete_zone", "zone", &zone_id, json!({})).await;
     Ok(StatusCode::NO_CONTENT)
 }
 
