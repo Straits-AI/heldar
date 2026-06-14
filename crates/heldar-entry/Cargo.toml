@@ -5,6 +5,7 @@ edition = "2021"
 rust-version = "1.85"
 description = "Heldar Access Control — generic ANPR authorization, vehicle/visitor/watchlist registry, guard workflow, and entry reports for gated-entry deployments. Built on the heldar-kernel platform."
 license = "Apache-2.0"
+readme = "README.md"
 repository = "https://github.com/Straits-AI/heldar"
 keywords = ["anpr", "alpr", "access-control", "cctv", "surveillance"]
 categories = ["multimedia::video"]

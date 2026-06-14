@@ -346,7 +346,7 @@ pub struct ZoneEvent {
     pub created_at: DateTime<Utc>,
 }
 
-// ---- Stage 4: Campus Entry — RBAC ----
+// ---- Stage 4: Access control — RBAC ----
 
 /// Operator account. `password_hash` is never serialized; use [`UserView`] for output.
 #[derive(Debug, Clone, FromRow)]

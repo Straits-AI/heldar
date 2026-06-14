@@ -1,6 +1,6 @@
 //! Multi-signal ReID candidate engine.
 //!
-//! VEHICLE ReID is anchored on the PLATE (resolved by Campus Entry into `entry_events`): the proposer
+//! VEHICLE ReID is anchored on the PLATE (resolved by the access-control app into `entry_events`): the proposer
 //! finds the same normalized plate appearing on two topology-linked cameras within a plausible transit
 //! window, and scores the link by fusing plate-exactness + transit-time plausibility + vehicle
 //! attribute agreement (colour/type). The plate is the dominant signal — this is the "multi-signal,

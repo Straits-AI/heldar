@@ -5,6 +5,7 @@ edition = "2021"
 rust-version = "1.85"
 description = "Heldar semantic search — generic searchable visual-event memory. Deterministic structured search over kernel event facts + an LLM-as-query-PLANNER natural-language layer (never the source of truth) + a proof layer (claim levels → evidence → confidence). Built on the heldar-kernel platform."
 license = "Apache-2.0"
+readme = "README.md"
 repository = "https://github.com/Straits-AI/heldar"
 keywords = ["search", "cctv", "surveillance", "video", "events"]
 categories = ["multimedia::video"]

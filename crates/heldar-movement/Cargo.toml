@@ -5,6 +5,7 @@ edition = "2021"
 rust-version = "1.85"
 description = "Heldar Movement intelligence — generic cross-camera ReID + movement trails + red-zone breach alerts. Multi-signal candidate matching (plate/attributes/topology/time), never pure visual embedding; ReID is probabilistic correlation with human review, not legal identity. Built on the heldar-kernel platform."
 license = "Apache-2.0"
+readme = "README.md"
 repository = "https://github.com/Straits-AI/heldar"
 keywords = ["reid", "cctv", "tracking", "surveillance", "video"]
 categories = ["multimedia::video"]

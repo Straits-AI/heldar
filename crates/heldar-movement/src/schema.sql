@@ -1,4 +1,4 @@
--- Movement intelligence (proprietary) schema. Owned by this app crate, applied idempotently against
+-- Movement intelligence schema (Apache-2.0, open). Owned by this app crate, applied idempotently against
 -- the shared kernel pool. Correlation/candidate data only — no legal-identity records.
 
 -- Operator-configured directed camera adjacency: a subject leaving `from_camera` may appear at

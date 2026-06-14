@@ -1,4 +1,4 @@
-//! Campus Entry domain models (registry + canonical entry events). The RBAC/auth models
+//! Access-control domain models (registry + canonical entry events). The RBAC/auth models
 //! (User, ApiKey, …) remain in the kernel auth module for now.
 
 use chrono::{DateTime, Utc};

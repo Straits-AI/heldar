@@ -1,4 +1,4 @@
-//! The proof layer (research.md §12–13). Every answer is decomposed into claim levels, each with its
+//! The proof layer. Every answer is decomposed into claim levels, each with its
 //! evidence + confidence, so a result is always traceable to the facts it rests on — and the one
 //! genuinely uncertain step (the natural-language → plan interpretation) is surfaced as such.
 //!

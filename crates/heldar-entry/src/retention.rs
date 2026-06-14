@@ -1,4 +1,4 @@
-//! Campus Entry owns the lifecycle of its own data: it prunes old entry events (and deletes their
+//! The access-control app owns the lifecycle of its own data: it prunes old entry events (and deletes their
 //! evidence frames) on the entry-retention TTL. The kernel's retention sweeper handles only
 //! kernel-owned data (segments, detections, outbox, zone events, sessions, audit, events).
 

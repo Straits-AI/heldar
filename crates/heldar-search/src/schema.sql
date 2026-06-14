@@ -1,4 +1,4 @@
--- Semantic search (proprietary) schema. Owned by this app crate, applied idempotently against the
+-- Semantic search schema (Apache-2.0, open). Owned by this app crate, applied idempotently against the
 -- shared kernel pool. Only a query log (history + accountability) — search itself reads kernel facts.
 
 CREATE TABLE IF NOT EXISTS search_log (

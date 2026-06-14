@@ -7,8 +7,8 @@
 //! and plug in as consumers / route modules via the composing server binary.
 //!
 //! Generic reference apps (`heldar-entry`, `heldar-movement`, `heldar-search`) are also
-//! Apache-2.0 and live alongside this crate; vertical/client products (Campus Entry, BakerySense, …)
-//! are proprietary crates that depend on the generic ones. See `ARCHITECTURE.md` for the open-core
+//! Apache-2.0 and live alongside this crate; proprietary vertical/client products depend on the
+//! generic ones. See `ARCHITECTURE.md` for the open-core
 //! split and `docs/REMOTE-ACCESS.md` for the remote-access model.
 
 pub mod auth;

@@ -2,8 +2,8 @@
 //!
 //! The media + AI-task kernel is domain-agnostic: it samples frames, accepts detections from workers,
 //! and persists them. Anything that *interprets* those detections into domain events — the zone engine
-//! (spatial rules), the ANPR/Campus-Entry engine (plate authorization), and future apps like
-//! BakerySense (retail behaviour) — plugs in here as a [`DetectionConsumer`] rather than being wired
+//! (spatial rules), the ANPR/access-control engine (plate authorization), and other domain
+//! verticals — plug in here as a [`DetectionConsumer`] rather than being wired
 //! into the ingest handler or [`crate::state::AppState`] directly.
 //!
 //! This inverts the dependency: ingest fans a committed batch out to a registry of consumers; a
@@ -21,12 +21,12 @@ use crate::models::DetectionIngest;
 pub struct DetectionBatch<'a> {
     pub camera_id: &'a str,
     pub site_id: Option<&'a str>,
-    /// The task type that produced this batch (consumers self-select on it; e.g. BakerySense may also
+    /// The task type that produced this batch (consumers self-select on it; a vertical may also
     /// inspect it). Part of the stable seam contract.
     pub task_type: &'a str,
     pub detections: &'a [DetectionIngest],
     /// Worker-supplied capture time (engines that need trustworthy timing use server time instead;
-    /// time-windowing consumers like BakerySense use this).
+    /// time-windowing consumers use this).
     pub timestamp: DateTime<Utc>,
 }
 

@@ -1,7 +1,7 @@
 //! ANPR entry engine (Stage 4): consolidates per-frame plate reads from the AI worker into one
 //! authoritative entry/exit event per vehicle track via temporal voting, resolves the plate against
 //! the registered-vehicle / visitor-pass / watchlist registry, classifies authorization
-//! (matched / exception / unmatched / blocked), and writes a canonical entry event (memo §8.1) with
+//! (matched / exception / unmatched / blocked), and writes a canonical entry event with
 //! an evidence frame.
 //!
 //! Like the zone engine, all timing is driven by SERVER time and state is keyed per (camera, track)
@@ -10,7 +10,7 @@
 //! threshold but did produce at least one plate read. Plate is the PRIMARY identity
 //! anchor; vehicle attributes (type/color/make/model) are SECONDARY — an attribute mismatch against
 //! a registered plate raises an *exception for guard review*, never an automatic rejection
-//! (per memo §7.4: no hard access decision on make/model without local benchmarking).
+//! (by policy: no hard access decision on make/model without local benchmarking).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -443,7 +443,7 @@ impl AnprEngine {
 
         // 2) Registered vehicle (within validity window, if set). We deliberately only compare
         //    color + vehicle_type for mismatch — make/model is assistive metadata only and not
-        //    reliable enough (memo §7.4/§15.4) to drive an exception.
+        //    reliable enough to drive an exception.
         let vehicle = sqlx::query_as::<_, RegVehicle>(
             "SELECT id, vehicle_type, color, valid_from, valid_until
                FROM vehicles WHERE plate_norm = ? AND active = 1",

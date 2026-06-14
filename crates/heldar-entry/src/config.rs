@@ -1,4 +1,4 @@
-//! Campus Entry's own configuration, loaded from the environment by the composing server. The open
+//! The access-control app's own configuration, loaded from the environment by the composing server. The open
 //! kernel does not carry any entry-app tuning knobs.
 
 fn parse_or<T: std::str::FromStr>(key: &str, default: T) -> T {

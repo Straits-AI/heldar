@@ -1,7 +1,7 @@
--- Campus Entry (proprietary) schema. Owned by this app crate, applied idempotently on startup against
+-- Access-control schema (Apache-2.0, open). Owned by this app crate, applied idempotently on startup against
 -- the shared kernel pool (single-tenant-per-deployment). No camera FK: events outlive a camera delete
 -- for audit integrity (like zone_events). Plate is the primary anchor; vehicle attributes are
--- secondary verification only (memo §7.4).
+-- secondary verification only.
 
 -- Registered vehicles (the "allow" anchor). plate_norm is uppercased, alphanumeric-only.
 CREATE TABLE IF NOT EXISTS vehicles (
@@ -65,7 +65,7 @@ CREATE TABLE IF NOT EXISTS watchlist (
 );
 CREATE INDEX IF NOT EXISTS idx_watchlist_plate ON watchlist(plate_norm);
 
--- Canonical entry/exit event (memo §8.1). subject/authorization/evidence/workflow/audit are JSON;
+-- Canonical entry/exit event. subject/authorization/evidence/workflow/audit are JSON;
 -- plate / auth_status / workflow_status are denormalized columns for fast querying & reports.
 CREATE TABLE IF NOT EXISTS entry_events (
     id               TEXT PRIMARY KEY,

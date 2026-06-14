@@ -1,7 +1,7 @@
 //! Heldar semantic search — generic, **open (Apache-2.0)** searchable visual-event memory.
 //!
 //! Turns the platform's accumulated event facts into a queryable memory — *who / what / where / when /
-//! confidence / evidence* — under one governing principle from research.md §12–13 and the memo:
+//! confidence / evidence* — under one governing principle:
 //!
 //! **The LLM is a query PLANNER, never the source of truth.** A natural-language question is translated
 //! into a structured query PLAN (a deterministic filter), the plan is executed against the kernel's

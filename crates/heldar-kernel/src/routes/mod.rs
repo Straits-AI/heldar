@@ -15,7 +15,7 @@ pub mod system;
 pub mod zones;
 
 /// Assemble the kernel API router (absolute paths, mounted at root by the composing server). The
-/// auth admin surface stays here for now; domain apps (Campus Entry, …) merge their own routers in
+/// auth admin surface stays here for now; domain apps merge their own routers in
 /// the server binary.
 pub fn api_router() -> Router<AppState> {
     Router::new()

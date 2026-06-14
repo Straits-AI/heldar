@@ -1,4 +1,4 @@
-//! Stage 4 Campus Entry surface: registered vehicles, visitor passes (+ check-in/out), watchlist,
+//! Stage 4 access-control surface: registered vehicles, visitor passes (+ check-in/out), watchlist,
 //! the canonical entry-event feed with a guard confirm/reject workflow, and reports (daily entry
 //! log, exceptions, audit). Reads require any authenticated principal; registry mutations require
 //! manager+, gate operations require guard+, and the audit report requires manager+.
