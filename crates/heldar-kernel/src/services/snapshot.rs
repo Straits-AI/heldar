@@ -78,6 +78,13 @@ pub async fn snapshot_at(
 
 /// Grab one frame live from the camera stream (sub-stream preferred).
 pub async fn snapshot_live(state: &AppState, camera_id: &str) -> AppResult<Vec<u8>> {
+    snapshot_live_raw(state, camera_id).await
+}
+
+/// Reusable inner that captures one live frame and returns the raw JPEG bytes. Backs the public
+/// [`snapshot_live`] handler path and is reused by the snapshot scheduler. Identical behaviour;
+/// kept as a distinct entry point so background callers don't depend on the route-facing wrapper.
+pub async fn snapshot_live_raw(state: &AppState, camera_id: &str) -> AppResult<Vec<u8>> {
     let cam: Option<Camera> = sqlx::query_as::<_, Camera>("SELECT * FROM cameras WHERE id = ?")
         .bind(camera_id)
         .fetch_optional(&state.pool)

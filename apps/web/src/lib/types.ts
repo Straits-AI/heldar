@@ -39,6 +39,10 @@ export interface CameraView {
   record_enabled: boolean;
   segment_seconds: number;
   retention_hours: number;
+  /** Per-camera storage quota in bytes; null means no per-camera cap. */
+  storage_quota_bytes?: number | null;
+  /** Record the camera's audio stream (pass-through) instead of dropping it. */
+  record_audio: boolean;
   enabled: boolean;
   created_at: string;
   updated_at: string;
@@ -61,6 +65,8 @@ export interface CameraCreate {
   record_enabled?: boolean;
   segment_seconds?: number;
   retention_hours?: number;
+  storage_quota_bytes?: number | null;
+  record_audio?: boolean;
   enabled?: boolean;
 }
 
@@ -87,11 +93,23 @@ export interface SegmentView {
   height?: number | null;
   size_bytes: number;
   container: string;
+  /** Transient export read-lock; cleared at startup. Not a durable hold. */
   locked: boolean;
+  /** Durable evidence hold: when true the segment is never pruned by retention. */
+  evidence_locked: boolean;
   incident_id?: string | null;
   created_at: string;
   /** Browser-playable URL under /media/recordings/... */
   url: string;
+}
+
+/** Roll-up of segments tagged to one incident (GET /api/v1/incidents). */
+export interface IncidentSummary {
+  incident_id: string;
+  segment_count: number;
+  total_bytes: number;
+  oldest_start: string;
+  newest_end: string;
 }
 
 export interface TimelineRange {
@@ -243,6 +261,40 @@ export interface Gaps {
   gaps: GapSpan[];
   gap_count: number;
   total_gap_seconds: number;
+}
+
+// ---- Scheduled interval snapshots ----
+
+/** A per-camera schedule that captures a live JPEG every `interval_seconds`. */
+export interface SnapshotSchedule {
+  id: string;
+  camera_id: string;
+  interval_seconds: number;
+  enabled: boolean;
+  /** Last time the scheduler fired this schedule (null until it first fires). */
+  last_fired_at?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface SnapshotScheduleCreate {
+  interval_seconds?: number;
+  enabled?: boolean;
+}
+
+export type SnapshotScheduleUpdate = Partial<SnapshotScheduleCreate>;
+
+/** A captured snapshot frame plus its browser-fetchable media URL (flattened PersistedSnapshot). */
+export interface SnapshotView {
+  id: string;
+  camera_id: string;
+  schedule_id?: string | null;
+  path: string;
+  taken_at: string;
+  size_bytes: number;
+  created_at: string;
+  /** Browser-fetchable URL under /media/snapshots/... */
+  url: string;
 }
 
 // ---- Stage 2: AI perception ----

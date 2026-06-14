@@ -7,10 +7,12 @@ pub mod auth;
 pub mod cameras;
 pub mod discovery;
 pub mod health;
+pub mod incidents;
 pub mod liveview;
 pub mod metrics;
 pub mod playback;
 pub mod recordings;
+pub mod snapshot_schedules;
 pub mod system;
 pub mod zones;
 
@@ -28,5 +30,7 @@ pub fn api_router() -> Router<AppState> {
         .merge(discovery::router())
         .merge(ai::router())
         .merge(zones::router())
+        .merge(snapshot_schedules::router())
+        .merge(incidents::router())
         .merge(auth::router())
 }

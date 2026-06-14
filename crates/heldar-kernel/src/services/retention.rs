@@ -1,5 +1,7 @@
 //! Retention sweeper: deletes recordings past each camera's age policy, and enforces a global
-//! size cap by pruning the oldest unlocked segments. Locked (evidence) segments are never deleted.
+//! size cap by pruning the oldest deletable segments. Segments under a durable evidence hold
+//! (`evidence_locked = 1`) are never deleted, and a segment with a transient export read-lock
+//! (`locked = 1`) is skipped while the export is in flight. Both are excluded from every prune.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,6 +29,20 @@ async fn unlink_segment(path: &str) -> bool {
     }
 }
 
+/// Delete a snapshot's file and report whether its DB row should now be removed. Mirrors
+/// [`unlink_segment`]: the row is removed only when the file is actually gone (deleted just now or
+/// already absent); on any other delete error we keep the row so the next sweep retries.
+async fn unlink_snapshot(path: &str) -> bool {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => true,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            tracing::error!(path, error = %e, "retention: failed to delete snapshot file; keeping DB row to retry next sweep");
+            false
+        }
+    }
+}
+
 pub async fn run(pool: SqlitePool, cfg: Arc<Config>) {
     let mut tick = tokio::time::interval(Duration::from_secs(cfg.retention_interval_s.max(30)));
     loop {
@@ -46,7 +62,7 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
     for (id, hours) in cams {
         let cutoff = Utc::now() - chrono::Duration::hours(hours.max(1));
         let rows: Vec<(String, String)> = sqlx::query_as(
-            "SELECT id, path FROM segments WHERE camera_id = ? AND locked = 0 AND end_time < ?",
+            "SELECT id, path FROM segments WHERE camera_id = ? AND locked = 0 AND evidence_locked = 0 AND end_time < ?",
         )
         .bind(&id)
         .bind(cutoff)
@@ -74,44 +90,138 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         tracing::info!(deleted = age_deleted, "retention: age-based cleanup");
     }
 
-    // 2) Global size cap: prune the oldest UNLOCKED segments until the deletable footprint fits the
-    //    budget. The budget is the cap minus the locked (evidence) bytes we cannot delete — counting
-    //    locked bytes in the comparison would otherwise make us delete every unlocked segment.
-    let max = cfg.max_recordings_bytes as i64;
-    let locked_bytes: i64 =
-        sqlx::query_scalar("SELECT COALESCE(SUM(size_bytes), 0) FROM segments WHERE locked = 1")
+    // 2) Per-camera storage quota. Mirrors the global size cap (step 3) but scoped to one camera:
+    //    keep each capped camera's deletable footprint within its quota by pruning its oldest
+    //    unlocked segments. Evidence-locked footage (`evidence_locked = 1`) is protected and counts
+    //    against the quota; if it alone meets or exceeds the quota, we warn and delete nothing rather
+    //    than wiping the camera's other footage. Only cameras with `storage_quota_bytes IS NOT NULL`
+    //    are capped here; the rest are governed solely by the global cap + disk floor below.
+    let mut quota_deleted: u64 = 0;
+    let quota_cams: Vec<(String, i64)> = sqlx::query_as(
+        "SELECT id, storage_quota_bytes FROM cameras WHERE storage_quota_bytes IS NOT NULL",
+    )
+    .fetch_all(pool)
+    .await?;
+    for (cam_id, quota) in quota_cams {
+        if quota <= 0 {
+            continue;
+        }
+        let protected_bytes: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(size_bytes), 0) FROM segments WHERE camera_id = ? AND evidence_locked = 1",
+        )
+        .bind(&cam_id)
+        .fetch_one(pool)
+        .await?;
+        let budget = quota - protected_bytes;
+        if budget <= 0 {
+            if protected_bytes > quota {
+                tracing::warn!(
+                    camera_id = %cam_id,
+                    protected_bytes,
+                    quota,
+                    "retention: evidence-locked footage exceeds the camera quota; not deleting other footage"
+                );
+                let _ = repo::log_event(
+                    pool,
+                    Some(&cam_id),
+                    "disk_pressure",
+                    "warning",
+                    json!({ "reason": "camera_quota", "camera_id": &cam_id, "protected_bytes": protected_bytes, "quota_bytes": quota }),
+                )
+                .await;
+            }
+            continue;
+        }
+        loop {
+            let deletable_total: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(SUM(size_bytes), 0) FROM segments WHERE camera_id = ? AND locked = 0 AND evidence_locked = 0",
+            )
+            .bind(&cam_id)
             .fetch_one(pool)
             .await?;
-    let budget = max - locked_bytes;
+            if deletable_total <= budget {
+                break;
+            }
+            let batch: Vec<(String, String)> = sqlx::query_as(
+                "SELECT id, path FROM segments WHERE camera_id = ? AND locked = 0 AND evidence_locked = 0 ORDER BY end_time ASC LIMIT 20",
+            )
+            .bind(&cam_id)
+            .fetch_all(pool)
+            .await?;
+            if batch.is_empty() {
+                break;
+            }
+            let mut progressed = 0u64;
+            for (seg_id, path) in batch {
+                if unlink_segment(&path).await {
+                    sqlx::query("DELETE FROM segments WHERE id = ?")
+                        .bind(&seg_id)
+                        .execute(pool)
+                        .await?;
+                    quota_deleted += 1;
+                    progressed += 1;
+                }
+            }
+            if progressed == 0 {
+                tracing::error!(camera_id = %cam_id, "retention: camera-quota prune made no progress (segment file deletes failing); stopping this camera");
+                break;
+            }
+        }
+    }
+    if quota_deleted > 0 {
+        let _ = repo::log_event(
+            pool,
+            None,
+            "disk_pressure",
+            "warning",
+            json!({ "deleted": quota_deleted, "reason": "camera_quota" }),
+        )
+        .await;
+        tracing::warn!(deleted = quota_deleted, "retention: per-camera quota cleanup");
+    }
+
+    // 3) Global size cap: prune the oldest DELETABLE segments until the deletable footprint fits the
+    //    budget. The budget is the cap minus the evidence-locked bytes we cannot delete — counting
+    //    those in the comparison would otherwise make us delete every deletable segment. We measure
+    //    the protected footprint by `evidence_locked = 1` (the DURABLE hold), not the transient
+    //    `locked` read-lock: an in-flight export must not inflate the protected total and starve the
+    //    cap. Deletable = `locked = 0 AND evidence_locked = 0` (skip both the read-lock and the hold).
+    let max = cfg.max_recordings_bytes as i64;
+    let protected_bytes: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(size_bytes), 0) FROM segments WHERE evidence_locked = 1",
+    )
+    .fetch_one(pool)
+    .await?;
+    let budget = max - protected_bytes;
     let mut size_deleted: u64 = 0;
 
     if budget <= 0 {
-        // Locked/evidence footage alone meets or exceeds the cap; deleting unlocked footage cannot
+        // Evidence-locked footage alone meets or exceeds the cap; deleting other footage cannot
         // help. Warn instead of wiping everything.
         let unlocked: i64 = sqlx::query_scalar(
-            "SELECT COALESCE(SUM(size_bytes), 0) FROM segments WHERE locked = 0",
+            "SELECT COALESCE(SUM(size_bytes), 0) FROM segments WHERE locked = 0 AND evidence_locked = 0",
         )
         .fetch_one(pool)
         .await?;
-        if locked_bytes > max {
+        if protected_bytes > max {
             tracing::warn!(
-                locked_bytes,
+                protected_bytes,
                 max,
-                "retention: locked (evidence) footage exceeds the size cap; not deleting unlocked footage"
+                "retention: evidence-locked footage exceeds the size cap; not deleting other footage"
             );
             let _ = repo::log_event(
                 pool,
                 None,
                 "disk_pressure",
                 "warning",
-                json!({ "reason": "locked_exceeds_cap", "locked_bytes": locked_bytes, "unlocked_bytes": unlocked, "max_bytes": max }),
+                json!({ "reason": "locked_exceeds_cap", "protected_bytes": protected_bytes, "unlocked_bytes": unlocked, "max_bytes": max }),
             )
             .await;
         }
     } else {
         loop {
             let unlocked_total: i64 = sqlx::query_scalar(
-                "SELECT COALESCE(SUM(size_bytes), 0) FROM segments WHERE locked = 0",
+                "SELECT COALESCE(SUM(size_bytes), 0) FROM segments WHERE locked = 0 AND evidence_locked = 0",
             )
             .fetch_one(pool)
             .await?;
@@ -119,7 +229,7 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
                 break;
             }
             let batch: Vec<(String, String)> = sqlx::query_as(
-                "SELECT id, path FROM segments WHERE locked = 0 ORDER BY end_time ASC LIMIT 20",
+                "SELECT id, path FROM segments WHERE locked = 0 AND evidence_locked = 0 ORDER BY end_time ASC LIMIT 20",
             )
             .fetch_all(pool)
             .await?;
@@ -157,7 +267,7 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         tracing::warn!(deleted = size_deleted, "retention: size-cap cleanup");
     }
 
-    // 3) Disk-free floor: if the recordings filesystem drops below the free-space floor, prune the
+    // 4) Disk-free floor: if the recordings filesystem drops below the free-space floor, prune the
     //    oldest unlocked segments until back above it. Self-limiting: it stops if a delete batch
     //    does not actually recover free space (disk filled by non-recording data), and refuses to
     //    run if the floor exceeds the whole disk — so it never destroys the footprint for nothing.
@@ -201,7 +311,7 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
                 guard += 1;
                 let before = prev.free_bytes;
                 let batch: Vec<(String, String)> = sqlx::query_as(
-                    "SELECT id, path FROM segments WHERE locked = 0 ORDER BY end_time ASC LIMIT 20",
+                    "SELECT id, path FROM segments WHERE locked = 0 AND evidence_locked = 0 ORDER BY end_time ASC LIMIT 20",
                 )
                 .fetch_all(pool)
                 .await?;
@@ -209,7 +319,7 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
                     tracing::warn!(
                         free_bytes = before,
                         floor,
-                        "retention: below disk-free floor but no unlocked segments remain to prune"
+                        "retention: below disk-free floor but no deletable segments remain to prune"
                     );
                     break;
                 }
@@ -260,7 +370,7 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         tracing::warn!(deleted = disk_deleted, "retention: disk-free-floor cleanup");
     }
 
-    // 4) Prune old AI detections (the table grows unbounded otherwise).
+    // 5) Prune old AI detections (the table grows unbounded otherwise).
     let det_cutoff = Utc::now() - chrono::Duration::hours(cfg.detection_retention_hours.max(1));
     let pruned = sqlx::query("DELETE FROM detections WHERE created_at < ?")
         .bind(det_cutoff)
@@ -280,7 +390,7 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         tracing::info!(deleted = ob_pruned, "retention: pruned old outbox rows");
     }
 
-    // 5) Prune old zone events and delete their evidence frames (same TTL as detections).
+    // 6) Prune old zone events and delete their evidence frames (same TTL as detections).
     let old_zone_events: Vec<(String, Option<String>)> =
         sqlx::query_as("SELECT id, evidence_path FROM zone_events WHERE created_at < ?")
             .bind(det_cutoff)
@@ -303,7 +413,7 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         );
     }
 
-    // 6) Prune kernel auth bookkeeping: stale audit log + expired sessions. (Domain entry events +
+    // 7) Prune kernel auth bookkeeping: stale audit log + expired sessions. (Domain entry events +
     //    their evidence frames are pruned by the entry app's own retention loop, not the kernel.)
     let audit_cutoff = Utc::now() - chrono::Duration::days(cfg.audit_retention_days.max(1));
     let apruned = sqlx::query("DELETE FROM audit_log WHERE created_at < ?")
@@ -323,7 +433,7 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         tracing::debug!(deleted = spruned, "retention: pruned expired sessions");
     }
 
-    // 7) Prune the generic event log (camera-status events, disk-pressure warnings, and the entry
+    // 8) Prune the generic event log (camera-status events, disk-pressure warnings, and the entry
     //    mirrors written by the ANPR engine). It is otherwise unbounded. The alert notifier advances
     //    a durable cursor over recent rows, so deleting rows older than the (long) entry TTL — which
     //    are far past delivery — is safe.
@@ -334,6 +444,31 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         .rows_affected();
     if evpruned > 0 {
         tracing::info!(deleted = evpruned, "retention: pruned old event-log rows");
+    }
+
+    // 9) Prune scheduled snapshots past their retention window. The cutoff is `taken_at` (capture
+    //    time, not the row's `created_at`). Delete the file first; only drop the DB row when the
+    //    file is gone (mirrors the segment unlink pattern). Skipped entirely when hours = 0.
+    if cfg.snapshot_retention_hours > 0 {
+        let snap_cutoff = Utc::now() - chrono::Duration::hours(cfg.snapshot_retention_hours);
+        let rows: Vec<(String, String)> =
+            sqlx::query_as("SELECT id, path FROM snapshots WHERE taken_at < ?")
+                .bind(snap_cutoff)
+                .fetch_all(pool)
+                .await?;
+        let mut snap_deleted: u64 = 0;
+        for (snap_id, path) in rows {
+            if unlink_snapshot(&path).await {
+                sqlx::query("DELETE FROM snapshots WHERE id = ?")
+                    .bind(&snap_id)
+                    .execute(pool)
+                    .await?;
+                snap_deleted += 1;
+            }
+        }
+        if snap_deleted > 0 {
+            tracing::info!(deleted = snap_deleted, "retention: pruned old snapshots");
+        }
     }
     Ok(())
 }

@@ -135,6 +135,13 @@ async fn main() -> anyhow::Result<()> {
         spawn_supervised("movement_breach", move || {
             heldar_movement::breach::run(p.clone(), m.clone())
         });
+        // Scheduled interval snapshots (kernel platform feature): supervise only when enabled.
+        if cfg.snapshot_scheduler_enabled {
+            let st = state.clone();
+            spawn_supervised("snapshot_scheduler", move || {
+                services::snapshot_scheduler::run(st.clone())
+            });
+        }
         // Only supervise the notifier when a webhook is configured — otherwise run() returns
         // immediately and the supervisor would respawn it in a tight loop.
         if cfg.alert_webhook_url.is_some() {

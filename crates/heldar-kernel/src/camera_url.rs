@@ -145,6 +145,8 @@ mod tests {
             record_enabled: true,
             segment_seconds: 60,
             retention_hours: 24,
+            storage_quota_bytes: None,
+            record_audio: false,
             enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),

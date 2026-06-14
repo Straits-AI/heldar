@@ -162,3 +162,24 @@ pub async fn set_segments_locked(pool: &SqlitePool, ids: &[String], locked: bool
         tracing::warn!(error = %e, locked, "failed to toggle segment read-lock");
     }
 }
+
+/// Set or clear the DURABLE evidence lock on a single segment (distinct from the transient `locked`
+/// read-lock). When `incident_id` is supplied it is recorded; `COALESCE` preserves any existing tag
+/// when `incident_id` is `None` (so unlocking — or locking without a tag — never erases the case
+/// the segment was already attached to). Returns the number of rows affected (0 ⇒ no such segment).
+pub async fn set_evidence_locked(
+    pool: &SqlitePool,
+    segment_id: &str,
+    locked: bool,
+    incident_id: Option<&str>,
+) -> sqlx::Result<u64> {
+    let res = sqlx::query(
+        "UPDATE segments SET evidence_locked = ?, incident_id = COALESCE(?, incident_id) WHERE id = ?",
+    )
+    .bind(i64::from(locked))
+    .bind(incident_id)
+    .bind(segment_id)
+    .execute(pool)
+    .await?;
+    Ok(res.rows_affected())
+}

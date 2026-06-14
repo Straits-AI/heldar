@@ -215,6 +215,13 @@ impl RecorderManager {
             let seg = cam.segment_seconds.max(2);
             let pattern = dir.join("%Y%m%d_%H%M%S.mp4");
             let masked = camera_url::mask_url(&url);
+            // Video is always stream-copied. Audio: pass it through (`-c:a copy`) when the camera
+            // opts in, otherwise drop it (`-an`, the default).
+            let audio_args: &[&str] = if cam.record_audio {
+                &["-c:a", "copy"]
+            } else {
+                &["-an"]
+            };
 
             let _ = repo::set_state(&self.pool, &camera_id, "connecting", None).await;
             tracing::info!(%camera_id, url = %masked, segment_s = seg, "recorder: starting ffmpeg");
@@ -226,7 +233,8 @@ impl RecorderManager {
                 .args(["-rtsp_transport", "tcp"])
                 .args(["-timeout", "15000000"]) // 15s RTSP socket I/O timeout -> exit on stall
                 .args(["-i", &url])
-                .args(["-c", "copy", "-an"]) // copy video; drop audio in Stage 0
+                .args(["-c", "copy"]) // stream-copy (no decode)
+                .args(audio_args) // audio: pass-through when record_audio, else dropped
                 .args(["-f", "segment"])
                 .args(["-segment_time", &seg.to_string()])
                 .args(["-segment_format", "mp4"])

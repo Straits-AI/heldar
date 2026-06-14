@@ -11,5 +11,6 @@ pub mod remote_access;
 pub mod retention;
 pub mod sampler;
 pub mod snapshot;
+pub mod snapshot_scheduler;
 pub mod storage;
 pub mod zones;

@@ -22,6 +22,12 @@ pub struct Config {
     pub recorder_enabled: bool,
     pub default_segment_seconds: i64,
     pub default_retention_hours: i64,
+    /// Default per-camera storage quota (bytes) applied when a camera is created without an explicit
+    /// `storage_quota_bytes`. 0 means no default quota (the camera's quota is stored as NULL).
+    pub default_camera_quota_bytes: u64,
+    /// Default audio-recording toggle applied when a camera is created without an explicit
+    /// `record_audio`. When false (default) the recorder drops audio (video only).
+    pub default_record_audio: bool,
     pub indexer_interval_s: u64,
     pub health_interval_s: u64,
     pub retention_interval_s: u64,
@@ -46,6 +52,13 @@ pub struct Config {
     pub default_ai_width: i64,
     /// How long detection rows are kept before the retention sweeper prunes them.
     pub detection_retention_hours: i64,
+    // ---- Scheduled interval snapshots ----
+    /// Master switch for the background snapshot scheduler (interval live-frame captures).
+    pub snapshot_scheduler_enabled: bool,
+    /// How often the scheduler ticks to look for due schedules (seconds).
+    pub snapshot_scheduler_interval_s: u64,
+    /// How long captured snapshots are kept before the retention sweeper prunes them. 0 = no pruning.
+    pub snapshot_retention_hours: i64,
     // ---- Auth / RBAC (kernel platform feature) ----
     /// Master switch for authentication + RBAC. When false, the API is open (dev/single-tenant
     /// LAN appliance default) and a synthetic admin principal is used. When true, the auth/admin
@@ -116,6 +129,7 @@ impl Config {
 
         let max_recordings_gb: f64 = parse_or("HELDAR_MAX_RECORDINGS_GB", 20.0);
         let min_free_disk_gb: f64 = parse_or("HELDAR_MIN_FREE_DISK_GB", 5.0);
+        let default_camera_quota_gb: f64 = parse_or("HELDAR_DEFAULT_CAMERA_QUOTA_GB", 0.0);
 
         Config {
             database_url: var_or("HELDAR_DATABASE_URL", "sqlite://./data/heldar.db"),
@@ -134,6 +148,8 @@ impl Config {
             recorder_enabled: parse_bool("HELDAR_RECORDER_ENABLED", true),
             default_segment_seconds: parse_or("HELDAR_DEFAULT_SEGMENT_SECONDS", 60),
             default_retention_hours: parse_or("HELDAR_DEFAULT_RETENTION_HOURS", 24),
+            default_camera_quota_bytes: (default_camera_quota_gb * 1024.0 * 1024.0 * 1024.0) as u64,
+            default_record_audio: parse_bool("HELDAR_DEFAULT_RECORD_AUDIO", false),
             indexer_interval_s: parse_or("HELDAR_INDEXER_INTERVAL_S", 10),
             health_interval_s: parse_or("HELDAR_HEALTH_INTERVAL_S", 15),
             retention_interval_s: parse_or("HELDAR_RETENTION_INTERVAL_S", 300),
@@ -149,6 +165,9 @@ impl Config {
             default_ai_fps: parse_or("HELDAR_DEFAULT_AI_FPS", 5.0),
             default_ai_width: parse_or("HELDAR_DEFAULT_AI_WIDTH", 1280),
             detection_retention_hours: parse_or("HELDAR_DETECTION_RETENTION_HOURS", 168),
+            snapshot_scheduler_enabled: parse_bool("HELDAR_SNAPSHOT_SCHEDULER_ENABLED", true),
+            snapshot_scheduler_interval_s: parse_or("HELDAR_SNAPSHOT_SCHEDULER_INTERVAL_S", 60),
+            snapshot_retention_hours: parse_or("HELDAR_SNAPSHOT_RETENTION_HOURS", 168),
             auth_enabled: parse_bool("HELDAR_AUTH_ENABLED", false),
             session_ttl_hours: parse_or("HELDAR_SESSION_TTL_HOURS", 12),
             auth_cookie_secure: parse_bool("HELDAR_AUTH_COOKIE_SECURE", false),

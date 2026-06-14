@@ -30,6 +30,10 @@ pub struct Camera {
     pub record_enabled: bool,
     pub segment_seconds: i64,
     pub retention_hours: i64,
+    /// Per-camera storage quota in bytes; NULL means no per-camera cap.
+    pub storage_quota_bytes: Option<i64>,
+    /// Record the camera's audio stream (pass-through) instead of dropping it.
+    pub record_audio: bool,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -66,6 +70,8 @@ pub struct CameraView {
     pub record_enabled: bool,
     pub segment_seconds: i64,
     pub retention_hours: i64,
+    pub storage_quota_bytes: Option<i64>,
+    pub record_audio: bool,
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -99,6 +105,8 @@ impl From<Camera> for CameraView {
             record_enabled: c.record_enabled,
             segment_seconds: c.segment_seconds,
             retention_hours: c.retention_hours,
+            storage_quota_bytes: c.storage_quota_bytes,
+            record_audio: c.record_audio,
             enabled: c.enabled,
             created_at: c.created_at,
             updated_at: c.updated_at,
@@ -126,6 +134,8 @@ pub struct CameraCreate {
     pub record_enabled: Option<bool>,
     pub segment_seconds: Option<i64>,
     pub retention_hours: Option<i64>,
+    pub storage_quota_bytes: Option<i64>,
+    pub record_audio: Option<bool>,
     pub enabled: Option<bool>,
 }
 
@@ -151,6 +161,8 @@ pub struct CameraUpdate {
     pub record_enabled: Option<bool>,
     pub segment_seconds: Option<i64>,
     pub retention_hours: Option<i64>,
+    pub storage_quota_bytes: Option<i64>,
+    pub record_audio: Option<bool>,
     pub enabled: Option<bool>,
 }
 
@@ -167,7 +179,11 @@ pub struct Segment {
     pub height: Option<i64>,
     pub size_bytes: i64,
     pub container: String,
+    /// Transient read-lock held by clip/snapshot export; cleared at startup. Not durable.
     pub locked: bool,
+    /// Durable evidence hold: when true the segment is never pruned by retention. Set via the
+    /// incident API; survives restarts (unlike `locked`).
+    pub evidence_locked: bool,
     pub incident_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
@@ -451,4 +467,42 @@ impl From<ApiKey> for ApiKeyView {
 pub struct ApiKeyCreate {
     pub name: String,
     pub role: Option<String>,
+}
+
+// ---- Scheduled interval snapshots ----
+
+/// A per-camera schedule that captures a live JPEG every `interval_seconds`.
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct SnapshotSchedule {
+    pub id: String,
+    pub camera_id: String,
+    pub interval_seconds: i64,
+    pub enabled: bool,
+    pub last_fired_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SnapshotScheduleCreate {
+    pub interval_seconds: Option<i64>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct SnapshotScheduleUpdate {
+    pub interval_seconds: Option<i64>,
+    pub enabled: Option<bool>,
+}
+
+/// A captured snapshot frame on disk (one file under snapshots_dir/{camera_id}/).
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct PersistedSnapshot {
+    pub id: String,
+    pub camera_id: String,
+    pub schedule_id: Option<String>,
+    pub path: String,
+    pub taken_at: DateTime<Utc>,
+    pub size_bytes: i64,
+    pub created_at: DateTime<Utc>,
 }

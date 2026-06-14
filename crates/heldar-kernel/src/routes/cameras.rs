@@ -105,13 +105,23 @@ async fn create_camera(
         .retention_hours
         .unwrap_or(st.cfg.default_retention_hours)
         .max(1);
+    // Fall back to the configured default quota when omitted; a default of 0 means "no quota" and is
+    // stored as NULL (no per-camera cap).
+    let storage_quota_bytes = body.storage_quota_bytes.or_else(|| {
+        match st.cfg.default_camera_quota_bytes {
+            0 => None,
+            q => Some(q as i64),
+        }
+    });
+    let record_audio = body.record_audio.unwrap_or(st.cfg.default_record_audio);
 
     sqlx::query(
         "INSERT INTO cameras
            (id, site_id, name, vendor, model, address, rtsp_port, username, password,
             main_stream_url, sub_stream_url, record_stream, capabilities, record_enabled,
-            segment_seconds, retention_hours, enabled, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            segment_seconds, retention_hours, storage_quota_bytes, record_audio, enabled,
+            created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
     )
     .bind(&id)
     .bind(&body.site_id)
@@ -129,6 +139,8 @@ async fn create_camera(
     .bind(record_enabled)
     .bind(seg)
     .bind(retention)
+    .bind(storage_quota_bytes)
+    .bind(record_audio)
     .bind(enabled)
     .bind(now)
     .bind(now)
@@ -201,12 +213,15 @@ async fn update_camera(
         .retention_hours
         .map(|v| v.max(1))
         .unwrap_or(cur.retention_hours);
+    let storage_quota_bytes = body.storage_quota_bytes.or(cur.storage_quota_bytes);
+    let record_audio = body.record_audio.unwrap_or(cur.record_audio);
 
     sqlx::query(
         "UPDATE cameras SET
             name=?, site_id=?, vendor=?, model=?, address=?, rtsp_port=?, username=?, password=?,
             main_stream_url=?, sub_stream_url=?, record_stream=?, capabilities=?, record_enabled=?,
-            segment_seconds=?, retention_hours=?, enabled=?, updated_at=?
+            segment_seconds=?, retention_hours=?, storage_quota_bytes=?, record_audio=?, enabled=?,
+            updated_at=?
          WHERE id=?",
     )
     .bind(&name)
@@ -224,6 +239,8 @@ async fn update_camera(
     .bind(record_enabled)
     .bind(seg)
     .bind(retention)
+    .bind(storage_quota_bytes)
+    .bind(record_audio)
     .bind(enabled)
     .bind(Utc::now())
     .bind(&id)

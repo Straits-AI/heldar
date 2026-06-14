@@ -24,12 +24,22 @@ struct RangeQuery {
     limit: Option<i64>,
 }
 
+/// A segment row plus its browser-playable media URL. Flattens the full [`Segment`] (so new model
+/// fields like `evidence_locked` flow through automatically). Reused by the incidents API.
 #[derive(Debug, Serialize)]
-struct SegmentView {
+pub struct SegmentView {
     #[serde(flatten)]
     seg: Segment,
     /// Browser-playable URL for the segment file.
     url: String,
+}
+
+impl SegmentView {
+    /// Build a view from a segment row, deriving its media URL from the stored path.
+    pub fn new(seg: Segment) -> Self {
+        let url = segment_url(&seg.camera_id, &seg.path);
+        SegmentView { seg, url }
+    }
 }
 
 fn segment_url(camera_id: &str, path: &str) -> String {
@@ -100,13 +110,7 @@ async fn list_segments(
         .await?
     };
 
-    let views = segments
-        .into_iter()
-        .map(|s| {
-            let url = segment_url(&id, &s.path);
-            SegmentView { seg: s, url }
-        })
-        .collect();
+    let views = segments.into_iter().map(SegmentView::new).collect();
     Ok(Json(views))
 }
 
