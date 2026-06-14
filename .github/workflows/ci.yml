@@ -19,7 +19,7 @@ jobs:
     name: rust (fmt · clippy · build · test)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -37,7 +37,7 @@ jobs:
     name: web (build)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
