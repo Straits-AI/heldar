@@ -16,7 +16,7 @@ path = "src/lib.rs"
 [dependencies]
 heldar-kernel = { path = "../heldar-kernel", version = "0.1.0" }
 axum = { version = "0.8", features = ["macros"] }
-sqlx = { version = "0.8", default-features = false, features = [
+sqlx = { version = "0.9", default-features = false, features = [
     "runtime-tokio",
     "sqlite",
     "chrono",

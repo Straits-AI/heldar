@@ -17,7 +17,7 @@ heldar-entry = { path = "../heldar-entry", version = "0.1.0" }
 heldar-movement = { path = "../heldar-movement", version = "0.1.0" }
 heldar-search = { path = "../heldar-search", version = "0.1.0" }
 tokio = { version = "1", features = ["full"] }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite"] }
 axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 chrono = { version = "0.4", features = ["serde"] }
