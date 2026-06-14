@@ -1,0 +1,55 @@
+# Heldar Core — dev/single-node stack.
+# Host networking keeps things simple on Linux: the control plane's default MediaMTX URLs
+# (127.0.0.1:9997/8888/8554/8889) work as-is, and cameras on the LAN are directly reachable.
+name: heldar
+
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./infra/mediamtx/mediamtx.yml:/mediamtx.yml:ro
+
+  core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      HELDAR_DATA_DIR: /data
+      HELDAR_DATABASE_URL: sqlite:///data/heldar.db
+      HELDAR_API_HOST: 0.0.0.0
+      HELDAR_API_PORT: "8000"
+      # MediaMTX runs on the host network at these addresses:
+      HELDAR_MEDIAMTX_API_URL: http://127.0.0.1:9997
+      HELDAR_MEDIAMTX_HLS_BASE: http://127.0.0.1:8888
+      HELDAR_MEDIAMTX_RTSP_BASE: rtsp://127.0.0.1:8554
+      HELDAR_MEDIAMTX_WEBRTC_BASE: http://127.0.0.1:8889
+    volumes:
+      # Named volume (not a host bind mount) so the non-root container user (uid 10001) owns /data;
+      # a bind mount would be owned by the host user and break writes under the non-root image.
+      - heldar-data:/data
+    healthcheck:
+      # /readyz returns 503 until the DB is reachable, so dependents wait for a truly-ready core.
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      mediamtx:
+        condition: service_started
+
+  web:
+    build:
+      context: ./apps/web
+    restart: unless-stopped
+    network_mode: host   # nginx listens on :8080 and proxies /api,/media,/healthz to 127.0.0.1:8000
+    depends_on:
+      core:
+        condition: service_healthy
+
+volumes:
+  heldar-data:

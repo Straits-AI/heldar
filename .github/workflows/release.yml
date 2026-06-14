@@ -1,0 +1,81 @@
+name: Release
+
+# Two CLI-friendly triggers:
+#   * push a version tag      ->  real publish + GitHub Release   (git tag v0.2.0 && git push origin v0.2.0)
+#   * manual dispatch          ->  defaults to a safe dry-run     (gh workflow run release.yml [-f dry_run=false])
+# Auth is crates.io Trusted Publishing (OIDC) — NO long-lived token stored anywhere.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Package + verify only (no publish)"
+        type: boolean
+        default: true
+
+permissions:
+  contents: write   # create the GitHub Release / read tags
+  id-token: write   # required for crates.io Trusted Publishing (OIDC)
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: publish to crates.io
+    # Only the canonical public repo publishes — a no-op in the private monorepo or any fork.
+    if: github.repository == 'Straits-AI/heldar'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # ---- dry-run path (manual dispatch with dry_run=true): package + verify, never upload ----
+      - name: Dry run (package + verify, no publish)
+        if: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          for c in heldar-kernel heldar-entry heldar-movement heldar-search; do
+            echo "::group::dry-run $c"
+            cargo publish -p "$c" --locked --dry-run
+            echo "::endgroup::"
+          done
+
+      # ---- publish path (tag push, or dispatch with dry_run=false) ----
+      - name: Mint short-lived crates.io token (OIDC)
+        if: ${{ !inputs.dry_run }}
+        id: auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Publish (dependency order, idempotent)
+        if: ${{ !inputs.dry_run }}
+        env:
+          TOKEN: ${{ steps.auth.outputs.token }}
+        run: |
+          set -euo pipefail
+          publish_one() {
+            local crate="$1" ver
+            ver=$(cargo metadata --no-deps --format-version 1 \
+                  | jq -r --arg c "$crate" '.packages[] | select(.name==$c) | .version')
+            if curl -fsS -A heldar-ci "https://crates.io/api/v1/crates/${crate}/${ver}" >/dev/null 2>&1; then
+              echo "::notice::${crate}@${ver} already on crates.io — skipping"
+            else
+              echo "::group::publish ${crate}@${ver}"
+              cargo publish -p "$crate" --locked --token "$TOKEN"
+              echo "::endgroup::"
+            fi
+          }
+          # kernel first (the generic apps depend on it); `cargo publish` waits for the
+          # index between crates, so the dependents resolve the just-published kernel.
+          for c in heldar-kernel heldar-entry heldar-movement heldar-search; do
+            publish_one "$c"
+          done
+
+      - name: GitHub Release
+        if: ${{ !inputs.dry_run && startsWith(github.ref, 'refs/tags/v') }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes
