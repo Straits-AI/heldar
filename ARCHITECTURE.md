@@ -1,7 +1,7 @@
-# VisionOps Core — Stage 0 Media Kernel Architecture
+# Heldar Core — Stage 0 Media Kernel Architecture
 
-This document describes the Stage 0 "media kernel" of VisionOps Core **as actually
-built** in `crates/visionops-kernel` (Rust / Axum / Tokio / SQLx), not as aspirationally planned.
+This document describes the Stage 0 "media kernel" of Heldar Core **as actually
+built** in `crates/heldar-kernel` (Rust / Axum / Tokio / SQLx), not as aspirationally planned.
 It is the base VMS/NVR control plane: camera registry, RTSP ingest, segment
 recording, timeline index, playback / clip / snapshot, brokered live view, and
 camera health. The detection/tracking **models** are a later stage (Stage 3) and
@@ -34,7 +34,7 @@ it (memo §15.3/§15.4).
 
 **Stage 4 (Campus Entry app) has also shipped** — the first vertical on the kernel.
 It adds an **RBAC layer** (users / sessions / API keys, five roles, a `Principal`
-extractor gated by `VISIONOPS_AUTH_ENABLED`), an entry **registry** (registered
+extractor gated by `HELDAR_AUTH_ENABLED`), an entry **registry** (registered
 vehicles, visitor passes, watchlist), and an **ANPR temporal-voting engine**
 (`services/anpr.rs`) that consolidates per-frame plate reads from an `anpr` worker
 task into one canonical entry/exit event (memo §8.1), resolves it against the
@@ -46,7 +46,7 @@ needs the same local benchmark (memo §15.3/§15.4) before any hard access decis
 
 **Stage 5 (BakerySense app) has also shipped** — a second vertical, **same kernel,
 different ontology**. It is a retail behaviour-analytics app
-(`crates/visionops-bakery`) that is **anonymous by construction**: it reads only the
+(`crates/heldar-bakery`) that is **anonymous by construction**: it reads only the
 kernel's anonymous perception data (zone `enter`/`exit`/`dwell` events + person
 detections keyed by ephemeral ByteTrack ids) and rolls them into hourly behaviour
 metrics — footfall, queue/browse dwell, occupancy, display engagement, and an
@@ -61,7 +61,7 @@ documented in §18 below and, for operators/integrators, in
 
 **Stage 6 (Movement intelligence app) has also shipped** — cross-camera correlation on
 the **same kernel data**, under strict privacy gates. It is the client's "Movement
-intelligence" (Phase 2) app (`crates/visionops-movement`): **multi-signal ReID, never a
+intelligence" (Phase 2) app (`crates/heldar-movement`): **multi-signal ReID, never a
 pure visual embedding.** Vehicle ReID is anchored on the **plate** (already resolved by
 Campus Entry into `entry_events`), fused with transit-time plausibility + colour/type
 agreement over an operator-defined **camera-topology graph**; person ReID has no plate and
@@ -88,7 +88,7 @@ wrapped in a **proof layer** (the research.md §12–13 claim ladder), with the 
 surfaced as the *single* fallible inference. Like BakerySense/Movement it is **not** a
 `DetectionConsumer` — and unlike them it is not even a background loop: it is a **read-only
 query layer over kernel facts** (three HTTP routes + one small query log), composed (not
-welded) with its own schema/config/routes. New code lives in `crates/visionops-search`. It
+welded) with its own schema/config/routes. New code lives in `crates/heldar-search`. It
 is documented in §20 below and, for operators/integrators, in
 [`docs/SEARCH.md`](docs/SEARCH.md). Open-vocabulary VLM enrichment + event/clip embeddings +
 vector retrieval (search-by-image) remain a documented future seam — they need an
@@ -166,7 +166,7 @@ sampler) is deliberately out of scope for Stage 0.
 
 ### Process boot order (`main.rs`)
 
-1. Load `.env` (dotenvy), init tracing (`VISIONOPS_LOG`, default `info,visionops_core=debug`).
+1. Load `.env` (dotenvy), init tracing (`HELDAR_LOG`, default `info,heldar_core=debug`).
 2. Build `Config::from_env`; `create_dir_all` for data/recordings/clips/snapshots dirs.
 3. Open SQLite pool (`db::init_pool`), run embedded migrations (`db::run_migrations`).
 4. Construct `RecorderManager` and shared `reqwest::Client` (10s timeout).
@@ -178,7 +178,7 @@ sampler) is deliberately out of scope for Stage 0.
 8. Bind `api_host:api_port` (default `0.0.0.0:8000`) and serve with graceful shutdown
    on SIGINT/SIGTERM, which calls `recorder.shutdown()` to stop every FFmpeg child.
 
-CORS allows all origins when `VISIONOPS_CORS_ORIGINS` is empty or contains `*`,
+CORS allows all origins when `HELDAR_CORS_ORIGINS` is empty or contains `*`,
 otherwise restricts to the configured list (default `http://localhost:5173`).
 
 ---
@@ -349,7 +349,7 @@ Key properties:
 
 ### Lifecycle management
 - `start_all()` queries `WHERE enabled=1 AND record_enabled=1` and spawns each; it is
-  a no-op (with a warning) when `VISIONOPS_RECORDER_ENABLED=false`.
+  a no-op (with a warning) when `HELDAR_RECORDER_ENABLED=false`.
 - `reconcile(id)` is called by the camera CRUD handlers after create/update: it
   stops any existing task, reloads the row, and (re)spawns only if `should_record()`,
   else marks `disabled`. This keeps recorders consistent with registry edits.
@@ -360,7 +360,7 @@ Key properties:
 
 ## 4. Timeline indexer (`services/indexer.rs`)
 
-A periodic loop (`VISIONOPS_INDEXER_INTERVAL_S`, default 10s, min 2s) that turns
+A periodic loop (`HELDAR_INDEXER_INTERVAL_S`, default 10s, min 2s) that turns
 closed segment files into `segments` rows. For each camera's recordings dir:
 
 1. **List** `*.mp4` files, sort by name (≈ chronological, thanks to UTC strftime).
@@ -390,7 +390,7 @@ the recorder never blocks on probing and the DB only ever references complete fi
 
 ## 5. Health monitor (`services/health.rs`)
 
-A loop (`VISIONOPS_HEALTH_INTERVAL_S`, default 15s, min 5s) catching the
+A loop (`HELDAR_HEALTH_INTERVAL_S`, default 15s, min 5s) catching the
 **stalled-but-connected** failure mode that the recorder's process-exit logic cannot
 see — FFmpeg is alive and `state='recording'` but no new segments are landing.
 
@@ -412,7 +412,7 @@ and is indexed.
 
 ## 6. Retention sweeper (`services/retention.rs`)
 
-A loop (`VISIONOPS_RETENTION_INTERVAL_S`, default 300s, min 30s) enforcing two
+A loop (`HELDAR_RETENTION_INTERVAL_S`, default 300s, min 30s) enforcing two
 policies, in order. **Locked (evidence) segments are never deleted by either.**
 
 1. **Age policy, per camera** — for each camera, delete segments with
@@ -420,7 +420,7 @@ policies, in order. **Locked (evidence) segments are never deleted by either.**
    (`remove_file`) then the row. A summary `retention_delete` info event is logged if
    anything was removed.
 2. **Global size cap** — read `SUM(size_bytes)` across all segments; while it exceeds
-   `VISIONOPS_MAX_RECORDINGS_GB` (default 20 GB, stored as `max_recordings_bytes`),
+   `HELDAR_MAX_RECORDINGS_GB` (default 20 GB, stored as `max_recordings_bytes`),
    delete the oldest unlocked segments in batches of 20 (`ORDER BY end_time ASC`),
    re-checking the total each iteration. If the only remaining segments are locked,
    the loop breaks (the cap can be exceeded by locked evidence — by design). A
@@ -576,25 +576,25 @@ not leaked).
 
 ## 11. Configuration (`config.rs`)
 
-All via `VISIONOPS_*` env vars (see `.env.example`). Notable defaults:
+All via `HELDAR_*` env vars (see `.env.example`). Notable defaults:
 
 | Var | Default | Meaning |
 |---|---|---|
-| `VISIONOPS_DATABASE_URL` | `sqlite://./data/visionops.db` | SQLite only in Stage 0 |
-| `VISIONOPS_DATA_DIR` / `RECORDINGS_DIR` / `CLIPS_DIR` / `SNAPSHOTS_DIR` | `./data` + subdirs | media roots |
-| `VISIONOPS_FFMPEG_BIN` / `FFPROBE_BIN` | `ffmpeg` / `ffprobe` | external binaries |
-| `VISIONOPS_MEDIAMTX_API_URL` | `http://127.0.0.1:9997` | gateway control API |
-| `VISIONOPS_MEDIAMTX_HLS_BASE` / `RTSP_BASE` / `WEBRTC_BASE` | `:8888` / `rtsp://...:8554` / `:8889` | viewer URLs |
-| `VISIONOPS_RECORDER_ENABLED` | `true` | master recorder switch |
-| `VISIONOPS_DEFAULT_SEGMENT_SECONDS` | `60` | segment length |
-| `VISIONOPS_DEFAULT_RETENTION_HOURS` | `24` | age policy |
-| `VISIONOPS_INDEXER_INTERVAL_S` / `HEALTH_INTERVAL_S` / `RETENTION_INTERVAL_S` | `10` / `15` / `300` | loop cadences |
-| `VISIONOPS_MAX_RECORDINGS_GB` | `20` | global size cap (soft footprint budget) |
-| `VISIONOPS_MIN_FREE_DISK_GB` | `5` | disk-free floor (hard host-protection floor) |
-| `VISIONOPS_ALERT_WEBHOOK_URL` | *(unset)* | alert webhook; unset disables the notifier |
-| `VISIONOPS_NOTIFIER_INTERVAL_S` | `15` (min 5) | notifier poll cadence |
-| `VISIONOPS_API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | bind address |
-| `VISIONOPS_CORS_ORIGINS` | `http://localhost:5173` | `*`/empty = allow all |
+| `HELDAR_DATABASE_URL` | `sqlite://./data/heldar.db` | SQLite only in Stage 0 |
+| `HELDAR_DATA_DIR` / `RECORDINGS_DIR` / `CLIPS_DIR` / `SNAPSHOTS_DIR` | `./data` + subdirs | media roots |
+| `HELDAR_FFMPEG_BIN` / `FFPROBE_BIN` | `ffmpeg` / `ffprobe` | external binaries |
+| `HELDAR_MEDIAMTX_API_URL` | `http://127.0.0.1:9997` | gateway control API |
+| `HELDAR_MEDIAMTX_HLS_BASE` / `RTSP_BASE` / `WEBRTC_BASE` | `:8888` / `rtsp://...:8554` / `:8889` | viewer URLs |
+| `HELDAR_RECORDER_ENABLED` | `true` | master recorder switch |
+| `HELDAR_DEFAULT_SEGMENT_SECONDS` | `60` | segment length |
+| `HELDAR_DEFAULT_RETENTION_HOURS` | `24` | age policy |
+| `HELDAR_INDEXER_INTERVAL_S` / `HEALTH_INTERVAL_S` / `RETENTION_INTERVAL_S` | `10` / `15` / `300` | loop cadences |
+| `HELDAR_MAX_RECORDINGS_GB` | `20` | global size cap (soft footprint budget) |
+| `HELDAR_MIN_FREE_DISK_GB` | `5` | disk-free floor (hard host-protection floor) |
+| `HELDAR_ALERT_WEBHOOK_URL` | *(unset)* | alert webhook; unset disables the notifier |
+| `HELDAR_NOTIFIER_INTERVAL_S` | `15` (min 5) | notifier poll cadence |
+| `HELDAR_API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | bind address |
+| `HELDAR_CORS_ORIGINS` | `http://localhost:5173` | `*`/empty = allow all |
 
 > Stage 1 observability/reliability config is documented end-to-end in
 > [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
@@ -661,7 +661,7 @@ section documents the implementation.
 
 ### 14.1 Storage monitoring (`services/storage.rs`)
 
-`disk_stats(path)` calls **`statvfs(3)`** via `libc` on `VISIONOPS_RECORDINGS_DIR`
+`disk_stats(path)` calls **`statvfs(3)`** via `libc` on `HELDAR_RECORDINGS_DIR`
 and reports `total/free/used_bytes` + `used_percent`. Free space is `f_bavail`
 (blocks available to a non-privileged user — the space we can actually write), not
 `f_bfree`. It returns `None` (serialized as `null`) if the syscall fails.
@@ -685,12 +685,12 @@ recycles old segments), not a retention horizon.
 
 `GET /metrics` renders Prometheus text exposition
 (`text/plain; version=0.0.4`) directly from SQL each scrape (no in-process
-registry). System gauges: `visionops_build_info`, `visionops_cameras_total`,
-`visionops_cameras_recording`, `visionops_segments_total`,
-`visionops_recordings_bytes`, and (when statvfs succeeds)
-`visionops_disk_total_bytes` / `visionops_disk_free_bytes` /
-`visionops_disk_used_percent`. Per-camera series (labeled `camera`):
-`visionops_camera_up` (1 if `state='recording'`), `..._reconnects_total`,
+registry). System gauges: `heldar_build_info`, `heldar_cameras_total`,
+`heldar_cameras_recording`, `heldar_segments_total`,
+`heldar_recordings_bytes`, and (when statvfs succeeds)
+`heldar_disk_total_bytes` / `heldar_disk_free_bytes` /
+`heldar_disk_used_percent`. Per-camera series (labeled `camera`):
+`heldar_camera_up` (1 if `state='recording'`), `..._reconnects_total`,
 `..._segments_written`, `..._bitrate_kbps`, `..._last_segment_age_seconds`. The
 full table (types/labels/conditions) is in `docs/OBSERVABILITY.md` §2. Note there is
 **no fps metric** on `/metrics`; observed fps is health-API-only (§14.6).
@@ -698,11 +698,11 @@ full table (types/labels/conditions) is in `docs/OBSERVABILITY.md` §2. Note the
 ### 14.3 Alert notifier (`services/notifier.rs`)
 
 A supervised loop that **POSTs warning/critical events to a webhook** when
-`VISIONOPS_ALERT_WEBHOOK_URL` is set (no-op otherwise). Key properties:
+`HELDAR_ALERT_WEBHOOK_URL` is set (no-op otherwise). Key properties:
 
 - **Starts from now:** the delivery cursor is `Utc::now()` at boot, so history is
   never replayed on restart.
-- Polls every `VISIONOPS_NOTIFIER_INTERVAL_S` (default 15, min 5); each cycle pulls
+- Polls every `HELDAR_NOTIFIER_INTERVAL_S` (default 15, min 5); each cycle pulls
   up to 100 events with `severity IN ('warning','critical') AND created_at > cursor`
   oldest-first and POSTs one JSON body per event
   (`{source, event_id, event_type, severity, camera_id, timestamp, payload}`).
@@ -720,10 +720,10 @@ The sweeper gained a third phase on top of Stage 0's age policy + size cap:
 
 1. **Age** — delete unlocked segments older than each camera's `retention_hours`
    (`retention_delete`/info).
-2. **Size cap** (`VISIONOPS_MAX_RECORDINGS_GB`, soft) — prune oldest *unlocked*
+2. **Size cap** (`HELDAR_MAX_RECORDINGS_GB`, soft) — prune oldest *unlocked*
    segments until the unlocked footprint fits `budget = cap − locked_bytes`
    (`disk_pressure`/warning).
-3. **Disk-free floor** (`VISIONOPS_MIN_FREE_DISK_GB`, hard) — **new in Stage 1**:
+3. **Disk-free floor** (`HELDAR_MIN_FREE_DISK_GB`, hard) — **new in Stage 1**:
    while `statvfs` free space is below the floor, prune oldest unlocked segments
    (batches of 20, capped at 200 iterations/sweep) until back above it
    (`disk_pressure`/critical).
@@ -843,7 +843,7 @@ parallel `info` map of `SamplerInfo {camera_id, state, fps}`, and a
 
 ### 15.2 Frame storage
 
-`VISIONOPS_FRAMES_DIR` (default `<DATA_DIR>/frames`, via
+`HELDAR_FRAMES_DIR` (default `<DATA_DIR>/frames`, via
 `Config::camera_frames_dir`) holds **one `latest.jpg` per camera** in
 `frames/<camera_id>/`. `-update 1` overwrites that single file in place — there is
 no growing frame directory and no per-frame id; it is the always-current frame
@@ -860,7 +860,7 @@ degrades per-camera fps instead of overloading the host (memo §5 backpressure):
 
 ```
 active         = # enabled cameras with ≥1 enabled AI task
-budget         = VISIONOPS_AI_MAX_TOTAL_FPS  (default 40, floored at 1.0)
+budget         = HELDAR_AI_MAX_TOTAL_FPS  (default 40, floored at 1.0)
 per_camera_cap = budget / active
 effective_fps  = max( min(MAX(task.fps), per_camera_cap), 0.5 )
 ```
@@ -922,9 +922,9 @@ with no extra wiring.
 `sampler.start_all().await` after the recorders start; `shutdown_signal` calls
 `sampler.shutdown()` alongside the recorders. The sampler's internal per-camera
 tasks provide their own crash/backoff supervision (it is not wrapped in
-`spawn_supervised`). Config (`config.rs`): `VISIONOPS_AI_ENABLED` (default `true`;
-`false` runs no samplers), `VISIONOPS_AI_MAX_TOTAL_FPS` (40), `VISIONOPS_DEFAULT_AI_FPS`
-(5), `VISIONOPS_DEFAULT_AI_WIDTH` (1280), `VISIONOPS_FRAMES_DIR`
+`spawn_supervised`). Config (`config.rs`): `HELDAR_AI_ENABLED` (default `true`;
+`false` runs no samplers), `HELDAR_AI_MAX_TOTAL_FPS` (40), `HELDAR_DEFAULT_AI_FPS`
+(5), `HELDAR_DEFAULT_AI_WIDTH` (1280), `HELDAR_FRAMES_DIR`
 (`<DATA_DIR>/frames`).
 
 ### 15.8 Isolation (the Stage 2 success criterion)
@@ -954,7 +954,7 @@ and BakerySense apps. It has two halves that meet at the Stage 2 `POST
    confidence, normalized `bbox`, `track_id`) through the unchanged ingest endpoint.
    This is documented for integrators in [`docs/AI-WORKERS.md`](docs/AI-WORKERS.md)
    §11; the kernel does not know or care which model produced the boxes.
-2. **In the kernel (`crates/visionops-kernel`)** — a **zone engine** (`services/zones.rs`)
+2. **In the kernel (`crates/heldar-kernel`)** — a **zone engine** (`services/zones.rs`)
    evaluates each tracked detection against the camera's polygon **zones** and
    raises **`enter` / `exit` / `dwell`** zone events (with an evidence frame). Zone
    CRUD + a zone-events query live in `routes/zones.rs`; the schema is
@@ -967,7 +967,7 @@ has **no background loop** — it is driven synchronously from the detection-ing
 path.
 
 ```
-   AI worker (apps/ai)                 media kernel (crates/visionops-kernel)
+   AI worker (apps/ai)                 media kernel (crates/heldar-kernel)
    ┌────────────────────┐
    │ YOLO detector      │  frame → person/vehicle boxes
    │ ByteTrack tracker  │  boxes → stable track_id per object
@@ -1195,7 +1195,7 @@ in `config.rs`, and `migrations/0005_entry.sql`. The `AnprEngine` is built in
 background loop** — it is driven synchronously from the detection-ingest path.
 
 ```
-   AI worker (apps/ai)                    media kernel (crates/visionops-kernel)
+   AI worker (apps/ai)                    media kernel (crates/heldar-kernel)
    ┌────────────────────┐
    │ AnprAnalyzer       │  vehicle boxes → color → (optional) OCR plate, per frame
    │ YOLO+ByteTrack+OCR │  attributes:{plate, plate_confidence, vehicle_type, color, direction, …}
@@ -1357,7 +1357,7 @@ token present?
  └─ no/invalid token, auth_enabled=true  ─► 401 (authentication required / invalid credentials)
 ```
 
-So with the default `VISIONOPS_AUTH_ENABLED=false` every request is the synthetic
+So with the default `HELDAR_AUTH_ENABLED=false` every request is the synthetic
 admin and the whole API behaves as the pre-Stage-4 open appliance; flip it on and the
 entry/admin surface requires a valid token and enforces roles. Five roles map to five
 capabilities — `can_view` (all), `can_operate_gate` (admin/manager/guard),
@@ -1367,7 +1367,7 @@ role×capability matrix and per-endpoint roles are in
 [`docs/CAMPUS-ENTRY.md`](docs/CAMPUS-ENTRY.md) §4/§9.
 
 **Bootstrap** — `ensure_bootstrap` (called from `main.rs` right after migrations)
-seeds one admin from `VISIONOPS_BOOTSTRAP_ADMIN_USER`/`_PASSWORD` (password ≥8) when
+seeds one admin from `HELDAR_BOOTSTRAP_ADMIN_USER`/`_PASSWORD` (password ≥8) when
 auth is enabled and no users exist; a no-op otherwise. **Last-admin protection** in
 `routes/auth.rs` refuses to demote/disable/delete the final active admin (and refuses
 self-deletion). Every mutation across `routes/auth.rs` + `routes/entry.rs` appends an
@@ -1395,7 +1395,7 @@ today) or explicit `from`/`to`. The exception report is
   `st.anpr.process(camera_id, cam.site_id, &detections)`. The engine and the zone
   engine are independent in-proc consumers of the **same** committed batch.
 - **Retention** — the Stage 0/1 sweeper (`services/retention.rs`) gained an entry
-  phase governed by `VISIONOPS_ENTRY_RETENTION_DAYS` (default 365): prune
+  phase governed by `HELDAR_ENTRY_RETENTION_DAYS` (default 365): prune
   `entry_events` older than the cutoff **and their evidence JPEGs**, then prune
   `audit_log` and the mirrored `events` rows past the same cutoff, and prune **expired
   `sessions`** every sweep. Recording-segment policy + evidence lock are untouched.
@@ -1441,7 +1441,7 @@ periodic **rollup loop + report generator** that reads tables the kernel has *al
 written. This is the **analytics-layer-over-kernel-data** pattern: the app reasons over
 stored events and metadata, never over the live frame stream.
 
-New code (all in `crates/visionops-bakery`): `rollup.rs` (the aggregation loop + metric
+New code (all in `crates/heldar-bakery`): `rollup.rs` (the aggregation loop + metric
 SQL), `reports.rs` (the diagnosis generator), `routes.rs` (HTTP surface), `schema.sql`
 (its two tables), `config.rs` (knobs), `models.rs` (`Observation` / `Report`), `lib.rs`
 (the anonymity stance). The operator/integrator guide is
@@ -1455,7 +1455,7 @@ SQL), `reports.rs` (the diagnosis generator), `routes.rs` (HTTP surface), `schem
         │
         │  ╌╌╌ kernel boundary; BakerySense reads, never consumes ╌╌╌
         ▼
-   visionops-bakery::rollup::run   (spawn_supervised, every ROLLUP_INTERVAL_S)
+   heldar-bakery::rollup::run   (spawn_supervised, every ROLLUP_INTERVAL_S)
      sweep(): recompute last 3 hourly buckets from zone_events + detections + cameras
               ─► upsert bakery_observations (idempotent)  ─► prune past retention
         │
@@ -1468,7 +1468,7 @@ SQL), `reports.rs` (the diagnosis generator), `routes.rs` (HTTP surface), `schem
 ### 18.1 The rollup loop + metric SQL (`rollup.rs`)
 
 `rollup::run(pool, cfg)` is launched in `main.rs` via `spawn_supervised("bakery_rollup",
-…)` and ticks every `VISIONOPS_BAKERY_ROLLUP_INTERVAL_S` (default 300, min 30). Each tick
+…)` and ticks every `HELDAR_BAKERY_ROLLUP_INTERVAL_S` (default 300, min 30). Each tick
 calls `sweep()`; `run_once()` exposes the same `sweep()` for the manual trigger (§18.4)
 and tests. `sweep()`:
 
@@ -1563,7 +1563,7 @@ default `[]`), `generated_at`. `UNIQUE(report_date, scope)`; index on `report_da
 
 The router takes the `BakeryConfig` as an `Extension` and is `merge`d into the server.
 Every endpoint requires the kernel **`view`** capability
-(`principal.require(principal.can_view(), …)`); with `VISIONOPS_AUTH_ENABLED=false` every
+(`principal.require(principal.can_view(), …)`); with `HELDAR_AUTH_ENABLED=false` every
 caller is the synthetic system admin.
 
 | Method | Path | Role | Purpose |
@@ -1576,15 +1576,15 @@ caller is the synthetic system admin.
 
 ### 18.5 How it composes (composed, not welded) + retention + isolation
 
-BakerySense is wired in `crates/visionops-server/src/main.rs` purely as a bundled app:
-its schema is applied after the kernel migrations (`visionops_bakery::schema::init`), its
+BakerySense is wired in `crates/heldar-server/src/main.rs` purely as a bundled app:
+its schema is applied after the kernel migrations (`heldar_bakery::schema::init`), its
 config is loaded from the environment (`BakeryConfig::from_env`; the kernel `Config`
 carries none of it), its rollup loop is `spawn_supervised("bakery_rollup", …)`, and its
 router is `merge`d. Crucially it is **absent from the `consumers` vec** — it is not a
 `DetectionConsumer`, so it never runs on the ingest request.
 
 - **Retention** — the rollup loop prunes `bakery_observations` past
-  `VISIONOPS_BAKERY_RETENTION_DAYS` (default 180) itself; the kernel retention sweeper and
+  `HELDAR_BAKERY_RETENTION_DAYS` (default 180) itself; the kernel retention sweeper and
   evidence lock are untouched. `bakery_reports` (small JSON) are not auto-pruned.
 - **Evidence clips** — insights point at a `camera_id` + window; the operator requests
   footage from the **kernel** clip API (`POST /api/v1/cameras/{id}/clip`, §7). The
@@ -1618,7 +1618,7 @@ Stage 6 (memo §2 Phase 2, §7.5–7.6 ReID, §15.5 privacy, §14 "Stage 6") is 
 Stages 4/5 reason **within** a camera (an ANPR gate, a shop's anonymous footfall),
 Movement correlates the kernel's per-camera observations **across** cameras into
 candidate journeys, and flags **red-zone breaches** — under the strictest privacy gates
-in the stack. New code (all in `crates/visionops-movement`): `reid.rs` (the vehicle
+in the stack. New code (all in `crates/heldar-movement`): `reid.rs` (the vehicle
 candidate proposer + scoring + plate trail), `breach.rs` (the red-zone rule engine +
 subject correlation), `routes.rs` (HTTP surface + audited searches), `schema.sql` (its
 three tables), `config.rs` (knobs), `models.rs` (`CameraLink` / `MovementCandidate` /
@@ -1644,7 +1644,7 @@ a scored *candidate* a human reviews, and every identity-like *search* is audite
         │
         │  ╌╌╌ kernel boundary; Movement reads, never consumes ╌╌╌
         ▼
-   visionops-movement (spawn_supervised, every VISIONOPS_MOVEMENT_INTERVAL_S)
+   heldar-movement (spawn_supervised, every HELDAR_MOVEMENT_INTERVAL_S)
      reid::run     propose_vehicle_candidates(): same plate on two topology-linked cameras
                    within a plausible transit window ─► fused score ─► movement_candidates (pending)
                    + prune()
@@ -1661,7 +1661,7 @@ a scored *candidate* a human reviews, and every identity-like *search* is audite
 ### 19.1 The vehicle candidate proposer + exact scoring (`reid.rs`)
 
 `reid::run` is launched in `main.rs` via `spawn_supervised("movement_reid", …)` and ticks
-every `VISIONOPS_MOVEMENT_INTERVAL_S`; each tick runs `propose_vehicle_candidates()` then
+every `HELDAR_MOVEMENT_INTERVAL_S`; each tick runs `propose_vehicle_candidates()` then
 `prune()`. `run_once()` exposes the proposer for the manual trigger (§19.6) and tests.
 
 **Pairing.** The proposer joins `entry_events` to itself on the **same normalized plate**
@@ -1713,7 +1713,7 @@ edge match both ways; `UNIQUE(from_camera, to_camera)` dedups edges. CRUD is `ma
 ### 19.4 The red-zone breach rule engine (`breach.rs`)
 
 `breach::run` (`spawn_supervised("movement_breach", …)`) ticks on the same interval and
-runs `sweep()`. It resolves red zones by **kind** (`VISIONOPS_MOVEMENT_RED_ZONE_KINDS`,
+runs `sweep()`. It resolves red zones by **kind** (`HELDAR_MOVEMENT_RED_ZONE_KINDS`,
 default `restricted,red`; `zones WHERE kind=? AND enabled=1`) — so a red zone is just an
 ordinary Stage 3 kernel zone tagged `restricted`/`red`. For each red zone it reads recent
 **`enter`** events and records one `breach_alerts` incident per event
@@ -1772,14 +1772,14 @@ capability-gated but not audit-logged).
 
 ### 19.7 How it composes (composed, not welded) + retention + isolation
 
-Movement is wired in `crates/visionops-server/src/main.rs` purely as a bundled app: schema
-applied after the kernel migrations (`visionops_movement::schema::init`), config from the
+Movement is wired in `crates/heldar-server/src/main.rs` purely as a bundled app: schema
+applied after the kernel migrations (`heldar_movement::schema::init`), config from the
 environment (`MovementConfig::from_env`), its two loops `spawn_supervised`, its router
 `merge`d. It is **absent from the `consumers` vec** — not a `DetectionConsumer`, never on
 the ingest request.
 
 - **Retention** — `reid::prune()` (each tick) deletes `movement_candidates` older than
-  `VISIONOPS_MOVEMENT_RETENTION_DAYS` (default 365), and `breach_alerts` older than the
+  `HELDAR_MOVEMENT_RETENTION_DAYS` (default 365), and `breach_alerts` older than the
   cutoff **only when `status='resolved'`** (open/acknowledged incidents are kept until
   worked). The app owns this lifecycle; the kernel retention sweeper + evidence-lock are
   untouched.
@@ -1816,7 +1816,7 @@ correlation that stays explicitly probabilistic.
 Stage 7 (memo §9 "Industrial frontier", §14 "Stage 7"; research.md §12–13, Stage 3–4) turns
 the platform's accumulated event facts into a queryable **visual-event memory** —
 *who / what / where / when / confidence / evidence*. New code (all in
-`crates/visionops-search`): `query.rs` (the `QueryPlan` + its deterministic executor),
+`crates/heldar-search`): `query.rs` (the `QueryPlan` + its deterministic executor),
 `planner.rs` (the offline rule parser + the optional LLM seam), `proof.rs` (the claim
 ladder), `routes.rs` (the HTTP surface + audit + log), `config.rs` (knobs), `schema.sql`
 (its one query-log table), `lib.rs` (the governing principle). The operator/integrator
@@ -1838,7 +1838,7 @@ routes plus one small query log, reading tables the kernel and the Stage 4/6 app
 no decode, no `spawn_supervised` task, and no new fact table.
 
 ```
-   kernel + app fact tables (Stages 3/4/6)        visionops-search (3 routes, no loop, no consumer)
+   kernel + app fact tables (Stages 3/4/6)        heldar-search (3 routes, no loop, no consumer)
      entry_events / zone_events / breach_alerts   ┌─────────────────────────────────────────────┐
         │                                         │ POST /search/events  ─ QueryPlan ───────┐     │
         │  ╌╌ search READS; never consumes ╌╌      │ POST /search/nl      ─ question ─ plan ─┤     │
@@ -1887,7 +1887,7 @@ its patterns and leaves the rest to the default window — and it means **search
 offline with no external dependency.**
 
 **`plan_llm(http, cfg, query, cameras)`** is engaged **only when
-`VISIONOPS_SEARCH_LLM_URL` is set**. It asks an OpenAI-compatible endpoint
+`HELDAR_SEARCH_LLM_URL` is set**. It asks an OpenAI-compatible endpoint
 (`temperature: 0`, `response_format: json_object`, a system prompt spelling out the schema +
 known camera ids, and the hard rule *"you never answer the question or invent data"*) to
 emit a plan JSON, parsed back into a `QueryPlan` and `sanitize()`d (out-of-range hours
@@ -1926,8 +1926,8 @@ exact `plan` that ran, so there is nothing hidden between the question and the r
 
 ### 20.5 How it composes + honest scope
 
-Search is wired in `crates/visionops-server/src/main.rs` purely as a bundled app: schema
-applied after the kernel migrations (`visionops_search::schema::init`), config from the
+Search is wired in `crates/heldar-server/src/main.rs` purely as a bundled app: schema
+applied after the kernel migrations (`heldar_search::schema::init`), config from the
 environment (`SearchConfig::from_env`), router `merge`d. It is **absent from the `consumers`
 vec** and has **no `spawn_supervised` loop** — it touches the ingest/recording/live-view path
 nowhere, so a slow or failing request can only affect that request. Adding it was a
@@ -1954,7 +1954,7 @@ fallible, and decoupled from the answer.
 ## 21. Remote access — the WireGuard overlay model
 
 A deployment is normally behind **CGNAT** (shared public IPv4, no inbound port-forward, DDNS
-useless), so the only thing that reaches it is the node **dialing out**. VisionOps standardizes
+useless), so the only thing that reaches it is the node **dialing out**. Heldar standardizes
 on a **WireGuard overlay** (Tailscale for personal/dev, NetBird self-hosted for shipped products)
 running as an **external daemon** on the host. This is an **open kernel** capability — every
 Apache-2.0 deployment gets private, P2P-first remote viewing with no proprietary component. Full
@@ -1973,7 +1973,7 @@ coordinator — self-hosting the coordinator (NetBird/Headscale) removes even th
 **The overlay is orthogonal to the kernel.** Critically, remote access required **no** media-stack
 changes: the overlay is a deployment concern (install a client, set an ACL), not kernel code. The
 kernel does **not** embed or manage WireGuard — duplicating mature daemons would be wrong. Its entire
-contribution is *awareness*: `config` reads `VISIONOPS_OVERLAY_{ENABLED,KIND,IFACE}`, and
+contribution is *awareness*: `config` reads `HELDAR_OVERLAY_{ENABLED,KIND,IFACE}`, and
 `services::remote_access::status` probes the configured interface via `/sys/class/net/<iface>`
 (dependency-free; TUN devices report `operstate=unknown` when healthy, so `unknown` is treated as
 up), surfaced at `GET /api/v1/system → remote_access`. Transport-agnostic by construction: any

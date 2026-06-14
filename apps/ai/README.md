@@ -1,11 +1,11 @@
-# VisionOps AI Worker (Stage 2 reference)
+# Heldar AI Worker (Stage 2 reference)
 
-A small, production-grade **reference AI worker** for VisionOps Core. It proves
+A small, production-grade **reference AI worker** for Heldar Core. It proves
 and documents the Stage 2 worker contract end-to-end with zero heavy
 dependencies (no GPU, no model). Stage 3 swaps in a real model (e.g. YOLO) by
 implementing **one class** — see [Plugging in a real model](#stage-3-plugging-in-a-real-model).
 
-The worker does **not** touch RTSP. VisionOps Core samples each camera and
+The worker does **not** touch RTSP. Heldar Core samples each camera and
 writes the latest frame to disk; the worker pulls those frames over HTTP and
 posts results back.
 
@@ -71,10 +71,10 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 # 2. Install dependencies
 pip install -r requirements.txt
 
-# 3. Run (point it at a running VisionOps Core)
+# 3. Run (point it at a running Heldar Core)
 python worker.py --api http://localhost:8000
 # or rely on the env default:
-VISIONOPS_API=http://localhost:8000 python worker.py
+HELDAR_API=http://localhost:8000 python worker.py
 ```
 
 Stop with `Ctrl-C` — it drains and exits cleanly.
@@ -82,8 +82,8 @@ Stop with `Ctrl-C` — it drains and exits cleanly.
 ### Docker
 
 ```bash
-docker build -t visionops-ai-worker apps/ai
-docker run --rm -e VISIONOPS_API=http://host.docker.internal:8000 visionops-ai-worker
+docker build -t heldar-ai-worker apps/ai
+docker run --rm -e HELDAR_API=http://host.docker.internal:8000 heldar-ai-worker
 ```
 
 ## Configuration
@@ -93,14 +93,14 @@ which override the built-in defaults.
 
 | Flag | Env var | Default | Meaning |
 |------|---------|---------|---------|
-| `--api` | `VISIONOPS_API` | `http://localhost:8000` | VisionOps Core base URL |
-| `--poll-interval` | `VISIONOPS_AI_POLL_INTERVAL` | `10` | Seconds between `/ai/tasks` re-polls |
-| `--http-timeout` | `VISIONOPS_HTTP_TIMEOUT` | `10` | Per-request timeout (s) |
-| `--http-max-retries` | `VISIONOPS_HTTP_MAX_RETRIES` | `5` | Retries for transient HTTP failures |
-| `--backoff-base` | `VISIONOPS_HTTP_BACKOFF_BASE` | `0.5` | Initial backoff (s) |
-| `--backoff-cap` | `VISIONOPS_HTTP_BACKOFF_CAP` | `15` | Max backoff (s) |
-| `--log-level` | `VISIONOPS_LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR` |
-| `--log-format` | `VISIONOPS_LOG_FORMAT` | `text` | `text` or `json` |
+| `--api` | `HELDAR_API` | `http://localhost:8000` | Heldar Core base URL |
+| `--poll-interval` | `HELDAR_AI_POLL_INTERVAL` | `10` | Seconds between `/ai/tasks` re-polls |
+| `--http-timeout` | `HELDAR_HTTP_TIMEOUT` | `10` | Per-request timeout (s) |
+| `--http-max-retries` | `HELDAR_HTTP_MAX_RETRIES` | `5` | Retries for transient HTTP failures |
+| `--backoff-base` | `HELDAR_HTTP_BACKOFF_BASE` | `0.5` | Initial backoff (s) |
+| `--backoff-cap` | `HELDAR_HTTP_BACKOFF_CAP` | `15` | Max backoff (s) |
+| `--log-level` | `HELDAR_LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR` |
+| `--log-format` | `HELDAR_LOG_FORMAT` | `text` | `text` or `json` |
 
 ### Per-task `config` (from the task's `config` JSON)
 
@@ -143,7 +143,7 @@ How it works:
   `persist=True` keeps ByteTrack state across calls, so each box has a **stable
   `track_id`**. A model is created **per camera/task** so track ids never collide
   between cameras.
-- Each box maps to a VisionOps detection: `label` from `model.names`,
+- Each box maps to a Heldar detection: `label` from `model.names`,
   `confidence` from `box.conf`, `bbox` = `[x, y, w, h]` **normalized to 0..1** by
   the frame width/height, and `track_id = str(int(box.id))` when present. These
   are POSTed to `/api/v1/ai/events` with the task's `camera_id` + `task_type`.

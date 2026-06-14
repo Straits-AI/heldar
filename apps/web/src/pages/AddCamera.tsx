@@ -15,7 +15,7 @@ import {
 
 type Vendor = "hikvision" | "dahua" | "generic";
 
-/** Mirror of crates/visionops-kernel/src/camera_url.rs path templates, for the live preview only. */
+/** Mirror of crates/heldar-kernel/src/camera_url.rs path templates, for the live preview only. */
 function buildPreviewUrl(
   vendor: Vendor,
   address: string,

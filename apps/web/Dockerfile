@@ -1,4 +1,4 @@
-# VisionOps dashboard — build the Vite SPA, serve via nginx.
+# Heldar dashboard — build the Vite SPA, serve via nginx.
 FROM node:22-bookworm-slim AS builder
 WORKDIR /app
 COPY package*.json ./

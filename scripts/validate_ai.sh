@@ -47,6 +47,6 @@ log "## query detections"
 curl -s "$API/api/v1/cameras/$CAM/detections?limit=5" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d),"detections"); [print(" ",x["label"],x["confidence"],x["bbox"]) for x in d]' 2>/dev/null | tee -a "$REPORT"
 
 log "## metrics (AI)"
-curl -s "$API/metrics" | grep -E 'visionops_(ai_tasks_enabled|detections_total)' | tee -a "$REPORT"
+curl -s "$API/metrics" | grep -E 'heldar_(ai_tasks_enabled|detections_total)' | tee -a "$REPORT"
 
 log "DONE"

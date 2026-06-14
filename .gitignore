@@ -1,4 +1,4 @@
-# VisionOps Core — gitignore
+# Heldar Core — gitignore
 
 # Rust (commit the workspace Cargo.lock; ignore build output)
 target/

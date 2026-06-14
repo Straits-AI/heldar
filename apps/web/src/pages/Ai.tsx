@@ -1,4 +1,4 @@
-// VisionOps Core — AI perception console.
+// Heldar Core — AI perception console.
 // One screen to see the sampler fleet (state + effective fps) and every enabled AI task,
 // plus a short explainer of the global fps budget that drives backpressure.
 
@@ -353,7 +353,7 @@ export function Ai() {
         <p className="font-mono text-[11px] leading-relaxed text-fg-secondary">
           The sampler decodes each AI-enabled camera&apos;s stream at a budgeted frame rate and writes
           the latest JPEG to disk. A global budget{" "}
-          <code className="text-accent-soft">VISIONOPS_AI_MAX_TOTAL_FPS</code> (default 40 fps) is split
+          <code className="text-accent-soft">HELDAR_AI_MAX_TOTAL_FPS</code> (default 40 fps) is split
           across active cameras — when many cameras run AI, each camera&apos;s effective fps is reduced
           (backpressure) so the host is never overloaded. Workers pull the latest frame over HTTP and{" "}
           <span className="text-fg">never touch RTSP</span>.

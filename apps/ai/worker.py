@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""VisionOps reference AI worker (Stage 2).
+"""Heldar reference AI worker (Stage 2).
 
-This is the canonical, dependency-light implementation of the VisionOps AI
+This is the canonical, dependency-light implementation of the Heldar AI
 worker contract. It proves and documents how a perception worker talks to
-VisionOps Core so that Stage 3 can drop in a real model (e.g. YOLO) by
+Heldar Core so that Stage 3 can drop in a real model (e.g. YOLO) by
 implementing a single `Analyzer` subclass — nothing else has to change.
 
-The contract (served by the kernel; see crates/visionops-kernel/src/routes/ai.rs)
+The contract (served by the kernel; see crates/heldar-kernel/src/routes/ai.rs)
 -------------------------------------------------------
 1. Discover work:
        GET  {API}/api/v1/ai/tasks
@@ -101,59 +101,59 @@ def parse_settings(argv: Optional[List[str]] = None) -> Settings:
     """Build settings from env defaults overridden by CLI flags."""
     parser = argparse.ArgumentParser(
         prog="worker",
-        description="VisionOps reference AI worker (Stage 2).",
+        description="Heldar reference AI worker (Stage 2).",
     )
     parser.add_argument(
         "--api",
-        default=_env("VISIONOPS_API", "http://localhost:8000"),
-        help="VisionOps Core base URL (env VISIONOPS_API).",
+        default=_env("HELDAR_API", "http://localhost:8000"),
+        help="Heldar Core base URL (env HELDAR_API).",
     )
     parser.add_argument(
         "--poll-interval",
         type=float,
-        default=float(_env("VISIONOPS_AI_POLL_INTERVAL", "10")),
-        help="Seconds between /ai/tasks re-polls (env VISIONOPS_AI_POLL_INTERVAL).",
+        default=float(_env("HELDAR_AI_POLL_INTERVAL", "10")),
+        help="Seconds between /ai/tasks re-polls (env HELDAR_AI_POLL_INTERVAL).",
     )
     parser.add_argument(
         "--http-timeout",
         type=float,
-        default=float(_env("VISIONOPS_HTTP_TIMEOUT", "10")),
-        help="Per-request HTTP timeout in seconds (env VISIONOPS_HTTP_TIMEOUT).",
+        default=float(_env("HELDAR_HTTP_TIMEOUT", "10")),
+        help="Per-request HTTP timeout in seconds (env HELDAR_HTTP_TIMEOUT).",
     )
     parser.add_argument(
         "--http-max-retries",
         type=int,
-        default=int(_env("VISIONOPS_HTTP_MAX_RETRIES", "5")),
-        help="Max retries for transient HTTP failures (env VISIONOPS_HTTP_MAX_RETRIES).",
+        default=int(_env("HELDAR_HTTP_MAX_RETRIES", "5")),
+        help="Max retries for transient HTTP failures (env HELDAR_HTTP_MAX_RETRIES).",
     )
     parser.add_argument(
         "--backoff-base",
         type=float,
-        default=float(_env("VISIONOPS_HTTP_BACKOFF_BASE", "0.5")),
-        help="Initial backoff in seconds (env VISIONOPS_HTTP_BACKOFF_BASE).",
+        default=float(_env("HELDAR_HTTP_BACKOFF_BASE", "0.5")),
+        help="Initial backoff in seconds (env HELDAR_HTTP_BACKOFF_BASE).",
     )
     parser.add_argument(
         "--backoff-cap",
         type=float,
-        default=float(_env("VISIONOPS_HTTP_BACKOFF_CAP", "15")),
-        help="Max backoff in seconds (env VISIONOPS_HTTP_BACKOFF_CAP).",
+        default=float(_env("HELDAR_HTTP_BACKOFF_CAP", "15")),
+        help="Max backoff in seconds (env HELDAR_HTTP_BACKOFF_CAP).",
     )
     parser.add_argument(
         "--log-level",
-        default=_env("VISIONOPS_LOG_LEVEL", "INFO"),
-        help="Logging level: DEBUG/INFO/WARNING/ERROR (env VISIONOPS_LOG_LEVEL).",
+        default=_env("HELDAR_LOG_LEVEL", "INFO"),
+        help="Logging level: DEBUG/INFO/WARNING/ERROR (env HELDAR_LOG_LEVEL).",
     )
     parser.add_argument(
         "--log-format",
         choices=("text", "json"),
-        default=_env("VISIONOPS_LOG_FORMAT", "text"),
-        help="Log output format (env VISIONOPS_LOG_FORMAT).",
+        default=_env("HELDAR_LOG_FORMAT", "text"),
+        help="Log output format (env HELDAR_LOG_FORMAT).",
     )
     parser.add_argument(
         "--api-key",
-        default=_env("VISIONOPS_API_KEY", ""),
+        default=_env("HELDAR_API_KEY", ""),
         help="API key (integration role) sent as X-API-Key when Core auth is enabled "
-        "(env VISIONOPS_API_KEY). Optional when Core runs with auth disabled.",
+        "(env HELDAR_API_KEY). Optional when Core runs with auth disabled.",
     )
     ns = parser.parse_args(argv)
     return Settings(
@@ -1013,12 +1013,12 @@ class WorkerHTTPError(Exception):
 
 
 class CoreClient:
-    """Thin VisionOps Core client with capped exponential backoff + jitter."""
+    """Thin Heldar Core client with capped exponential backoff + jitter."""
 
     def __init__(self, settings: Settings):
         self.s = settings
         self.session = requests.Session()
-        self.session.headers["User-Agent"] = "visionops-ai-worker/1.0"
+        self.session.headers["User-Agent"] = "heldar-ai-worker/1.0"
         # When Core auth is enabled, the worker authenticates with an integration API key. Harmless
         # when auth is disabled (Core ignores it). Sent on every request via the shared session.
         if settings.api_key:
@@ -1309,14 +1309,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     settings = parse_settings(argv)
     setup_logging(settings.log_level, settings.log_format)
     _install_signal_handlers()
-    log.info("VisionOps AI worker starting (api=%s)", settings.api)
+    log.info("Heldar AI worker starting (api=%s)", settings.api)
 
     client = CoreClient(settings)
     try:
         Supervisor(client, settings).run()
     finally:
         client.close()
-    log.info("VisionOps AI worker stopped")
+    log.info("Heldar AI worker stopped")
     return 0
 
 

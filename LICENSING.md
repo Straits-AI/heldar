@@ -1,19 +1,19 @@
 # Licensing
 
-VisionOps is **open-core**. The kernel and the generic reference apps are **Apache-2.0** and live in
-the public `visionops` repo; vertical/client-specific products are **proprietary** and live in the
-private `visionops-verticals` repo, depending on the open crates through published seams.
+Heldar is **open-core**. The kernel and the generic reference apps are **Apache-2.0** and live in
+the public `heldar` repo; vertical/client-specific products are **proprietary** and live in the
+private `heldar-proprietary` repo, depending on the open crates through published seams.
 
 | Component | Crate / path | License |
 |---|---|---|
-| **Kernel** — media/DVR, perception ingest + sampler, zone engine, auth/RBAC, observability, retention, remote-access overlay awareness, worker SDK contract | `crates/visionops-kernel` | **Apache-2.0** |
-| **Access Control** — generic ANPR authorization, vehicle/visitor/watchlist registry, guard workflow, entry/exception/audit reports | `crates/visionops-entry` | **Apache-2.0** |
-| **Movement intelligence** — generic cross-camera ReID candidates, trails, red-zone breach engine | `crates/visionops-movement` | **Apache-2.0** |
-| **Semantic search** — generic deterministic query layer + LLM-as-planner + proof ladder | `crates/visionops-search` | **Apache-2.0** |
-| **Reference composing server** — links the kernel + open apps (proprietary verticals only via the `verticals` Cargo feature, off in the open build) | `crates/visionops-server` | **Apache-2.0** |
+| **Kernel** — media/DVR, perception ingest + sampler, zone engine, auth/RBAC, observability, retention, remote-access overlay awareness, worker SDK contract | `crates/heldar-kernel` | **Apache-2.0** |
+| **Access Control** — generic ANPR authorization, vehicle/visitor/watchlist registry, guard workflow, entry/exception/audit reports | `crates/heldar-entry` | **Apache-2.0** |
+| **Movement intelligence** — generic cross-camera ReID candidates, trails, red-zone breach engine | `crates/heldar-movement` | **Apache-2.0** |
+| **Semantic search** — generic deterministic query layer + LLM-as-planner + proof ladder | `crates/heldar-search` | **Apache-2.0** |
+| **Reference composing server** — links the kernel + open apps (proprietary verticals only via the `verticals` Cargo feature, off in the open build) | `crates/heldar-server` | **Apache-2.0** |
 | **Reference AI worker** — YOLO/ByteTrack reference implementation of the open worker contract | `apps/ai` | **Apache-2.0** (model weights download separately under their own licenses, e.g. Ultralytics AGPL) |
-| **BakerySense** — retail behaviour analytics (a vertical) | `crates/visionops-bakery` | **Proprietary** |
-| **Campus** — school products (students/guardians, pickup/dismissal, parental-app integration) | `crates/visionops-campus-*` *(future)* | **Proprietary** |
+| **BakerySense** — retail behaviour analytics (a vertical) | `crates/heldar-bakery` | **Proprietary** |
+| **Campus** — school products (students/guardians, pickup/dismissal, parental-app integration) | `crates/heldar-campus-*` *(future)* | **Proprietary** |
 
 ## The boundary
 

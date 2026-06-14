@@ -1,4 +1,4 @@
-// VisionOps Core — Stage 4 "Campus Entry" operator console.
+// Heldar Core — Stage 4 "Campus Entry" operator console.
 // One screen for the gatehouse: live entry events with confirm/reject workflow,
 // visitor passes, the vehicle registry, the plate watchlist, daily reports, and
 // (for admins) user + API-key administration. Auth-gated via /auth/me.

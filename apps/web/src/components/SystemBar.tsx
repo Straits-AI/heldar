@@ -31,7 +31,7 @@ export function SystemBar({ info, error }: Props) {
   if (!info) {
     return (
       <div className="flex items-center gap-2 border-b border-line bg-panel px-4 py-2 font-mono text-xs text-fg-muted">
-        <StatusLed state="connecting" /> Linking to VisionOps Core…
+        <StatusLed state="connecting" /> Linking to Heldar Core…
       </div>
     );
   }

@@ -1,4 +1,4 @@
-// VisionOps Core — Stage 6 "Movement intelligence" console.
+// Heldar Core — Stage 6 "Movement intelligence" console.
 // Cross-camera movement reasoning: red-zone breach incidents, probabilistic ReID candidates
 // (anchored on plates, awaiting a human decision), the camera-link topology that bounds plausible
 // transits, and an audited plate trail search. NOTHING here asserts identity — every correlation is

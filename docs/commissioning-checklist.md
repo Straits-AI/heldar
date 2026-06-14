@@ -1,6 +1,6 @@
 # Camera Commissioning Checklist
 
-Field checklist for installing and onboarding cameras into **VisionOps Core**
+Field checklist for installing and onboarding cameras into **Heldar Core**
 (Stage 0 media kernel). Work top to bottom; do not skip a phase. A camera is
 not "live" until **Phase 7 — Verification** passes.
 
@@ -27,7 +27,7 @@ default retention 24 h.
 - [ ] Bandwidth + storage budget sanity-checked
       (`cameras × bitrate × 1.0` overhead for net; `1 Mbps ≈ 10.8 GB/day` for storage).
 - [ ] Naming convention agreed (e.g. `gate-north-anpr`, `lobby-overview`) — the
-      camera `name` becomes the VisionOps `id` slug.
+      camera `name` becomes the Heldar `id` slug.
 - [ ] Credentials provisioned per the rules in **Phase 6** (no shared passwords,
       no brute-forcing the test units).
 
@@ -50,7 +50,7 @@ Cameras must be on an isolated CCTV VLAN, never on the corp/guest network.
       - [ ] **Operator VLAN** — dashboards
       - [ ] **Management VLAN** — switches / firewall / admin
       - [ ] **Guest/Corp VLAN** — isolated from CCTV
-- [ ] Inter-VLAN routing locked down: only the Media VLAN (VisionOps core) may
+- [ ] Inter-VLAN routing locked down: only the Media VLAN (Heldar core) may
       reach the CCTV VLAN on RTSP (554) and the camera HTTP/ONVIF ports. No path
       from Guest/Corp to CCTV.
 - [ ] Cameras have **no internet egress** (block at firewall; disable cloud/P2P
@@ -88,7 +88,7 @@ Cameras must be on an isolated CCTV VLAN, never on the corp/guest network.
 
 ## Phase 3 — Per-camera stream configuration
 
-Configure on the camera's own web UI before onboarding. VisionOps records the
+Configure on the camera's own web UI before onboarding. Heldar records the
 **compressed stream without decode**, so the camera-side encode settings are what
 you actually store.
 
@@ -100,7 +100,7 @@ you actually store.
       use case needs (see Phase 4). This is the evidence-grade stream.
 - [ ] **Sub stream (live/preview & later AI sampling):** lower resolution
       (e.g. 640–720p), modest fps, lower bitrate — keeps live view and analytics cheap.
-- [ ] **Stream roles assigned:** decide which stream VisionOps records via
+- [ ] **Stream roles assigned:** decide which stream Heldar records via
       `record_stream` (`main` or `sub`). Default and norm = `main` for evidence;
       use `sub` only for low-value overview cameras.
 - [ ] **Keyframe / GOP interval** set to ~1× fps (i.e. 1 IDR per second). Long GOPs
@@ -144,12 +144,12 @@ appears (entry to the zone), not at the closest point. Useful reference scale
       recognition-grade; ~40 px is detection-only.
 - [ ] Frontal, eye-level framing at a choke point; even frontal lighting.
 - [ ] Confirm face recognition is **permitted** for this site before relying on it —
-      VisionOps default is anonymous/behaviour analysis, **no face recognition by
+      Heldar default is anonymous/behaviour analysis, **no face recognition by
       default** (memo §15.5).
 
 ---
 
-## Phase 5 — Onboard into VisionOps
+## Phase 5 — Onboard into Heldar
 
 Register the camera via the core API. Credentials are stored server-side and never
 returned to clients; stream URLs are masked in all responses.
@@ -175,7 +175,7 @@ returned to clients; stream URLs are masked in all responses.
 | `enabled` | default `true` |
 
 ### Vendor URL templates
-VisionOps builds the RTSP URL from `vendor` + `address` + `rtsp_port` + creds when
+Heldar builds the RTSP URL from `vendor` + `address` + `rtsp_port` + creds when
 no explicit URL is given:
 
 - [ ] **HikVision** → `rtsp://<host>:554/Streaming/Channels/101` (main) /
@@ -214,7 +214,7 @@ curl -sX POST http://<core-host>:8000/api/v1/cameras/gate-north-anpr/test
 ## Phase 6 — Credentials & the test-unit rule
 
 - [ ] Use a **dedicated least-privilege viewer/streaming account** per camera (or
-      per site), never the admin account, for VisionOps RTSP pulls.
+      per site), never the admin account, for Heldar RTSP pulls.
 - [ ] Passwords entered only via the API body; they are stored server-side, never
       serialized back to clients, and are masked in URLs/logs. Treat them as secrets.
 - [ ] No plaintext credentials in tickets, chat, or commits.
@@ -270,4 +270,4 @@ Wait at least 2–3 segment lengths (~3+ min at the 60 s default) after enabling
 - [ ] Purpose-specific acceptance met (plate/face/body pixels-on-target confirmed
       from a real snapshot, not just on paper).
 - [ ] Credentials handed off to the secret store; no secrets left in notes.
-- [ ] Camera marked commissioned in the install log with the VisionOps `id`.
+- [ ] Camera marked commissioned in the install log with the Heldar `id`.

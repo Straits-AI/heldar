@@ -1,0 +1,38 @@
+[package]
+name = "heldar-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Heldar composing server: links the open kernel with the open generic apps (entry/movement/search), plus optional proprietary verticals behind the `verticals` feature."
+license = "Apache-2.0"
+publish = false  # composition bin, not a library — lives in the repo, not on crates.io
+
+[[bin]]
+name = "heldar-core"
+path = "src/main.rs"
+
+[features]
+# `verticals` pulls the proprietary vertical app crates (e.g. bakery) into the composition. The OPEN
+# reference build (`--no-default-features`) links only kernel + the Apache-2.0 generic apps; the
+# private production bins enable this. At the polyrepo split the public server drops it entirely.
+default = ["verticals"]
+verticals = ["dep:heldar-bakery"]
+
+[dependencies]
+heldar-kernel = { path = "../heldar-kernel" }
+# Open generic apps (Apache-2.0) — always composed.
+heldar-entry = { path = "../heldar-entry" }
+heldar-movement = { path = "../heldar-movement" }
+heldar-search = { path = "../heldar-search" }
+# Proprietary verticals — optional, gated by the `verticals` feature.
+heldar-bakery = { path = "../heldar-bakery", optional = true }
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"

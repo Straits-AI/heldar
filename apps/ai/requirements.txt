@@ -1,4 +1,4 @@
-# VisionOps reference AI worker.
+# Heldar reference AI worker.
 #
 # Core runtime (always required) — intentionally light: HTTP + frame decode.
 requests>=2.32

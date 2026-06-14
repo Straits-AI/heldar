@@ -1,4 +1,4 @@
-// VisionOps Core — operator sign-in.
+// Heldar Core — operator sign-in.
 // Rendered by the Campus Entry console when the API reports auth is enabled (401 on /auth/me).
 // Flow: api.login -> server sets the HttpOnly session cookie -> re-fetch the Principal -> hand it to
 // the parent. The token is NOT persisted in JS storage; the cookie carries the session (XSS-safe).
@@ -50,7 +50,7 @@ export function Login({ onSuccess }: { onSuccess: (principal: Principal) => void
           </span>
           <div className="leading-none">
             <div className="font-display text-[15px] font-extrabold tracking-wider text-fg">
-              VISIONOPS
+              HELDAR
             </div>
             <div className="mt-1 font-mono text-[9px] uppercase tracking-micro text-accent">
               Operator sign-in

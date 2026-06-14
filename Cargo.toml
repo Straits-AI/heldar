@@ -1,19 +1,19 @@
-# VisionOps Cargo workspace (open-core).
+# Heldar Cargo workspace (open-core).
 #
-# Apache-2.0 open tier: `visionops-kernel` (domain-agnostic platform) + the generic reference apps
-# `visionops-entry` (access control), `visionops-movement`, `visionops-search`, and the reference
-# composing bin `visionops-server`. Proprietary verticals (`visionops-bakery`; future
-# `visionops-campus-*`) depend on the open crates and are gated out of the open build via the server's
+# Apache-2.0 open tier: `heldar-kernel` (domain-agnostic platform) + the generic reference apps
+# `heldar-entry` (access control), `heldar-movement`, `heldar-search`, and the reference
+# composing bin `heldar-server`. Proprietary verticals (`heldar-bakery`; future
+# `heldar-campus-*`) depend on the open crates and are gated out of the open build via the server's
 # `verticals` feature. See LICENSING.md + docs/OPEN-CORE-SPLIT.md.
 [workspace]
 resolver = "2"
 members = [
-    "crates/visionops-kernel",
-    "crates/visionops-entry",
-    "crates/visionops-bakery",
-    "crates/visionops-movement",
-    "crates/visionops-search",
-    "crates/visionops-server",
+    "crates/heldar-kernel",
+    "crates/heldar-entry",
+    "crates/heldar-bakery",
+    "crates/heldar-movement",
+    "crates/heldar-search",
+    "crates/heldar-server",
 ]
 
 [profile.dev]

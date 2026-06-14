@@ -1,9 +1,9 @@
-# VisionOps Core — AI Worker Integration Guide (Stages 2–4)
+# Heldar Core — AI Worker Integration Guide (Stages 2–4)
 
-This is the integration guide for **AI workers** against the VisionOps Core media
+This is the integration guide for **AI workers** against the Heldar Core media
 kernel. It documents the Stage 2 **frame sampler** and the **worker contract**
 (§§1–10) plus the Stage 3 **detection + tracking analyzer and zone engine** (§11)
-exactly as built in `crates/visionops-kernel` (`services/sampler.rs`, `services/zones.rs`,
+exactly as built in `crates/heldar-kernel` (`services/sampler.rs`, `services/zones.rs`,
 `routes/ai.rs`, `routes/zones.rs`, `models.rs`, `config.rs`, `migrations/0003_ai.sql`,
 `migrations/0004_zones.sql`).
 
@@ -67,7 +67,7 @@ The budget is computed in `SamplerManager::rebalance` (`services/sampler.rs`):
 
 ```
 active          = number of enabled cameras that have ≥1 enabled AI task
-budget          = VISIONOPS_AI_MAX_TOTAL_FPS  (default 40, floored at 1.0)
+budget          = HELDAR_AI_MAX_TOTAL_FPS  (default 40, floored at 1.0)
 per_camera_cap  = budget / active
 effective_fps   = clamp( min(task_fps, per_camera_cap), MIN_FPS=0.5, … )
 ```
@@ -91,7 +91,7 @@ Key facts, grounded in the code:
   `sampler.reconcile()`, which stops **all** samplers, recomputes the active set
   + per-camera cap, and restarts them. It is serialized by an internal
   `rebalance_lock` so concurrent edits can't race into overlapping ffmpegs.
-- **Master switch.** `VISIONOPS_AI_ENABLED=false` makes `rebalance` a no-op (no
+- **Master switch.** `HELDAR_AI_ENABLED=false` makes `rebalance` a no-op (no
   samplers run at all), independent of whether tasks exist.
 
 ### What the sampler actually runs
@@ -145,7 +145,7 @@ A row in `ai_tasks` (`migrations/0003_ai.sql`, `models.rs::AiTask`) declares
 | `created_at` / `updated_at` | RFC3339 | |
 
 `fps`/`width` defaults when omitted on create come from
-`VISIONOPS_DEFAULT_AI_FPS` (5) and `VISIONOPS_DEFAULT_AI_WIDTH` (1280).
+`HELDAR_DEFAULT_AI_FPS` (5) and `HELDAR_DEFAULT_AI_WIDTH` (1280).
 
 A **detection** (`detections` table, `models.rs::Detection`) is one result a
 worker posts back:
@@ -503,12 +503,12 @@ sampler → worker → ingest → events path **with no model and no GPU** by cr
 cd apps/ai
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-VISIONOPS_API=http://localhost:8000 python worker.py
+HELDAR_API=http://localhost:8000 python worker.py
 # or: python worker.py --api http://localhost:8000 --log-format json
 ```
 
-Worker-side config (CLI flag / env var): `--api`/`VISIONOPS_API`
-(default `http://localhost:8000`), `--poll-interval`/`VISIONOPS_AI_POLL_INTERVAL`
+Worker-side config (CLI flag / env var): `--api`/`HELDAR_API`
+(default `http://localhost:8000`), `--poll-interval`/`HELDAR_AI_POLL_INTERVAL`
 (10), `--http-timeout`, `--http-max-retries`, `--backoff-base`, `--backoff-cap`,
 `--log-level`, `--log-format`. Full table in `apps/ai/README.md`.
 
@@ -550,19 +550,19 @@ register("detection", YoloAnalyzer)   # replaces the placeholder for task_type "
 
 ## 9. Configuration
 
-All via `VISIONOPS_*` env vars (`config.rs`):
+All via `HELDAR_*` env vars (`config.rs`):
 
 | Var | Default | Meaning |
 |---|---|---|
-| `VISIONOPS_AI_ENABLED` | `true` | master switch for frame sampling; `false` runs no samplers |
-| `VISIONOPS_AI_MAX_TOTAL_FPS` | `40` | global fps budget split across AI-enabled cameras (floored at 1.0) |
-| `VISIONOPS_DEFAULT_AI_FPS` | `5` | default `fps` for a task that omits it (clamped 0.1…30 on write) |
-| `VISIONOPS_DEFAULT_AI_WIDTH` | `1280` | default `width` for a task that omits it (clamped 160…3840) |
-| `VISIONOPS_FRAMES_DIR` | `<DATA_DIR>/frames` | where `latest.jpg` per camera is written (`frames/<camera_id>/latest.jpg`) |
+| `HELDAR_AI_ENABLED` | `true` | master switch for frame sampling; `false` runs no samplers |
+| `HELDAR_AI_MAX_TOTAL_FPS` | `40` | global fps budget split across AI-enabled cameras (floored at 1.0) |
+| `HELDAR_DEFAULT_AI_FPS` | `5` | default `fps` for a task that omits it (clamped 0.1…30 on write) |
+| `HELDAR_DEFAULT_AI_WIDTH` | `1280` | default `width` for a task that omits it (clamped 160…3840) |
+| `HELDAR_FRAMES_DIR` | `<DATA_DIR>/frames` | where `latest.jpg` per camera is written (`frames/<camera_id>/latest.jpg`) |
 
-The **worker** side (`apps/ai/worker.py`) is configured separately: `VISIONOPS_API`
+The **worker** side (`apps/ai/worker.py`) is configured separately: `HELDAR_API`
 (base URL of the core, default `http://localhost:8000`),
-`VISIONOPS_AI_POLL_INTERVAL`, and HTTP/backoff/logging knobs — full table in
+`HELDAR_AI_POLL_INTERVAL`, and HTTP/backoff/logging knobs — full table in
 `apps/ai/README.md`.
 
 ---
@@ -572,7 +572,7 @@ The **worker** side (`apps/ai/worker.py`) is configured separately: `VISIONOPS_A
 | Memo §5/§14 Stage 2 item | Status in Stage 2 | Notes |
 |---|---|---|
 | Substream sampler (decode only sampled frames) | ✅ | one ffmpeg per camera, `-vf fps,scale`, decode-free recording untouched |
-| FPS budgeting + task scheduler | ✅ | global `VISIONOPS_AI_MAX_TOTAL_FPS` split; per-camera = `min(task fps, budget/active)`, `MIN_FPS=0.5` floor |
+| FPS budgeting + task scheduler | ✅ | global `HELDAR_AI_MAX_TOTAL_FPS` split; per-camera = `min(task fps, budget/active)`, `MIN_FPS=0.5` floor |
 | Frame queue / frame-sample object | ◑ | realized as a **single `latest.jpg` per camera** (last-value), not a multi-frame queue or `frame_id` stream; staleness via `x-frame-age-ms` |
 | Backpressure policy | ◑ | **static** proportional fps reduction as cameras are added (graceful fps degradation). The dynamic *resolution* ladder (720p→480p) + auto-recovery from live load is **deferred** (Stage 3+) |
 | High-res snapshot on trigger | ◑ | not in the sampler; a worker can use the Stage 0 `GET /api/v1/cameras/{id}/snapshot` for a main-stream grab on trigger. Per-task `stream_profile=main` is stored/validated but the sampler currently always samples the sub-stream |

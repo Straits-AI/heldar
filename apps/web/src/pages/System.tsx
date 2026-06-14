@@ -1,4 +1,4 @@
-// VisionOps Core — System / observability console.
+// Heldar Core — System / observability console.
 // One screen where a non-developer operator can see system health and explain faults:
 //   (1) storage horizon, (2) per-camera recorder health, (3) recent events feed.
 

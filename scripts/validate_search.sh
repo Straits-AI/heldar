@@ -48,5 +48,5 @@ log ""
 log "## identity-query audit (plate search writes audit_log):"
 curl -s -X POST "$API/search/nl" -H 'content-type: application/json' -d '{"query":"vehicle SEEK999"}' >/dev/null
 log "  search_identity_query audit entries: $(curl -s "$API/audit?action=search_identity_query&limit=5" | jqget 'len(d)')"
-log "  search_log rows: $(sqlite3 /home/soh/cctv/data/visionops.db 'SELECT count(*) FROM search_log;' 2>/dev/null)"
+log "  search_log rows: $(sqlite3 /home/soh/cctv/data/heldar.db 'SELECT count(*) FROM search_log;' 2>/dev/null)"
 log "DONE"

@@ -1,4 +1,4 @@
-// Typed fetch client for the VisionOps Core API.
+// Typed fetch client for the Heldar Core API.
 //
 // All paths are relative so they flow through the Vite dev proxy (-> :8000)
 // in development and the same origin in production.
@@ -71,7 +71,7 @@ export class ApiError extends Error {
 }
 
 // ---- Session auth (RBAC) -------------------------------------------------
-// The login session lives in an HttpOnly `vo_session` cookie set by the server (see auth.rs), sent
+// The login session lives in an HttpOnly `heldar_session` cookie set by the server (see auth.rs), sent
 // automatically on every request via `credentials: "include"` — including the media plane
 // (<img>/<video>/HLS), since the SPA is same-origin with the API. The cookie is NOT readable by JS,
 // so it cannot be exfiltrated by XSS, and it survives reloads / new tabs. We deliberately do NOT

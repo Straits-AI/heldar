@@ -1,13 +1,13 @@
-# VisionOps Core — Operator Dashboard
+# Heldar Core — Operator Dashboard
 
-A dark, dense, operator-focused control plane for the VisionOps Core media kernel
+A dark, dense, operator-focused control plane for the Heldar Core media kernel
 (camera registry, RTSP ingest, segment recording, timeline, playback/clip/snapshot,
 live view, health). Built with React + Vite + TypeScript, Tailwind CSS,
 react-router-dom, and hls.js.
 
 ## Prerequisites
 
-The VisionOps Core API (Rust/Axum) must be running on `http://localhost:8000`.
+The Heldar Core API (Rust/Axum) must be running on `http://localhost:8000`.
 For live view, MediaMTX should be running (the core returns HLS URLs that point at it).
 
 ## Run

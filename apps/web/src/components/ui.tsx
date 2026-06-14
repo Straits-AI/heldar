@@ -1,4 +1,4 @@
-// VisionOps Core — shared UI primitives (Operations console / SOC).
+// Heldar Core — shared UI primitives (Operations console / SOC).
 // Phase 2 page clusters import from here; keep these names + signatures stable.
 
 import type {

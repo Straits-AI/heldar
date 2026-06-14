@@ -1,4 +1,4 @@
-// VisionOps Core — Stage 3 zone + detection surface for a single camera.
+// Heldar Core — Stage 3 zone + detection surface for a single camera.
 //
 // Renders the live AI-sampled frame as an editable canvas: click to draw a
 // polygon zone (normalized 0..1), name/classify/save it (POST); list existing

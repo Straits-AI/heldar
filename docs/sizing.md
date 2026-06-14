@@ -1,4 +1,4 @@
-# VisionOps Sizing Guide — Server, Storage, Bandwidth, AI
+# Heldar Sizing Guide — Server, Storage, Bandwidth, AI
 
 This guide turns the sizing model from `memo.md` §13 and the deployment topology from
 `memo.md` §12 into worked numbers you can plan a deployment against. Every formula and the
@@ -8,7 +8,7 @@ The four things you size for a camera deployment:
 
 1. **Network bandwidth** — can the LAN/switch/uplink carry the streams.
 2. **Storage** — how much disk the recordings consume per day, and over a retention window.
-3. **Recording footprint cap** — the VisionOps soft ceiling that keeps disk from filling.
+3. **Recording footprint cap** — the Heldar soft ceiling that keeps disk from filling.
 4. **AI pixel workload** — how much pixel throughput the AI tier must process (later stages).
 
 ---
@@ -108,26 +108,26 @@ Reference table at **1080p @ 4 Mbps** (1 TB = 1000 GB, matching the decimal 10.8
 
 ---
 
-## 3. Recording footprint cap in VisionOps
+## 3. Recording footprint cap in Heldar
 
-VisionOps does **not** record blindly until the disk is full. The core
-(`crates/visionops-kernel/src/services/retention.rs`) runs a retention sweeper that enforces two policies
+Heldar does **not** record blindly until the disk is full. The core
+(`crates/heldar-kernel/src/services/retention.rs`) runs a retention sweeper that enforces two policies
 on every pass.
 
 ### The two retention controls
 
 | Control | Where set | Scope | Default |
 | ------- | --------- | ----- | ------- |
-| `retention_hours` | per camera (DB column, settable via the camera API; falls back to `VISIONOPS_DEFAULT_RETENTION_HOURS`) | one camera | 24 h |
-| `VISIONOPS_MAX_RECORDINGS_GB` | environment variable | whole install | 20 GB |
+| `retention_hours` | per camera (DB column, settable via the camera API; falls back to `HELDAR_DEFAULT_RETENTION_HOURS`) | one camera | 24 h |
+| `HELDAR_MAX_RECORDINGS_GB` | environment variable | whole install | 20 GB |
 
-`VISIONOPS_MAX_RECORDINGS_GB` is parsed in `crates/visionops-kernel/src/config.rs` into
+`HELDAR_MAX_RECORDINGS_GB` is parsed in `crates/heldar-kernel/src/config.rs` into
 `max_recordings_bytes` (GB × 1024³) and surfaced in the system status endpoint as
 `max_recordings_gb`.
 
 ### How a sweep works
 
-The sweeper runs every `VISIONOPS_RETENTION_INTERVAL_S` (default 300 s, floor 30 s) and does
+The sweeper runs every `HELDAR_RETENTION_INTERVAL_S` (default 300 s, floor 30 s) and does
 two passes in order:
 
 1. **Age-based, per camera.** For each camera, delete unlocked segments whose `end_time` is
@@ -144,7 +144,7 @@ the cap with nothing left to prune.
 
 - They are independent gates. **Effective retention = whichever limit bites first.**
   - If disk is roomy, `retention_hours` governs and each camera keeps exactly its window.
-  - If the install is over `VISIONOPS_MAX_RECORDINGS_GB`, the size cap overrides and footage
+  - If the install is over `HELDAR_MAX_RECORDINGS_GB`, the size cap overrides and footage
     gets pruned *before* it reaches `retention_hours`.
 - The size cap is a **global FIFO by end_time, not per camera.** A busy or high-bitrate camera
   can push the install over the cap and cause the oldest segment of a *quiet* camera to be
@@ -156,7 +156,7 @@ Required cap to honor everyone's `retention_hours`:
 
 ```text
 needed_GB ≈ Σ over cameras ( bitrate_Mbps × 10.8 × retention_hours / 24 )
-set VISIONOPS_MAX_RECORDINGS_GB ≥ needed_GB × ~1.15   (headroom for locked clips + variance)
+set HELDAR_MAX_RECORDINGS_GB ≥ needed_GB × ~1.15   (headroom for locked clips + variance)
 ```
 
 Worked: 8 × 1080p cameras at 4 Mbps, all `retention_hours = 12`:
@@ -226,7 +226,7 @@ PoE camera switches → core 10GbE switch → media/recording server
 
 - **Split media and AI onto separate servers.** 10 GbE core once you pass ~64 × 4 Mbps.
 - Storage on a dedicated NAS/array — a 32-cam 1080p site is ~1.38 TB/day (§2).
-- This is where `VISIONOPS_MAX_RECORDINGS_GB` and per-camera `retention_hours` must be tuned
+- This is where `HELDAR_MAX_RECORDINGS_GB` and per-camera `retention_hours` must be tuned
   deliberately, not left at defaults.
 
 ### Large site / campus (§12.3)
@@ -258,7 +258,7 @@ Measured specs of the development machine:
 **Keep retention small here.** With only ~55 GB free, recording is the binding constraint:
 
 - A single 1080p @ 4 Mbps camera burns **43.2 GB/day** (≈ 1.8 GB/hour). The default
-  `VISIONOPS_MAX_RECORDINGS_GB = 20` therefore holds only **~11 camera-hours** at that bitrate —
+  `HELDAR_MAX_RECORDINGS_GB = 20` therefore holds only **~11 camera-hours** at that bitrate —
   the size cap fires long before the default `retention_hours = 24` is reached.
 - Rough capacities at the 20 GB default cap:
 
@@ -269,9 +269,9 @@ Measured specs of the development machine:
 
 Recommended dev settings:
 
-- `VISIONOPS_MAX_RECORDINGS_GB` ≈ **30** (stay well under the ~55 GB free; leave headroom for
+- `HELDAR_MAX_RECORDINGS_GB` ≈ **30** (stay well under the ~55 GB free; leave headroom for
   the OS, DB, clips, and snapshots).
-- `VISIONOPS_DEFAULT_RETENTION_HOURS` ≈ **2–6** for a couple of test cameras.
+- `HELDAR_DEFAULT_RETENTION_HOURS` ≈ **2–6** for a couple of test cameras.
 - Prefer a 720p substream and a low sample FPS for any AI experiments — the 1080 Ti is fine for
   the "manageable" 720p @ 5 FPS profile (§4), not for 4K @ 25 FPS.
 
@@ -301,19 +301,19 @@ Fill in the blanks for your deployment.
 | Storage per camera-day (GB) | `bitrate × 10.8` | _____ |
 | Daily footprint (GB) | `N × bitrate × 10.8` | _____ |
 | Retention footprint (GB) | `daily × retention_hours / 24` | _____ |
-| Recommended `VISIONOPS_MAX_RECORDINGS_GB` | `retention_footprint × 1.15` | _____ |
+| Recommended `HELDAR_MAX_RECORDINGS_GB` | `retention_footprint × 1.15` | _____ |
 | AI pixels/sec | `N × w × h × fps` | _____ |
 
 ### Sanity checks
 
 - [ ] Provisioned bandwidth fits the switch/uplink (1 GbE ≈ 1000 Mbps; go 10 GbE past ~64 cams).
 - [ ] Retention footprint fits the disk/NAS **with** headroom for clips, snapshots, DB, OS.
-- [ ] `VISIONOPS_MAX_RECORDINGS_GB` ≥ retention footprint, or you accept shortened retention.
+- [ ] `HELDAR_MAX_RECORDINGS_GB` ≥ retention footprint, or you accept shortened retention.
 - [ ] AI pixels/sec is in the "manageable" range for the available GPU (≈ 147 M/s on one GPU at
       720p @ 5 FPS per the memo); downscale and sample if not.
 
 ---
 
 *Sources: `memo.md` §12 (deployment topology), §13 (sizing model). Config behavior:
-`crates/visionops-kernel/src/config.rs`, `crates/visionops-kernel/src/services/retention.rs`,
-`crates/visionops-kernel/src/routes/system.rs`.*
+`crates/heldar-kernel/src/config.rs`, `crates/heldar-kernel/src/services/retention.rs`,
+`crates/heldar-kernel/src/routes/system.rs`.*

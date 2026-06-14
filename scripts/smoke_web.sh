@@ -4,7 +4,7 @@
 set -u
 ROOT=/home/soh/cctv
 MTX="$ROOT/infra/mediamtx/mediamtx"
-CORE="$ROOT/target/debug/visionops-core"
+CORE="$ROOT/target/debug/heldar-core"
 REPORT="$ROOT/data/web_smoke.txt"
 LOG="$ROOT/data/web_logs"; mkdir -p "$LOG"
 : > "$REPORT"
@@ -21,7 +21,7 @@ cleanup(){
   pkill -f 'rtsp://127.0.0.1:8554/cam_test' 2>/dev/null
 }
 trap cleanup EXIT
-rm -rf "$ROOT/data/recordings/synth_cam" "$ROOT/data/visionops.db"* 2>/dev/null
+rm -rf "$ROOT/data/recordings/synth_cam" "$ROOT/data/heldar.db"* 2>/dev/null
 
 "$MTX" "$ROOT/infra/mediamtx/mediamtx.yml" >"$LOG/mtx.log" 2>&1 & MTX_PID=$!
 sleep 2
@@ -29,7 +29,7 @@ ffmpeg -nostdin -hide_banner -loglevel warning -re -f lavfi -i "testsrc=size=128
   -c:v libx264 -preset ultrafast -tune zerolatency -g 30 -pix_fmt yuv420p \
   -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/cam_test >"$LOG/synth.log" 2>&1 & SYNTH_PID=$!
 sleep 2
-VISIONOPS_DEFAULT_SEGMENT_SECONDS=10 VISIONOPS_DATA_DIR="$ROOT/data" "$CORE" >"$LOG/core.log" 2>&1 & CORE_PID=$!
+HELDAR_DEFAULT_SEGMENT_SECONDS=10 HELDAR_DATA_DIR="$ROOT/data" "$CORE" >"$LOG/core.log" 2>&1 & CORE_PID=$!
 for _ in $(seq 1 30); do curl -fsS localhost:8000/healthz >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS -X POST localhost:8000/api/v1/cameras -H 'content-type: application/json' \
   -d '{"id":"synth_cam","name":"Synthetic Test Camera","main_stream_url":"rtsp://127.0.0.1:8554/cam_test","segment_seconds":10}' >/dev/null 2>&1

@@ -1,4 +1,4 @@
-# VisionOps — developer commands (Cargo workspace).
+# Heldar — developer commands (Cargo workspace).
 
 .PHONY: build release check fmt test kernel setup-mediamtx dev synth validate web-install web-dev clean
 
@@ -18,7 +18,7 @@ test:                ## Run the test suite
 	cargo test --workspace
 
 kernel:              ## Build the open kernel crate standalone (no proprietary apps)
-	cargo build -p visionops-kernel
+	cargo build -p heldar-kernel
 
 setup-mediamtx:      ## Download the MediaMTX binary into infra/mediamtx/
 	bash scripts/setup_mediamtx.sh

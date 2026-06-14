@@ -1,4 +1,4 @@
-// VisionOps Core — Stage 7 "Semantic Search" console.
+// Heldar Core — Stage 7 "Semantic Search" console.
 // One natural-language box over the kernel's stored facts (entry / zone / breach events). The planner
 // (rules, or an optional LLM) ONLY decides *how to query* — it never answers. The answer is always the
 // executed query's rows. So the trust surface here is two-fold: the interpreted plan (the single

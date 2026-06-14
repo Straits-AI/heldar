@@ -1,4 +1,4 @@
-# VisionOps Core — Roadmap
+# Heldar Core — Roadmap
 
 > **Thesis:** Camera streams become structured events → events become workflows → workflows become operational intelligence.
 > We build the **media kernel first**, then AI as plugins on top, then vertical apps. The long arc (see `research.md`) is to turn continuous video into a **compressed, queryable, verifiable world memory** of a physical space — so analytical intent can be defined *after* collection, not before.
@@ -32,7 +32,7 @@ Maturity ladder (research.md §5): **L1** task-specific analytics (industry base
 
 ## ✅ Stage 0 — Media kernel MVP  — **DONE**
 
-Goal (memo §14): *own the base VMS.* Record compressed packets without decode; index, play back, export, and keep cameras healthy. Built in `crates/visionops-kernel` (Rust / Axum / Tokio / SQLx-SQLite) with MediaMTX + FFmpeg as the media engine.
+Goal (memo §14): *own the base VMS.* Record compressed packets without decode; index, play back, export, and keep cameras healthy. Built in `crates/heldar-kernel` (Rust / Axum / Tokio / SQLx-SQLite) with MediaMTX + FFmpeg as the media engine.
 
 **Shipped checklist** (memo §14 build list + §16 immediate technical actions):
 
@@ -71,8 +71,8 @@ Goal (memo §14): *own the base VMS.* Record compressed packets without decode; 
 - [x] **Stream metrics** — observed `fps_observed` + `bitrate_kbps` computed per indexed segment and stored on `camera_status`, surfaced via the health API and (bitrate) Prometheus. (`services/indexer.rs`, `repo.rs`, `routes/health.rs`)
 - [x] **Disk / storage health monitor** — `statvfs` free-space, recordings footprint, recent write rate, and free-disk-fill projection in the `/api/v1/system` `storage` block; `disk_pressure` events on pressure. (`services/storage.rs`, `routes/system.rs`)
 - [x] **Prometheus metrics + liveness/readiness** — `GET /metrics` (system + per-camera gauges/counters), `GET /healthz` (liveness), `GET /readyz` (readiness, 200/503 on DB reachability). (`services/metrics.rs`, `routes/metrics.rs`, `routes/health.rs`)
-- [x] **Alerting** — `VISIONOPS_ALERT_WEBHOOK_URL` notifier POSTs warning/critical events as JSON; starts-from-now (no replay on boot), retries on transport failure. (`services/notifier.rs`)
-- [x] **Disk-free retention floor** — `VISIONOPS_MIN_FREE_DISK_GB` hard floor prunes oldest *unlocked* segments when the filesystem gets tight, on top of the age policy + `VISIONOPS_MAX_RECORDINGS_GB` size cap; evidence-lock honored throughout. (`services/retention.rs`)
+- [x] **Alerting** — `HELDAR_ALERT_WEBHOOK_URL` notifier POSTs warning/critical events as JSON; starts-from-now (no replay on boot), retries on transport failure. (`services/notifier.rs`)
+- [x] **Disk-free retention floor** — `HELDAR_MIN_FREE_DISK_GB` hard floor prunes oldest *unlocked* segments when the filesystem gets tight, on top of the age policy + `HELDAR_MAX_RECORDINGS_GB` size cap; evidence-lock honored throughout. (`services/retention.rs`)
 - [x] **Service watchdog / auto-restart** — `spawn_supervised` respawns the indexer / health / retention / notifier loops 5 s after any return or panic. (`main.rs`)
 
 **Deferred (rolls into later edge/cloud work):**
@@ -100,7 +100,7 @@ Goal (memo §14): *own the base VMS.* Record compressed packets without decode; 
 **Shipped checklist:**
 
 - [x] **Substream frame sampler** — one supervised FFmpeg per AI-enabled camera, `-vf fps=<budgeted>,scale=<width>:-2` → `frames/<cam>/latest.jpg` (`-update 1`, overwritten in place). Decode happens **only** here; the recorder's 24/7 `-c copy` path stays decode-free. Sub-stream preferred (falls back to record URL); crash → `offline` + `sampler_offline` event + exponential backoff. (`services/sampler.rs`)
-- [x] **FPS budgeting + task model** — global `VISIONOPS_AI_MAX_TOTAL_FPS` (default 40) split across active cameras: per-camera `effective = min(MAX(task.fps), budget/active)`, floored at `MIN_FPS=0.5`. `ai_tasks` carries `task_type / enabled / stream_profile / fps / width / config`; any create/update/delete triggers `reconcile()` → rebalance. (`services/sampler.rs`, `routes/ai.rs`, `migrations/0003_ai.sql`, `models.rs`)
+- [x] **FPS budgeting + task model** — global `HELDAR_AI_MAX_TOTAL_FPS` (default 40) split across active cameras: per-camera `effective = min(MAX(task.fps), budget/active)`, floored at `MIN_FPS=0.5`. `ai_tasks` carries `task_type / enabled / stream_profile / fps / width / config`; any create/update/delete triggers `reconcile()` → rebalance. (`services/sampler.rs`, `routes/ai.rs`, `migrations/0003_ai.sql`, `models.rs`)
 - [x] **Frame delivery to workers (not raw RTSP)** — `GET /api/v1/cameras/{id}/frame` serves the latest sampled JPEG with `x-frame-age-ms` + `x-frame-captured-at` freshness headers; `GET /api/v1/ai/tasks` is worker discovery (each task + its `frame_url`); `GET /api/v1/ai/samplers` reports per-camera state + effective fps. (`routes/ai.rs`)
 - [x] **Detections / events ingestion** — `POST /api/v1/ai/events` writes detections (`bbox` normalized `[x,y,w,h]` 0…1, `track_id`, `attributes`) and an optional event through the **same** `events`/notifier path as the kernel, so `warning`/`critical` AI events reuse the Stage 1 alert webhook. `GET /api/v1/cameras/{id}/detections` queries them. (`routes/ai.rs`, `repo.rs`, `migrations/0003_ai.sql`)
 - [x] **Backpressure** — implemented as a **static** proportional fps split (adding AI cameras degrades per-camera fps, not the host). (`services/sampler.rs`)
@@ -192,7 +192,7 @@ integrator guide: [`docs/CAMPUS-ENTRY.md`](docs/CAMPUS-ENTRY.md); implementation
 **Shipped checklist:**
 
 - [x] **Visitor pre-registration + guard-booth check-in (operator dashboard surface)** — `visitor_passes` (auto `V-XXXXXX` code, validity window, `active→checked_in→checked_out`/`revoked` lifecycle) + check-in/out endpoints that also write a manual `visitor_checkin`/`visitor_checkout` entry event. Full CRUD API for the booth UI. (`routes/entry.rs`, `migrations/0005_entry.sql`)
-- [x] **ANPR / ALPR** — vehicle→plate→OCR (worker `AnprAnalyzer`) → **server-time temporal voting** per `(camera,track)` → format/plausibility validate → registry lookup, committing **one** canonical event per vehicle. Plate/pass = **primary** identity anchor; voting is on the plate (min `VISIONOPS_ANPR_MIN_VOTES`, default 3) with commit-on-prune for fast passers. (`services/anpr.rs`, `apps/ai/worker.py`)
+- [x] **ANPR / ALPR** — vehicle→plate→OCR (worker `AnprAnalyzer`) → **server-time temporal voting** per `(camera,track)` → format/plausibility validate → registry lookup, committing **one** canonical event per vehicle. Plate/pass = **primary** identity anchor; voting is on the plate (min `HELDAR_ANPR_MIN_VOTES`, default 3) with commit-on-prune for fast passers. (`services/anpr.rs`, `apps/ai/worker.py`)
 - [x] **Vehicle attributes (type → color → make → model)** — **secondary** verification + search metadata only: the engine compares **color + vehicle_type** for mismatch (→ *exception for guard review*, never auto-reject); make/model is assistive and never a hard access decision (memo §7.4/§15.4). The reference worker emits type + color (no make/model classifier yet). (`services/anpr.rs::check_mismatch`, `apps/ai/worker.py`)
 - [x] **Daily entry logs · exception reports · audit reports** — `GET /reports/entry-log` (window + `by_auth_status` counts), `GET /reports/exceptions` (blocked/exception/unmatched/rejected), `GET /audit` (immutable action log, manager+). (`routes/entry.rs`)
 - [x] **Role matrix (RBAC) + API integration layer** — five roles (`admin`/`manager`/`guard`/`viewer`/`integration`) × five capabilities; opaque `vos_` sessions + `vok_` API keys (SHA-256 at rest, argon2id passwords); `auth_enabled` gating with a synthetic system admin when off; env bootstrap admin. API keys (`X-API-Key` / `Bearer`) are the integration seam for the worker + external callers. (`auth.rs`, `routes/auth.rs`)
@@ -251,7 +251,7 @@ task pending local footage (see deferrals).
 **Goal:** retail behaviour analytics on the **same kernel**, different ontology.
 Diagnosis-oriented, **anonymous by construction (no identity, no faces, no plates).**
 (memo §7.7, §14; research.md §24 MVP, Stage 1) Built as the second **vertical app**
-(`crates/visionops-bakery`) — **not** a detection consumer on the hot path, but a
+(`crates/heldar-bakery`) — **not** a detection consumer on the hot path, but a
 **rollup loop + report generator** reading the kernel's stored `zone_events` +
 `detections`, **composed (not welded)** into the server with its own schema/config/
 rollup/retention/routes. Operator/integrator guide:
@@ -317,9 +317,9 @@ or crashed rollup cannot affect recording/ingest/live view. **Open:** detector/t
 
 ## ✅ Stage 6 — ReID & movement intelligence (client Phase 2)  — **DONE**
 
-**Goal:** cross-camera movement = client's "Movement intelligence" / VisionOps Security.
+**Goal:** cross-camera movement = client's "Movement intelligence" / Heldar Security.
 (memo §2 Phase 2, §7.5–7.6, §15.5, §14) Built as a third **vertical app**
-(`crates/visionops-movement`) — the **same kernel, cross-camera**. Like BakerySense it is
+(`crates/heldar-movement`) — the **same kernel, cross-camera**. Like BakerySense it is
 **not** a detection consumer on the hot path, but a **correlation layer**: two
 `spawn_supervised` loops (a ReID candidate **proposer** + a red-zone breach **rule
 engine**) plus an on-demand trigger/search surface, reading the kernel's + Campus Entry's
@@ -334,7 +334,7 @@ with its own schema/config/loops/retention/routes. Operator/integrator guide:
   (resolved by Campus Entry) and fused with transit-time plausibility + colour/type
   agreement over the topology graph: `score_pair` = `0.8` plate anchor `±` transit (`+0.10`
   in-window / `+0.05` ≤2× / else 0) `±` colour (`+0.05`/`−0.10`) `±` type (`+0.05`/`−0.10`),
-  proposed at `≥ VISIONOPS_MOVEMENT_MIN_SCORE` (default 0.5). Person ReID has no plate/no
+  proposed at `≥ HELDAR_MOVEMENT_MIN_SCORE` (default 0.5). Person ReID has no plate/no
   embedding, so it is **never auto-proposed** — only the weak topology+time search (§5).
   (`reid.rs::score_pair` / `propose_vehicle_candidates`, `routes.rs::search_person`)
 - [x] **Multi-camera topology graph + movement trails** — `camera_links` operator-defined
@@ -343,7 +343,7 @@ with its own schema/config/loops/retention/routes. Operator/integrator guide:
   (`trail_for_plate`). Full CRUD API (manage-gated). (`schema.sql`, `routes.rs`,
   `reid.rs::trail_for_plate`)
 - [x] **Red/green zone breach alerts (rule engine)** — `breach::sweep()` resolves red zones
-  by `kind` (`VISIONOPS_MOVEMENT_RED_ZONE_KINDS`, default `restricted,red`), records one
+  by `kind` (`HELDAR_MOVEMENT_RED_ZONE_KINDS`, default `restricted,red`), records one
   `breach_alerts` incident per zone `enter` event (`ON CONFLICT(zone_event_id) DO NOTHING`
   dedup), correlates `track_id → plate` within ±5 min, and is worked open → acknowledged →
   resolved. **Complements** the kernel's existing restricted-zone webhook (it adds the
@@ -359,7 +359,7 @@ with its own schema/config/loops/retention/routes. Operator/integrator guide:
 proposes vehicle candidates (same plate on two linked cameras within a plausible transit
 window, fused-scored) into a `pending` review queue, and the breach loop turns
 restricted-zone entries into deduped, subject-correlated incidents — both on
-`VISIONOPS_MOVEMENT_INTERVAL_S`, or via `POST /api/v1/movement/run`. An operator reviews
+`HELDAR_MOVEMENT_INTERVAL_S`, or via `POST /api/v1/movement/run`. An operator reviews
 candidates (`confirm`/`reject`), works breaches (`ack`/`resolve`), and runs audited plate /
 person searches; the design (two supervised loops over stored kernel/Entry tables, own
 SQLite schema, own retention off the ingest hot path) means a slow or crashed loop cannot
@@ -414,7 +414,7 @@ is unbenchmarked on local footage — the human review gate is the safeguard (se
 
 **Goal:** searchable visual event memory — *who/what/where/when/confidence/evidence/workflow.*
 (memo §9, §14; research.md Stage 3–4) Built as a fourth **vertical app**
-(`crates/visionops-search`) — and the most "composed, not welded" of all: **not** a
+(`crates/heldar-search`) — and the most "composed, not welded" of all: **not** a
 `DetectionConsumer` and **not** even a background loop, but a **read-only query layer over
 kernel facts** (three HTTP routes + one query log) reading the tables Stages 3/4/6 already
 wrote (`entry_events`, `zone_events`, `breach_alerts`). One governing principle: **the LLM
@@ -471,7 +471,7 @@ retrieval seam (search-by-image) is documented, not built (see deferrals).
   deterministic aggregates, **not** generated prose (the LLM plans, it never narrates the
   answer).
 - [ ] **LLM planner is optional and untested without a live endpoint** — exercised only when
-  `VISIONOPS_SEARCH_LLM_URL` is configured; the default and fallback path is the rule parser.
+  `HELDAR_SEARCH_LLM_URL` is configured; the default and fallback path is the rule parser.
 - [ ] **Rule parser is best-effort** — it recognizes its keyword patterns (colour/type/
   subject/auth/source/event, relative dates, time-of-day, camera names, plate token) and
   leaves the rest to the default window; it cannot express dwell thresholds or

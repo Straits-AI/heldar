@@ -1,5 +1,5 @@
 /** @type {import('tailwindcss').Config} */
-// VisionOps Core — "Operations console / SOC" design tokens.
+// Heldar Core — "Operations console / SOC" design tokens.
 // Industrial, utilitarian, dark, signal-driven. Always dark (no light theme).
 export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],

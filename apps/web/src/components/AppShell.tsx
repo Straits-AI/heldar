@@ -1,4 +1,4 @@
-// VisionOps Core — application shell: left nav rail + top telemetry status bar.
+// Heldar Core — application shell: left nav rail + top telemetry status bar.
 // The telemetry bar polls GET /api/v1/system (~5s) and renders live operations data.
 
 import { useEffect, useState } from "react";
@@ -200,7 +200,7 @@ function NavRail({ version }: { version?: string }) {
         </span>
         <div className="leading-none">
           <div className="font-display text-[15px] font-extrabold tracking-wider text-fg">
-            VISIONOPS
+            HELDAR
           </div>
           <div className="mt-1 font-mono text-[9px] uppercase tracking-micro text-accent">
             Core

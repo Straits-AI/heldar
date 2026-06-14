@@ -1,6 +1,6 @@
-// TypeScript mirror of the VisionOps HTTP API contract (serde JSON).
-// Field names match the Rust structs in crates/visionops-kernel/src/{models.rs,routes/*} (kernel)
-// and crates/visionops-entry/src/{models.rs,routes.rs} (Campus Entry app).
+// TypeScript mirror of the Heldar HTTP API contract (serde JSON).
+// Field names match the Rust structs in crates/heldar-kernel/src/{models.rs,routes/*} (kernel)
+// and crates/heldar-entry/src/{models.rs,routes.rs} (Campus Entry app).
 
 export type CameraStatusState =
   | "disabled"

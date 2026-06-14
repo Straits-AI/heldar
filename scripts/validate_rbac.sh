@@ -14,16 +14,16 @@ code(){ curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
 cd /home/soh/cctv
 log "== starting auth-enabled core on :$PORT (temp db $TMP) =="
-VISIONOPS_AUTH_ENABLED=true \
-VISIONOPS_BOOTSTRAP_ADMIN_USER=admin \
-VISIONOPS_BOOTSTRAP_ADMIN_PASSWORD=supersecret123 \
-VISIONOPS_DATA_DIR="$TMP" \
-VISIONOPS_DATABASE_URL="sqlite://$TMP/rbac.db" \
-VISIONOPS_API_PORT=$PORT \
-VISIONOPS_RECORDER_ENABLED=false \
-VISIONOPS_AI_ENABLED=false \
-VISIONOPS_MEDIAMTX_API_URL=http://127.0.0.1:65599 \
-./target/debug/visionops-core >"$TMP/core.log" 2>&1 &
+HELDAR_AUTH_ENABLED=true \
+HELDAR_BOOTSTRAP_ADMIN_USER=admin \
+HELDAR_BOOTSTRAP_ADMIN_PASSWORD=supersecret123 \
+HELDAR_DATA_DIR="$TMP" \
+HELDAR_DATABASE_URL="sqlite://$TMP/rbac.db" \
+HELDAR_API_PORT=$PORT \
+HELDAR_RECORDER_ENABLED=false \
+HELDAR_AI_ENABLED=false \
+HELDAR_MEDIAMTX_API_URL=http://127.0.0.1:65599 \
+./target/debug/heldar-core >"$TMP/core.log" 2>&1 &
 CORE_PID=$!
 trap 'kill $CORE_PID 2>/dev/null; rm -rf "$TMP"' EXIT
 

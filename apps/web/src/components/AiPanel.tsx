@@ -1,4 +1,4 @@
-// VisionOps Core — Stage 2 AI surface for a single camera.
+// Heldar Core — Stage 2 AI surface for a single camera.
 // Lists this camera's AI tasks (toggle / delete), an "Add AI task" form, the live
 // sampled-frame preview with detection-bbox overlay, and a recent-detections feed.
 

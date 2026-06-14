@@ -1,9 +1,9 @@
 {
-  "name": "visionops-web",
+  "name": "heldar-web",
   "private": true,
   "version": "0.1.0",
   "type": "module",
-  "description": "VisionOps Core operator dashboard",
+  "description": "Heldar Core operator dashboard",
   "scripts": {
     "dev": "vite",
     "typecheck": "tsc --noEmit",

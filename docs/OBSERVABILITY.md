@@ -1,11 +1,11 @@
-# VisionOps Core — Observability & Reliability (Stage 1)
+# Heldar Core — Observability & Reliability (Stage 1)
 
-Operator / SRE guide to running VisionOps Core unattended: how to check that it is
+Operator / SRE guide to running Heldar Core unattended: how to check that it is
 alive, how to scrape its metrics, how to get paged when a camera or disk goes bad,
 and how recordings are kept inside their storage budget without ever deleting
 evidence.
 
-This document is **grounded in the code as built** (`crates/visionops-kernel/src`). Endpoint
+This document is **grounded in the code as built** (`crates/heldar-kernel/src`). Endpoint
 shapes, metric names, event types, and env vars below are the real ones — if a
 field or metric is not listed here, it is not emitted. The authoritative sources
 are: `routes/health.rs`, `routes/system.rs`, `routes/recordings.rs`,
@@ -20,7 +20,7 @@ recording gaps explainable, operable by a non-developer).
 
 ## 1. Probe & telemetry endpoints
 
-All served by the same Axum process on `VISIONOPS_API_PORT` (default `8000`).
+All served by the same Axum process on `HELDAR_API_PORT` (default `8000`).
 
 | Method | Path | Purpose | Status codes |
 |---|---|---|---|
@@ -49,7 +49,7 @@ All served by the same Axum process on `VISIONOPS_API_PORT` (default `8000`).
 
 ```json
 {
-  "name": "VisionOps Core",
+  "name": "Heldar Core",
   "version": "…",
   "uptime_seconds": 1234,
   "recordings_bytes": 10737418240,
@@ -73,7 +73,7 @@ All served by the same Axum process on `VISIONOPS_API_PORT` (default `8000`).
 
 | Field | Source | Meaning |
 |---|---|---|
-| `disk` | `statvfs(VISIONOPS_RECORDINGS_DIR)` | Filesystem totals, or **`null`** if statvfs fails. `free_bytes` is `f_bavail` (space usable by a non-root user — what we can actually write). |
+| `disk` | `statvfs(HELDAR_RECORDINGS_DIR)` | Filesystem totals, or **`null`** if statvfs fails. `free_bytes` is `f_bavail` (space usable by a non-root user — what we can actually write). |
 | `recordings_bytes` | `SUM(size_bytes)` over `segments` | Indexed recording footprint (not raw disk usage). |
 | `segment_count` | `COUNT(*)` over `segments` | Number of indexed segments. |
 | `oldest_segment` / `newest_segment` | `MIN(start_time)` / `MAX(end_time)` | Coverage window of the index. |
@@ -95,22 +95,22 @@ metric** on `/metrics` (observed fps is available per-camera via the health API,
 
 | Metric | Type | Labels | Description |
 |---|---|---|---|
-| `visionops_build_info` | gauge | `version` | Always `1`; carries the build version label. |
-| `visionops_cameras_total` | gauge | — | Registered cameras. |
-| `visionops_cameras_recording` | gauge | — | Cameras whose status row is `state = 'recording'`. |
-| `visionops_segments_total` | gauge | — | Indexed recording segments. |
-| `visionops_recordings_bytes` | gauge | — | Total bytes of recorded segments (`SUM(size_bytes)`). |
-| `visionops_disk_total_bytes` | gauge | — | Total bytes on the recordings filesystem. *Omitted if statvfs fails.* |
-| `visionops_disk_free_bytes` | gauge | — | Free bytes on the recordings filesystem (`f_bavail`). *Omitted if statvfs fails.* |
-| `visionops_disk_used_percent` | gauge | — | Used percent of the recordings filesystem. *Omitted if statvfs fails.* |
-| `visionops_camera_up` | gauge | `camera`, `state` | `1` when that camera's state is `recording`, else `0`. One series per camera. |
-| `visionops_camera_reconnects_total` | counter | `camera` | Recorder reconnect count (from `camera_status.reconnect_count`). |
-| `visionops_camera_segments_written` | counter | `camera` | Segments written by the recorder. |
-| `visionops_camera_bitrate_kbps` | gauge | `camera` | Observed bitrate of the last indexed segment. *Only emitted when known.* |
-| `visionops_camera_last_segment_age_seconds` | gauge | `camera` | Seconds since the last indexed segment. *Only emitted when a segment exists.* |
+| `heldar_build_info` | gauge | `version` | Always `1`; carries the build version label. |
+| `heldar_cameras_total` | gauge | — | Registered cameras. |
+| `heldar_cameras_recording` | gauge | — | Cameras whose status row is `state = 'recording'`. |
+| `heldar_segments_total` | gauge | — | Indexed recording segments. |
+| `heldar_recordings_bytes` | gauge | — | Total bytes of recorded segments (`SUM(size_bytes)`). |
+| `heldar_disk_total_bytes` | gauge | — | Total bytes on the recordings filesystem. *Omitted if statvfs fails.* |
+| `heldar_disk_free_bytes` | gauge | — | Free bytes on the recordings filesystem (`f_bavail`). *Omitted if statvfs fails.* |
+| `heldar_disk_used_percent` | gauge | — | Used percent of the recordings filesystem. *Omitted if statvfs fails.* |
+| `heldar_camera_up` | gauge | `camera`, `state` | `1` when that camera's state is `recording`, else `0`. One series per camera. |
+| `heldar_camera_reconnects_total` | counter | `camera` | Recorder reconnect count (from `camera_status.reconnect_count`). |
+| `heldar_camera_segments_written` | counter | `camera` | Segments written by the recorder. |
+| `heldar_camera_bitrate_kbps` | gauge | `camera` | Observed bitrate of the last indexed segment. *Only emitted when known.* |
+| `heldar_camera_last_segment_age_seconds` | gauge | `camera` | Seconds since the last indexed segment. *Only emitted when a segment exists.* |
 
 The disk gauges are conditional on `statvfs` succeeding for
-`VISIONOPS_RECORDINGS_DIR`; the per-camera bitrate / last-segment-age gauges are
+`HELDAR_RECORDINGS_DIR`; the per-camera bitrate / last-segment-age gauges are
 conditional on those values being present. Alerting rules must tolerate the series
 being absent (use `absent()` or `unless`, or alert on the camera-up signal).
 
@@ -119,11 +119,11 @@ being absent (use `absent()` or `unless`, or alert on the camera-up signal).
 ```yaml
 # prometheus.yml
 scrape_configs:
-  - job_name: visionops-core
+  - job_name: heldar-core
     metrics_path: /metrics
     scrape_interval: 30s
     static_configs:
-      - targets: ['127.0.0.1:8000']   # VISIONOPS_API_HOST:VISIONOPS_API_PORT
+      - targets: ['127.0.0.1:8000']   # HELDAR_API_HOST:HELDAR_API_PORT
         labels:
           site: edge-1
 ```
@@ -138,35 +138,35 @@ to be up".
 ```yaml
 # alerts.yml
 groups:
-  - name: visionops
+  - name: heldar
     rules:
       # 1) Camera down — recorder not in the 'recording' state for 5 minutes.
-      - alert: VisionOpsCameraDown
-        expr: visionops_camera_up == 0
+      - alert: HeldarCameraDown
+        expr: heldar_camera_up == 0
         for: 5m
         labels: { severity: warning }
         annotations:
           summary: "Camera {{ $labels.camera }} is not recording (state={{ $labels.state }})"
 
       # 2) Disk low — recordings filesystem under 10% free.
-      - alert: VisionOpsDiskLow
-        expr: visionops_disk_used_percent > 90
+      - alert: HeldarDiskLow
+        expr: heldar_disk_used_percent > 90
         for: 10m
         labels: { severity: critical }
         annotations:
           summary: "Recordings disk over 90% used"
 
       # 3) Stale segments — a recording camera that hasn't produced a segment in 3 min.
-      - alert: VisionOpsStaleSegments
-        expr: visionops_camera_last_segment_age_seconds > 180 and on(camera) visionops_camera_up == 1
+      - alert: HeldarStaleSegments
+        expr: heldar_camera_last_segment_age_seconds > 180 and on(camera) heldar_camera_up == 1
         for: 2m
         labels: { severity: warning }
         annotations:
           summary: "Camera {{ $labels.camera }} stalled: no new segment in >3m"
 
       # 4) Recording gap proxy — segment counter flat while the camera is up.
-      - alert: VisionOpsNoSegmentProgress
-        expr: increase(visionops_camera_segments_written[10m]) == 0 and on(camera) visionops_camera_up == 1
+      - alert: HeldarNoSegmentProgress
+        expr: increase(heldar_camera_segments_written[10m]) == 0 and on(camera) heldar_camera_up == 1
         for: 10m
         labels: { severity: warning }
         annotations:
@@ -180,16 +180,16 @@ groups:
 `services/notifier.rs` runs as a supervised background loop that pushes
 **warning/critical events** to an external webhook as they happen.
 
-- **Enable it** by setting `VISIONOPS_ALERT_WEBHOOK_URL`. If unset/blank, the
+- **Enable it** by setting `HELDAR_ALERT_WEBHOOK_URL`. If unset/blank, the
   notifier logs `alerting disabled` and is a no-op.
-- **Poll cadence**: `VISIONOPS_NOTIFIER_INTERVAL_S` (default `15`, floored at 5s).
+- **Poll cadence**: `HELDAR_NOTIFIER_INTERVAL_S` (default `15`, floored at 5s).
 - **HTTP**: `POST` JSON with a 10-second client timeout.
 
 ### Payload shape (one POST per event)
 
 ```json
 {
-  "source":     "visionops-core",
+  "source":     "heldar-core",
   "event_id":   "…",
   "event_type": "camera_offline",
   "severity":   "warning",
@@ -259,7 +259,7 @@ the camera's indexed segments into availability ranges (segments closer than the
 
 `from` / `to` are optional (RFC 3339); each side is open-ended if omitted. Only
 holes larger than the 2 s coalescing tolerance are reported. Pair this endpoint
-with a `recording_gap` event or a `VisionOpsNoSegmentProgress` alert to answer
+with a `recording_gap` event or a `HeldarNoSegmentProgress` alert to answer
 "*why* is there a gap" by cross-referencing `camera_offline` / `recorder_error`
 events over the same window.
 
@@ -284,7 +284,7 @@ segments_written, fps_observed, bitrate_kbps, last_error, recorder_pid, updated_
 ```
 
 States: `recording`, `connecting`, `offline`, `error`, `disabled`. Only
-`bitrate_kbps` is mirrored to Prometheus (`visionops_camera_bitrate_kbps`);
+`bitrate_kbps` is mirrored to Prometheus (`heldar_camera_bitrate_kbps`);
 `fps_observed` is health-API-only.
 
 ---
@@ -293,17 +293,17 @@ States: `recording`, `connecting`, `offline`, `error`, `disabled`. Only
 
 Two independent ceilings protect storage, on top of per-camera age policy. The
 retention sweeper (`services/retention.rs`) runs every
-`VISIONOPS_RETENTION_INTERVAL_S` (default `300`, floored at 30 s) and applies three
+`HELDAR_RETENTION_INTERVAL_S` (default `300`, floored at 30 s) and applies three
 phases **in order**:
 
 1. **Age policy (per camera).** Deletes *unlocked* segments whose `end_time` is
    older than the camera's `retention_hours`. Logs `retention_delete` (info).
-2. **Global size cap — `VISIONOPS_MAX_RECORDINGS_GB`** (default `20`). A *soft cap*
+2. **Global size cap — `HELDAR_MAX_RECORDINGS_GB`** (default `20`). A *soft cap*
    on total recording footprint. The deletable budget is
    `max_recordings_bytes − locked_bytes`; the oldest *unlocked* segments (by
    `end_time`, in batches of 20) are pruned until the unlocked footprint fits the
    budget. Logs `disk_pressure` (warning).
-3. **Disk-free floor — `VISIONOPS_MIN_FREE_DISK_GB`** (default `5`). A *hard floor*
+3. **Disk-free floor — `HELDAR_MIN_FREE_DISK_GB`** (default `5`). A *hard floor*
    on free space on the recordings filesystem (measured with `statvfs`). While
    free space is below the floor, the oldest *unlocked* segments are pruned (batches
    of 20, capped at 200 iterations per sweep) until back above it. Logs
@@ -317,9 +317,9 @@ phases **in order**:
 | Kind | Soft cap (footprint budget) | Hard floor (host protection) |
 | Triggers when | Unlocked footprint exceeds `cap − locked_bytes` | Free disk drops below the floor |
 | Severity | `disk_pressure` / warning | `disk_pressure` / critical |
-| Protects against | VisionOps hoarding disk | Anything (incl. other apps) filling the disk and breaking recording |
+| Protects against | Heldar hoarding disk | Anything (incl. other apps) filling the disk and breaking recording |
 
-Run both: the size cap keeps VisionOps inside its own budget; the floor is a
+Run both: the size cap keeps Heldar inside its own budget; the floor is a
 backstop that fires regardless of the cap if the underlying disk gets tight (e.g.
 something else on the box consumed space).
 
@@ -367,25 +367,25 @@ logs a `camera_offline` event).
   `reconnect_count`, `last_segment_at`
 - **Recent faults?** `GET /api/v1/events?severity=warning` (or `critical`)
 - **Coverage holes?** `GET /api/v1/cameras/{id}/gaps?from=…&to=…`
-- **Get paged automatically?** set `VISIONOPS_ALERT_WEBHOOK_URL` and/or scrape
+- **Get paged automatically?** set `HELDAR_ALERT_WEBHOOK_URL` and/or scrape
   `/metrics` with the rules in §2.
 
 ---
 
 ## 9. Relevant configuration
 
-All `VISIONOPS_*` env vars (see `.env.example` / `config.rs`):
+All `HELDAR_*` env vars (see `.env.example` / `config.rs`):
 
 | Var | Default | Used by |
 |---|---|---|
-| `VISIONOPS_MAX_RECORDINGS_GB` | `20` | size cap (retention §6) |
-| `VISIONOPS_MIN_FREE_DISK_GB` | `5` | disk-free floor (retention §6) |
-| `VISIONOPS_ALERT_WEBHOOK_URL` | *(unset)* | notifier — unset disables alerting (§3) |
-| `VISIONOPS_NOTIFIER_INTERVAL_S` | `15` (min 5) | notifier poll cadence |
-| `VISIONOPS_RETENTION_INTERVAL_S` | `300` (min 30) | retention sweep cadence |
-| `VISIONOPS_HEALTH_INTERVAL_S` | `15` (min 5) | staleness monitor cadence |
-| `VISIONOPS_INDEXER_INTERVAL_S` | `10` (min 2) | indexer / gap-detect cadence |
-| `VISIONOPS_RECORDINGS_DIR` | `./data/recordings` | filesystem that `statvfs` / disk metrics target |
-| `VISIONOPS_API_HOST` / `VISIONOPS_API_PORT` | `0.0.0.0` / `8000` | where `/healthz`, `/readyz`, `/metrics` are served |
+| `HELDAR_MAX_RECORDINGS_GB` | `20` | size cap (retention §6) |
+| `HELDAR_MIN_FREE_DISK_GB` | `5` | disk-free floor (retention §6) |
+| `HELDAR_ALERT_WEBHOOK_URL` | *(unset)* | notifier — unset disables alerting (§3) |
+| `HELDAR_NOTIFIER_INTERVAL_S` | `15` (min 5) | notifier poll cadence |
+| `HELDAR_RETENTION_INTERVAL_S` | `300` (min 30) | retention sweep cadence |
+| `HELDAR_HEALTH_INTERVAL_S` | `15` (min 5) | staleness monitor cadence |
+| `HELDAR_INDEXER_INTERVAL_S` | `10` (min 2) | indexer / gap-detect cadence |
+| `HELDAR_RECORDINGS_DIR` | `./data/recordings` | filesystem that `statvfs` / disk metrics target |
+| `HELDAR_API_HOST` / `HELDAR_API_PORT` | `0.0.0.0` / `8000` | where `/healthz`, `/readyz`, `/metrics` are served |
 </content>
 </invoke>

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# End-to-end validation of the VisionOps Core media kernel against a synthetic RTSP camera.
+# End-to-end validation of the Heldar Core media kernel against a synthetic RTSP camera.
 # Starts MediaMTX + a synthetic camera + the core server, exercises every Stage 0 capability,
 # writes a report to data/validate_report.txt, and tears everything down.
 set -u
 ROOT=/home/soh/cctv
 MTX="$ROOT/infra/mediamtx/mediamtx"
-CORE="$ROOT/target/debug/visionops-core"
+CORE="$ROOT/target/debug/heldar-core"
 API=http://127.0.0.1:8000
 REPORT="$ROOT/data/validate_report.txt"
 LOGDIR="$ROOT/data/validate_logs"
@@ -29,7 +29,7 @@ cleanup(){
 trap cleanup EXIT
 
 # Clean prior validation artifacts
-rm -rf "$ROOT/data/recordings/synth_cam" "$ROOT/data/visionops.db"* 2>/dev/null
+rm -rf "$ROOT/data/recordings/synth_cam" "$ROOT/data/heldar.db"* 2>/dev/null
 rm -f "$ROOT/data/clips/"*.mp4 2>/dev/null
 
 hr "start MediaMTX"
@@ -45,13 +45,13 @@ ffmpeg -nostdin -hide_banner -loglevel warning -re \
 SYNTH_PID=$!
 sleep 3
 
-hr "start VisionOps Core (segment=5s, indexer=3s)"
-VISIONOPS_DEFAULT_SEGMENT_SECONDS=5 \
-VISIONOPS_DATA_DIR="$ROOT/data" \
-VISIONOPS_INDEXER_INTERVAL_S=3 \
-VISIONOPS_HEALTH_INTERVAL_S=10 \
-VISIONOPS_RETENTION_INTERVAL_S=60 \
-VISIONOPS_LOG="info,visionops_core=debug" \
+hr "start Heldar Core (segment=5s, indexer=3s)"
+HELDAR_DEFAULT_SEGMENT_SECONDS=5 \
+HELDAR_DATA_DIR="$ROOT/data" \
+HELDAR_INDEXER_INTERVAL_S=3 \
+HELDAR_HEALTH_INTERVAL_S=10 \
+HELDAR_RETENTION_INTERVAL_S=60 \
+HELDAR_LOG="info,heldar_core=debug" \
 "$CORE" >"$LOGDIR/core.log" 2>&1 &
 CORE_PID=$!
 

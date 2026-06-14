@@ -1,8 +1,8 @@
-# VisionOps Core — Movement Intelligence (Stage 6) Operator & Integrator Guide
+# Heldar Core — Movement Intelligence (Stage 6) Operator & Integrator Guide
 
 This is the definitive guide to **Movement Intelligence** (the client's "Movement
-intelligence" / VisionOps Security Phase 2; memo §2 Phase 2, §7.5–7.6, §15.5) **as
-actually built** in `crates/visionops-movement`: cross-camera ReID as **probabilistic
+intelligence" / Heldar Security Phase 2; memo §2 Phase 2, §7.5–7.6, §15.5) **as
+actually built** in `crates/heldar-movement`: cross-camera ReID as **probabilistic
 candidate matching with human review**, an operator-defined **camera-topology graph**,
 **movement trails**, and a **red-zone breach** incident engine — all under strict
 privacy gates.
@@ -37,7 +37,7 @@ kernel and Campus Entry have *already* written. The kernel is unaware it exists.
         │
         │  ── Movement reads these tables; it never sees RTSP, frames, or the ingest batch ──
         ▼
-   visionops-movement (two supervised loops, every VISIONOPS_MOVEMENT_INTERVAL_S)
+   heldar-movement (two supervised loops, every HELDAR_MOVEMENT_INTERVAL_S)
         ├─ reid::run    — propose_vehicle_candidates(): same plate on two topology-linked
         │                 cameras within a plausible transit window → fused score → movement_candidates
         │                 (status=pending; never auto-confirmed)
@@ -94,7 +94,7 @@ correlation"*, never legal identity verification.
 ## 3. Vehicle ReID — plate-anchored, multi-signal candidate proposer (`reid.rs`)
 
 `reid::run(pool, cfg)` is launched in `main.rs` via `spawn_supervised("movement_reid",
-…)` and ticks every `VISIONOPS_MOVEMENT_INTERVAL_S`. Each tick calls
+…)` and ticks every `HELDAR_MOVEMENT_INTERVAL_S`. Each tick calls
 `propose_vehicle_candidates()` then `prune()`; `run_once()` exposes the same proposer for
 the manual trigger (§7) and tests.
 
@@ -140,7 +140,7 @@ The result is `clamp(0, 1)`. Worked corollaries:
   matching colour **and** type pushes it to **1.0**.
 - An attribute **conflict lowers confidence** (signalling a possible OCR misread or a
   cloned plate) but, because the plate anchor dominates, a double conflict still floors at
-  ~**0.6** — above the default `VISIONOPS_MOVEMENT_MIN_SCORE = 0.5`. The conflict is
+  ~**0.6** — above the default `HELDAR_MOVEMENT_MIN_SCORE = 0.5`. The conflict is
   surfaced in the candidate's `signals` for the reviewer rather than silently suppressing
   the link.
 
@@ -150,7 +150,7 @@ The `signals` JSON stored on the candidate records exactly which signals fired:
 
 ### 3.3 Writing the candidate
 
-A pair scoring `≥ VISIONOPS_MOVEMENT_MIN_SCORE` is written to `movement_candidates` as
+A pair scoring `≥ HELDAR_MOVEMENT_MIN_SCORE` is written to `movement_candidates` as
 `subject_type='vehicle'`, `anchor=<plate>`, `from_*`/`to_*` referencing the two
 `entry_events` rows and their cameras/times, `transit_seconds=<gap>`, the fused `score`,
 the `signals` evidence, and `status='pending'`. The insert is
@@ -228,7 +228,7 @@ human-triaged correlation only (memo §7.6, §15.5).
 ## 6. Red-zone breach rule engine (`breach.rs`)
 
 `breach::run(pool, cfg)` is launched via `spawn_supervised("movement_breach", …)` and
-ticks every `VISIONOPS_MOVEMENT_INTERVAL_S`, calling `sweep()` (also exposed as
+ticks every `HELDAR_MOVEMENT_INTERVAL_S`, calling `sweep()` (also exposed as
 `run_once()` for the trigger/tests). It turns restricted-zone entries into **worked
 incidents** with **subject correlation** — complementing, not duplicating, the kernel's
 existing zone alerting.
@@ -236,7 +236,7 @@ existing zone alerting.
 ### 6.1 What counts as a red zone
 
 The sweep resolves the set of red/breach zones by **kind**: for each kind in
-`VISIONOPS_MOVEMENT_RED_ZONE_KINDS` (default `restricted,red`) it selects
+`HELDAR_MOVEMENT_RED_ZONE_KINDS` (default `restricted,red`) it selects
 `zones WHERE kind = ? AND enabled = 1`, collecting `(zone_id, severity)`. If no zone
 matches, the sweep returns immediately. So designating a red zone is just creating an
 ordinary kernel zone (Stage 3) with `kind = 'restricted'` (or `'red'`).
@@ -308,7 +308,7 @@ and the route does.
 
 Reads need **`view`**, candidate/breach reviews need **`operate_gate`**, topology edits
 and the manual run need **`manage`** (the kernel capability matrix from
-[`docs/CAMPUS-ENTRY.md`](CAMPUS-ENTRY.md) §4). With `VISIONOPS_AUTH_ENABLED=false` every
+[`docs/CAMPUS-ENTRY.md`](CAMPUS-ENTRY.md) §4). With `HELDAR_AUTH_ENABLED=false` every
 caller is the synthetic system admin. The router takes `MovementConfig` as an `Extension`
 and is `merge`d into the server.
 
@@ -395,16 +395,16 @@ so the correlation record survives the deletion of the underlying source row
 
 ## 10. Configuration (`config.rs`)
 
-All via `VISIONOPS_MOVEMENT_*` env vars, loaded by the composing server
+All via `HELDAR_MOVEMENT_*` env vars, loaded by the composing server
 (`MovementConfig::from_env`); the kernel `Config` carries none of them.
 
 | Var | Default | Meaning |
 |---|---|---|
-| `VISIONOPS_MOVEMENT_INTERVAL_S` | `60` (clamp 15…600) | How often **both** the ReID proposer and the breach engine run |
-| `VISIONOPS_MOVEMENT_SCAN_WINDOW_S` | `900` (min 120) | Lookback each tick scans for new events; must exceed the interval so no event is missed between ticks |
-| `VISIONOPS_MOVEMENT_MIN_SCORE` | `0.5` (clamp 0…1) | Minimum fused score at which a vehicle candidate is proposed for review |
-| `VISIONOPS_MOVEMENT_RED_ZONE_KINDS` | `restricted,red` | Comma-separated zone `kind` values treated as red/breach zones |
-| `VISIONOPS_MOVEMENT_RETENTION_DAYS` | `365` | How long candidates + resolved breaches are kept before pruning |
+| `HELDAR_MOVEMENT_INTERVAL_S` | `60` (clamp 15…600) | How often **both** the ReID proposer and the breach engine run |
+| `HELDAR_MOVEMENT_SCAN_WINDOW_S` | `900` (min 120) | Lookback each tick scans for new events; must exceed the interval so no event is missed between ticks |
+| `HELDAR_MOVEMENT_MIN_SCORE` | `0.5` (clamp 0…1) | Minimum fused score at which a vehicle candidate is proposed for review |
+| `HELDAR_MOVEMENT_RED_ZONE_KINDS` | `restricted,red` | Comma-separated zone `kind` values treated as red/breach zones |
+| `HELDAR_MOVEMENT_RETENTION_DAYS` | `365` | How long candidates + resolved breaches are kept before pruning |
 
 ---
 
@@ -425,8 +425,8 @@ and recording segments / evidence-lock are untouched.
 
 ## 12. How it composes (composed, not welded) + isolation
 
-Movement is wired in `crates/visionops-server/src/main.rs` purely as a bundled app: its
-schema is applied after the kernel migrations (`visionops_movement::schema::init`), its
+Movement is wired in `crates/heldar-server/src/main.rs` purely as a bundled app: its
+schema is applied after the kernel migrations (`heldar_movement::schema::init`), its
 config is loaded from the environment (`MovementConfig::from_env`), its two loops are
 `spawn_supervised("movement_reid", …)` and `spawn_supervised("movement_breach", …)`, and
 its router is `merge`d. Crucially it is **absent from the `consumers` vec** — it is **not**

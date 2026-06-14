@@ -1,6 +1,6 @@
 # Remote Access
 
-How to view a VisionOps deployment from outside its LAN — when the site is behind **CGNAT** (the
+How to view a Heldar deployment from outside its LAN — when the site is behind **CGNAT** (the
 common case for home/small-site internet: a shared public IPv4, no inbound port-forward, DDNS
 useless). This is an **open kernel** capability: every deployment of the Apache-2.0 kernel gets
 private, peer-to-peer-first remote viewing out of the box.
@@ -75,9 +75,9 @@ Headscale) removes even that third-party metadata, at the cost of a small VPS to
    ```
 3. Point the kernel at the interface so the dashboard shows status:
    ```bash
-   VISIONOPS_OVERLAY_ENABLED=true
-   VISIONOPS_OVERLAY_KIND=tailscale
-   VISIONOPS_OVERLAY_IFACE=tailscale0
+   HELDAR_OVERLAY_ENABLED=true
+   HELDAR_OVERLAY_KIND=tailscale
+   HELDAR_OVERLAY_IFACE=tailscale0
    ```
 4. Viewers open the host's MagicDNS name in a normal browser — WHEP plays P2P, sub-second latency.
 
@@ -92,9 +92,9 @@ Recipe B for the product.
    media/control ports as above.
 3. Configure the kernel:
    ```bash
-   VISIONOPS_OVERLAY_ENABLED=true
-   VISIONOPS_OVERLAY_KIND=netbird
-   VISIONOPS_OVERLAY_IFACE=wt0
+   HELDAR_OVERLAY_ENABLED=true
+   HELDAR_OVERLAY_KIND=netbird
+   HELDAR_OVERLAY_IFACE=wt0
    ```
 
 This keeps the device graph/metadata on infrastructure **you** control, WireGuard E2E end to end,
@@ -115,7 +115,7 @@ trusted viewers. But:
 
 ## What the kernel provides (and what it doesn't)
 
-- **Provides (open, Apache-2.0):** overlay-status awareness — config (`VISIONOPS_OVERLAY_*`) and a
+- **Provides (open, Apache-2.0):** overlay-status awareness — config (`HELDAR_OVERLAY_*`) and a
   probe of the configured interface (`/sys/class/net/<iface>`), surfaced at
   `GET /api/v1/system → remote_access { enabled, kind, iface, present, operstate, up, note }`.
   Transport-agnostic: any overlay that presents a network interface is supported.

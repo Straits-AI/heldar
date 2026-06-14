@@ -1,4 +1,4 @@
-# VisionOps Core — Design System
+# Heldar Core — Design System
 
 **Direction:** Operations console / SOC. Industrial, utilitarian, dark, signal-driven.
 A control-room surface, not a marketing site. Dense, legible, fast, calm under load.
@@ -129,7 +129,7 @@ Unknown `state` strings normalize to `"unknown"` in `StatusLed` / `StatusPill`.
 AppShell(props: { children: ReactNode })   // also default-exported
 ```
 
-- **Left nav rail** (sticky, `w-[232px]`, hidden below `sm`): wordmark `VISIONOPS` (Archivo, wide
+- **Left nav rail** (sticky, `w-[232px]`, hidden below `sm`): wordmark `HELDAR` (Archivo, wide
   tracking) + `CORE` sublabel; NavLinks `Wall → "/"`, `Discover → "/discover"`,
   `Add Camera → "/cameras/new"` with amber active bar/icon. Footer shows build version.
 - **Top telemetry bar** (sticky, polls `GET /api/v1/system` every 5s): link-status LED, live

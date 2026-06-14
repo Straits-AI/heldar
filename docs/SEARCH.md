@@ -1,8 +1,8 @@
-# VisionOps Core — Semantic Search (Stage 7) Operator & Integrator Guide
+# Heldar Core — Semantic Search (Stage 7) Operator & Integrator Guide
 
 This is the definitive guide to **Semantic Search** (memo §9 "Industrial frontier",
 §14 "Stage 7"; research.md §12–13 proof layer, Stage 3–4) **as actually built** in
-`crates/visionops-search`: turn the platform's accumulated event facts into a queryable
+`crates/heldar-search`: turn the platform's accumulated event facts into a queryable
 **visual-event memory** — *who / what / where / when / confidence / evidence* — answered
 by **structured search**, by **natural-language search** (a question is *planned* into a
 structured query, the plan is executed, the rows are the answer), and a **plan dry-run**,
@@ -72,12 +72,12 @@ step is **decoupled** from the data it selects.
         │
         │  ── search READS these tables; it never sees RTSP, frames, or the ingest batch ──
         ▼
-   visionops-search (three HTTP routes, no loop, no consumer)
+   heldar-search (three HTTP routes, no loop, no consumer)
 
    POST /api/v1/search/events   structured ─┐
                                             ├─► QueryPlan ─► execute() ─► rows ─► proof ─► response
    POST /api/v1/search/nl        question ──┘     ▲
-                                            plan_llm()  (if VISIONOPS_SEARCH_LLM_URL set)
+                                            plan_llm()  (if HELDAR_SEARCH_LLM_URL set)
                                             else parse_rules()  (transparent, offline, default)
 
    POST /api/v1/search/plan      question ─► plan_llm()/parse_rules() ─► {plan}   (dry-run: NO execution, NO data)
@@ -131,7 +131,7 @@ Every result is normalized to a **`SearchHit`** regardless of which table it cam
 `execute(pool, plan, max)` runs the plan against the kernel's facts. It is **pure SQL +
 Rust** — no model, no randomness, fully reproducible.
 
-**1. Time window.** `from`/`to` are parsed (`visionops_kernel::util::parse_rfc3339`);
+**1. Time window.** `from`/`to` are parsed (`heldar_kernel::util::parse_rfc3339`);
 unset `from` defaults to **now − 7 days** and unset `to` to **now + 1 min**, so an
 unbounded query never scans the whole history. This default 7-day window is the single
 most important guardrail on cost.
@@ -233,7 +233,7 @@ directly — a deliberate boundary, surfaced honestly rather than faked.
 
 ## 6. The optional LLM planner (the seam, `planner.rs`)
 
-`plan_llm(http, cfg, query, cameras)` is engaged **only if `VISIONOPS_SEARCH_LLM_URL` is
+`plan_llm(http, cfg, query, cameras)` is engaged **only if `HELDAR_SEARCH_LLM_URL` is
 set**. It asks an OpenAI-compatible chat-completions endpoint to translate the question
 into a strict plan JSON:
 
@@ -241,8 +241,8 @@ into a strict plan JSON:
   that spells out the exact `QueryPlan` schema and the **known camera ids/names**, and the
   hard instruction *"You ONLY produce the query plan; you never answer the question or
   invent data."*
-- `model` = `VISIONOPS_SEARCH_LLM_MODEL` (default `gpt-4o-mini`); `Authorization: Bearer`
-  added if `VISIONOPS_SEARCH_LLM_API_KEY` is set.
+- `model` = `HELDAR_SEARCH_LLM_MODEL` (default `gpt-4o-mini`); `Authorization: Bearer`
+  added if `HELDAR_SEARCH_LLM_API_KEY` is set.
 - The response's `choices[0].message.content` is parsed as a `QueryPlan`.
 
 **It returns `None` (and the caller falls back to `parse_rules`) on any failure** —
@@ -354,17 +354,17 @@ to run fully offline on the rule parser** (the default).
 
 | Var | Default | Meaning |
 |---|---|---|
-| `VISIONOPS_SEARCH_LLM_URL` | *(unset)* | OpenAI-compatible chat-completions endpoint used **only** to plan a question. **Unset ⇒ the rule parser is used** (and the feature works with no external dependency). |
-| `VISIONOPS_SEARCH_LLM_API_KEY` | *(unset)* | Bearer token sent to that endpoint, if it requires one. |
-| `VISIONOPS_SEARCH_LLM_MODEL` | `gpt-4o-mini` | Model name passed to the endpoint. |
-| `VISIONOPS_SEARCH_MAX_RESULTS` | `200` (clamped `1…5000`) | Hard cap on hits returned per search; also drives the executor's internal `fetch_cap`. |
+| `HELDAR_SEARCH_LLM_URL` | *(unset)* | OpenAI-compatible chat-completions endpoint used **only** to plan a question. **Unset ⇒ the rule parser is used** (and the feature works with no external dependency). |
+| `HELDAR_SEARCH_LLM_API_KEY` | *(unset)* | Bearer token sent to that endpoint, if it requires one. |
+| `HELDAR_SEARCH_LLM_MODEL` | `gpt-4o-mini` | Model name passed to the endpoint. |
+| `HELDAR_SEARCH_MAX_RESULTS` | `200` (clamped `1…5000`) | Hard cap on hits returned per search; also drives the executor's internal `fetch_cap`. |
 
 ---
 
 ## 11. How it composes (composed, not welded)
 
-Search is wired in `crates/visionops-server/src/main.rs` purely as a bundled app: its
-schema is applied after the kernel migrations (`visionops_search::schema::init`), its config
+Search is wired in `crates/heldar-server/src/main.rs` purely as a bundled app: its
+schema is applied after the kernel migrations (`heldar_search::schema::init`), its config
 is read from the environment (`SearchConfig::from_env`), and its router is `merge`d in. It
 is **absent from the `consumers` vec** (not a `DetectionConsumer`) and has **no
 `spawn_supervised` loop** — it touches the ingest/recording/live-view path nowhere. A slow
@@ -394,7 +394,7 @@ audit, the RBAC-gated HTTP surface, and the structured / NL / dry-run routes.
 - **VLM-based report interpretation** (natural-language synthesis of findings) is **not**
   here by design — the proof layer reports deterministic aggregates, not generated prose.
 - **The LLM planner is optional and untested without a live endpoint.** It is exercised
-  only when `VISIONOPS_SEARCH_LLM_URL` is configured; the default path is the rule parser.
+  only when `HELDAR_SEARCH_LLM_URL` is configured; the default path is the rule parser.
 - **The rule parser is best-effort.** It recognizes the patterns in §5 and leaves the rest
   to the default window. It cannot express dwell thresholds, multi-condition joins, or
   arbitrary semantics — use `/search/plan` to confirm a question parsed as intended, or

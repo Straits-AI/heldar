@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run the full VisionOps stack (MediaMTX + core + Vite dashboard) for interactive/browser testing.
+# Run the full Heldar stack (MediaMTX + core + Vite dashboard) for interactive/browser testing.
 # Stays up for up to 30 minutes, then auto-stops. Conservative recording limits for the dev host.
 set -u
 ROOT=/home/soh/cctv
@@ -18,11 +18,11 @@ trap cleanup EXIT TERM INT
 MTX_PID=$!
 sleep 2
 
-VISIONOPS_DATA_DIR="$ROOT/data" \
-VISIONOPS_MAX_RECORDINGS_GB=3 \
-VISIONOPS_DEFAULT_RETENTION_HOURS=2 \
-VISIONOPS_LOG="info,visionops_core=info" \
-"$ROOT/target/debug/visionops-core" >"$LOG/core.log" 2>&1 &
+HELDAR_DATA_DIR="$ROOT/data" \
+HELDAR_MAX_RECORDINGS_GB=3 \
+HELDAR_DEFAULT_RETENTION_HOURS=2 \
+HELDAR_LOG="info,heldar_core=info" \
+"$ROOT/target/debug/heldar-core" >"$LOG/core.log" 2>&1 &
 CORE_PID=$!
 
 ( cd "$ROOT/apps/web" && npm run dev >"$LOG/vite.log" 2>&1 ) &

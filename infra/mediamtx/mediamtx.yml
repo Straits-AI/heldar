@@ -1,9 +1,9 @@
-# VisionOps Core — MediaMTX configuration (live-view gateway + dev RTSP server).
+# Heldar Core — MediaMTX configuration (live-view gateway + dev RTSP server).
 # Minimal config; unspecified keys use MediaMTX defaults.
 
 logLevel: info
 
-# Control API — VisionOps registers camera paths through this. Bound to loopback so only the local
+# Control API — Heldar registers camera paths through this. Bound to loopback so only the local
 # kernel can reconfigure the media server (never expose the control plane on the network).
 api: yes
 apiAddress: 127.0.0.1:9997
@@ -43,6 +43,6 @@ authInternalUsers:
       - action: read
       - action: playback
 
-# VisionOps adds named camera proxy paths via the API.
+# Heldar adds named camera proxy paths via the API.
 paths:
   all_others:

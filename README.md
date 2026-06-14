@@ -1,6 +1,6 @@
-# VisionOps Core
+# Heldar Core
 
-**A visual event-intelligence operating system for physical spaces.** VisionOps turns camera streams
+**A visual event-intelligence operating system for physical spaces.** Heldar turns camera streams
 into structured events, events into workflows, and workflows into operational intelligence — the
 opposite of a camera-centric VMS. Rather than starting from AI features or wrapping an existing
 DVR/NVR, it builds its own **media kernel** first (camera registry, RTSP ingest, recording, playback,
@@ -38,19 +38,19 @@ The full perception pipeline has been **validated end-to-end on real HikVision c
 
 ```text
                     ┌─────────────────────────────────────────────┐
-   cameras ──RTSP──▶│  visionops-kernel  (Apache-2.0)             │
+   cameras ──RTSP──▶│  heldar-kernel  (Apache-2.0)             │
                     │  media/DVR · perception ingest + sampler ·   │
                     │  zone engine · auth/RBAC · observability ·   │
                     │  retention · remote-access overlay status ·  │
                     │  the DetectionConsumer + worker SDK seams     │
                     └───────────────┬──────────────┬──────────────┘
-   AI worker ──/ai/events──▶ (perception)          │ composed by visionops-server
+   AI worker ──/ai/events──▶ (perception)          │ composed by heldar-server
    (apps/ai, YOLO)                                 │
                     ┌──────────────────────────────┴──────────────┐
    OPEN generic apps (Apache-2.0)        PROPRIETARY verticals     │
-   visionops-entry  (access control)     visionops-bakery          │
-   visionops-movement (ReID/breach)      visionops-campus-* (future)│
-   visionops-search (semantic search)                              │
+   heldar-entry  (access control)     heldar-bakery          │
+   heldar-movement (ReID/breach)      heldar-campus-* (future)│
+   heldar-search (semantic search)                              │
                     └───────────────────────────────────────────────┘
 ```
 
@@ -79,12 +79,12 @@ deployment). See [ARCHITECTURE.md](./ARCHITECTURE.md).
 ```text
 cctv/
 ├── crates/
-│   ├── visionops-kernel/     # Apache-2.0 platform (media/DVR, perception, zones, auth, seams)
-│   ├── visionops-entry/      # Apache-2.0 generic access control (ANPR, registry, guard workflow)
-│   ├── visionops-movement/   # Apache-2.0 generic cross-camera ReID + breach engine
-│   ├── visionops-search/     # Apache-2.0 generic semantic search (plan → execute → proof)
-│   ├── visionops-bakery/     # PROPRIETARY retail-analytics vertical
-│   └── visionops-server/     # composing binary `visionops-core` (verticals behind a Cargo feature)
+│   ├── heldar-kernel/     # Apache-2.0 platform (media/DVR, perception, zones, auth, seams)
+│   ├── heldar-entry/      # Apache-2.0 generic access control (ANPR, registry, guard workflow)
+│   ├── heldar-movement/   # Apache-2.0 generic cross-camera ReID + breach engine
+│   ├── heldar-search/     # Apache-2.0 generic semantic search (plan → execute → proof)
+│   ├── heldar-bakery/     # PROPRIETARY retail-analytics vertical
+│   └── heldar-server/     # composing binary `heldar-core` (verticals behind a Cargo feature)
 ├── apps/
 │   ├── ai/                   # Python reference AI worker (YOLO/ByteTrack)
 │   └── web/                  # React + Vite + TS dashboard
@@ -129,7 +129,7 @@ Run the AI worker (detection) against onboarded cameras:
 ```bash
 # enable a detection task on a camera, then:
 cd apps/ai && python -m venv .venv && .venv/bin/pip install -r requirements.txt
-VISIONOPS_API=http://localhost:8000 .venv/bin/python worker.py
+HELDAR_API=http://localhost:8000 .venv/bin/python worker.py
 ```
 
 Per-stage validation scripts (`scripts/validate_*.sh`) exercise each stage end-to-end against a
@@ -139,7 +139,7 @@ running stack and write reports to `data/`.
 
 | Port | Service |
 | --- | --- |
-| 8000 | VisionOps Core HTTP API |
+| 8000 | Heldar Core HTTP API |
 | 5173 | Web frontend (Vite dev server) |
 | 8554 / 8888 / 8889 | MediaMTX RTSP / HLS / WebRTC |
 | 9997 | MediaMTX control API (loopback) |
@@ -148,7 +148,7 @@ running stack and write reports to `data/`.
 
 ## Security & auth
 
-- **Auth/RBAC is opt-in** (`VISIONOPS_AUTH_ENABLED`, default false = open LAN appliance). When enabled,
+- **Auth/RBAC is opt-in** (`HELDAR_AUTH_ENABLED`, default false = open LAN appliance). When enabled,
   the API requires a session (login) or `X-API-Key`, and enforces five roles
   (`admin` / `manager` / `guard` / `viewer` / `integration`) across capabilities; every mutation is
   written to an immutable audit log.
