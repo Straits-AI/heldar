@@ -823,7 +823,7 @@ Stage 4 adds an `anpr` task type and registers a real `Analyzer` for it
 worker still discovers tasks, pulls `latest.jpg`, and POSTs to `/api/v1/ai/events`.
 The kernel routes `task_type == "anpr"` results into the **entry engine**
 (`services/anpr.rs`), which does temporal plate voting + registry resolution. The
-engine and its event model are documented in [`docs/CAMPUS-ENTRY.md`](CAMPUS-ENTRY.md)
+engine and its event model are documented in [`docs/ACCESS-CONTROL.md`](ACCESS-CONTROL.md)
 and [`ARCHITECTURE.md`](../ARCHITECTURE.md) §17; this section is the **worker** half.
 
 ### 12.1 The vehicle → plate → OCR pipeline
@@ -901,7 +901,7 @@ engine reads:
 `{"anpr": "anpr_v0.1_<paddleocr|easyocr|noocr>", "vehicle_attr": "heuristic_v0.1",
 "detector": "yolov8n.pt"}`. The engine keeps the **highest-confidence** observation of
 each attribute across the track's frames and votes the **plate** across frames — so a
-single noisy read is outvoted (see [`docs/CAMPUS-ENTRY.md`](CAMPUS-ENTRY.md) §2.2).
+single noisy read is outvoted (see [`docs/ACCESS-CONTROL.md`](ACCESS-CONTROL.md) §2.2).
 
 Example posted detection:
 
@@ -931,8 +931,8 @@ Example posted detection:
 ---
 
 See also: [`ARCHITECTURE.md`](../ARCHITECTURE.md) §15 (Stage 2 implementation), §16
-(Stage 3 detection/tracking/zone kernel), and §17 (Stage 4 Campus Entry),
-[`docs/CAMPUS-ENTRY.md`](CAMPUS-ENTRY.md) (the entry engine + RBAC + reports),
+(Stage 3 detection/tracking/zone kernel), and §17 (Stage 4 Access Control),
+[`docs/ACCESS-CONTROL.md`](ACCESS-CONTROL.md) (the entry engine + RBAC + reports),
 [`ROADMAP.md`](../ROADMAP.md) Stages 2–4 (checklists),
 [`docs/OBSERVABILITY.md`](OBSERVABILITY.md) (Stage 1 metrics/alerts the AI + zone +
 entry events feed into).

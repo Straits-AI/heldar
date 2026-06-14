@@ -3,7 +3,7 @@
 > **Thesis:** Camera streams become structured events → events become workflows → workflows become operational intelligence.
 > We build the **media kernel first**, then AI as plugins on top, then vertical apps. The long arc (see `research.md`) is to turn continuous video into a **compressed, queryable, verifiable world memory** of a physical space — so analytical intent can be defined *after* collection, not before.
 
-> **Status (2026-06):** Stages **0–7 are all shipped (✅ DONE)** — the media kernel, observability, the AI frame sampler, detection/tracking/zones, Campus Entry, BakerySense, Movement intelligence, and Semantic search. What remains is the research frontier below (Level 4–5) and the per-stage accuracy benchmarking gated on local footage.
+> **Status (2026-06):** Stages **0–7 are all shipped (✅ DONE)** — the media kernel, observability, the AI frame sampler, detection/tracking/zones, Access Control, BakerySense, Movement intelligence, and Semantic search. What remains is the research frontier below (Level 4–5) and the per-stage accuracy benchmarking gated on local footage.
 
 Source of truth: `memo.md` §14 (Build roadmap) and `research.md` §21 (Product Roadmap) + §5 (Level 1–5 maturity ladder). This file reconciles the two.
 
@@ -178,7 +178,7 @@ Reference worker: `apps/ai`.
 
 ---
 
-## ✅ Stage 4 — Campus Entry app (client Phase 1)  — **DONE**
+## ✅ Stage 4 — Access Control app (client Phase 1)  — **DONE**
 
 **Goal:** the client's "Premise Security / Entry intelligence" deliverable. (memo §2
 Phase 1, §7.3–7.4, §8.1, §14) Built as the first **vertical app** on the kernel: an
@@ -186,7 +186,7 @@ RBAC layer, an entry registry (vehicles / passes / watchlist), an **ANPR
 temporal-voting engine** producing canonical entry/exit events, a guard
 confirm/reject workflow, and reports — all on the **unchanged** Stage 2 ingest
 contract (`anpr` tasks feed the engine via `POST /api/v1/ai/events`). Operator/
-integrator guide: [`docs/CAMPUS-ENTRY.md`](docs/CAMPUS-ENTRY.md); implementation:
+integrator guide: [`docs/ACCESS-CONTROL.md`](docs/ACCESS-CONTROL.md); implementation:
 `ARCHITECTURE.md` §17. Worker side: `apps/ai` `AnprAnalyzer`.
 
 **Shipped checklist:**
@@ -223,7 +223,7 @@ task pending local footage (see deferrals).
 
 **Cross-ref to memo §14 Phase 1 items:**
 
-| Memo §14 Phase 1 (Campus Entry) item | Status | Backed by |
+| Memo §14 Phase 1 (Access Control) item | Status | Backed by |
 |---|---|---|
 | Visitor registration + guard-booth check-in | ✅ | `visitor_passes` + checkin/checkout (`routes/entry.rs`), manual entry events |
 | ANPR / ALPR (primary identity anchor) | ✅ engineering; ⚠️ accuracy unbenchmarked | `services/anpr.rs` temporal voting + resolution, worker `AnprAnalyzer` |
@@ -322,7 +322,7 @@ or crashed rollup cannot affect recording/ingest/live view. **Open:** detector/t
 (`crates/heldar-movement`) — the **same kernel, cross-camera**. Like BakerySense it is
 **not** a detection consumer on the hot path, but a **correlation layer**: two
 `spawn_supervised` loops (a ReID candidate **proposer** + a red-zone breach **rule
-engine**) plus an on-demand trigger/search surface, reading the kernel's + Campus Entry's
+engine**) plus an on-demand trigger/search surface, reading the kernel's + Access Control's
 stored `entry_events` / `detections` / `zone_events` / `zones`, **composed (not welded)**
 with its own schema/config/loops/retention/routes. Operator/integrator guide:
 [`docs/MOVEMENT.md`](docs/MOVEMENT.md); implementation: `ARCHITECTURE.md` §19.
@@ -331,7 +331,7 @@ with its own schema/config/loops/retention/routes. Operator/integrator guide:
 
 - [x] **Person ReID + vehicle ReID — multi-signal, never pure visual embedding** — **no
   appearance/visual embedding anywhere.** Vehicle ReID is anchored on the **plate**
-  (resolved by Campus Entry) and fused with transit-time plausibility + colour/type
+  (resolved by Access Control) and fused with transit-time plausibility + colour/type
   agreement over the topology graph: `score_pair` = `0.8` plate anchor `±` transit (`+0.10`
   in-window / `+0.05` ≤2× / else 0) `±` colour (`+0.05`/`−0.10`) `±` type (`+0.05`/`−0.10`),
   proposed at `≥ HELDAR_MOVEMENT_MIN_SCORE` (default 0.5). Person ReID has no plate/no

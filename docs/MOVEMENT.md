@@ -13,14 +13,14 @@ Implementation: `reid.rs` (the vehicle candidate proposer + scoring + plate trai
 (`CameraLink` / `MovementCandidate` / `BreachAlert`), `lib.rs` (the privacy stance). The
 kernel architecture is in [`ARCHITECTURE.md`](../ARCHITECTURE.md) §19; the
 detector/tracker + ANPR worker side is documented in [`docs/AI-WORKERS.md`](AI-WORKERS.md)
-and [`docs/CAMPUS-ENTRY.md`](CAMPUS-ENTRY.md).
+and [`docs/ACCESS-CONTROL.md`](ACCESS-CONTROL.md).
 
-Stage 6 builds **entirely on stored kernel + Campus Entry data** (`entry_events`,
+Stage 6 builds **entirely on stored kernel + Access Control data** (`entry_events`,
 `detections`, `zone_events`, `zones`) and adds **no ingest path and no decode**. Like
 BakerySense (Stage 5), Movement is **not** a `DetectionConsumer` on the hot path — it is
 a **correlation layer** of two background loops (a ReID candidate **proposer** and a
 red-zone breach **rule engine**) plus an on-demand search surface, all reading data the
-kernel and Campus Entry have *already* written. The kernel is unaware it exists.
+kernel and Access Control have *already* written. The kernel is unaware it exists.
 
 ---
 
@@ -30,7 +30,7 @@ kernel and Campus Entry have *already* written. The kernel is unaware it exists.
    gate / corridor cameras (RTSP)
         │
         ▼
-   media kernel + Campus Entry  (Stages 0–4)
+   media kernel + Access Control  (Stages 0–4)
         ├─► entry_events     (one canonical ANPR event per vehicle: normalized plate, attrs, direction)
         ├─► detections       (person/vehicle boxes + ephemeral ByteTrack track_id)
         └─► zone_events      (enter/exit/dwell on polygon zones, incl. restricted/red zones)
@@ -66,7 +66,7 @@ three hard rules taken straight from memo §15.5 and §7.5/§7.6:
 
 1. **Multi-signal, never pure visual embedding.** There is **no appearance/visual ReID
    embedding anywhere in this crate.** Vehicle ReID is anchored on the **plate** (already
-   resolved by Campus Entry into `entry_events`) and fused with **transit-time
+   resolved by Access Control into `entry_events`) and fused with **transit-time
    plausibility** + **vehicle attribute agreement** (colour/type) over the operator's
    **camera-topology graph**. The plate is the dominant signal; the rest only nudge a
    plate-exact match up or down.
@@ -114,7 +114,7 @@ SELECT … FROM entry_events a
  ORDER BY b.timestamp DESC LIMIT 1000
 ```
 
-- The `plate` column is the **normalized** plate Campus Entry committed (uppercase,
+- The `plate` column is the **normalized** plate Access Control committed (uppercase,
   alphanumeric-only) — the join is plate-exact.
 - The `camera_links` join is what **scopes** correlation: a pair is only considered if an
   operator has declared an adjacency between the two cameras (§4). Direction is honored —
@@ -308,7 +308,7 @@ and the route does.
 
 Reads need **`view`**, candidate/breach reviews need **`operate_gate`**, topology edits
 and the manual run need **`manage`** (the kernel capability matrix from
-[`docs/CAMPUS-ENTRY.md`](CAMPUS-ENTRY.md) §4). With `HELDAR_AUTH_ENABLED=false` every
+[`docs/ACCESS-CONTROL.md`](ACCESS-CONTROL.md) §4). With `HELDAR_AUTH_ENABLED=false` every
 caller is the synthetic system admin. The router takes `MovementConfig` as an `Extension`
 and is `merge`d into the server.
 

@@ -32,7 +32,7 @@ is production-grade; model *accuracy* on local footage (Malaysian vehicles/plate
 crowded ReID) still needs a local benchmark set before any hard decision is made on
 it (memo §15.3/§15.4).
 
-**Stage 4 (Campus Entry app) has also shipped** — the first vertical on the kernel.
+**Stage 4 (Access Control app) has also shipped** — the first vertical on the kernel.
 It adds an **RBAC layer** (users / sessions / API keys, five roles, a `Principal`
 extractor gated by `HELDAR_AUTH_ENABLED`), an entry **registry** (registered
 vehicles, visitor passes, watchlist), and an **ANPR temporal-voting engine**
@@ -40,7 +40,7 @@ vehicles, visitor passes, watchlist), and an **ANPR temporal-voting engine**
 task into one canonical entry/exit event (memo §8.1), resolves it against the
 registry, and drives a guard confirm/reject **workflow** + daily/exception/audit
 **reports**. New schema: `migrations/0005_entry.sql`. It is documented in §17 below
-and, for operators/integrators, in [`docs/CAMPUS-ENTRY.md`](docs/CAMPUS-ENTRY.md).
+and, for operators/integrators, in [`docs/ACCESS-CONTROL.md`](docs/ACCESS-CONTROL.md).
 The ANPR/attribute *engineering* is production-grade; OCR + make/model *accuracy*
 needs the same local benchmark (memo §15.3/§15.4) before any hard access decision.
 
@@ -63,7 +63,7 @@ documented in §18 below and, for operators/integrators, in
 the **same kernel data**, under strict privacy gates. It is the client's "Movement
 intelligence" (Phase 2) app (`crates/heldar-movement`): **multi-signal ReID, never a
 pure visual embedding.** Vehicle ReID is anchored on the **plate** (already resolved by
-Campus Entry into `entry_events`), fused with transit-time plausibility + colour/type
+Access Control into `entry_events`), fused with transit-time plausibility + colour/type
 agreement over an operator-defined **camera-topology graph**; person ReID has no plate and
 no appearance embedding, so it is offered only as a **low-confidence, on-demand**
 topology+time search. Every cross-camera link is a scored **candidate** a human confirms
@@ -1176,7 +1176,7 @@ decision. Accuracy benchmarking is gated on collecting that local footage set.
 
 ---
 
-## 17. Stage 4 — Campus Entry app
+## 17. Stage 4 — Access Control app
 
 Stage 4 (memo §2 Phase 1, §7.3–7.4 ANPR + vehicle attributes, §8.1 canonical event,
 §14 "Stage 4") is the first **vertical app** on the kernel: turn the Stage 3 event
@@ -1184,7 +1184,7 @@ substrate into a guard-operable gate. It adds three things — an **RBAC layer**
 entry **registry**, and an **ANPR temporal-voting engine** — and reuses everything
 below it (sampler, ingest contract, events log + alert webhook, retention loop,
 evidence snapshots) **with no change to the Stage 0–3 paths**. The
-operator/integrator guide is [`docs/CAMPUS-ENTRY.md`](docs/CAMPUS-ENTRY.md); this
+operator/integrator guide is [`docs/ACCESS-CONTROL.md`](docs/ACCESS-CONTROL.md); this
 section documents the implementation.
 
 New code: `services/anpr.rs` (engine), `auth.rs` (RBAC + `Principal` extractor),
@@ -1311,7 +1311,7 @@ release; an insert failure clears `committed` so a still-live track retries next
 ### 17.3 Canonical event + evidence + alert mirror
 
 On commit the engine writes one `entry_events` row (the §8.1 model — see
-[`docs/CAMPUS-ENTRY.md`](docs/CAMPUS-ENTRY.md) §6 for the full JSON and field
+[`docs/ACCESS-CONTROL.md`](docs/ACCESS-CONTROL.md) §6 for the full JSON and field
 mapping). `event_type` is `vehicle_exit` when `direction == "outbound"`, else
 `vehicle_entry`. The top-level `plate` column is the **normalized** key; `subject.plate`
 is the raw read; `subject.plate_valid` carries the plausibility flag;
@@ -1364,7 +1364,7 @@ capabilities — `can_view` (all), `can_operate_gate` (admin/manager/guard),
 `can_manage_registry` (admin/manager), `can_ingest` (admin/integration), `can_admin`
 (admin) — asserted by `principal.require(allowed, action)` → 403 on denial. The full
 role×capability matrix and per-endpoint roles are in
-[`docs/CAMPUS-ENTRY.md`](docs/CAMPUS-ENTRY.md) §4/§9.
+[`docs/ACCESS-CONTROL.md`](docs/ACCESS-CONTROL.md) §4/§9.
 
 **Bootstrap** — `ensure_bootstrap` (called from `main.rs` right after migrations)
 seeds one admin from `HELDAR_BOOTSTRAP_ADMIN_USER`/`_PASSWORD` (password ≥8) when
@@ -1376,7 +1376,7 @@ self-deletion). Every mutation across `routes/auth.rs` + `routes/entry.rs` appen
 ### 17.5 HTTP surface (`routes/auth.rs`, `routes/entry.rs`)
 
 Both routers are `merge`d in `routes/mod.rs`. The full table (method × path × role ×
-purpose) is in [`docs/CAMPUS-ENTRY.md`](docs/CAMPUS-ENTRY.md) §9. In brief: `/auth/*`
+purpose) is in [`docs/ACCESS-CONTROL.md`](docs/ACCESS-CONTROL.md) §9. In brief: `/auth/*`
 (login/logout/me) + admin-only `/users` + `/api-keys`; `/vehicles` + `/watchlist`
 (read = view, write = manage_registry); `/passes` + check-in/out + entry-event
 confirm/reject (gate ops = operate_gate); `/entry-events` + `/reports/{entry-log,
@@ -1427,7 +1427,7 @@ line-crossing/homography), and **extending the `Principal` guard to the legacy S
 
 Stage 5 (memo §7.7 retail behaviour analytics, §14 "Stage 5"; research.md §24) is the
 second **vertical app** on the kernel — the **same media kernel, different ontology**.
-Where Campus Entry is identity-aware at a gate, BakerySense is **anonymous by
+Where Access Control is identity-aware at a gate, BakerySense is **anonymous by
 construction**: a retail behaviour-analytics layer that reads the kernel's anonymous
 perception data and turns it into hourly metrics and a daily **diagnosis** report. It
 reuses everything below it (sampler, detector/tracker, zone engine, `zone_events` +
@@ -1631,7 +1631,7 @@ run **synchronously on the ingest hot path**. Movement sits **off** that path �
 **correlation layer over stored kernel data**: two `spawn_supervised` background loops (a
 ReID candidate **proposer** and a red-zone breach **rule engine**) on a shared timer,
 plus an on-demand **trigger** and **search** surface. It reads tables the kernel and
-Campus Entry have *already* written (`entry_events`, `detections`, `zone_events`,
+Access Control have *already* written (`entry_events`, `detections`, `zone_events`,
 `zones`) — never the live frame stream or the ingest batch. There is **no appearance/
 visual embedding anywhere** and **nothing is auto-confirmed**: every cross-camera link is
 a scored *candidate* a human reviews, and every identity-like *search* is audited.
@@ -1747,7 +1747,7 @@ correlation record outlives the camera/zone/entry it was derived from (auditabil
 ### 19.6 HTTP surface + the privacy gates (`routes.rs`)
 
 Reads need **`view`**, candidate/breach **reviews** need **`operate_gate`**, topology edits
-+ the manual `run` need **`manage`** (the Campus Entry capability matrix, §17.4). The
++ the manual `run` need **`manage`** (the Access Control capability matrix, §17.4). The
 router takes `MovementConfig` as an `Extension` and is `merge`d in `main.rs`.
 
 | Method | Path | Cap | Purpose |

@@ -23,7 +23,7 @@ Roadmap **Stages 0–7 are shipped** (see [ROADMAP.md](./ROADMAP.md)):
 | 1 | Observability & reliability — health/metrics/events APIs, alert webhook, recording-gap tracking |
 | 2 | AI frame sampler — bounded sub-stream frame extraction feeding a pluggable worker, isolated from recording |
 | 3 | Detection / tracking / zones — `DetectionConsumer` ingest, zone enter/exit/dwell engine |
-| 4 | Campus Entry / access control — ANPR temporal-voting plate resolution, vehicle/visitor/watchlist registry, guard workflow, RBAC |
+| 4 | Access Control / access control — ANPR temporal-voting plate resolution, vehicle/visitor/watchlist registry, guard workflow, RBAC |
 | 5 | BakerySense — anonymous retail behaviour analytics (footfall / queue / dwell / occupancy) |
 | 6 | Movement intelligence — multi-signal cross-camera ReID *candidates* (human-reviewed) + red-zone breach alerts |
 | 7 | Semantic search — deterministic query over event facts + LLM-as-*planner* (offline rule parser default) + a proof/claim ladder |
@@ -168,7 +168,12 @@ the confirmed findings fixed.
 
 ## Documentation
 
-- [ARCHITECTURE.md](./ARCHITECTURE.md) — the seams + every stage's design
+- [ARCHITECTURE.md](./ARCHITECTURE.md) — the kernel seams + every stage's design
 - [ROADMAP.md](./ROADMAP.md) — stage status and the research frontier
-- [LICENSING.md](./LICENSING.md) · [docs/OPEN-CORE-SPLIT.md](./docs/OPEN-CORE-SPLIT.md) — open-core boundary + how the public repo is produced
-- `docs/` — per-stage guides (Campus Entry, BakerySense, Movement, Search, AI workers, observability) + [REMOTE-ACCESS.md](./docs/REMOTE-ACCESS.md)
+- [CONTRIBUTING.md](./CONTRIBUTING.md) — dev setup, the quality bar, and what belongs in this repo
+- [LICENSING.md](./LICENSING.md) — the open-core boundary
+- Operator / integrator guides in [`docs/`](./docs):
+  - [Access Control](./docs/ACCESS-CONTROL.md) (ANPR / entry) · [Movement](./docs/MOVEMENT.md) (ReID + breach) · [Search](./docs/SEARCH.md)
+  - [AI workers](./docs/AI-WORKERS.md) · [Observability](./docs/OBSERVABILITY.md) · [Remote access](./docs/REMOTE-ACCESS.md)
+  - [Commissioning checklist](./docs/commissioning-checklist.md) · [Sizing](./docs/sizing.md)
+  - [Open-core split + publishing](./docs/OPEN-CORE-SPLIT.md)
