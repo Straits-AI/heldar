@@ -27,7 +27,7 @@ use heldar_kernel::state::AppState;
 use heldar_kernel::{auth, db, routes, services};
 
 // Proprietary vertical composition is isolated behind this seam. In the OPEN repo `verticals.rs` is a
-// no-op stub; the private workspace ships the real module (BakerySense, …). Keeps main.rs identical
+// no-op stub; the private workspace ships the real module (the proprietary verticals). Keeps main.rs identical
 // and free of any proprietary-crate reference in the open build.
 mod verticals;
 
