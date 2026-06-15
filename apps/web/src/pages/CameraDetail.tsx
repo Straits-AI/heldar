@@ -17,6 +17,7 @@ import { LiveView } from "../components/LiveView";
 import { Timeline } from "../components/Timeline";
 import { AiPanel } from "../components/AiPanel";
 import { ZonePanel } from "../components/ZonePanel";
+import { CameraConfigPanel } from "../components/CameraConfigPanel";
 import {
   PlaybackSessionPanel,
   PtzPanel,
@@ -713,6 +714,8 @@ export function CameraDetail() {
           )}
 
           <PtzPanel cameraId={id} canManage={canManage} />
+
+          <CameraConfigPanel cameraId={id} canManage={canManage} />
 
           <Panel
             title="Recent Segments"

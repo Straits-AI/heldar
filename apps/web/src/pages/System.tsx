@@ -2,7 +2,7 @@
 // One screen where a non-developer operator can see system health and explain faults:
 //   (1) storage horizon, (2) per-camera recorder health, (3) recent events feed.
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../lib/api";
@@ -11,10 +11,12 @@ import type {
   CameraStatus,
   CameraView,
   DiskStats,
+  Principal,
   Severity,
   StorageReport,
   VisionEvent,
 } from "../lib/types";
+import { BulkConfigPanel } from "../components/CameraConfigPanel";
 import {
   Button,
   EmptyState,
@@ -441,6 +443,26 @@ export function System() {
   const cameras = usePoll(() => api.listCameras(), 30000);
   const events = usePoll(() => api.listEvents({ limit: 50 }), 10000);
 
+  // ---- Principal / manager gating ----
+  // Bulk camera-config actions are manager+. When auth is disabled the server returns the `system`
+  // admin principal; when unauthenticated the controls stay gated off.
+  const [principal, setPrincipal] = useState<Principal | null>(null);
+  useEffect(() => {
+    let alive = true;
+    api
+      .me()
+      .then((p) => {
+        if (alive) setPrincipal(p);
+      })
+      .catch(() => {
+        /* unauthenticated / auth off — leave principal null (controls gated off) */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const canManage = principal?.role === "admin" || principal?.role === "manager";
+
   const [refreshing, setRefreshing] = useState(false);
   const refresh = () => {
     setRefreshing(true);
@@ -513,6 +535,11 @@ export function System() {
             error={events.error}
           />
         </div>
+      </div>
+
+      {/* ---- Full-width: bulk camera configuration ---- */}
+      <div className="mt-4 stagger">
+        <BulkConfigPanel canManage={canManage} />
       </div>
 
       {/* ---- Footer: raw endpoints ---- */}

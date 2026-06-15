@@ -792,6 +792,25 @@ pub struct PtzPreset {
     pub fetched_at: DateTime<Utc>,
 }
 
+// ---- Camera configuration (HikVision ISAPI): device + integration state ----
+
+/// Per-camera HikVision ISAPI configuration state, populated by the camera-config service. Mirrors
+/// `GET /ISAPI/System/deviceInfo` (identity), `/System/Network/Integrate` (`onvif_enabled`), the
+/// kernel-provisioned ONVIF user (`onvif_user_created`), and `/System/time` (`time_mode`/`ntp_server`).
+#[derive(Debug, Clone, FromRow, Serialize)]
+pub struct CameraIsapi {
+    pub camera_id: String,
+    pub device_name: Option<String>,
+    pub model: Option<String>,
+    pub firmware_version: Option<String>,
+    pub serial_number: Option<String>,
+    pub onvif_enabled: bool,
+    pub onvif_user_created: bool,
+    pub time_mode: Option<String>,
+    pub ntp_server: Option<String>,
+    pub fetched_at: DateTime<Utc>,
+}
+
 /// Request body for POST /api/v1/archive/export — zip a selection of recorded footage on demand.
 #[derive(Debug, Deserialize)]
 pub struct ArchiveExportRequest {

@@ -1117,3 +1117,148 @@ export interface PtzGotoPresetRequest {
   /** The device preset token to move to. */
   token: string;
 }
+
+// ---- Camera configuration (HikVision ISAPI): device, video, clock/NTP, ONVIF, OSD, bulk ----
+
+/** Device identity from GET /api/v1/cameras/{id}/config/device_info. */
+export interface DeviceInfo {
+  device_name?: string | null;
+  model?: string | null;
+  firmware_version?: string | null;
+  serial_number?: string | null;
+}
+
+/** A streaming channel's video-encoding configuration. `fps` is centi-fps as the device reports it
+ * (2000 = 20fps); `bitrate`/`vbr_upper_cap` are kbps. */
+export interface VideoConfig {
+  channel_id: number;
+  channel_name?: string | null;
+  codec: string;
+  width: number;
+  height: number;
+  fps: number;
+  quality_control: string;
+  bitrate: number;
+  vbr_upper_cap: number;
+  gop: number;
+}
+
+/** Partial update to a VideoConfig (read-modify-write); every field is optional. */
+export interface VideoConfigPatch {
+  codec?: string;
+  width?: number;
+  height?: number;
+  fps?: number;
+  quality_control?: string;
+  bitrate?: number;
+  vbr_upper_cap?: number;
+  gop?: number;
+}
+
+/** Device clock configuration (GET/PUT /api/v1/cameras/{id}/config/time). */
+export interface TimeConfig {
+  /** `manual` or `NTP`. */
+  time_mode: string;
+  /** ISO8601 local time with tz offset. */
+  local_time: string;
+  /** e.g. `CST-8:00:00`. */
+  time_zone: string;
+}
+
+/** NTP server configuration (GET/PUT /api/v1/cameras/{id}/config/time/ntp). */
+export interface NtpConfig {
+  /** `hostname` or `ipaddress`. */
+  addressing_format: string;
+  host_name: string;
+  port: number;
+}
+
+/** ONVIF + ISAPI integration toggles (GET/PUT /api/v1/cameras/{id}/config/onvif). */
+export interface OnvifSettings {
+  onvif_enabled: boolean;
+  isapi_enabled: boolean;
+}
+
+/** On-screen-display overlay configuration (GET/PUT /api/v1/cameras/{id}/config/osd). */
+export interface OsdConfig {
+  datetime_enabled: boolean;
+  channel_name_enabled: boolean;
+  date_style?: string | null;
+  time_style?: string | null;
+  display_week?: boolean | null;
+}
+
+/** ONVIF user role; the device's verbatim `userType` values. */
+export type OnvifUserType = "administrator" | "operator" | "mediaUser";
+
+/** Request to ensure a dedicated ONVIF user exists on the device (create-if-absent). */
+export interface EnsureOnvifUserRequest {
+  /** Defaults server-side to `heldar_onvif` when omitted. */
+  username?: string;
+  password: string;
+  /** Defaults server-side to `operator` (least-privilege Profile S). */
+  user_type?: OnvifUserType;
+}
+
+/** Per-camera HikVision ISAPI state cache row (GET reads refresh it). */
+export interface CameraIsapi {
+  camera_id: string;
+  device_name?: string | null;
+  model?: string | null;
+  firmware_version?: string | null;
+  serial_number?: string | null;
+  onvif_enabled: boolean;
+  onvif_user_created: boolean;
+  time_mode?: string | null;
+  ntp_server?: string | null;
+  fetched_at: string;
+}
+
+/** Reboot request body (DISRUPTIVE; the kernel refuses unless `confirm` is true). */
+export interface RebootRequest {
+  confirm: boolean;
+}
+
+/** Result of POST /api/v1/cameras/{id}/config/onvif/ensure_user. */
+export interface EnableOnvifResult {
+  ok: boolean;
+  /** True when the kernel created the user on this call (false if it had already provisioned it). */
+  created: boolean;
+}
+
+/** A single configuration action applied across one or more cameras (discriminated on `type`). */
+export type BulkAction =
+  | {
+      type: "enable_onvif";
+      /** Defaults server-side to `heldar_onvif` when omitted. */
+      onvif_username?: string;
+      onvif_password: string;
+    }
+  | { type: "sync_time"; ntp_server?: string | null }
+  | { type: "set_ntp"; ntp_server: string }
+  | {
+      type: "set_video";
+      /** null/omitted = the camera's main channel. */
+      channel?: number | null;
+      patch: VideoConfigPatch;
+    };
+
+/** Apply a BulkAction to a set of cameras (`camera_ids` null/omitted = every enabled camera). */
+export interface BulkConfigRequest {
+  camera_ids?: string[] | null;
+  action: BulkAction;
+}
+
+/** Per-camera outcome of a bulk action. */
+export interface BulkCameraResult {
+  camera_id: string;
+  ok: boolean;
+  error?: string | null;
+}
+
+/** Aggregate result of a bulk action across all targeted cameras. */
+export interface BulkConfigResponse {
+  results: BulkCameraResult[];
+  succeeded: number;
+  failed: number;
+}

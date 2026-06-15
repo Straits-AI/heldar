@@ -23,6 +23,8 @@ import type {
   BakeryReport,
   BakerySummary,
   BreachAlert,
+  BulkConfigRequest,
+  BulkConfigResponse,
   CameraCreate,
   CameraLink,
   CameraOnvif,
@@ -37,8 +39,11 @@ import type {
   CameraView,
   ClipResult,
   Detection,
+  DeviceInfo,
   DiscoverOptions,
   DiscoverResponse,
+  EnableOnvifResult,
+  EnsureOnvifUserRequest,
   EntryEvent,
   EntryLogReport,
   ExceptionReport,
@@ -46,8 +51,11 @@ import type {
   IncidentSummary,
   LiveUrls,
   LoginResult,
+  NtpConfig,
   OnvifDiscoverResponse,
   OnvifProbeRequest,
+  OnvifSettings,
+  OsdConfig,
   OutboxPage,
   PlaybackSession,
   Principal,
@@ -68,12 +76,15 @@ import type {
   StreamProfile,
   SystemInfo,
   Timeline,
+  TimeConfig,
   UserCreate,
   UserUpdate,
   UserView,
   Vehicle,
   VehicleCreate,
   VehicleUpdate,
+  VideoConfig,
+  VideoConfigPatch,
   VisionEvent,
   VisitorPass,
   VisitorPassCreate,
@@ -127,14 +138,19 @@ function qs(params: object = {}): string {
 
 const REQUEST_TIMEOUT_MS = 30000;
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+async function request<T>(
+  path: string,
+  init?: RequestInit,
+  timeoutMs: number = REQUEST_TIMEOUT_MS,
+): Promise<T> {
   const headers: Record<string, string> = { Accept: "application/json" };
   if (init?.body) headers["Content-Type"] = "application/json";
   if (authToken) headers["Authorization"] = `Bearer ${authToken}`;
 
   // Always bound a request with a timeout so a slow/hung Core can't leave the UI spinning forever;
   // merge in the caller's signal (if any) so a component can also cancel on unmount / re-nav.
-  const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+  // Slow fleet-wide operations (e.g. bulk camera config) pass a larger timeoutMs.
+  const timeout = AbortSignal.timeout(timeoutMs);
   const signal = init?.signal ? AbortSignal.any([init.signal, timeout]) : timeout;
 
   let res: Response;
@@ -654,6 +670,77 @@ export const api = {
     request<RecordingGap>(
       `/api/v1/cameras/${enc(cameraId)}/recording-gaps/${enc(gapId)}/retry`,
       { method: "POST" },
+    ),
+
+  // ---- Camera ISAPI configuration ----
+  /** Device identity; the GET also refreshes the kernel's per-camera ISAPI cache row. */
+  getCameraDeviceInfo: (id: string) =>
+    request<DeviceInfo>(`/api/v1/cameras/${enc(id)}/config/device_info`),
+  /** Every streaming channel's video-encoding configuration. */
+  listCameraVideoConfigs: (id: string) =>
+    request<VideoConfig[]>(`/api/v1/cameras/${enc(id)}/config/video`),
+  getCameraVideoConfig: (id: string, channel: number) =>
+    request<VideoConfig>(`/api/v1/cameras/${enc(id)}/config/video/${enc(String(channel))}`),
+  /** Read-modify-write a channel's video encoding (manager+). */
+  putCameraVideoConfig: (id: string, channel: number, cfg: VideoConfigPatch) =>
+    request<VideoConfig>(`/api/v1/cameras/${enc(id)}/config/video/${enc(String(channel))}`, {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }),
+  getCameraTimeConfig: (id: string) =>
+    request<TimeConfig>(`/api/v1/cameras/${enc(id)}/config/time`),
+  /** Set the device clock (manager+). */
+  putCameraTimeConfig: (id: string, cfg: TimeConfig) =>
+    request<TimeConfig>(`/api/v1/cameras/${enc(id)}/config/time`, {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }),
+  getCameraNtpConfig: (id: string) =>
+    request<NtpConfig>(`/api/v1/cameras/${enc(id)}/config/time/ntp`),
+  /** Set the camera's NTP server (manager+). */
+  putCameraNtpConfig: (id: string, cfg: NtpConfig) =>
+    request<NtpConfig>(`/api/v1/cameras/${enc(id)}/config/time/ntp`, {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }),
+  /** Switch the clock to NTP and sync immediately (manager+). */
+  syncCameraTimeNow: (id: string) =>
+    request<TimeConfig>(`/api/v1/cameras/${enc(id)}/config/time/sync_now`, { method: "POST" }),
+  getCameraOnvifSettings: (id: string) =>
+    request<OnvifSettings>(`/api/v1/cameras/${enc(id)}/config/onvif`),
+  /** Toggle ONVIF + ISAPI integration (manager+). */
+  putCameraOnvifSettings: (id: string, cfg: OnvifSettings) =>
+    request<OnvifSettings>(`/api/v1/cameras/${enc(id)}/config/onvif`, {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }),
+  /** Provision a dedicated ONVIF user on the device, create-if-absent (manager+). */
+  ensureCameraOnvifUser: (id: string, req: EnsureOnvifUserRequest) =>
+    request<EnableOnvifResult>(`/api/v1/cameras/${enc(id)}/config/onvif/ensure_user`, {
+      method: "POST",
+      body: JSON.stringify(req),
+    }),
+  getCameraOsdConfig: (id: string) =>
+    request<OsdConfig>(`/api/v1/cameras/${enc(id)}/config/osd`),
+  /** Set on-screen-display overlays (manager+). */
+  putCameraOsdConfig: (id: string, cfg: OsdConfig) =>
+    request<OsdConfig>(`/api/v1/cameras/${enc(id)}/config/osd`, {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }),
+  /** Reboot a camera — DISRUPTIVE; sends the required `confirm: true` (manager+). */
+  rebootCamera: (id: string) =>
+    request<{ ok: boolean; rebooting: boolean }>(`/api/v1/cameras/${enc(id)}/config/reboot`, {
+      method: "POST",
+      body: JSON.stringify({ confirm: true }),
+    }),
+  /** Apply one configuration action across many cameras (manager+). Fleet ops are slow — allow up
+   * to 5 minutes for the serial walk to finish. */
+  bulkCameraConfig: (body: BulkConfigRequest) =>
+    request<BulkConfigResponse>(
+      "/api/v1/cameras/config/bulk",
+      { method: "POST", body: JSON.stringify(body) },
+      300000, // fleet-wide ISAPI ops are slow; override the default 30s client timeout
     ),
 
   // ---- Fleet: site identity + outbox ----

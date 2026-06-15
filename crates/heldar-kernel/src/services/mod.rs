@@ -1,5 +1,6 @@
 pub mod anr;
 pub mod backup;
+pub mod camera_config;
 pub mod clip;
 pub mod consumer;
 pub mod discovery;

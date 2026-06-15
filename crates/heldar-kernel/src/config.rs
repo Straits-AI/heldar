@@ -141,6 +141,8 @@ pub struct Config {
     pub onvif_discovery_timeout_ms: u64,
     /// Per-request timeout for an ONVIF SOAP call (GetDeviceInformation, PTZ, etc.) in milliseconds.
     pub onvif_request_timeout_ms: u64,
+    /// Per-request timeout for a HikVision ISAPI camera-config call (HTTP Digest) in milliseconds.
+    pub isapi_request_timeout_ms: u64,
     // ---- Disk / array health (HA ops; see docs/HA.md) ----
     /// Run periodic SMART self-assessment checks (`smartctl -H`) inside the health loop. Off by
     /// default; needs `smartmontools` on PATH. Missing binary degrades to a one-time log + skip.
@@ -286,6 +288,7 @@ impl Config {
             archive_retention_hours: parse_or("HELDAR_ARCHIVE_RETENTION_HOURS", 48),
             onvif_discovery_timeout_ms: parse_or("HELDAR_ONVIF_DISCOVERY_TIMEOUT_MS", 2000),
             onvif_request_timeout_ms: parse_or("HELDAR_ONVIF_REQUEST_TIMEOUT_MS", 5000),
+            isapi_request_timeout_ms: parse_or("HELDAR_ISAPI_REQUEST_TIMEOUT_MS", 8000),
             smart_check_enabled: parse_bool("HELDAR_SMART_CHECK_ENABLED", false),
             smart_devices: var("HELDAR_SMART_DEVICES")
                 .map(|v| {
