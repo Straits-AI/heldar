@@ -25,14 +25,12 @@ fn select_codec_args(engine: &str, vaapi_device: &str) -> String {
     match engine {
         "software" => SOFTWARE_CODEC_ARGS.to_string(),
         // VAAPI: upload the decoded frames to the render node and encode with h264_vaapi.
-        "vaapi" => format!(
-            "-vaapi_device {vaapi_device} -vf format=nv12,hwupload -c:v h264_vaapi -g 30"
-        ),
-        // NVENC: low-latency NVIDIA hardware encoder.
-        "nvenc" => {
-            "-c:v h264_nvenc -preset p1 -tune ll -profile:v baseline -pix_fmt yuv420p -g 30"
-                .to_string()
+        "vaapi" => {
+            format!("-vaapi_device {vaapi_device} -vf format=nv12,hwupload -c:v h264_vaapi -g 30")
         }
+        // NVENC: low-latency NVIDIA hardware encoder.
+        "nvenc" => "-c:v h264_nvenc -preset p1 -tune ll -profile:v baseline -pix_fmt yuv420p -g 30"
+            .to_string(),
         other => {
             tracing::warn!(
                 engine = %other,
@@ -124,12 +122,18 @@ mod tests {
 
     #[test]
     fn codec_args_select_by_engine() {
-        assert_eq!(select_codec_args("software", "/dev/dri/renderD128"), SOFTWARE_CODEC_ARGS);
+        assert_eq!(
+            select_codec_args("software", "/dev/dri/renderD128"),
+            SOFTWARE_CODEC_ARGS
+        );
         let vaapi = select_codec_args("vaapi", "/dev/dri/renderD129");
         assert!(vaapi.contains("h264_vaapi"));
         assert!(vaapi.contains("/dev/dri/renderD129"));
         assert!(select_codec_args("nvenc", "/dev/dri/renderD128").contains("h264_nvenc"));
         // Unknown engine falls back to software (libx264).
-        assert_eq!(select_codec_args("bogus", "/dev/dri/renderD128"), SOFTWARE_CODEC_ARGS);
+        assert_eq!(
+            select_codec_args("bogus", "/dev/dri/renderD128"),
+            SOFTWARE_CODEC_ARGS
+        );
     }
 }

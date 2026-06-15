@@ -37,7 +37,10 @@ pub fn router() -> Router<AppState> {
             "/api/v1/backup/destinations/{id}",
             axum::routing::patch(update_destination).delete(delete_destination),
         )
-        .route("/api/v1/backup/destinations/{id}/test", post(test_destination))
+        .route(
+            "/api/v1/backup/destinations/{id}/test",
+            post(test_destination),
+        )
         .route(
             "/api/v1/backup/policies",
             get(list_policies).post(create_policy),
@@ -48,10 +51,7 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/v1/backup/policies/{id}/trigger", post(trigger_policy))
         .route("/api/v1/backup/jobs", get(list_jobs))
-        .route(
-            "/api/v1/backup/jobs/{id}",
-            get(get_job).delete(delete_job),
-        )
+        .route("/api/v1/backup/jobs/{id}", get(get_job).delete(delete_job))
         .route("/api/v1/archive/export", post(archive_export))
         .route("/api/v1/archive/exports", get(list_archive_exports))
 }
@@ -118,7 +118,9 @@ async fn list_destinations(
     )
     .fetch_all(&st.pool)
     .await?;
-    Ok(Json(rows.into_iter().map(BackupDestinationView::from).collect()))
+    Ok(Json(
+        rows.into_iter().map(BackupDestinationView::from).collect(),
+    ))
 }
 
 async fn create_destination(
@@ -126,7 +128,10 @@ async fn create_destination(
     principal: Principal,
     Json(body): Json<BackupDestinationCreate>,
 ) -> AppResult<(StatusCode, Json<BackupDestinationView>)> {
-    principal.require(principal.can_manage_registry(), "create backup destinations")?;
+    principal.require(
+        principal.can_manage_registry(),
+        "create backup destinations",
+    )?;
     let name = body.name.trim();
     if name.is_empty() {
         return Err(AppError::BadRequest("`name` is required".into()));
@@ -138,7 +143,9 @@ async fn create_destination(
     }
     let config = body.config.unwrap_or_else(|| json!({}));
     if !config.is_object() {
-        return Err(AppError::BadRequest("`config` must be a JSON object".into()));
+        return Err(AppError::BadRequest(
+            "`config` must be a JSON object".into(),
+        ));
     }
     let enabled = body.enabled.unwrap_or(true);
     let id = format!("bkd_{}", Uuid::new_v4().simple());
@@ -175,7 +182,10 @@ async fn update_destination(
     principal: Principal,
     Json(body): Json<BackupDestinationUpdate>,
 ) -> AppResult<Json<BackupDestinationView>> {
-    principal.require(principal.can_manage_registry(), "update backup destinations")?;
+    principal.require(
+        principal.can_manage_registry(),
+        "update backup destinations",
+    )?;
     let cur = load_destination(&st.pool, &id).await?;
 
     let name = body
@@ -192,7 +202,9 @@ async fn update_destination(
     let config = match body.config {
         Some(new) => {
             if !new.is_object() {
-                return Err(AppError::BadRequest("`config` must be a JSON object".into()));
+                return Err(AppError::BadRequest(
+                    "`config` must be a JSON object".into(),
+                ));
             }
             merge_secret_config(&cur.config.0, new)
         }
@@ -229,7 +241,10 @@ async fn delete_destination(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<StatusCode> {
-    principal.require(principal.can_manage_registry(), "delete backup destinations")?;
+    principal.require(
+        principal.can_manage_registry(),
+        "delete backup destinations",
+    )?;
     let res = sqlx::query("DELETE FROM backup_destinations WHERE id = ?")
         .bind(&id)
         .execute(&st.pool)
@@ -354,7 +369,9 @@ async fn update_policy(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| cur.name.clone());
-    let destination_id = body.destination_id.unwrap_or_else(|| cur.destination_id.clone());
+    let destination_id = body
+        .destination_id
+        .unwrap_or_else(|| cur.destination_id.clone());
     let _ = load_destination(&st.pool, &destination_id).await?;
     let camera_ids = match body.camera_ids {
         Some(v) => {
@@ -372,7 +389,10 @@ async fn update_policy(
         .schedule_interval_s
         .map(|v| v.max(60))
         .unwrap_or(cur.schedule_interval_s);
-    let lookback_hours = body.lookback_hours.map(|v| v.max(0)).unwrap_or(cur.lookback_hours);
+    let lookback_hours = body
+        .lookback_hours
+        .map(|v| v.max(0))
+        .unwrap_or(cur.lookback_hours);
     let enabled = body.enabled.unwrap_or(cur.enabled);
 
     sqlx::query(
@@ -548,7 +568,8 @@ async fn archive_export(
     let camera_ids = body.camera_ids;
     let incident_lock_only = body.incident_lock_only.unwrap_or(false);
     let trim = body.trim.unwrap_or(false);
-    let job = backup::create_archive(&st, camera_ids.clone(), from, to, incident_lock_only, trim).await?;
+    let job =
+        backup::create_archive(&st, camera_ids.clone(), from, to, incident_lock_only, trim).await?;
     auth::audit(
         &st.pool,
         &principal,

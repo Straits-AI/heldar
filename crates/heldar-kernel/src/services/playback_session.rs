@@ -299,12 +299,7 @@ async fn sweep(state: &AppState) -> anyhow::Result<()> {
     };
     while let Some(entry) = entries.next_entry().await? {
         let path = entry.path();
-        if !entry
-            .file_type()
-            .await
-            .map(|t| t.is_dir())
-            .unwrap_or(false)
-        {
+        if !entry.file_type().await.map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
         let meta = read_meta(&path).await;
@@ -319,8 +314,12 @@ async fn sweep(state: &AppState) -> anyhow::Result<()> {
             crate::repo::set_segments_locked(&state.pool, &m.segment_ids, false).await;
         }
         match tokio::fs::remove_dir_all(&path).await {
-            Ok(()) => tracing::debug!(dir = %path.display(), "playback_session_cleanup: removed expired session"),
-            Err(e) => tracing::warn!(error = %e, dir = %path.display(), "playback_session_cleanup: failed to remove session dir"),
+            Ok(()) => {
+                tracing::debug!(dir = %path.display(), "playback_session_cleanup: removed expired session")
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, dir = %path.display(), "playback_session_cleanup: failed to remove session dir")
+            }
         }
     }
     Ok(())

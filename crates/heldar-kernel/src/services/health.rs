@@ -219,7 +219,9 @@ fn line_has_down_member(line: &str) -> bool {
         let after = &rest[open + 1..];
         if let Some(close) = after.find(']') {
             let inner = &after[..close];
-            if !inner.is_empty() && inner.chars().all(|c| c == 'U' || c == '_') && inner.contains('_')
+            if !inner.is_empty()
+                && inner.chars().all(|c| c == 'U' || c == '_')
+                && inner.contains('_')
             {
                 return true;
             }
@@ -275,7 +277,11 @@ unused devices: <none>
     fn down_member_detection_ignores_disk_index_brackets() {
         // The header line's [0]/[1] disk-index brackets must not be read as a state map.
         assert!(!line_has_down_member("md0 : active raid1 sdb1[1] sda1[0]"));
-        assert!(line_has_down_member("      976630336 blocks super 1.2 [2/1] [U_]"));
-        assert!(!line_has_down_member("      976630336 blocks super 1.2 [2/2] [UU]"));
+        assert!(line_has_down_member(
+            "      976630336 blocks super 1.2 [2/1] [U_]"
+        ));
+        assert!(!line_has_down_member(
+            "      976630336 blocks super 1.2 [2/2] [UU]"
+        ));
     }
 }

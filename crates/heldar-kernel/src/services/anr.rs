@@ -164,7 +164,9 @@ async fn fill_gap(cfg: &Config, cam: &Camera, gap: &RecordingGap) -> anyhow::Res
         .unwrap_or(0);
     if size == 0 {
         let _ = tokio::fs::remove_file(&part_path).await;
-        anyhow::bail!("replay produced an empty file (camera likely has no footage for this window)");
+        anyhow::bail!(
+            "replay produced an empty file (camera likely has no footage for this window)"
+        );
     }
     tokio::fs::rename(&part_path, &final_path)
         .await

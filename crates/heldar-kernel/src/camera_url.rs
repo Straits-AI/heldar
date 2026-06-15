@@ -263,11 +263,14 @@ mod tests {
     #[test]
     fn anr_replay_url_honors_template_placeholders() {
         let mut c = base();
-        c.anr_replay_url_template =
-            Some("rtsp://cam/replay?s={start}&e={end}".into());
+        c.anr_replay_url_template = Some("rtsp://cam/replay?s={start}&e={end}".into());
         assert_eq!(
-            anr_replay_url(&c, parse_t("2026-06-13T12:00:00Z"), parse_t("2026-06-13T12:00:05Z"))
-                .unwrap(),
+            anr_replay_url(
+                &c,
+                parse_t("2026-06-13T12:00:00Z"),
+                parse_t("2026-06-13T12:00:05Z")
+            )
+            .unwrap(),
             "rtsp://cam/replay?s=20260613T120000Z&e=20260613T120005Z"
         );
     }

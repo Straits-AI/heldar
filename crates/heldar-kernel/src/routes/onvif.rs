@@ -24,7 +24,10 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/cameras/{id}/onvif", get(get_onvif))
         .route("/api/v1/cameras/{id}/onvif/probe", post(probe))
         .route("/api/v1/cameras/{id}/ptz/presets", get(list_presets))
-        .route("/api/v1/cameras/{id}/ptz/presets/refresh", post(refresh_presets))
+        .route(
+            "/api/v1/cameras/{id}/ptz/presets/refresh",
+            post(refresh_presets),
+        )
         .route("/api/v1/cameras/{id}/ptz/continuous", post(continuous_move))
         .route("/api/v1/cameras/{id}/ptz/stop", post(ptz_stop))
         .route("/api/v1/cameras/{id}/ptz/goto_preset", post(goto_preset))
@@ -32,10 +35,7 @@ pub fn router() -> Router<AppState> {
 
 // ---- Discovery ----
 
-async fn discover(
-    State(st): State<AppState>,
-    principal: Principal,
-) -> AppResult<Json<Value>> {
+async fn discover(State(st): State<AppState>, principal: Principal) -> AppResult<Json<Value>> {
     principal.require(principal.can_manage_registry(), "run ONVIF discovery")?;
     let devices = onvif::discover(&st.cfg).await?;
     auth::audit(

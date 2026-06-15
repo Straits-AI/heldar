@@ -162,14 +162,14 @@ async fn execute_job(state: &AppState, job_id: &str, timeout: Duration) {
     };
 
     let dest = match &job.destination_id {
-        Some(d) => sqlx::query_as::<_, BackupDestination>(
-            "SELECT * FROM backup_destinations WHERE id = ?",
-        )
-        .bind(d)
-        .fetch_optional(&state.pool)
-        .await
-        .ok()
-        .flatten(),
+        Some(d) => {
+            sqlx::query_as::<_, BackupDestination>("SELECT * FROM backup_destinations WHERE id = ?")
+                .bind(d)
+                .fetch_optional(&state.pool)
+                .await
+                .ok()
+                .flatten()
+        }
         None => None,
     };
     let Some(dest) = dest else {
@@ -209,11 +209,13 @@ async fn execute_job(state: &AppState, job_id: &str, timeout: Duration) {
     .await;
 
     if segments.is_empty() {
-        let _ = sqlx::query("UPDATE backup_jobs SET status = 'completed', finished_at = ? WHERE id = ?")
-            .bind(Utc::now())
-            .bind(job_id)
-            .execute(&state.pool)
-            .await;
+        let _ = sqlx::query(
+            "UPDATE backup_jobs SET status = 'completed', finished_at = ? WHERE id = ?",
+        )
+        .bind(Utc::now())
+        .bind(job_id)
+        .execute(&state.pool)
+        .await;
         return;
     }
 
@@ -221,7 +223,8 @@ async fn execute_job(state: &AppState, job_id: &str, timeout: Duration) {
     // after the (possibly timed-out) transfer future settles.
     let seg_ids: Vec<String> = segments.iter().map(|s| s.id.clone()).collect();
     repo::set_segments_locked(&state.pool, &seg_ids, true).await;
-    let outcome = tokio::time::timeout(timeout, copy_segments(state, job_id, &dest, &segments)).await;
+    let outcome =
+        tokio::time::timeout(timeout, copy_segments(state, job_id, &dest, &segments)).await;
     repo::set_segments_locked(&state.pool, &seg_ids, false).await;
 
     match outcome {
@@ -244,12 +247,14 @@ async fn execute_job(state: &AppState, job_id: &str, timeout: Duration) {
 
 async fn set_job_error(state: &AppState, job_id: &str, msg: &str) {
     tracing::warn!(job = job_id, error = msg, "backup: job failed");
-    let _ = sqlx::query("UPDATE backup_jobs SET status = 'error', error = ?, finished_at = ? WHERE id = ?")
-        .bind(msg)
-        .bind(Utc::now())
-        .bind(job_id)
-        .execute(&state.pool)
-        .await;
+    let _ = sqlx::query(
+        "UPDATE backup_jobs SET status = 'error', error = ?, finished_at = ? WHERE id = ?",
+    )
+    .bind(msg)
+    .bind(Utc::now())
+    .bind(job_id)
+    .execute(&state.pool)
+    .await;
 }
 
 /// Dispatch the transfer by destination kind. Returns (files_copied, bytes_copied).
@@ -338,7 +343,11 @@ async fn copy_rclone(
             bytes += seg.size_bytes.max(0) as u64;
         } else {
             let err = scrub(&String::from_utf8_lossy(&out.stderr), &secrets);
-            anyhow::bail!("rclone copy failed for {}: {}", file_name_of(&seg.path), err.trim());
+            anyhow::bail!(
+                "rclone copy failed for {}: {}",
+                file_name_of(&seg.path),
+                err.trim()
+            );
         }
         update_progress(state, job_id, copied, bytes).await;
     }
@@ -372,8 +381,7 @@ pub async fn create_archive(
             "`trim` requires both `from` and `to`".into(),
         ));
     }
-    let segments =
-        resolve_segments(&state.pool, &camera_ids, from, to, incident_lock_only).await?;
+    let segments = resolve_segments(&state.pool, &camera_ids, from, to, incident_lock_only).await?;
     if segments.is_empty() {
         return Err(AppError::NotFound(
             "no recorded footage matches the requested archive selection".into(),
@@ -415,9 +423,11 @@ pub async fn create_archive(
     let seg_ids: Vec<String> = segments.iter().map(|s| s.id.clone()).collect();
     repo::set_segments_locked(&state.pool, &seg_ids, true).await;
     let timeout = Duration::from_secs(state.cfg.backup_job_timeout_s.max(30));
-    let outcome =
-        tokio::time::timeout(timeout, build_archive_zip(state, &job_id, &segments, from, to, trim))
-            .await;
+    let outcome = tokio::time::timeout(
+        timeout,
+        build_archive_zip(state, &job_id, &segments, from, to, trim),
+    )
+    .await;
     repo::set_segments_locked(&state.pool, &seg_ids, false).await;
 
     let out_path = state.cfg.archive_dir.join(format!("{job_id}.zip"));
@@ -503,7 +513,10 @@ async fn build_archive_zip(
             .await
             .map_err(|e| anyhow::anyhow!("spawning zip ({ZIP_BIN}): {e}"))?;
         if !out.status.success() {
-            anyhow::bail!("zip failed: {}", String::from_utf8_lossy(&out.stderr).trim());
+            anyhow::bail!(
+                "zip failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
         }
         let size = tokio::fs::metadata(&out_path)
             .await
@@ -720,7 +733,11 @@ async fn build_remote(
                 secrets.push(pass.clone());
                 parts.push(format!("pass={obscured}"));
             }
-            Ok((format!("{}:", parts.join(",")), cfg_str(config, "path"), secrets))
+            Ok((
+                format!("{}:", parts.join(",")),
+                cfg_str(config, "path"),
+                secrets,
+            ))
         }
         "s3" => {
             let bucket = cfg_str(config, "bucket");
@@ -839,8 +856,14 @@ mod tests {
 
     #[test]
     fn join_path_preserves_leading_slash() {
-        assert_eq!(join_path("/srv/backups", &["cam1", "f.mp4"]), "/srv/backups/cam1/f.mp4");
-        assert_eq!(join_path("backups/", &["cam1", "f.mp4"]), "backups/cam1/f.mp4");
+        assert_eq!(
+            join_path("/srv/backups", &["cam1", "f.mp4"]),
+            "/srv/backups/cam1/f.mp4"
+        );
+        assert_eq!(
+            join_path("backups/", &["cam1", "f.mp4"]),
+            "backups/cam1/f.mp4"
+        );
         assert_eq!(join_path("", &["cam1", "f.mp4"]), "cam1/f.mp4");
         assert_eq!(join_path("bucket", &["", "p"]), "bucket/p");
     }
@@ -848,7 +871,10 @@ mod tests {
     #[test]
     fn scrub_masks_secrets() {
         let s = "auth failed for pass=hunter2 token=hunter2";
-        assert_eq!(scrub(s, &["hunter2".into()]), "auth failed for pass=*** token=***");
+        assert_eq!(
+            scrub(s, &["hunter2".into()]),
+            "auth failed for pass=*** token=***"
+        );
         assert_eq!(scrub("nothing", &["".into()]), "nothing");
     }
 
@@ -871,7 +897,10 @@ mod tests {
 
     #[test]
     fn file_name_of_extracts_basename() {
-        assert_eq!(file_name_of("/data/recordings/cam1/20260613_120000.mp4"), "20260613_120000.mp4");
+        assert_eq!(
+            file_name_of("/data/recordings/cam1/20260613_120000.mp4"),
+            "20260613_120000.mp4"
+        );
         assert_eq!(file_name_of(""), "segment.mp4");
     }
 }

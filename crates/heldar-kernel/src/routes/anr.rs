@@ -46,24 +46,27 @@ async fn list_gaps(
     principal.require(principal.can_view(), "view recording gaps")?;
     let _ = load_camera(&st.pool, &id).await?;
     let limit = q.limit.unwrap_or(500).clamp(1, 5000);
-    let rows = match q.state.as_deref() {
-        Some(state) => sqlx::query_as::<_, RecordingGap>(
-            "SELECT * FROM recording_gaps WHERE camera_id = ? AND fill_state = ?
+    let rows =
+        match q.state.as_deref() {
+            Some(state) => {
+                sqlx::query_as::<_, RecordingGap>(
+                    "SELECT * FROM recording_gaps WHERE camera_id = ? AND fill_state = ?
              ORDER BY gap_start DESC LIMIT ?",
-        )
-        .bind(&id)
-        .bind(state)
-        .bind(limit)
-        .fetch_all(&st.pool)
-        .await?,
-        None => sqlx::query_as::<_, RecordingGap>(
-            "SELECT * FROM recording_gaps WHERE camera_id = ? ORDER BY gap_start DESC LIMIT ?",
-        )
-        .bind(&id)
-        .bind(limit)
-        .fetch_all(&st.pool)
-        .await?,
-    };
+                )
+                .bind(&id)
+                .bind(state)
+                .bind(limit)
+                .fetch_all(&st.pool)
+                .await?
+            }
+            None => sqlx::query_as::<_, RecordingGap>(
+                "SELECT * FROM recording_gaps WHERE camera_id = ? ORDER BY gap_start DESC LIMIT ?",
+            )
+            .bind(&id)
+            .bind(limit)
+            .fetch_all(&st.pool)
+            .await?,
+        };
     Ok(Json(rows))
 }
 

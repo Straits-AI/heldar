@@ -123,12 +123,12 @@ async fn create_camera(
         .max(1);
     // Fall back to the configured default quota when omitted; a default of 0 means "no quota" and is
     // stored as NULL (no per-camera cap).
-    let storage_quota_bytes = body.storage_quota_bytes.or_else(|| {
-        match st.cfg.default_camera_quota_bytes {
-            0 => None,
-            q => Some(q as i64),
-        }
-    });
+    let storage_quota_bytes =
+        body.storage_quota_bytes
+            .or_else(|| match st.cfg.default_camera_quota_bytes {
+                0 => None,
+                q => Some(q as i64),
+            });
     let record_audio = body.record_audio.unwrap_or(st.cfg.default_record_audio);
     let record_mode = body.record_mode.unwrap_or_else(|| "continuous".into());
     validate_record_mode(&record_mode)?;

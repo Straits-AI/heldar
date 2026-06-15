@@ -255,14 +255,16 @@ impl RecorderManager {
         // Choose the supervisor by record mode at task start. A mode change always goes through
         // `reconcile()` (stop + respawn), so picking the path here is sufficient; both paths also
         // self-exit if the camera is later deleted / disabled / its mode no longer matches.
-        let mode: Option<String> = sqlx::query_scalar("SELECT record_mode FROM cameras WHERE id = ?")
-            .bind(&camera_id)
-            .fetch_optional(&self.pool)
-            .await
-            .ok()
-            .flatten();
+        let mode: Option<String> =
+            sqlx::query_scalar("SELECT record_mode FROM cameras WHERE id = ?")
+                .bind(&camera_id)
+                .fetch_optional(&self.pool)
+                .await
+                .ok()
+                .flatten();
         if event_capable(mode.as_deref().unwrap_or("continuous")) {
-            self.run_event_supervise(camera_id.clone(), stop, trigger).await;
+            self.run_event_supervise(camera_id.clone(), stop, trigger)
+                .await;
         } else {
             self.run_supervise(camera_id.clone(), stop).await;
         }

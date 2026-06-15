@@ -177,7 +177,10 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
             json!({ "deleted": quota_deleted, "reason": "camera_quota" }),
         )
         .await;
-        tracing::warn!(deleted = quota_deleted, "retention: per-camera quota cleanup");
+        tracing::warn!(
+            deleted = quota_deleted,
+            "retention: per-camera quota cleanup"
+        );
     }
 
     // 3) Global size cap: prune the oldest DELETABLE segments until the deletable footprint fits the
@@ -506,7 +509,10 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         .await?
         .rows_affected();
         if jpruned > 0 {
-            tracing::info!(deleted = jpruned, "retention: pruned old finished backup jobs");
+            tracing::info!(
+                deleted = jpruned,
+                "retention: pruned old finished backup jobs"
+            );
         }
     }
     Ok(())

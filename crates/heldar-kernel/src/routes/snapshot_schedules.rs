@@ -82,12 +82,11 @@ async fn create_schedule(
     .execute(&st.pool)
     .await?;
 
-    let schedule = sqlx::query_as::<_, SnapshotSchedule>(
-        "SELECT * FROM snapshot_schedules WHERE id = ?",
-    )
-    .bind(&schedule_id)
-    .fetch_one(&st.pool)
-    .await?;
+    let schedule =
+        sqlx::query_as::<_, SnapshotSchedule>("SELECT * FROM snapshot_schedules WHERE id = ?")
+            .bind(&schedule_id)
+            .fetch_one(&st.pool)
+            .await?;
     auth::audit(
         &st.pool,
         &principal,
@@ -107,13 +106,14 @@ async fn update_schedule(
     Json(body): Json<SnapshotScheduleUpdate>,
 ) -> AppResult<Json<SnapshotSchedule>> {
     principal.require(principal.can_manage_registry(), "update snapshot schedules")?;
-    let cur = sqlx::query_as::<_, SnapshotSchedule>(
-        "SELECT * FROM snapshot_schedules WHERE id = ?",
-    )
-    .bind(&schedule_id)
-    .fetch_optional(&st.pool)
-    .await?
-    .ok_or_else(|| AppError::NotFound(format!("snapshot schedule {schedule_id} not found")))?;
+    let cur =
+        sqlx::query_as::<_, SnapshotSchedule>("SELECT * FROM snapshot_schedules WHERE id = ?")
+            .bind(&schedule_id)
+            .fetch_optional(&st.pool)
+            .await?
+            .ok_or_else(|| {
+                AppError::NotFound(format!("snapshot schedule {schedule_id} not found"))
+            })?;
 
     let interval = clamp_interval(body.interval_seconds.unwrap_or(cur.interval_seconds));
     let enabled = body.enabled.unwrap_or(cur.enabled);
@@ -128,12 +128,11 @@ async fn update_schedule(
     .execute(&st.pool)
     .await?;
 
-    let schedule = sqlx::query_as::<_, SnapshotSchedule>(
-        "SELECT * FROM snapshot_schedules WHERE id = ?",
-    )
-    .bind(&schedule_id)
-    .fetch_one(&st.pool)
-    .await?;
+    let schedule =
+        sqlx::query_as::<_, SnapshotSchedule>("SELECT * FROM snapshot_schedules WHERE id = ?")
+            .bind(&schedule_id)
+            .fetch_one(&st.pool)
+            .await?;
     auth::audit(
         &st.pool,
         &principal,

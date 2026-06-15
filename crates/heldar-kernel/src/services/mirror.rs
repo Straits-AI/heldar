@@ -154,7 +154,12 @@ impl MirrorRecorderManager {
         }
     }
 
-    async fn supervise(self: Arc<Self>, camera_id: String, generation: u64, stop: watch::Receiver<bool>) {
+    async fn supervise(
+        self: Arc<Self>,
+        camera_id: String,
+        generation: u64,
+        stop: watch::Receiver<bool>,
+    ) {
         self.run_mirror(camera_id.clone(), stop).await;
         // Self-exit cleanup: remove our own entry only if it is still ours.
         let mut tasks = self.tasks.lock().await;

@@ -60,16 +60,11 @@ fn find_open(xml: &str, local: &str, from: usize) -> Option<(usize, usize, bool)
             _ => {}
         }
         let name_start = lt + 1;
-        let Some(gt_rel) = xml[name_start..].find('>') else {
-            return None;
-        };
+        let gt_rel = xml[name_start..].find('>')?;
         let gt = name_start + gt_rel;
         let self_closing = gt > name_start && bytes.get(gt - 1).copied() == Some(b'/');
         let tag = &xml[name_start..gt];
-        let head = tag
-            .split([' ', '\t', '\n', '\r', '/'])
-            .next()
-            .unwrap_or("");
+        let head = tag.split([' ', '\t', '\n', '\r', '/']).next().unwrap_or("");
         let local_name = head.rsplit(':').next().unwrap_or(head);
         if local_name == local {
             return Some((lt, gt, self_closing));
@@ -85,9 +80,7 @@ fn find_close(xml: &str, local: &str) -> Option<usize> {
     while let Some(rel) = xml[i..].find("</") {
         let pos = i + rel;
         let after = &xml[pos + 2..];
-        let Some(gt_rel) = after.find('>') else {
-            return None;
-        };
+        let gt_rel = after.find('>')?;
         let name = after[..gt_rel].trim();
         let local_name = name.rsplit(':').next().unwrap_or(name);
         if local_name == local {
@@ -431,7 +424,10 @@ async fn resolve_device_url(
     cam: &Camera,
     override_url: Option<String>,
 ) -> AppResult<String> {
-    if let Some(u) = override_url.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
+    if let Some(u) = override_url
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
         camera_url::validate_stream_url(&u).map_err(AppError::BadRequest)?;
         return Ok(u);
     }
@@ -563,14 +559,13 @@ pub async fn probe(
     }
 
     // Preserve any scopes captured by a prior discovery (probe itself does not fetch scopes).
-    let scopes: Value = sqlx::query_scalar::<_, String>(
-        "SELECT scopes FROM camera_onvif WHERE camera_id = ?",
-    )
-    .bind(camera_id)
-    .fetch_optional(&state.pool)
-    .await?
-    .and_then(|s| serde_json::from_str(&s).ok())
-    .unwrap_or_else(|| json!([]));
+    let scopes: Value =
+        sqlx::query_scalar::<_, String>("SELECT scopes FROM camera_onvif WHERE camera_id = ?")
+            .bind(camera_id)
+            .fetch_optional(&state.pool)
+            .await?
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_else(|| json!([]));
 
     let now = Utc::now();
     sqlx::query(
@@ -707,7 +702,10 @@ pub async fn load_onvif(pool: &SqlitePool, camera_id: &str) -> AppResult<CameraO
 }
 
 /// Load a camera + its ONVIF profile, asserting the PTZ service + profile token are present.
-async fn load_ptz_target(pool: &SqlitePool, camera_id: &str) -> AppResult<(Camera, CameraOnvif, String, String)> {
+async fn load_ptz_target(
+    pool: &SqlitePool,
+    camera_id: &str,
+) -> AppResult<(Camera, CameraOnvif, String, String)> {
     let cam: Camera = sqlx::query_as::<_, Camera>("SELECT * FROM cameras WHERE id = ?")
         .bind(camera_id)
         .fetch_optional(pool)
@@ -890,7 +888,10 @@ mod tests {
     #[test]
     fn extracts_simple_text_with_prefix() {
         let xml = "<tds:Manufacturer>HIKVISION</tds:Manufacturer><tds:Model>DS-2CD</tds:Model>";
-        assert_eq!(first_text(xml, "Manufacturer").as_deref(), Some("HIKVISION"));
+        assert_eq!(
+            first_text(xml, "Manufacturer").as_deref(),
+            Some("HIKVISION")
+        );
         assert_eq!(first_text(xml, "Model").as_deref(), Some("DS-2CD"));
         assert_eq!(first_text(xml, "SerialNumber"), None);
     }
@@ -985,7 +986,11 @@ mod tests {
     #[test]
     fn injects_creds_into_stream_uri() {
         assert_eq!(
-            inject_creds("rtsp://10.0.0.2:554/Streaming/101", Some("admin"), Some("p@ss")),
+            inject_creds(
+                "rtsp://10.0.0.2:554/Streaming/101",
+                Some("admin"),
+                Some("p@ss")
+            ),
             "rtsp://admin:p%40ss@10.0.0.2:554/Streaming/101"
         );
         // Already has userinfo: unchanged.
@@ -1008,7 +1013,13 @@ mod tests {
 
     #[test]
     fn host_of_strips_everything() {
-        assert_eq!(host_of("http://192.168.0.2/onvif/x").as_deref(), Some("192.168.0.2"));
-        assert_eq!(host_of("http://u:p@10.0.0.5:8000/x").as_deref(), Some("10.0.0.5"));
+        assert_eq!(
+            host_of("http://192.168.0.2/onvif/x").as_deref(),
+            Some("192.168.0.2")
+        );
+        assert_eq!(
+            host_of("http://u:p@10.0.0.5:8000/x").as_deref(),
+            Some("10.0.0.5")
+        );
     }
 }

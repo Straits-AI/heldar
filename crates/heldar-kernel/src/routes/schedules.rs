@@ -81,7 +81,10 @@ async fn create_schedule(
     principal: Principal,
     Json(body): Json<RecordScheduleCreate>,
 ) -> AppResult<(StatusCode, Json<RecordSchedule>)> {
-    principal.require(principal.can_manage_registry(), "create recording schedules")?;
+    principal.require(
+        principal.can_manage_registry(),
+        "create recording schedules",
+    )?;
     let _ = load_camera(&st.pool, &id).await?;
     validate_days(&body.days)?;
     let time_start = normalize_hhmm(&body.time_start, "time_start")?;
@@ -106,10 +109,11 @@ async fn create_schedule(
     .execute(&st.pool)
     .await?;
 
-    let schedule = sqlx::query_as::<_, RecordSchedule>("SELECT * FROM camera_schedules WHERE id = ?")
-        .bind(&schedule_id)
-        .fetch_one(&st.pool)
-        .await?;
+    let schedule =
+        sqlx::query_as::<_, RecordSchedule>("SELECT * FROM camera_schedules WHERE id = ?")
+            .bind(&schedule_id)
+            .fetch_one(&st.pool)
+            .await?;
     // Apply immediately (e.g. a window that is active right now should start the recorder).
     st.recorder.reconcile(&id).await;
     auth::audit(
@@ -130,7 +134,10 @@ async fn update_schedule(
     principal: Principal,
     Json(body): Json<RecordScheduleUpdate>,
 ) -> AppResult<Json<RecordSchedule>> {
-    principal.require(principal.can_manage_registry(), "update recording schedules")?;
+    principal.require(
+        principal.can_manage_registry(),
+        "update recording schedules",
+    )?;
     let cur = sqlx::query_as::<_, RecordSchedule>("SELECT * FROM camera_schedules WHERE id = ?")
         .bind(&schedule_id)
         .fetch_optional(&st.pool)
@@ -167,10 +174,11 @@ async fn update_schedule(
     .execute(&st.pool)
     .await?;
 
-    let schedule = sqlx::query_as::<_, RecordSchedule>("SELECT * FROM camera_schedules WHERE id = ?")
-        .bind(&schedule_id)
-        .fetch_one(&st.pool)
-        .await?;
+    let schedule =
+        sqlx::query_as::<_, RecordSchedule>("SELECT * FROM camera_schedules WHERE id = ?")
+            .bind(&schedule_id)
+            .fetch_one(&st.pool)
+            .await?;
     st.recorder.reconcile(&cur.camera_id).await;
     auth::audit(
         &st.pool,
@@ -189,7 +197,10 @@ async fn delete_schedule(
     Path(schedule_id): Path<String>,
     principal: Principal,
 ) -> AppResult<StatusCode> {
-    principal.require(principal.can_manage_registry(), "delete recording schedules")?;
+    principal.require(
+        principal.can_manage_registry(),
+        "delete recording schedules",
+    )?;
     let camera_id: Option<String> =
         sqlx::query_scalar("SELECT camera_id FROM camera_schedules WHERE id = ?")
             .bind(&schedule_id)
