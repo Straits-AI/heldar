@@ -123,6 +123,17 @@ pre,
     44px 44px;
 }
 
+/* Extremely subtle film grain, tiled, ~2.5% — texture without noise. */
+.app-atmosphere::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.025;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  background-size: 160px 160px;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -185,20 +196,20 @@ pre,
   }
 
   .btn {
-    @apply inline-flex items-center justify-center gap-1.5 rounded-md border border-line bg-raised px-3 py-1.5 text-sm font-medium text-fg transition-colors duration-150 hover:border-[#34373e] hover:bg-[#23262c] disabled:cursor-not-allowed disabled:opacity-50;
+    @apply inline-flex select-none items-center justify-center gap-1.5 rounded-md border border-line bg-raised px-3 py-1.5 text-sm font-medium text-fg shadow-raised transition-[background-color,border-color,box-shadow,transform] duration-150 hover:border-[#34373e] hover:bg-[#23262c] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-canvas active:translate-y-px disabled:cursor-not-allowed disabled:opacity-50 disabled:shadow-none;
   }
   .btn-sm {
     @apply px-2 py-1 text-xs;
   }
   .btn-primary {
-    @apply border-transparent bg-accent font-semibold text-accent-ink hover:bg-accent-soft hover:text-accent-ink;
+    @apply border-transparent bg-accent font-semibold text-accent-ink shadow-none hover:bg-accent-soft hover:text-accent-ink hover:shadow-glow-soft active:bg-accent-deep active:text-fg;
   }
   .btn-danger {
-    @apply border-danger/40 bg-danger/10 text-red-300 hover:bg-danger/20 hover:text-red-200;
+    @apply border-danger/40 bg-danger/10 text-red-300 shadow-none hover:bg-danger/20 hover:text-red-200;
   }
 
   .input {
-    @apply w-full rounded-md border border-line bg-canvas px-3 py-1.5 font-mono text-sm text-fg placeholder:text-fg-muted/70 transition-colors duration-150 focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent;
+    @apply w-full rounded-md border border-line bg-canvas px-3 py-1.5 font-mono text-sm text-fg placeholder:text-fg-muted/70 transition-[border-color,box-shadow,background-color] duration-150 hover:border-[#34373e] focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent;
   }
   .label {
     @apply mb-1 block font-mono text-[10px] font-medium uppercase tracking-micro text-fg-secondary;

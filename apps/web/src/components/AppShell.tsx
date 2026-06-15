@@ -7,7 +7,7 @@ import { NavLink } from "react-router-dom";
 import { api } from "../lib/api";
 import { usePoll } from "../lib/usePoll";
 import { formatBytes, formatUptime } from "../lib/format";
-import { cx, Spinner, StatusLed } from "./ui";
+import { BrandMark, cx, Spinner, StatusLed } from "./ui";
 
 /* ---------------------------------------------------------------- */
 /* Nav rail                                                         */
@@ -228,26 +228,29 @@ const NAV_ITEMS: { to: string; label: string; end?: boolean; Icon: (p: IconProps
 function NavRail({ version }: { version?: string }) {
   return (
     <aside className="sticky top-0 z-30 hidden h-screen w-[232px] shrink-0 flex-col border-r border-line bg-panel sm:flex">
-      {/* Wordmark */}
-      <div className="flex items-center gap-3 border-b border-line px-5 py-5">
-        <span className="relative flex h-9 w-9 items-center justify-center rounded-md border border-accent/40 bg-canvas">
-          <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none">
-            <circle cx="12" cy="12" r="8" stroke="#f59e0b" strokeWidth="1.8" />
-            <circle cx="12" cy="12" r="2.4" fill="#f59e0b" />
-          </svg>
+      {/* Brand */}
+      <div className="relative flex animate-fade-in items-center gap-3 px-5 py-5">
+        <span className="relative flex h-10 w-10 items-center justify-center rounded-lg border border-accent/35 bg-canvas shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_0_18px_-6px_rgba(245,158,11,0.5)]">
+          <span className="pointer-events-none absolute inset-0 rounded-lg bg-bifrost-soft opacity-50" />
+          <BrandMark size={24} className="relative" />
         </span>
         <div className="leading-none">
           <div className="font-display text-[15px] font-extrabold tracking-wider text-fg">
             HELDAR
           </div>
-          <div className="mt-1 font-mono text-[9px] uppercase tracking-micro text-accent">
+          <div className="mt-1.5 font-mono text-[9px] uppercase tracking-micro text-accent">
             Core
           </div>
         </div>
+        {/* Lone Bifrost hairline — the brand seam */}
+        <span
+          aria-hidden="true"
+          className="absolute inset-x-0 bottom-0 h-px bg-bifrost-line opacity-70"
+        />
       </div>
 
       {/* Nav */}
-      <nav className="flex flex-1 flex-col gap-1 px-3 py-4">
+      <nav className="stagger flex flex-1 flex-col gap-0.5 px-3 py-4">
         <div className="px-2 pb-2 font-mono text-[9px] uppercase tracking-micro text-fg-muted">
           Operations
         </div>
@@ -258,9 +261,9 @@ function NavRail({ version }: { version?: string }) {
             end={end}
             className={({ isActive }) =>
               cx(
-                "group relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors duration-150",
+                "group relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-[background-color,color] duration-150",
                 isActive
-                  ? "bg-raised text-fg"
+                  ? "bg-raised text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
                   : "text-fg-secondary hover:bg-raised/60 hover:text-fg",
               )
             }
@@ -269,8 +272,10 @@ function NavRail({ version }: { version?: string }) {
               <>
                 <span
                   className={cx(
-                    "absolute left-0 top-1/2 h-4 w-[3px] -translate-y-1/2 rounded-r-full bg-accent transition-opacity duration-150",
-                    isActive ? "opacity-100" : "opacity-0",
+                    "absolute left-0 top-1/2 w-[3px] -translate-y-1/2 rounded-r-full bg-accent transition-all duration-200",
+                    isActive
+                      ? "h-5 opacity-100 shadow-[0_0_8px_0_rgba(245,158,11,0.6)]"
+                      : "h-3 opacity-0 group-hover:opacity-40",
                   )}
                 />
                 <Icon
@@ -360,7 +365,7 @@ function TelemetryBar() {
   const online = !!data && !error;
 
   return (
-    <header className="sticky top-0 z-20 border-b border-line bg-panel/85 backdrop-blur supports-[backdrop-filter]:bg-panel/70">
+    <header className="sticky top-0 z-20 animate-fade-in border-b border-line bg-panel/85 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] backdrop-blur supports-[backdrop-filter]:bg-panel/70">
       <div className="flex h-14 items-center gap-5 overflow-x-auto px-4 sm:px-6">
         {/* Link status */}
         <div className="flex items-center gap-2">

@@ -7,7 +7,7 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 import { api, ApiError, setAuthToken } from "../lib/api";
 import type { Principal } from "../lib/types";
-import { Button, Field, Input, SectionLabel, Spinner } from "./ui";
+import { BrandMark, Button, Field, Input, SectionLabel, Spinner } from "./ui";
 
 export function Login({ onSuccess }: { onSuccess: (principal: Principal) => void }) {
   const [username, setUsername] = useState("");
@@ -40,22 +40,25 @@ export function Login({ onSuccess }: { onSuccess: (principal: Principal) => void
   return (
     <div className="mx-auto flex min-h-[72vh] max-w-sm flex-col justify-center px-4 py-10">
       <div className="animate-rise overflow-hidden rounded-panel border border-line bg-panel shadow-panel">
-        {/* Wordmark header */}
-        <div className="flex items-center gap-3 border-b border-line px-5 py-4">
-          <span className="relative flex h-9 w-9 items-center justify-center rounded-md border border-accent/40 bg-canvas">
-            <svg viewBox="0 0 24 24" className="h-5 w-5" fill="none" aria-hidden="true">
-              <circle cx="12" cy="12" r="8" stroke="#f59e0b" strokeWidth="1.8" />
-              <circle cx="12" cy="12" r="2.4" fill="#f59e0b" />
-            </svg>
+        {/* Wordmark header — login is a rare brand moment: the lone Bifrost arc + seam surface here. */}
+        <div className="relative flex items-center gap-3 border-b border-line px-5 py-4">
+          <span className="relative flex h-10 w-10 items-center justify-center rounded-lg border border-accent/35 bg-canvas shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_0_18px_-6px_rgba(245,158,11,0.5)]">
+            <span className="pointer-events-none absolute inset-0 rounded-lg bg-bifrost-soft opacity-50" />
+            <BrandMark size={24} className="relative" />
           </span>
           <div className="leading-none">
             <div className="font-display text-[15px] font-extrabold tracking-wider text-fg">
               HELDAR
             </div>
-            <div className="mt-1 font-mono text-[9px] uppercase tracking-micro text-accent">
+            <div className="mt-1.5 font-mono text-[9px] uppercase tracking-micro text-accent">
               Operator sign-in
             </div>
           </div>
+          {/* Lone Bifrost hairline — the brand seam (matches the nav rail). */}
+          <span
+            aria-hidden="true"
+            className="absolute inset-x-0 bottom-0 h-px bg-bifrost-line opacity-70"
+          />
         </div>
 
         <form onSubmit={handleSubmit} className="space-y-4 p-5">

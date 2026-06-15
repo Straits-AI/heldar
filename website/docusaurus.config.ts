@@ -7,23 +7,49 @@ import type * as Preset from '@docusaurus/preset-classic';
 const config: Config = {
   title: 'Heldar',
   tagline: 'Open visual-event intelligence for physical spaces',
-  favicon: 'img/favicon.ico',
+  favicon: 'img/favicon.svg',
 
   // Future flags, see https://docusaurus.io/docs/api/docusaurus-config#future
   future: {
     v4: true, // Improve compatibility with the upcoming Docusaurus v4
   },
 
-  // Production URL: served from GitHub Pages under the project path.
-  url: 'https://straits-ai.github.io',
-  baseUrl: '/heldar/',
+  // Production URL: served from Cloudflare Workers (Static Assets) at the root of
+  // the Worker's domain (the *.workers.dev subdomain or a custom domain). No path
+  // prefix, so baseUrl is "/". Set this to your final custom domain.
+  url: 'https://docs.heldar.ai',
+  baseUrl: '/',
 
-  // GitHub pages deployment config.
+  // Source repo metadata (used for editUrl and links).
   organizationName: 'Straits-AI',
   projectName: 'heldar',
   trailingSlash: false,
 
   onBrokenLinks: 'warn',
+
+  // Brand typography, mirrored from the Heldar dashboard:
+  // Archivo (display/headings), Hanken Grotesk (body/UI), JetBrains Mono (data/code).
+  headTags: [
+    {
+      tagName: 'link',
+      attributes: {rel: 'preconnect', href: 'https://fonts.googleapis.com'},
+    },
+    {
+      tagName: 'link',
+      attributes: {
+        rel: 'preconnect',
+        href: 'https://fonts.gstatic.com',
+        crossorigin: 'anonymous',
+      },
+    },
+    {
+      tagName: 'link',
+      attributes: {
+        rel: 'stylesheet',
+        href: 'https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=Hanken+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap',
+      },
+    },
+  ],
 
   markdown: {
     hooks: {
@@ -57,8 +83,10 @@ const config: Config = {
   themeConfig: {
     // Replace with your project's social card
     image: 'img/docusaurus-social-card.jpg',
+    // Heldar is a dark SOC console; the marketing + docs site is dark by default.
     colorMode: {
-      respectPrefersColorScheme: true,
+      defaultMode: 'dark',
+      respectPrefersColorScheme: false,
     },
     navbar: {
       title: 'Heldar',

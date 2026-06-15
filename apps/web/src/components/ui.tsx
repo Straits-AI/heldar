@@ -1,6 +1,7 @@
 // Heldar Core — shared UI primitives (Operations console / SOC).
 // Phase 2 page clusters import from here; keep these names + signatures stable.
 
+import { useId } from "react";
 import type {
   ButtonHTMLAttributes,
   InputHTMLAttributes,
@@ -14,6 +15,61 @@ import type {
 /* ---------------------------------------------------------------- */
 export function cx(...classes: (string | false | null | undefined)[]): string {
   return classes.filter(Boolean).join(" ");
+}
+
+/* ---------------------------------------------------------------- */
+/* BrandMark — Heldar's all-seeing aperture under a Bifrost arc      */
+/* The eye/iris identity stays; a single spectral arc is the only    */
+/* place the Bifrost gradient is allowed to surface.                 */
+/* ---------------------------------------------------------------- */
+export function BrandMark({
+  size = 24,
+  className,
+}: {
+  size?: number;
+  className?: string;
+}) {
+  const id = useId();
+  const arc = `bifrost-${id}`;
+  return (
+    <svg
+      viewBox="0 0 32 32"
+      width={size}
+      height={size}
+      className={className}
+      fill="none"
+      aria-hidden="true"
+    >
+      <defs>
+        <linearGradient id={arc} x1="3" y1="11" x2="29" y2="11" gradientUnits="userSpaceOnUse">
+          <stop offset="0%" stopColor="#fbbf24" />
+          <stop offset="42%" stopColor="#f59e0b" />
+          <stop offset="78%" stopColor="#a78bfa" />
+          <stop offset="100%" stopColor="#2dd4bf" />
+        </linearGradient>
+      </defs>
+      {/* Bifrost arc — the lone spectral flourish */}
+      <path
+        d="M4.5 12.5a11.5 11.5 0 0 1 23 0"
+        stroke={`url(#${arc})`}
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+      {/* Aperture / eye ring */}
+      <circle cx="16" cy="18" r="8" stroke="#f59e0b" strokeWidth="1.7" />
+      {/* Aperture blades */}
+      <g stroke="#f59e0b" strokeWidth="1.2" strokeLinecap="round" opacity="0.55">
+        <path d="M16 11.2 19.4 17" />
+        <path d="M22.8 19.4 16.6 19.7" />
+        <path d="M19 24.4 14.6 19.9" />
+        <path d="M13 24.4 16 18.3" />
+        <path d="M9.2 19.4 15.4 16.6" />
+        <path d="M13 11.6 16 17" />
+      </g>
+      {/* Iris */}
+      <circle cx="16" cy="18" r="2.5" fill="#f59e0b" />
+    </svg>
+  );
 }
 
 /* ---------------------------------------------------------------- */
@@ -70,17 +126,17 @@ export function Panel({
 /* Button                                                           */
 /* ---------------------------------------------------------------- */
 const BUTTON_BASE =
-  "inline-flex items-center justify-center gap-1.5 rounded-md border font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-canvas disabled:cursor-not-allowed disabled:opacity-50";
+  "inline-flex select-none items-center justify-center gap-1.5 rounded-md border font-medium transition-[background-color,border-color,box-shadow,transform,color] duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-canvas active:translate-y-px disabled:pointer-events-none disabled:cursor-not-allowed disabled:opacity-50";
 
 const BUTTON_VARIANTS = {
   primary:
-    "border-transparent bg-accent text-accent-ink font-semibold hover:bg-accent-soft active:bg-accent-deep active:text-fg",
+    "border-transparent bg-accent text-accent-ink font-semibold hover:bg-accent-soft hover:shadow-glow-soft active:bg-accent-deep active:text-fg active:shadow-none",
   default:
-    "border-line bg-raised text-fg hover:border-[#34373e] hover:bg-[#23262c]",
+    "border-line bg-raised text-fg shadow-raised hover:border-[#34373e] hover:bg-[#23262c] active:shadow-none",
   ghost:
     "border-transparent bg-transparent text-fg-secondary hover:bg-raised hover:text-fg",
   danger:
-    "border-danger/40 bg-danger/10 text-red-300 hover:bg-danger/20 hover:text-red-200",
+    "border-danger/40 bg-danger/10 text-red-300 hover:bg-danger/20 hover:text-red-200 hover:border-danger/60",
 } as const;
 
 const BUTTON_SIZES = {
@@ -111,7 +167,7 @@ export function Button({
 /* Form controls                                                    */
 /* ---------------------------------------------------------------- */
 const CONTROL_BASE =
-  "w-full rounded-md border border-line bg-canvas text-sm text-fg transition-colors duration-150 placeholder:text-fg-muted/70 focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent disabled:cursor-not-allowed disabled:opacity-50";
+  "w-full rounded-md border border-line bg-canvas text-sm text-fg shadow-[inset_0_1px_1px_rgba(0,0,0,0.35)] transition-[border-color,box-shadow,background-color] duration-150 placeholder:text-fg-muted/70 hover:border-[#34373e] focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent disabled:cursor-not-allowed disabled:opacity-50";
 
 export function Input({ className, ...props }: InputHTMLAttributes<HTMLInputElement>) {
   return <input className={cx(CONTROL_BASE, "px-3 py-2 font-mono", className)} {...props} />;
@@ -246,7 +302,7 @@ export function StatusPill({ state, label }: { state: string; label?: string }) 
   const meta = STATE_META[s];
   return (
     <span
-      className="inline-flex items-center gap-2 rounded-md border px-2 py-1"
+      className="inline-flex items-center gap-2 rounded-md border px-2 py-1 shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
       style={{
         borderColor: `${meta.color}40`,
         backgroundColor: `${meta.color}14`,

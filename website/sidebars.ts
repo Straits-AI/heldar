@@ -28,7 +28,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Operate',
-      items: ['operate/operate'],
+      items: ['operate/operate', 'operate/hosting-the-docs'],
     },
   ],
 };

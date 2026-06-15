@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" fill="none" role="img" aria-label="Heldar">
+  <defs>
+    <linearGradient id="favArc" x1="6" y1="12" x2="26" y2="12" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="55%" stop-color="#f59e0b"/>
+      <stop offset="100%" stop-color="#a78bfa"/>
+    </linearGradient>
+  </defs>
+  <!-- Near-black rounded tile (matches the SOC canvas) -->
+  <rect x="0.5" y="0.5" width="31" height="31" rx="7" fill="#0c0d10" stroke="#26282e"/>
+  <!-- Bifrost arc + aperture (the guardian mark, scaled for favicon legibility) -->
+  <path d="M7 13.5a9 9 0 0 1 18 0" stroke="url(#favArc)" stroke-width="2.1" stroke-linecap="round"/>
+  <circle cx="16" cy="19" r="6.2" stroke="#f59e0b" stroke-width="1.9"/>
+  <circle cx="16" cy="19" r="2.1" fill="#f59e0b"/>
+</svg>
