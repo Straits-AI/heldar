@@ -15,7 +15,7 @@ use anyhow::Context;
 use axum::http::HeaderValue;
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
-use tower_http::services::ServeDir;
+use tower_http::services::{ServeDir, ServeFile};
 use tower_http::trace::TraceLayer;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
@@ -235,7 +235,28 @@ async fn main() -> anyhow::Result<()> {
         .nest_service("/media/clips", ServeDir::new(&cfg.clips_dir))
         .nest_service("/media/snapshots", ServeDir::new(&cfg.snapshots_dir))
         .nest_service("/media/playback", ServeDir::new(&cfg.playback_dir))
-        .nest_service("/media/archives", ServeDir::new(&cfg.archive_dir))
+        .nest_service("/media/archives", ServeDir::new(&cfg.archive_dir));
+
+    // Serve the built dashboard so the whole product is ONE binary at ONE URL. The /api/*, /media/*,
+    // /healthz, /readyz and /metrics routes above are explicit and take precedence; the SPA is only
+    // a fallback for everything else. Unknown (client-routed) paths fall back to index.html so deep
+    // links work. We use ServeDir::fallback (not not_found_service) so those deep links return 200 —
+    // not_found_service wraps the file in SetStatus(404), which would mark every valid client route
+    // as a 404 (breaking caching, prefetch and uptime checks). When no web_dir exists: API-only.
+    let app = match &cfg.web_dir {
+        Some(dir) => {
+            tracing::info!("serving dashboard from {}", dir.display());
+            app.fallback_service(
+                ServeDir::new(dir).fallback(ServeFile::new(dir.join("index.html"))),
+            )
+        }
+        None => {
+            tracing::info!("no web_dir; dashboard not served");
+            app
+        }
+    };
+
+    let app = app
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state);

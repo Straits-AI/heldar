@@ -167,6 +167,12 @@ pub struct Config {
     /// Optional site identifier stamped onto outbox rows and surfaced at `GET /api/v1/site` for the
     /// edge->cloud fleet uplink. Empty/unset = a single unnamed site.
     pub site_id: Option<String>,
+    // ---- Embedded dashboard (single-binary SPA serving) ----
+    /// Directory holding the built React dashboard (`apps/web/dist`), served as a static SPA
+    /// fallback so the whole product is one binary at one URL. Resolved from `HELDAR_WEB_DIR`; when
+    /// unset it falls back to `apps/web/dist` relative to the binary CWD. `None` when neither path
+    /// exists — the server then runs API-only (no dashboard).
+    pub web_dir: Option<PathBuf>,
 }
 
 fn var(key: &str) -> Option<String> {
@@ -215,6 +221,17 @@ impl Config {
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+
+        // Embedded dashboard: explicit HELDAR_WEB_DIR wins; otherwise try `apps/web/dist` relative
+        // to the binary CWD. Only `Some` when the directory actually exists (else API-only).
+        let web_dir = var("HELDAR_WEB_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("apps/web/dist"));
+        let web_dir = if web_dir.is_dir() {
+            Some(web_dir)
+        } else {
+            None
+        };
 
         let max_recordings_gb: f64 = parse_or("HELDAR_MAX_RECORDINGS_GB", 20.0);
         let min_free_disk_gb: f64 = parse_or("HELDAR_MIN_FREE_DISK_GB", 5.0);
@@ -304,6 +321,7 @@ impl Config {
             live_transcode_engine: var_or("HELDAR_LIVE_TRANSCODE_ENGINE", "software"),
             vaapi_device: var_or("HELDAR_VAAPI_DEVICE", "/dev/dri/renderD128"),
             site_id: var("HELDAR_SITE_ID"),
+            web_dir,
         }
     }
 
