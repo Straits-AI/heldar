@@ -6,8 +6,15 @@
 //! this file with the no-op bodies only — so `main.rs` stays identical and pristine across both repos.
 
 use axum::Router;
+use heldar_kernel::modules::ModuleManifest;
 use heldar_kernel::state::AppState;
 use sqlx::SqlitePool;
+
+/// Each vertical's module manifest (collected into AppState + served at GET /api/v1/modules).
+#[cfg(feature = "verticals")]
+pub fn manifests() -> Vec<ModuleManifest> {
+    vec![heldar_bakery::manifest()]
+}
 
 /// Apply each vertical's schema (idempotent) against the shared pool.
 #[cfg(feature = "verticals")]
@@ -40,6 +47,11 @@ pub fn merge_routes(router: Router<AppState>) -> Router<AppState> {
 }
 
 // ---- No-op fallbacks when the `verticals` feature is off (the open reference build) ----
+
+#[cfg(not(feature = "verticals"))]
+pub fn manifests() -> Vec<ModuleManifest> {
+    Vec::new()
+}
 
 #[cfg(not(feature = "verticals"))]
 pub async fn init_schema(_pool: &SqlitePool) -> anyhow::Result<()> {

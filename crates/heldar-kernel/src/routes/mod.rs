@@ -13,6 +13,7 @@ pub mod health;
 pub mod incidents;
 pub mod liveview;
 pub mod metrics;
+pub mod modules;
 pub mod onvif;
 pub mod outbox;
 pub mod playback;
@@ -31,6 +32,7 @@ pub mod zones;
 pub fn api_router() -> Router<AppState> {
     Router::new()
         .merge(system::router())
+        .merge(modules::router())
         .merge(camera_config::router())
         .merge(cameras::router())
         .merge(recordings::router())

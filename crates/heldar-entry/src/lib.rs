@@ -17,3 +17,17 @@ pub mod models;
 pub mod retention;
 pub mod routes;
 pub mod schema;
+
+/// This app's module manifest (served at `GET /api/v1/modules` so the dashboard renders its nav).
+pub fn manifest() -> heldar_kernel::modules::ModuleManifest {
+    use heldar_kernel::modules::{ModuleKind, ModuleManifest, NavEntry};
+    ModuleManifest::new(
+        "entry",
+        "Access Control",
+        env!("CARGO_PKG_VERSION"),
+        "Heldar",
+        ModuleKind::Core,
+        "ANPR authorization, vehicle/visitor registry, guard confirm/reject, entry reports.",
+        vec![NavEntry::new("/entry", "Entry", "entry")],
+    )
+}

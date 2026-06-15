@@ -109,6 +109,17 @@ async fn main() -> anyhow::Result<()> {
         .timeout(Duration::from_secs(10))
         .build()
         .context("building http client")?;
+    // Module manifests, composed here so GET /api/v1/modules reflects exactly what this binary links.
+    // The open generic apps register first; proprietary verticals add theirs via the seam (empty in
+    // the open build). The dashboard renders its nav + routes from this list — adding a module is a
+    // push here (plus its router merge below), not an edit to the kernel.
+    let mut modules = vec![
+        heldar_entry::manifest(),
+        heldar_movement::manifest(),
+        heldar_search::manifest(),
+    ];
+    modules.extend(verticals::manifests());
+    let modules = Arc::new(modules);
     let state = AppState {
         pool: pool.clone(),
         cfg: cfg.clone(),
@@ -116,6 +127,7 @@ async fn main() -> anyhow::Result<()> {
         mirror: mirror.clone(),
         sampler: sampler.clone(),
         consumers,
+        modules,
         http,
         started_at: chrono::Utc::now(),
     };

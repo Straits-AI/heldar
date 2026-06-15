@@ -1,0 +1,177 @@
+// Module registry + live module context.
+//
+// Phase A of the plugin platform: the dashboard renders its module nav + routes from
+// GET /api/v1/modules (the manifests the Core binary links) instead of a hardcoded list, so only
+// LOADED modules appear. This file holds the two build-time halves a compiled module still needs in
+// the SPA bundle — its page component and its nav glyph — keyed by the manifest `id` / `icon`. A
+// later phase replaces these static pages with mounted micro-frontends; unknown icon keys already
+// fall back to a generic glyph so imported plugins render today.
+//
+// Proprietary modules (e.g. bakery) are tagged `@module:bakery` so the open-repo prep script strips
+// their page import + registry entries; the open build simply never reports that module.
+
+import { createContext, useContext } from "react";
+import type { ComponentType, ReactNode } from "react";
+import { api } from "./lib/api";
+import { usePoll } from "./lib/usePoll";
+import type { ModuleManifest } from "./lib/types";
+import { Entry } from "./pages/Entry";
+import { Movement } from "./pages/Movement";
+import { Search } from "./pages/Search";
+import { Bakery } from "./pages/Bakery"; // @module:bakery
+
+type IconProps = { className?: string };
+
+function EntryIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M3 16.5V6l5-2.5V16.5" />
+      <path d="M2 16.5h6" />
+      <path d="M8 8h9a1 1 0 0 1 1 1v6.5" />
+      <path d="M11 16.5V8" />
+      <path d="M14.5 16.5V8" />
+      <path d="M5.4 9.6h.01" />
+    </svg>
+  );
+}
+
+function MovementIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <circle cx="4.5" cy="5.5" r="2" />
+      <circle cx="15.5" cy="14.5" r="2" />
+      <path d="M6.4 6.6l7.2 6.8" />
+      <path d="M13.5 5l3 1-1 3" />
+    </svg>
+  );
+}
+
+function SearchIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <circle cx="8.5" cy="8.5" r="5" />
+      <path d="M12.5 12.5L17 17" />
+    </svg>
+  );
+}
+
+function BakeryIcon({ className }: IconProps) {
+  // @module:bakery
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M3 17V8.5a1.5 1.5 0 0 1 1.5-1.5h11A1.5 1.5 0 0 1 17 8.5V17" />
+      <path d="M2 17h16" />
+      <path d="M6.5 7V5.5M10 7V5M13.5 7V5.5" />
+      <path d="M6 11h8M6 13.5h8" opacity="0.85" />
+    </svg>
+  );
+}
+
+/** Fallback glyph for modules with no bundled icon (e.g. third-party/imported plugins). */
+function GenericModuleIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <rect x="3" y="3" width="6" height="6" rx="1.2" />
+      <rect x="11" y="3" width="6" height="6" rx="1.2" />
+      <rect x="3" y="11" width="6" height="6" rx="1.2" />
+      <path d="M11 14h6M14 11v6" />
+    </svg>
+  );
+}
+
+const MODULE_ICONS: Record<string, (p: IconProps) => ReactNode> = {
+  entry: EntryIcon,
+  movement: MovementIcon,
+  search: SearchIcon,
+  bakery: BakeryIcon, // @module:bakery
+};
+
+/** Resolve a manifest nav `icon` key to a glyph; unknown keys get the generic module glyph. */
+export function moduleIcon(key: string): (p: IconProps) => ReactNode {
+  return MODULE_ICONS[key] ?? GenericModuleIcon;
+}
+
+/**
+ * Page component for each module `id`. A module reported by the server but absent here (no bundled
+ * page in this build) is simply not routed. Phase B replaces these with mounted micro-frontends.
+ */
+export const MODULE_PAGES: Record<string, ComponentType> = {
+  entry: Entry,
+  movement: Movement,
+  search: Search,
+  bakery: Bakery, // @module:bakery
+};
+
+/* ---------------------------------------------------------------- */
+/* Live module context                                              */
+/* ---------------------------------------------------------------- */
+
+interface ModulesState {
+  modules: ModuleManifest[];
+  loading: boolean;
+  error: string | null;
+}
+
+const ModulesContext = createContext<ModulesState>({
+  modules: [],
+  loading: true,
+  error: null,
+});
+
+/** Loaded modules from GET /api/v1/modules, shared by the nav rail and the router. */
+export function useModules(): ModulesState {
+  return useContext(ModulesContext);
+}
+
+/**
+ * Fetches the loaded modules once (then re-polls every 30s so an install/uninstall in a later phase
+ * reflects without a reload) and provides them to the shell + routes.
+ */
+export function ModulesProvider({ children }: { children: ReactNode }) {
+  const { data, loading, error } = usePoll(() => api.modules(), 30000);
+  return (
+    <ModulesContext.Provider value={{ modules: data ?? [], loading, error }}>
+      {children}
+    </ModulesContext.Provider>
+  );
+}

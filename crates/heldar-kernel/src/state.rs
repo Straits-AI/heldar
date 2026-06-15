@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use sqlx::SqlitePool;
 
 use crate::config::Config;
+use crate::modules::ModuleManifest;
 use crate::services::consumer::DetectionConsumer;
 use crate::services::mirror::MirrorRecorderManager;
 use crate::services::recorder::RecorderManager;
@@ -25,6 +26,10 @@ pub struct AppState {
     pub sampler: Arc<SamplerManager>,
     /// Registered perception consumers, fanned out to from detection ingest.
     pub consumers: Arc<Vec<Arc<dyn DetectionConsumer>>>,
+    /// Loaded module manifests (composed by the binary), served at `GET /api/v1/modules` so the
+    /// dashboard renders nav + routes from live truth. The kernel names no module — it only carries
+    /// whatever the composing server populated.
+    pub modules: Arc<Vec<ModuleManifest>>,
     pub http: reqwest::Client,
     pub started_at: DateTime<Utc>,
 }

@@ -65,6 +65,9 @@ let state = AppState {
     recorder,
     sampler,
     consumers,
+    // Module manifests, served at GET /api/v1/modules so the dashboard builds nav + routes
+    // from live truth. The composing binary pushes each linked app's manifest() here.
+    modules: Arc::new(vec![]),
     http: reqwest::Client::new(),
     started_at: chrono::Utc::now(),
 };

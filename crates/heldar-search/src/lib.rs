@@ -26,3 +26,17 @@ pub mod proof;
 pub mod query;
 pub mod routes;
 pub mod schema;
+
+/// This app's module manifest (served at `GET /api/v1/modules` so the dashboard renders its nav).
+pub fn manifest() -> heldar_kernel::modules::ModuleManifest {
+    use heldar_kernel::modules::{ModuleKind, ModuleManifest, NavEntry};
+    ModuleManifest::new(
+        "search",
+        "Forensic Search",
+        env!("CARGO_PKG_VERSION"),
+        "Heldar",
+        ModuleKind::Core,
+        "Natural-language + structured query over stored event facts, with a traceable proof layer.",
+        vec![NavEntry::new("/search", "Search", "search")],
+    )
+}

@@ -26,3 +26,17 @@ pub mod models;
 pub mod reid;
 pub mod routes;
 pub mod schema;
+
+/// This app's module manifest (served at `GET /api/v1/modules` so the dashboard renders its nav).
+pub fn manifest() -> heldar_kernel::modules::ModuleManifest {
+    use heldar_kernel::modules::{ModuleKind, ModuleManifest, NavEntry};
+    ModuleManifest::new(
+        "movement",
+        "Movement Intelligence",
+        env!("CARGO_PKG_VERSION"),
+        "Heldar",
+        ModuleKind::Core,
+        "Cross-camera ReID candidates, journey trails, and red-zone breach alerts (audited).",
+        vec![NavEntry::new("/movement", "Movement", "movement")],
+    )
+}

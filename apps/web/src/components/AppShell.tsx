@@ -7,6 +7,7 @@ import { NavLink } from "react-router-dom";
 import { api } from "../lib/api";
 import { usePoll } from "../lib/usePoll";
 import { formatBytes, formatUptime } from "../lib/format";
+import { moduleIcon, useModules } from "../modules";
 import { BrandMark, cx, Spinner, StatusLed } from "./ui";
 
 /* ---------------------------------------------------------------- */
@@ -83,82 +84,6 @@ function AiIcon({ className }: IconProps) {
   );
 }
 
-function EntryIcon({ className }: IconProps) {
-  return (
-    <svg
-      viewBox="0 0 20 20"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-    >
-      <path d="M3 16.5V6l5-2.5V16.5" />
-      <path d="M2 16.5h6" />
-      <path d="M8 8h9a1 1 0 0 1 1 1v6.5" />
-      <path d="M11 16.5V8" />
-      <path d="M14.5 16.5V8" />
-      <path d="M5.4 9.6h.01" />
-    </svg>
-  );
-}
-
-function BakeryIcon({ className }: IconProps) {
-  return (
-    <svg
-      viewBox="0 0 20 20"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-    >
-      <path d="M3 17V8.5a1.5 1.5 0 0 1 1.5-1.5h11A1.5 1.5 0 0 1 17 8.5V17" />
-      <path d="M2 17h16" />
-      <path d="M6.5 7V5.5M10 7V5M13.5 7V5.5" />
-      <path d="M6 11h8M6 13.5h8" opacity="0.85" />
-    </svg>
-  );
-}
-
-function MovementIcon({ className }: IconProps) {
-  return (
-    <svg
-      viewBox="0 0 20 20"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-    >
-      <circle cx="4.5" cy="5.5" r="2" />
-      <circle cx="15.5" cy="14.5" r="2" />
-      <path d="M6.4 6.6l7.2 6.8" />
-      <path d="M13.5 5l3 1-1 3" />
-    </svg>
-  );
-}
-
-function SearchIcon({ className }: IconProps) {
-  return (
-    <svg
-      viewBox="0 0 20 20"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-    >
-      <circle cx="8.5" cy="8.5" r="5" />
-      <path d="M12.5 12.5L17 17" />
-    </svg>
-  );
-}
-
 function IncidentsIcon({ className }: IconProps) {
   return (
     <svg
@@ -211,21 +136,77 @@ function SystemIcon({ className }: IconProps) {
   );
 }
 
+// Platform chrome — the kernel console pages, always present. Domain modules are NOT listed here;
+// they come from GET /api/v1/modules (see the Modules section below), so only loaded modules appear.
 const NAV_ITEMS: { to: string; label: string; end?: boolean; Icon: (p: IconProps) => ReactNode }[] = [
   { to: "/", label: "Wall", end: true, Icon: WallIcon },
   { to: "/discover", label: "Discover", Icon: DiscoverIcon },
   { to: "/cameras/new", label: "Add Camera", Icon: AddCameraIcon },
   { to: "/ai", label: "AI", Icon: AiIcon },
-  { to: "/entry", label: "Entry", Icon: EntryIcon },
-  { to: "/bakery", label: "Bakery", Icon: BakeryIcon },
-  { to: "/movement", label: "Movement", Icon: MovementIcon },
-  { to: "/search", label: "Search", Icon: SearchIcon },
   { to: "/incidents", label: "Incidents", Icon: IncidentsIcon },
   { to: "/backup", label: "Backup", Icon: BackupIcon },
   { to: "/system", label: "System", Icon: SystemIcon },
 ];
 
+/** A single nav destination, shared by the Operations + Modules sections. */
+function NavRow({
+  to,
+  label,
+  end,
+  Icon,
+}: {
+  to: string;
+  label: string;
+  end?: boolean;
+  Icon: (p: IconProps) => ReactNode;
+}) {
+  return (
+    <NavLink
+      to={to}
+      end={end}
+      className={({ isActive }) =>
+        cx(
+          "group relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-[background-color,color] duration-150",
+          isActive
+            ? "bg-raised text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
+            : "text-fg-secondary hover:bg-raised/60 hover:text-fg",
+        )
+      }
+    >
+      {({ isActive }) => (
+        <>
+          <span
+            className={cx(
+              "absolute left-0 top-1/2 w-[3px] -translate-y-1/2 rounded-r-full bg-accent transition-all duration-200",
+              isActive
+                ? "h-5 opacity-100 shadow-[0_0_8px_0_rgba(245,158,11,0.6)]"
+                : "h-3 opacity-0 group-hover:opacity-40",
+            )}
+          />
+          <Icon
+            className={cx(
+              "h-[18px] w-[18px] transition-colors",
+              isActive ? "text-accent" : "text-fg-muted group-hover:text-fg-secondary",
+            )}
+          />
+          <span>{label}</span>
+        </>
+      )}
+    </NavLink>
+  );
+}
+
+function SectionLabel({ children }: { children: ReactNode }) {
+  return (
+    <div className="px-2 pb-2 font-mono text-[9px] uppercase tracking-micro text-fg-muted">
+      {children}
+    </div>
+  );
+}
+
 function NavRail({ version }: { version?: string }) {
+  // Loaded modules drive the dynamic Modules section — only what this Core binary links is shown.
+  const { modules } = useModules();
   return (
     <aside className="sticky top-0 z-30 hidden h-screen w-[232px] shrink-0 flex-col border-r border-line bg-panel sm:flex">
       {/* Brand */}
@@ -250,45 +231,25 @@ function NavRail({ version }: { version?: string }) {
       </div>
 
       {/* Nav */}
-      <nav className="stagger flex flex-1 flex-col gap-0.5 px-3 py-4">
-        <div className="px-2 pb-2 font-mono text-[9px] uppercase tracking-micro text-fg-muted">
-          Operations
-        </div>
+      <nav className="stagger flex flex-1 flex-col gap-0.5 overflow-y-auto px-3 py-4">
+        <SectionLabel>Operations</SectionLabel>
         {NAV_ITEMS.map(({ to, label, end, Icon }) => (
-          <NavLink
-            key={to}
-            to={to}
-            end={end}
-            className={({ isActive }) =>
-              cx(
-                "group relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-[background-color,color] duration-150",
-                isActive
-                  ? "bg-raised text-fg shadow-[inset_0_1px_0_rgba(255,255,255,0.04)]"
-                  : "text-fg-secondary hover:bg-raised/60 hover:text-fg",
-              )
-            }
-          >
-            {({ isActive }) => (
-              <>
-                <span
-                  className={cx(
-                    "absolute left-0 top-1/2 w-[3px] -translate-y-1/2 rounded-r-full bg-accent transition-all duration-200",
-                    isActive
-                      ? "h-5 opacity-100 shadow-[0_0_8px_0_rgba(245,158,11,0.6)]"
-                      : "h-3 opacity-0 group-hover:opacity-40",
-                  )}
-                />
-                <Icon
-                  className={cx(
-                    "h-[18px] w-[18px] transition-colors",
-                    isActive ? "text-accent" : "text-fg-muted group-hover:text-fg-secondary",
-                  )}
-                />
-                <span>{label}</span>
-              </>
-            )}
-          </NavLink>
+          <NavRow key={to} to={to} label={label} end={end} Icon={Icon} />
         ))}
+
+        {/* Modules — dynamic from GET /api/v1/modules; renders only when at least one is loaded. */}
+        {modules.length > 0 && (
+          <>
+            <SectionLabel>
+              <span className="mt-4 block">Modules</span>
+            </SectionLabel>
+            {modules.flatMap((m) =>
+              m.nav.map((n) => (
+                <NavRow key={n.path} to={n.path} label={n.label} Icon={moduleIcon(n.icon)} />
+              )),
+            )}
+          </>
+        )}
       </nav>
 
       {/* Footer */}

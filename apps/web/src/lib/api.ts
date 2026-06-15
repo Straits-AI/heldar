@@ -28,6 +28,7 @@ import type {
   CameraCreate,
   CameraLink,
   CameraOnvif,
+  ModuleManifest,
   MovementCandidate,
   PlateSearchResult,
   QueryPlan,
@@ -323,6 +324,10 @@ export const api = {
   cameraHealth: (id: string) => request<CameraStatus>(`/api/v1/cameras/${enc(id)}/health`),
   listEvents: (q: EventQuery = {}) => request<VisionEvent[]>(`/api/v1/events${qs(q)}`),
   system: () => request<SystemInfo>("/api/v1/system"),
+
+  // ---- Modules (drives the dashboard nav rail + routes; only loaded modules appear) ----
+  /** Manifests of every module this Core binary links. Readable by any authenticated principal. */
+  modules: () => request<ModuleManifest[]>("/api/v1/modules"),
 
   // ---- Webhook subscriptions (generic event-delivery substrate; supersedes single-URL alerting) ----
   /** Every webhook subscription, oldest first. Readable by any principal; the secret is never returned. */

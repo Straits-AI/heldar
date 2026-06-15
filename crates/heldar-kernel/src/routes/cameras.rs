@@ -458,6 +458,7 @@ mod tests {
             sampler: SamplerManager::new(pool.clone(), cfg.clone()),
             mirror: None,
             consumers: Arc::new(Vec::new()),
+            modules: Arc::new(Vec::new()),
             http: reqwest::Client::new(),
             started_at: chrono::Utc::now(),
             pool,

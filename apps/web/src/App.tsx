@@ -1,16 +1,13 @@
 import { Link, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
-import { Button } from "./components/ui";
+import { Button, Spinner } from "./components/ui";
+import { MODULE_PAGES, ModulesProvider, useModules } from "./modules";
 import { Dashboard } from "./pages/Dashboard";
 import { CameraDetail } from "./pages/CameraDetail";
 import { AddCamera } from "./pages/AddCamera";
 import { Discover } from "./pages/Discover";
 import { System } from "./pages/System";
 import { Ai } from "./pages/Ai";
-import { Entry } from "./pages/Entry";
-import { Bakery } from "./pages/Bakery";
-import { Movement } from "./pages/Movement";
-import { Search } from "./pages/Search";
 import { Backup } from "./pages/Backup";
 import { Incidents } from "./pages/Incidents";
 
@@ -27,24 +24,50 @@ function NotFound() {
   );
 }
 
+function RouteLoading() {
+  return (
+    <div className="flex items-center justify-center py-24 text-fg-muted">
+      <Spinner size={18} />
+    </div>
+  );
+}
+
+/** Platform routes are static; module routes come from the loaded manifests (only loaded modules
+ *  with a bundled page are routed). While modules are still loading, an unmatched path shows a spinner
+ *  rather than flashing 404 on a module deep-link. */
+function AppRoutes() {
+  const { modules, loading } = useModules();
+  return (
+    <Routes>
+      {/* Platform — the kernel console, always present */}
+      <Route path="/" element={<Dashboard />} />
+      <Route path="/cameras/new" element={<AddCamera />} />
+      <Route path="/discover" element={<Discover />} />
+      <Route path="/ai" element={<Ai />} />
+      <Route path="/incidents" element={<Incidents />} />
+      <Route path="/backup" element={<Backup />} />
+      <Route path="/system" element={<System />} />
+      <Route path="/cameras/:id" element={<CameraDetail />} />
+
+      {/* Modules — dynamic from GET /api/v1/modules */}
+      {modules.flatMap((m) =>
+        m.nav.map((n) => {
+          const Page = MODULE_PAGES[m.id];
+          return Page ? <Route key={n.path} path={n.path} element={<Page />} /> : null;
+        }),
+      )}
+
+      <Route path="*" element={loading ? <RouteLoading /> : <NotFound />} />
+    </Routes>
+  );
+}
+
 export default function App() {
   return (
-    <AppShell>
-      <Routes>
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/cameras/new" element={<AddCamera />} />
-        <Route path="/discover" element={<Discover />} />
-        <Route path="/ai" element={<Ai />} />
-        <Route path="/entry" element={<Entry />} />
-        <Route path="/bakery" element={<Bakery />} />
-        <Route path="/movement" element={<Movement />} />
-        <Route path="/search" element={<Search />} />
-        <Route path="/incidents" element={<Incidents />} />
-        <Route path="/backup" element={<Backup />} />
-        <Route path="/system" element={<System />} />
-        <Route path="/cameras/:id" element={<CameraDetail />} />
-        <Route path="*" element={<NotFound />} />
-      </Routes>
-    </AppShell>
+    <ModulesProvider>
+      <AppShell>
+        <AppRoutes />
+      </AppShell>
+    </ModulesProvider>
   );
 }

@@ -377,6 +377,29 @@ export interface EventTypeInfo {
   description: string;
 }
 
+// ---- Modules (the plugin platform: GET /api/v1/modules drives the nav rail + routes) ----
+
+/** Provenance of a loaded module; drives store shelving + nav badging. */
+export type ModuleKind = "core" | "proprietary" | "imported";
+
+/** A nav destination a module contributes. `icon` is a key the dashboard maps to a glyph. */
+export interface ModuleNavEntry {
+  path: string;
+  label: string;
+  icon: string;
+}
+
+/** One loaded module, as reported by the composing binary at GET /api/v1/modules. */
+export interface ModuleManifest {
+  id: string;
+  name: string;
+  version: string;
+  publisher: string;
+  kind: ModuleKind;
+  description: string;
+  nav: ModuleNavEntry[];
+}
+
 // ---- Fleet outbox + site identity (open-core seam, edge->cloud uplink foundation) ----
 
 /** One durable outbox row: a committed detection batch (GET /api/v1/outbox, admin-only). */
