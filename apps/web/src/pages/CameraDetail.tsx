@@ -7,6 +7,9 @@ import type {
   CameraTestResult,
   ClipResult,
   LiveUrls,
+  Principal,
+  RecordTriggerResult,
+  SegmentView,
   Severity,
   VisionEvent,
 } from "../lib/types";
@@ -14,6 +17,14 @@ import { LiveView } from "../components/LiveView";
 import { Timeline } from "../components/Timeline";
 import { AiPanel } from "../components/AiPanel";
 import { ZonePanel } from "../components/ZonePanel";
+import {
+  PlaybackSessionPanel,
+  PtzPanel,
+  RecordingGapsPanel,
+  RecordingSchedulePanel,
+  RecordingSettingsPanel,
+  SnapshotSchedulesPanel,
+} from "../components/RecordingPanels";
 import {
   Button,
   EmptyState,
@@ -119,6 +130,27 @@ export function CameraDetail() {
     };
   }, []);
   const liveForThisCamera = useCallback(() => mountedRef.current && idRef.current === id, [id]);
+
+  // ---- Principal / manager gating ----
+  // Mutations on the new DVR surfaces (evidence lock, record-trigger, settings, schedules, PTZ,
+  // gap retry) are manager+. When auth is disabled the server returns the `system` admin principal;
+  // when unauthenticated the controls stay gated off. Read-only views are never blocked.
+  const [principal, setPrincipal] = useState<Principal | null>(null);
+  useEffect(() => {
+    let alive = true;
+    api
+      .me()
+      .then((p) => {
+        if (alive) setPrincipal(p);
+      })
+      .catch(() => {
+        /* unauthenticated / auth off — leave principal null (controls gated off) */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const canManage = principal?.role === "admin" || principal?.role === "manager";
 
   // ---- Live view ----
   const [live, setLive] = useState<LiveUrls | null>(null);
@@ -240,9 +272,60 @@ export function CameraDetail() {
     }
   }
 
+  // ---- Evidence lock / incident tag (per segment) + manual record trigger ----
+  const [segBusy, setSegBusy] = useState<string | null>(null);
+  const [trigBusy, setTrigBusy] = useState(false);
+  const [trigResult, setTrigResult] = useState<RecordTriggerResult | null>(null);
+
+  async function toggleEvidence(seg: SegmentView) {
+    if (!seg.evidence_locked) {
+      const inc = window.prompt(
+        "Lock this segment as evidence (never pruned by retention). Optional incident id (blank = none):",
+        seg.incident_id ?? "",
+      );
+      if (inc === null) return; // cancelled
+      setSegBusy(seg.id);
+      try {
+        await api.lockSegmentEvidence(seg.id, inc.trim() ? inc.trim() : null);
+        await segments.refresh();
+      } catch (e) {
+        window.alert(e instanceof ApiError ? e.message : String(e));
+      } finally {
+        setSegBusy(null);
+      }
+      return;
+    }
+    setSegBusy(seg.id);
+    try {
+      await api.unlockSegmentEvidence(seg.id);
+      await segments.refresh();
+    } catch (e) {
+      window.alert(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setSegBusy(null);
+    }
+  }
+
+  async function recordNow() {
+    setTrigBusy(true);
+    try {
+      const r = await api.triggerRecord(id);
+      if (liveForThisCamera()) setTrigResult(r);
+      await segments.refresh();
+    } catch (e) {
+      window.alert(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      if (liveForThisCamera()) setTrigBusy(false);
+    }
+  }
+
   const cam = camera.data;
   const st = status.data;
   const headerState = st?.state ?? (cam?.enabled ? "unknown" : "disabled");
+  const isEventMode =
+    cam?.record_mode === "event" || cam?.record_mode === "scheduled_event";
+  const isScheduledMode =
+    cam?.record_mode === "scheduled" || cam?.record_mode === "scheduled_event";
   const recentSegments = useMemo(
     () => [...(segments.data ?? [])].reverse(),
     [segments.data],
@@ -358,7 +441,7 @@ export function CameraDetail() {
 
           {playback && (
             <Panel
-              title="Recorded Playback"
+              title="Clip / Segment Player"
               padded={false}
               actions={
                 <div className="flex items-center gap-2">
@@ -383,6 +466,8 @@ export function CameraDetail() {
               </div>
             </Panel>
           )}
+
+          <PlaybackSessionPanel key={id} cameraId={id} />
 
           <Panel
             title="Timeline"
@@ -510,6 +595,8 @@ export function CameraDetail() {
               )}
             </Panel>
           </div>
+
+          <SnapshotSchedulesPanel cameraId={id} canManage={canManage} />
         </div>
 
         {/* Side column */}
@@ -612,51 +699,72 @@ export function CameraDetail() {
             )}
           </Panel>
 
+          {cam && (
+            <RecordingSettingsPanel
+              key={cam.id}
+              camera={cam}
+              canManage={canManage}
+              onSaved={() => camera.refresh()}
+            />
+          )}
+
+          {isScheduledMode && (
+            <RecordingSchedulePanel cameraId={id} canManage={canManage} />
+          )}
+
+          <PtzPanel cameraId={id} canManage={canManage} />
+
           <Panel
             title="Recent Segments"
+            subtitle={isEventMode ? "Lock evidence · trigger recording" : "Lock evidence"}
             actions={
-              <span className="font-mono text-[11px] tabular-nums text-fg-muted">
-                {recentSegments.length}
-              </span>
+              <div className="flex items-center gap-2">
+                {isEventMode && (
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={!canManage || trigBusy}
+                    onClick={() => void recordNow()}
+                  >
+                    {trigBusy ? "…" : "Record now"}
+                  </Button>
+                )}
+                <span className="font-mono text-[11px] tabular-nums text-fg-muted">
+                  {recentSegments.length}
+                </span>
+              </div>
             }
           >
+            {trigResult && (
+              <div className="mb-3 rounded-md border border-rec/40 bg-rec/10 px-2.5 py-2 font-mono text-[11px] text-emerald-200">
+                Recording window extended to {formatClock(trigResult.window_end)} (post-roll{" "}
+                {trigResult.post_roll_seconds}s).
+              </div>
+            )}
             {recentSegments.length === 0 ? (
               <p className="font-mono text-xs text-fg-muted">No recorded segments yet.</p>
             ) : (
               <ul className="-mr-1 max-h-96 space-y-1.5 overflow-y-auto pr-1">
                 {recentSegments.map((seg) => (
-                  <li
+                  <SegmentRow
                     key={seg.id}
-                    className="flex items-center justify-between gap-2 rounded-md border border-line bg-canvas px-2.5 py-2 transition-colors duration-150 hover:border-[#34373e]"
-                  >
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-1.5 font-mono text-xs text-fg-secondary">
-                        {seg.locked && <LockIcon className="h-3 w-3 text-accent" />}
-                        <span className="tabular-nums">
-                          {formatTimeShort(seg.start_time)} → {formatTimeShort(seg.end_time)}
-                        </span>
-                      </div>
-                      <div className="mt-0.5 font-mono text-[10px] text-fg-muted">
-                        {formatDuration(seg.duration_s)} · {formatBytes(seg.size_bytes)}
-                      </div>
-                    </div>
-                    <Button
-                      size="sm"
-                      className="shrink-0"
-                      onClick={() =>
-                        setPlayback({
-                          src: seg.url,
-                          label: `Segment ${formatClock(seg.start_time)}`,
-                        })
-                      }
-                    >
-                      Play
-                    </Button>
-                  </li>
+                    seg={seg}
+                    canManage={canManage}
+                    busy={segBusy === seg.id}
+                    onPlay={() =>
+                      setPlayback({
+                        src: seg.url,
+                        label: `Segment ${formatClock(seg.start_time)}`,
+                      })
+                    }
+                    onToggleEvidence={() => void toggleEvidence(seg)}
+                  />
                 ))}
               </ul>
             )}
           </Panel>
+
+          <RecordingGapsPanel cameraId={id} canManage={canManage} />
 
           <Panel
             title="Recent Events"
@@ -679,6 +787,58 @@ export function CameraDetail() {
         </div>
       </div>
     </div>
+  );
+}
+
+function SegmentRow({
+  seg,
+  canManage,
+  busy,
+  onPlay,
+  onToggleEvidence,
+}: {
+  seg: SegmentView;
+  canManage: boolean;
+  busy: boolean;
+  onPlay: () => void;
+  onToggleEvidence: () => void;
+}) {
+  return (
+    <li className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-line bg-canvas px-2.5 py-2 transition-colors duration-150 hover:border-[#34373e]">
+      <div className="min-w-0">
+        <div className="flex items-center gap-1.5 font-mono text-xs text-fg-secondary">
+          {seg.evidence_locked && <LockIcon className="h-3 w-3 text-accent" />}
+          <span className="tabular-nums">
+            {formatTimeShort(seg.start_time)} → {formatTimeShort(seg.end_time)}
+          </span>
+        </div>
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 font-mono text-[10px] text-fg-muted">
+          <span>{formatDuration(seg.duration_s)}</span>
+          <span className="text-fg-muted/60">·</span>
+          <span>{formatBytes(seg.size_bytes)}</span>
+          {seg.incident_id && (
+            <>
+              <span className="text-fg-muted/60">·</span>
+              <span className="truncate text-accent-soft">#{seg.incident_id}</span>
+            </>
+          )}
+        </div>
+      </div>
+      <div className="flex shrink-0 items-center gap-1.5">
+        {busy && <Spinner size={13} />}
+        <Button size="sm" onClick={onPlay}>
+          Play
+        </Button>
+        <Button
+          size="sm"
+          variant={seg.evidence_locked ? "danger" : "default"}
+          disabled={!canManage || busy}
+          onClick={onToggleEvidence}
+        >
+          {seg.evidence_locked ? "Unlock" : "Lock"}
+        </Button>
+      </div>
+    </li>
   );
 }
 

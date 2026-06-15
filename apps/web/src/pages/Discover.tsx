@@ -1,8 +1,15 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import type { ChangeEventHandler, FormEvent, ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
-import type { DiscoverOptions, DiscoverResponse, DiscoveredDevice } from "../lib/types";
+import type {
+  DiscoverOptions,
+  DiscoverResponse,
+  DiscoveredDevice,
+  DiscoveredOnvifDevice,
+  OnvifDiscoverResponse,
+  Principal,
+} from "../lib/types";
 import {
   Button,
   cx,
@@ -125,7 +132,63 @@ function SummaryMetric({
   );
 }
 
+function RadarIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <circle cx="8" cy="8" r="6.5" />
+      <path d="M8 8 12.6 4.4" />
+      <path d="M8 4.2A3.8 3.8 0 0 1 11.8 8" />
+    </svg>
+  );
+}
+
 const TH = "px-4 py-2.5 font-mono text-[10px] font-medium uppercase tracking-micro text-fg-muted";
+
+/** Pull name / hardware / location hints out of ONVIF scope URIs
+ * (e.g. `onvif://www.onvif.org/name/Cam`, `.../hardware/DS-2CD`). */
+function parseOnvifScopes(scopes: string[]): {
+  name?: string;
+  hardware?: string;
+  location?: string;
+} {
+  const out: { name?: string; hardware?: string; location?: string } = {};
+  for (const s of scopes) {
+    const m = s.match(/onvif:\/\/www\.onvif\.org\/(name|hardware|location)\/(.+)$/i);
+    if (!m) continue;
+    const key = m[1].toLowerCase() as "name" | "hardware" | "location";
+    let val: string;
+    try {
+      val = decodeURIComponent(m[2]);
+    } catch {
+      val = m[2];
+    }
+    val = val.replace(/_/g, " ").trim();
+    if (val && !out[key]) out[key] = val;
+  }
+  return out;
+}
+
+/** Build the Add-Camera prefill link for a discovered ONVIF device. ONVIF gives no RTSP path, so the
+ * vendor is left generic — the operator finishes the connection details in the form. */
+function onvifPrefillHref(device: DiscoveredOnvifDevice): string {
+  const parsed = parseOnvifScopes(device.scopes);
+  const params = new URLSearchParams();
+  if (device.address) params.set("address", device.address);
+  const name = parsed.name ?? parsed.hardware ?? device.address ?? "";
+  if (name) params.set("name", name);
+  if (parsed.hardware) params.set("model", parsed.hardware);
+  params.set("vendor", "generic");
+  return `/cameras/new?${params.toString()}`;
+}
 
 export function Discover() {
   const [targets, setTargets] = useState("192.168.0.0/24");
@@ -137,6 +200,45 @@ export function Discover() {
   const [addingAddr, setAddingAddr] = useState<string | null>(null);
   const [result, setResult] = useState<DiscoverResponse | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const navigate = useNavigate();
+
+  // ONVIF WS-Discovery is a manager+ action (it touches devices). When auth is off the server returns
+  // the `system` admin principal; unauthenticated leaves the control gated off. Reads are never blocked.
+  const [principal, setPrincipal] = useState<Principal | null>(null);
+  useEffect(() => {
+    let alive = true;
+    api
+      .me()
+      .then((p) => {
+        if (alive) setPrincipal(p);
+      })
+      .catch(() => {
+        /* unauthenticated / auth off — leave principal null (ONVIF scan gated off) */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const canManage = principal?.role === "admin" || principal?.role === "manager";
+
+  // ---- ONVIF (WS-Discovery) ----
+  const [onvifScanning, setOnvifScanning] = useState(false);
+  const [onvifResult, setOnvifResult] = useState<OnvifDiscoverResponse | null>(null);
+  const [onvifError, setOnvifError] = useState<string | null>(null);
+
+  async function handleOnvifDiscover() {
+    setOnvifError(null);
+    setOnvifScanning(true);
+    try {
+      const resp = await api.onvifDiscover();
+      setOnvifResult(resp);
+    } catch (err) {
+      setOnvifError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setOnvifScanning(false);
+    }
+  }
 
   function baseOpts(): DiscoverOptions {
     const opts: DiscoverOptions = { targets: targets.trim(), verify };
@@ -463,6 +565,147 @@ export function Discover() {
               </div>
             </Panel>
           ))}
+
+        {/* ONVIF WS-Discovery (multicast) — separate from the RTSP port scan above. */}
+        <Panel
+          title="ONVIF Discovery"
+          subtitle="Multicast WS-Discovery probe for ONVIF (Profile S) devices on the local segment."
+          actions={
+            <div className="flex items-center gap-3">
+              {onvifScanning && (
+                <span className="hidden items-center gap-2 font-mono text-[10px] uppercase tracking-micro text-fg-muted sm:flex">
+                  <span className="relative flex h-1.5 w-1.5">
+                    <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-accent opacity-70" />
+                    <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-accent" />
+                  </span>
+                  Probing
+                </span>
+              )}
+              <Button
+                variant="primary"
+                size="sm"
+                disabled={onvifScanning || !canManage}
+                onClick={() => void handleOnvifDiscover()}
+              >
+                {onvifScanning ? (
+                  <>
+                    <Spinner size={12} />
+                    Probing…
+                  </>
+                ) : (
+                  <>
+                    <RadarIcon className="h-3.5 w-3.5" />
+                    Discover ONVIF
+                  </>
+                )}
+              </Button>
+            </div>
+          }
+        >
+          <p className="text-xs leading-relaxed text-fg-secondary">
+            WS-Discovery finds ONVIF devices that advertise themselves on the network — no IP range
+            required. It returns each device's service URLs and identity hints; ONVIF does not expose
+            an RTSP path, so a discovered device pre-fills the Add Camera form (vendor{" "}
+            <span className="font-mono text-fg">generic</span>) where you finish the connection
+            details.
+          </p>
+          {!canManage && (
+            <p className="mt-3 font-mono text-[11px] text-fg-muted">
+              Manager role required to run ONVIF discovery.
+            </p>
+          )}
+
+          {onvifError && (
+            <div
+              role="alert"
+              className="mt-4 overflow-hidden rounded-md border border-danger/40 bg-danger/[0.07]"
+            >
+              <div className="flex items-start gap-3 px-4 py-3">
+                <AlertIcon className="mt-0.5 h-4 w-4 shrink-0 text-danger" />
+                <div className="min-w-0">
+                  <div className="font-mono text-[10px] font-semibold uppercase tracking-micro text-danger">
+                    ONVIF Discovery Error
+                  </div>
+                  <p className="mt-1 break-words font-mono text-xs leading-relaxed text-red-200">
+                    {onvifError}
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {onvifResult &&
+            (onvifResult.devices.length === 0 ? (
+              <p className="mt-4 rounded-md border border-dashed border-line bg-panel/40 px-4 py-6 text-center text-xs text-fg-secondary">
+                No ONVIF devices answered the WS-Discovery probe.
+              </p>
+            ) : (
+              <div className="mt-4 space-y-2.5">
+                {onvifResult.devices.map((d, i) => {
+                  const parsed = parseOnvifScopes(d.scopes);
+                  const title = parsed.name ?? parsed.hardware ?? d.address ?? "ONVIF device";
+                  const key = d.endpoint_reference ?? d.device_url ?? `${d.address ?? "dev"}-${i}`;
+                  return (
+                    <div
+                      key={key}
+                      className="flex items-start justify-between gap-4 rounded-md border border-line bg-panel2/40 px-3.5 py-3"
+                    >
+                      <div className="min-w-0 space-y-1.5">
+                        <div className="flex flex-wrap items-baseline gap-x-2.5 gap-y-1">
+                          <span className="font-display text-sm font-bold text-fg">{title}</span>
+                          {d.address && (
+                            <span className="font-mono text-[11px] text-fg-muted">{d.address}</span>
+                          )}
+                        </div>
+                        <div className="flex flex-wrap gap-x-4 gap-y-1 font-mono text-[10px] uppercase tracking-micro text-fg-muted">
+                          {parsed.hardware && (
+                            <span>
+                              Model{" "}
+                              <span className="normal-case text-fg-secondary">
+                                {parsed.hardware}
+                              </span>
+                            </span>
+                          )}
+                          {parsed.location && (
+                            <span>
+                              Loc{" "}
+                              <span className="normal-case text-fg-secondary">
+                                {parsed.location}
+                              </span>
+                            </span>
+                          )}
+                          {d.types && (
+                            <span>
+                              Type{" "}
+                              <span className="normal-case text-fg-secondary">{d.types}</span>
+                            </span>
+                          )}
+                        </div>
+                        <div className="break-all font-mono text-[11px] text-fg-secondary">
+                          {d.device_url}
+                        </div>
+                        {d.xaddrs.length > 1 && (
+                          <div className="font-mono text-[10px] text-fg-muted">
+                            +{d.xaddrs.length - 1} more transport address
+                            {d.xaddrs.length - 1 === 1 ? "" : "es"}
+                          </div>
+                        )}
+                      </div>
+                      <div className="shrink-0">
+                        <Button
+                          size="sm"
+                          variant="primary"
+                          onClick={() => navigate(onvifPrefillHref(d))}
+                        >
+                          Use in Add Camera
+                        </Button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+        </Panel>
       </div>
     </div>
   );

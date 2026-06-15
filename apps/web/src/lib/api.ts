@@ -9,13 +9,23 @@ import type {
   AiTaskUpdate,
   ApiKeyCreated,
   ApiKeyView,
+  ArchiveExportRequest,
   AuditLogEntry,
+  BackupDestinationCreate,
+  BackupDestinationUpdate,
+  BackupDestinationView,
+  BackupJob,
+  BackupPolicy,
+  BackupPolicyCreate,
+  BackupPolicyUpdate,
+  BackupTestResult,
   BakeryObservation,
   BakeryReport,
   BakerySummary,
   BreachAlert,
   CameraCreate,
   CameraLink,
+  CameraOnvif,
   MovementCandidate,
   PlateSearchResult,
   QueryPlan,
@@ -33,11 +43,28 @@ import type {
   EntryLogReport,
   ExceptionReport,
   Gaps,
+  IncidentSummary,
   LiveUrls,
   LoginResult,
+  OnvifDiscoverResponse,
+  OnvifProbeRequest,
+  OutboxPage,
+  PlaybackSession,
   Principal,
+  PtzContinuousMoveRequest,
+  PtzPreset,
+  RecordSchedule,
+  RecordScheduleCreate,
+  RecordScheduleUpdate,
+  RecordTriggerResult,
+  RecordingGap,
   SamplerInfo,
   SegmentView,
+  SiteInfo,
+  SnapshotSchedule,
+  SnapshotScheduleCreate,
+  SnapshotScheduleUpdate,
+  SnapshotView,
   StreamProfile,
   SystemInfo,
   Timeline,
@@ -197,6 +224,29 @@ export interface AuditQuery {
   to?: string;
   actor?: string;
   action?: string;
+  limit?: number;
+}
+
+export interface SnapshotQuery {
+  from?: string;
+  to?: string;
+  limit?: number;
+}
+
+export interface RecordingGapQuery {
+  /** Filter on fill state (`pending` | `filled` | `failed`). */
+  state?: string;
+  limit?: number;
+}
+
+export interface BackupJobQuery {
+  policy_id?: string;
+  status?: string;
+  limit?: number;
+}
+
+export interface OutboxQuery {
+  since_seq?: number;
   limit?: number;
 }
 
@@ -433,4 +483,182 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ query }),
     }),
+
+  // ---- Evidence lock + incident tagging (DVR) ----
+  /** Pin a segment so retention never prunes it; optionally tag it to an incident case (manager+). */
+  lockSegmentEvidence: (id: string, incidentId?: string | null) =>
+    request<SegmentView>(`/api/v1/segments/${enc(id)}/evidence-lock`, {
+      method: "POST",
+      body: JSON.stringify({ incident_id: incidentId ?? null }),
+    }),
+  /** Release the evidence hold; the incident tag is preserved (manager+). */
+  unlockSegmentEvidence: (id: string) =>
+    request<SegmentView>(`/api/v1/segments/${enc(id)}/evidence-lock`, { method: "DELETE" }),
+  /** Set (or clear with null) a segment's incident tag (manager+). */
+  tagSegmentIncident: (id: string, incidentId: string | null) =>
+    request<SegmentView>(`/api/v1/segments/${enc(id)}/incident`, {
+      method: "PATCH",
+      body: JSON.stringify({ incident_id: incidentId }),
+    }),
+  /** Roll-up of every incident case (segment count, footprint, span). */
+  listIncidents: () => request<IncidentSummary[]>("/api/v1/incidents"),
+  /** All segments tagged to one incident, oldest first. */
+  incidentSegments: (incidentId: string) =>
+    request<SegmentView[]>(`/api/v1/incidents/${enc(incidentId)}/segments`),
+
+  // ---- Recording schedules (time-of-day windows) ----
+  listSchedules: (cameraId: string) =>
+    request<RecordSchedule[]>(`/api/v1/cameras/${enc(cameraId)}/schedules`),
+  createSchedule: (cameraId: string, body: RecordScheduleCreate) =>
+    request<RecordSchedule>(`/api/v1/cameras/${enc(cameraId)}/schedules`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateSchedule: (scheduleId: string, body: RecordScheduleUpdate) =>
+    request<RecordSchedule>(`/api/v1/schedules/${enc(scheduleId)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteSchedule: (scheduleId: string) =>
+    request<void>(`/api/v1/schedules/${enc(scheduleId)}`, { method: "DELETE" }),
+
+  // ---- Manual event-recording trigger ----
+  /** Fire an event-recording trigger (extends the post-roll window); manager+, event-mode cameras. */
+  triggerRecord: (cameraId: string) =>
+    request<RecordTriggerResult>(`/api/v1/cameras/${enc(cameraId)}/record-trigger`, {
+      method: "POST",
+    }),
+
+  // ---- Playback sessions (segment-spanning HLS VOD) ----
+  createPlaybackSession: (cameraId: string, from: string, to: string) =>
+    request<PlaybackSession>(`/api/v1/cameras/${enc(cameraId)}/playback/sessions`, {
+      method: "POST",
+      body: JSON.stringify({ from, to }),
+    }),
+  deletePlaybackSession: (sessionId: string) =>
+    request<void>(`/api/v1/playback/sessions/${enc(sessionId)}`, { method: "DELETE" }),
+
+  // ---- Snapshot schedules + captured snapshots ----
+  listSnapshotSchedules: (cameraId: string) =>
+    request<SnapshotSchedule[]>(`/api/v1/cameras/${enc(cameraId)}/snapshot-schedules`),
+  createSnapshotSchedule: (cameraId: string, body: SnapshotScheduleCreate) =>
+    request<SnapshotSchedule>(`/api/v1/cameras/${enc(cameraId)}/snapshot-schedules`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateSnapshotSchedule: (id: string, body: SnapshotScheduleUpdate) =>
+    request<SnapshotSchedule>(`/api/v1/snapshot-schedules/${enc(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteSnapshotSchedule: (id: string) =>
+    request<void>(`/api/v1/snapshot-schedules/${enc(id)}`, { method: "DELETE" }),
+  /** Captured snapshot frames for one camera, newest first. */
+  listSnapshots: (cameraId: string, params: SnapshotQuery = {}) =>
+    request<SnapshotView[]>(`/api/v1/cameras/${enc(cameraId)}/snapshots${qs(params)}`),
+
+  // ---- Backup: destinations ----
+  listBackupDestinations: () =>
+    request<BackupDestinationView[]>("/api/v1/backup/destinations"),
+  createBackupDestination: (body: BackupDestinationCreate) =>
+    request<BackupDestinationView>("/api/v1/backup/destinations", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateBackupDestination: (id: string, body: BackupDestinationUpdate) =>
+    request<BackupDestinationView>(`/api/v1/backup/destinations/${enc(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteBackupDestination: (id: string) =>
+    request<void>(`/api/v1/backup/destinations/${enc(id)}`, { method: "DELETE" }),
+  /** Connectivity / writability probe for a destination (manager+). */
+  testDestination: (id: string) =>
+    request<BackupTestResult>(`/api/v1/backup/destinations/${enc(id)}/test`, { method: "POST" }),
+
+  // ---- Backup: policies ----
+  listBackupPolicies: () => request<BackupPolicy[]>("/api/v1/backup/policies"),
+  createBackupPolicy: (body: BackupPolicyCreate) =>
+    request<BackupPolicy>("/api/v1/backup/policies", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  updateBackupPolicy: (id: string, body: BackupPolicyUpdate) =>
+    request<BackupPolicy>(`/api/v1/backup/policies/${enc(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteBackupPolicy: (id: string) =>
+    request<void>(`/api/v1/backup/policies/${enc(id)}`, { method: "DELETE" }),
+  /** Kick off a policy run now; returns the created job (manager+). */
+  triggerPolicy: (id: string) =>
+    request<BackupJob>(`/api/v1/backup/policies/${enc(id)}/trigger`, { method: "POST" }),
+
+  // ---- Backup: jobs + archive export ----
+  listBackupJobs: (q: BackupJobQuery = {}) =>
+    request<BackupJob[]>(`/api/v1/backup/jobs${qs(q)}`),
+  getBackupJob: (id: string) => request<BackupJob>(`/api/v1/backup/jobs/${enc(id)}`),
+  deleteBackupJob: (id: string) =>
+    request<void>(`/api/v1/backup/jobs/${enc(id)}`, { method: "DELETE" }),
+  /** On-demand archive (.zip) export of a footage selection; returns the created job (manager+). */
+  archiveExport: (body: ArchiveExportRequest) =>
+    request<BackupJob>("/api/v1/archive/export", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  /** Past on-demand archive exports, newest first. */
+  listArchiveExports: (limit?: number) =>
+    request<BackupJob[]>(`/api/v1/archive/exports${qs({ limit })}`),
+
+  // ---- ONVIF + PTZ (Profile S) ----
+  /** WS-Discovery scan for ONVIF devices on the LAN (manager+). */
+  onvifDiscover: () =>
+    request<OnvifDiscoverResponse>("/api/v1/onvif/discover", { method: "POST" }),
+  /** A camera's stored ONVIF device profile. */
+  getCameraOnvif: (cameraId: string) =>
+    request<CameraOnvif>(`/api/v1/cameras/${enc(cameraId)}/onvif`),
+  /** (Re-)probe a camera's ONVIF device profile; optional explicit device URL (manager+). */
+  probeCameraOnvif: (cameraId: string, body: OnvifProbeRequest = {}) =>
+    request<CameraOnvif>(`/api/v1/cameras/${enc(cameraId)}/onvif/probe`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  /** PTZ presets stored for a camera. */
+  listPtzPresets: (cameraId: string) =>
+    request<PtzPreset[]>(`/api/v1/cameras/${enc(cameraId)}/ptz/presets`),
+  /** Re-fetch presets from the device's ONVIF PTZ service (manager+). */
+  refreshPtzPresets: (cameraId: string) =>
+    request<PtzPreset[]>(`/api/v1/cameras/${enc(cameraId)}/ptz/presets/refresh`, { method: "POST" }),
+  /** Start a continuous PTZ move with normalized velocities (-1.0..1.0); manager+. */
+  ptzContinuous: (cameraId: string, body: PtzContinuousMoveRequest) =>
+    request<{ ok: boolean }>(`/api/v1/cameras/${enc(cameraId)}/ptz/continuous`, {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  /** Stop any in-progress PTZ move (manager+). */
+  ptzStop: (cameraId: string) =>
+    request<{ ok: boolean }>(`/api/v1/cameras/${enc(cameraId)}/ptz/stop`, { method: "POST" }),
+  /** Move the camera to a stored preset token (manager+). */
+  ptzGotoPreset: (cameraId: string, token: string) =>
+    request<{ ok: boolean }>(`/api/v1/cameras/${enc(cameraId)}/ptz/goto_preset`, {
+      method: "POST",
+      body: JSON.stringify({ token }),
+    }),
+
+  // ---- ANR: persisted recording gaps ----
+  /** A camera's persisted recording gaps (the ANR fill table), newest first. */
+  listRecordingGaps: (cameraId: string, q: RecordingGapQuery = {}) =>
+    request<RecordingGap[]>(`/api/v1/cameras/${enc(cameraId)}/recording-gaps${qs(q)}`),
+  /** Reset a gap to `pending` so the ANR loop retries the fill (manager+). */
+  retryRecordingGap: (cameraId: string, gapId: string) =>
+    request<RecordingGap>(
+      `/api/v1/cameras/${enc(cameraId)}/recording-gaps/${enc(gapId)}/retry`,
+      { method: "POST" },
+    ),
+
+  // ---- Fleet: site identity + outbox ----
+  /** This node's fleet identity (no auth required). */
+  getSite: () => request<SiteInfo>("/api/v1/site"),
+  /** Drain the durable detection outbox in `seq` order from a cursor (admin-only). */
+  listOutbox: (params: OutboxQuery = {}) => request<OutboxPage>(`/api/v1/outbox${qs(params)}`),
 };

@@ -159,6 +159,42 @@ function SearchIcon({ className }: IconProps) {
   );
 }
 
+function IncidentsIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M10 2.5 17 15H3z" />
+      <path d="M10 8v3.5" />
+      <path d="M10 13.6v.4" />
+    </svg>
+  );
+}
+
+function BackupIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <ellipse cx="10" cy="5" rx="6" ry="2.5" />
+      <path d="M4 5v10c0 1.38 2.69 2.5 6 2.5s6-1.12 6-2.5V5" />
+      <path d="M4 10c0 1.38 2.69 2.5 6 2.5s6-1.12 6-2.5" />
+    </svg>
+  );
+}
+
 function SystemIcon({ className }: IconProps) {
   return (
     <svg
@@ -184,6 +220,8 @@ const NAV_ITEMS: { to: string; label: string; end?: boolean; Icon: (p: IconProps
   { to: "/bakery", label: "Bakery", Icon: BakeryIcon },
   { to: "/movement", label: "Movement", Icon: MovementIcon },
   { to: "/search", label: "Search", Icon: SearchIcon },
+  { to: "/incidents", label: "Incidents", Icon: IncidentsIcon },
+  { to: "/backup", label: "Backup", Icon: BackupIcon },
   { to: "/system", label: "System", Icon: SystemIcon },
 ];
 

@@ -1,8 +1,8 @@
 import { useMemo, useState } from "react";
 import type { ChangeEventHandler, FormEvent, ReactNode } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
-import type { CameraCreate, RecordStream } from "../lib/types";
+import type { CameraCreate, RecordMode, RecordStream } from "../lib/types";
 import {
   Button,
   Field,
@@ -125,14 +125,20 @@ function Checkbox({
 
 export function AddCamera() {
   const navigate = useNavigate();
+  // Prefill support: the Discover page links here with ?address/&name/&vendor/&model query params
+  // after an RTSP / ONVIF scan, so an operator can register a discovered device in one step.
+  const [searchParams] = useSearchParams();
 
-  const [name, setName] = useState("");
+  const [name, setName] = useState(() => searchParams.get("name") ?? "");
   const [id, setId] = useState("");
   const [siteId, setSiteId] = useState("");
-  const [vendor, setVendor] = useState<Vendor>("hikvision");
-  const [model, setModel] = useState("");
+  const [vendor, setVendor] = useState<Vendor>(() => {
+    const v = searchParams.get("vendor");
+    return v === "hikvision" || v === "dahua" || v === "generic" ? v : "hikvision";
+  });
+  const [model, setModel] = useState(() => searchParams.get("model") ?? "");
 
-  const [address, setAddress] = useState("");
+  const [address, setAddress] = useState(() => searchParams.get("address") ?? "");
   const [rtspPort, setRtspPort] = useState(554);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
@@ -141,8 +147,16 @@ export function AddCamera() {
   const [subStreamUrl, setSubStreamUrl] = useState("");
 
   const [recordStream, setRecordStream] = useState<RecordStream>("main");
+  const [recordMode, setRecordMode] = useState<RecordMode>("continuous");
   const [segmentSeconds, setSegmentSeconds] = useState(60);
   const [retentionHours, setRetentionHours] = useState(24);
+  const [storageQuotaGb, setStorageQuotaGb] = useState("");
+  const [preRollSeconds, setPreRollSeconds] = useState(5);
+  const [postRollSeconds, setPostRollSeconds] = useState(30);
+  const [recordAudio, setRecordAudio] = useState(false);
+  const [mirrorEnabled, setMirrorEnabled] = useState(false);
+  const [anrEnabled, setAnrEnabled] = useState(false);
+  const [anrReplayTemplate, setAnrReplayTemplate] = useState("");
   const [recordEnabled, setRecordEnabled] = useState(true);
   const [enabled, setEnabled] = useState(true);
 
@@ -150,6 +164,7 @@ export function AddCamera() {
   const [error, setError] = useState<string | null>(null);
 
   const autoBuilds = vendor === "hikvision" || vendor === "dahua";
+  const isEventMode = recordMode === "event" || recordMode === "scheduled_event";
   const preview = useMemo(
     () =>
       autoBuilds
@@ -171,7 +186,11 @@ export function AddCamera() {
       name: name.trim(),
       vendor,
       record_stream: recordStream,
+      record_mode: recordMode,
       record_enabled: recordEnabled,
+      record_audio: recordAudio,
+      mirror_enabled: mirrorEnabled,
+      anr_enabled: anrEnabled,
       enabled,
       segment_seconds: segmentSeconds,
       retention_hours: retentionHours,
@@ -185,6 +204,19 @@ export function AddCamera() {
     if (password) body.password = password;
     if (mainStreamUrl.trim()) body.main_stream_url = mainStreamUrl.trim();
     if (subStreamUrl.trim()) body.sub_stream_url = subStreamUrl.trim();
+    // Event-window roll only applies to event / scheduled_event modes.
+    if (isEventMode) {
+      body.pre_roll_seconds = preRollSeconds;
+      body.post_roll_seconds = postRollSeconds;
+    }
+    // Per-camera storage cap is entered in GB; blank / 0 leaves it to the server default.
+    const quotaGb = Number(storageQuotaGb);
+    if (storageQuotaGb.trim() && Number.isFinite(quotaGb) && quotaGb > 0) {
+      body.storage_quota_bytes = Math.round(quotaGb * 1024 ** 3);
+    }
+    if (anrEnabled && anrReplayTemplate.trim()) {
+      body.anr_replay_url_template = anrReplayTemplate.trim();
+    }
 
     setSubmitting(true);
     try {
@@ -396,8 +428,20 @@ export function AddCamera() {
           </Panel>
 
           {/* Recording */}
-          <Panel title="Recording" subtitle="Segmenting and retention policy for this camera.">
+          <Panel title="Recording" subtitle="Mode, segmenting and retention policy for this camera.">
             <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <Field label="Record mode" htmlFor="record-mode">
+                <Select
+                  id="record-mode"
+                  value={recordMode}
+                  onChange={(e) => setRecordMode(e.target.value as RecordMode)}
+                >
+                  <option value="continuous">Continuous</option>
+                  <option value="scheduled">Scheduled</option>
+                  <option value="event">Event</option>
+                  <option value="scheduled_event">Scheduled + event</option>
+                </Select>
+              </Field>
               <Field label="Record stream" htmlFor="record-stream">
                 <Select
                   id="record-stream"
@@ -408,6 +452,23 @@ export function AddCamera() {
                   <option value="sub">Sub</option>
                 </Select>
               </Field>
+              <Field
+                label="Storage quota (GB)"
+                htmlFor="quota"
+                hint="Per-camera cap. Blank uses the server default."
+              >
+                <Input
+                  id="quota"
+                  type="number"
+                  value={storageQuotaGb}
+                  min={0}
+                  step="0.5"
+                  onChange={(e) => setStorageQuotaGb(e.target.value)}
+                  placeholder="no cap"
+                />
+              </Field>
+            </div>
+            <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
               <Field label="Segment length (s)" htmlFor="segment">
                 <Input
                   id="segment"
@@ -428,6 +489,38 @@ export function AddCamera() {
                 />
               </Field>
             </div>
+            {isEventMode && (
+              <div className="mt-4 grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <Field
+                  label="Pre-roll (s)"
+                  htmlFor="pre-roll"
+                  hint="Footage kept before a trigger (best-effort, 0–300)."
+                >
+                  <Input
+                    id="pre-roll"
+                    type="number"
+                    value={preRollSeconds}
+                    min={0}
+                    max={300}
+                    onChange={(e) => setPreRollSeconds(Number(e.target.value))}
+                  />
+                </Field>
+                <Field
+                  label="Post-roll (s)"
+                  htmlFor="post-roll"
+                  hint="Recording continues this long after a trigger (0–3600)."
+                >
+                  <Input
+                    id="post-roll"
+                    type="number"
+                    value={postRollSeconds}
+                    min={0}
+                    max={3600}
+                    onChange={(e) => setPostRollSeconds(Number(e.target.value))}
+                  />
+                </Field>
+              </div>
+            )}
             <div className="mt-4 flex flex-wrap gap-6 border-t border-line pt-4">
               <Checkbox
                 checked={recordEnabled}
@@ -435,9 +528,66 @@ export function AddCamera() {
               >
                 Record enabled
               </Checkbox>
+              <Checkbox checked={recordAudio} onChange={(e) => setRecordAudio(e.target.checked)}>
+                Record audio
+              </Checkbox>
               <Checkbox checked={enabled} onChange={(e) => setEnabled(e.target.checked)}>
                 Camera enabled
               </Checkbox>
+            </div>
+          </Panel>
+
+          {/* Continuity & redundancy (DVR) */}
+          <Panel
+            title="Continuity & Redundancy"
+            subtitle="Optional DVR reliability — mirrored writes and automatic gap recovery."
+          >
+            <div className="space-y-4">
+              <div>
+                <Checkbox
+                  checked={mirrorEnabled}
+                  onChange={(e) => setMirrorEnabled(e.target.checked)}
+                >
+                  Mirror recordings
+                </Checkbox>
+                <p className="mt-2 text-xs leading-relaxed text-fg-muted">
+                  Write a second, identical copy of every segment to the configured mirror directory
+                  (redundant DVR copy). No effect unless a mirror directory is configured on the
+                  server.
+                </p>
+              </div>
+              <div className="border-t border-line pt-4">
+                <Checkbox checked={anrEnabled} onChange={(e) => setAnrEnabled(e.target.checked)}>
+                  Automatic network replenishment (ANR)
+                </Checkbox>
+                <p className="mt-2 text-xs leading-relaxed text-fg-muted">
+                  Let the ANR loop re-fetch missed footage from the camera's onboard storage to fill
+                  recording gaps left by a network outage.
+                </p>
+                {anrEnabled && (
+                  <div className="mt-4">
+                    <Field
+                      label="ANR replay URL template (optional)"
+                      htmlFor="anr-template"
+                      hint={
+                        <>
+                          <code className="text-fg-secondary">{"{start}"}</code> /{" "}
+                          <code className="text-fg-secondary">{"{end}"}</code> placeholders,
+                          Hikvision time format. Blank derives a default Hikvision playback URL from
+                          the address and credentials.
+                        </>
+                      }
+                    >
+                      <Input
+                        id="anr-template"
+                        value={anrReplayTemplate}
+                        onChange={(e) => setAnrReplayTemplate(e.target.value)}
+                        placeholder="rtsp://host:554/Streaming/tracks/101?starttime={start}&endtime={end}"
+                      />
+                    </Field>
+                  </div>
+                )}
+              </div>
             </div>
           </Panel>
 
