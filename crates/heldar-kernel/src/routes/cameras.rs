@@ -53,7 +53,11 @@ pub(crate) async fn load_camera(pool: &SqlitePool, id: &str) -> AppResult<Camera
         .ok_or_else(|| AppError::NotFound(format!("camera {id} not found")))
 }
 
-async fn list_cameras(State(st): State<AppState>) -> AppResult<Json<Vec<CameraView>>> {
+async fn list_cameras(
+    State(st): State<AppState>,
+    principal: Principal,
+) -> AppResult<Json<Vec<CameraView>>> {
+    principal.require(principal.can_view(), "list cameras")?;
     let cams = sqlx::query_as::<_, Camera>("SELECT * FROM cameras ORDER BY id ASC")
         .fetch_all(&st.pool)
         .await?;
@@ -62,8 +66,10 @@ async fn list_cameras(State(st): State<AppState>) -> AppResult<Json<Vec<CameraVi
 
 async fn get_camera_handler(
     State(st): State<AppState>,
+    principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<CameraView>> {
+    principal.require(principal.can_view(), "view a camera")?;
     Ok(Json(load_camera(&st.pool, &id).await?.into()))
 }
 
@@ -386,7 +392,12 @@ async fn delete_camera(
 }
 
 /// Probe the camera's recording stream to confirm reachability and read its codec/dimensions.
-async fn test_camera(State(st): State<AppState>, Path(id): Path<String>) -> AppResult<Json<Value>> {
+async fn test_camera(
+    State(st): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    principal.require(principal.can_view(), "test camera connectivity")?;
     let cam = load_camera(&st.pool, &id).await?;
     let url = camera_url::record_url(&cam)
         .ok_or_else(|| AppError::BadRequest("camera has no stream URL".into()))?;
@@ -417,4 +428,69 @@ async fn test_camera(State(st): State<AppState>, Path(id): Path<String>) -> AppR
         }),
     };
     Ok(Json(result))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::config::Config;
+    use crate::services::recorder::RecorderManager;
+    use crate::services::sampler::SamplerManager;
+    use crate::state::AppState;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use std::sync::Arc;
+    use tower::Service;
+
+    /// Build a minimal in-memory AppState (single-connection so migrations persist) with auth
+    /// toggled, for exercising the route-level Principal gate end to end.
+    async fn test_state(auth_enabled: bool) -> AppState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let mut cfg = Config::from_env();
+        cfg.auth_enabled = auth_enabled;
+        let cfg = Arc::new(cfg);
+        AppState {
+            recorder: RecorderManager::new(pool.clone(), cfg.clone()),
+            sampler: SamplerManager::new(pool.clone(), cfg.clone()),
+            mirror: None,
+            consumers: Arc::new(Vec::new()),
+            http: reqwest::Client::new(),
+            started_at: chrono::Utc::now(),
+            pool,
+            cfg,
+        }
+    }
+
+    /// Send an unauthenticated GET /api/v1/cameras through the real router and report the status.
+    async fn unauthenticated_list_status(auth_enabled: bool) -> StatusCode {
+        let st = test_state(auth_enabled).await;
+        let mut app = super::router().with_state(st);
+        let req = Request::builder()
+            .method("GET")
+            .uri("/api/v1/cameras")
+            .body(Body::empty())
+            .unwrap();
+        app.call(req).await.unwrap().status()
+    }
+
+    /// With auth ENABLED, an unauthenticated request to a representative legacy route is rejected by
+    /// the Principal extractor (401) — the auth gap this batch closes.
+    #[tokio::test]
+    async fn legacy_route_rejects_unauthenticated_when_auth_enabled() {
+        assert_eq!(
+            unauthenticated_list_status(true).await,
+            StatusCode::UNAUTHORIZED
+        );
+    }
+
+    /// With auth DISABLED the Principal is the permissive system admin, so the new `require()` guard
+    /// is a behavioral NO-OP and the legacy route stays open (200).
+    #[tokio::test]
+    async fn legacy_route_open_when_auth_disabled() {
+        assert_eq!(unauthenticated_list_status(false).await, StatusCode::OK);
+    }
 }

@@ -4,7 +4,7 @@
 //!
 //! Boots the SQLite store + kernel migrations, applies each app's schema, registers their perception
 //! consumers and routers, starts the recorder/sampler supervisors + background services (indexer,
-//! health, retention, app retention, notifier), and serves the HTTP API + recorded media. The OPEN
+//! health, retention, app retention, webhooks), and serves the HTTP API + recorded media. The OPEN
 //! reference build (`--no-default-features`) composes only kernel + the Apache-2.0 generic apps; a
 //! different deployment links a different set of app crates here.
 
@@ -192,13 +192,14 @@ async fn main() -> anyhow::Result<()> {
                 services::backup::run(st.clone())
             });
         }
-        // The alert notifier is spawned UNCONDITIONALLY: its webhook + severity threshold are now
-        // UI-configurable (stored in app_state, read every cycle), so it self-idles when unconfigured
-        // or disabled and never returns — there is no tight-loop respawn concern.
+        // The webhook delivery engine is spawned UNCONDITIONALLY: it is the single deliverer of events
+        // to external systems (superseding the old single-URL notifier). Subscriptions are managed at
+        // runtime via the API and re-read every cycle, so it self-idles when none are enabled and never
+        // returns — there is no tight-loop respawn concern.
         {
             let (p, c) = (pool.clone(), cfg.clone());
-            spawn_supervised("notifier", move || {
-                services::notifier::run(p.clone(), c.clone())
+            spawn_supervised("webhooks", move || {
+                services::webhooks::run(p.clone(), c.clone())
             });
         }
     }

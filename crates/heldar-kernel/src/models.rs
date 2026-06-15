@@ -811,32 +811,7 @@ pub struct CameraIsapi {
     pub fetched_at: DateTime<Utc>,
 }
 
-// ---- Alerting (UI-configurable webhook notifier; persisted in app_state) ----
-
-/// Current alerting configuration (GET /api/v1/system/alerting). The webhook URL is MASKED
-/// (`scheme://host` + a trailing ellipsis); the full path/token is never returned to clients.
-#[derive(Debug, Clone, Serialize)]
-pub struct AlertingConfig {
-    /// Whether a webhook is configured (stored in app_state, or the `HELDAR_ALERT_WEBHOOK_URL` env fallback).
-    pub configured: bool,
-    /// Masked webhook url (`scheme://host…`); null when unconfigured.
-    pub webhook_url_masked: Option<String>,
-    /// Whether delivery is enabled (defaults to true when a webhook is set).
-    pub enabled: bool,
-    /// Threshold: `warning` (warning+critical) or `critical` (critical only).
-    pub min_severity: String,
-}
-
-/// Partial update (PUT /api/v1/system/alerting). A field that is ABSENT is left unchanged; an
-/// explicit empty/null `webhook_url` CLEARS the configured webhook (the outer `Option` distinguishes
-/// "field omitted" from an explicit null/empty so a toggle-only update never wipes the webhook).
-#[derive(Debug, Deserialize, Default)]
-pub struct AlertingUpdate {
-    #[serde(default, deserialize_with = "de_field_present")]
-    pub webhook_url: Option<Option<String>>,
-    pub enabled: Option<bool>,
-    pub min_severity: Option<String>,
-}
+// ---- Webhook helpers (URL masking + three-state field deserialization) ----
 
 /// Deserialize a PRESENT field into `Some(inner)`. Combined with `#[serde(default)]` (which leaves a
 /// missing field as `None`), this yields three states: omitted = `None`, null = `Some(None)`,
@@ -868,6 +843,101 @@ pub fn mask_webhook_url(url: &str) -> Option<String> {
         }
         None => Some("…".to_string()),
     }
+}
+
+// ---- Webhook subscriptions (the generic event-delivery substrate; supersedes single-URL alerting) ----
+
+/// A webhook subscription row as stored. `secret` (the HMAC signing key) is never serialized; use
+/// [`WebhookSubscriptionView`] for output. `event_types` is a JSON array of type names; the sentinel
+/// `["*"]` matches every event type, otherwise it is an exact-membership set. `cursor_at` is the
+/// per-subscription delivery cursor (an `events.created_at`); NULL means "start at now" (no backlog).
+#[derive(Debug, Clone, FromRow)]
+pub struct WebhookSubscription {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub event_types: Json<Vec<String>>,
+    pub min_severity: String,
+    pub secret: Option<String>,
+    pub enabled: bool,
+    pub cursor_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+/// Client-facing subscription view: the `secret` is replaced by a `has_secret` flag and never echoed.
+#[derive(Debug, Clone, Serialize)]
+pub struct WebhookSubscriptionView {
+    pub id: String,
+    pub name: String,
+    pub url: String,
+    pub event_types: Vec<String>,
+    pub min_severity: String,
+    /// Whether an HMAC signing secret is configured (the value itself is never returned).
+    pub has_secret: bool,
+    pub enabled: bool,
+    pub cursor_at: Option<DateTime<Utc>>,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<WebhookSubscription> for WebhookSubscriptionView {
+    fn from(s: WebhookSubscription) -> Self {
+        WebhookSubscriptionView {
+            id: s.id,
+            name: s.name,
+            url: s.url,
+            event_types: s.event_types.0,
+            min_severity: s.min_severity,
+            has_secret: s.secret.as_deref().map(|v| !v.is_empty()).unwrap_or(false),
+            enabled: s.enabled,
+            cursor_at: s.cursor_at,
+            created_at: s.created_at,
+            updated_at: s.updated_at,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct WebhookSubscriptionCreate {
+    pub name: String,
+    pub url: String,
+    /// Omitted/empty = all types (`["*"]`).
+    pub event_types: Option<Vec<String>>,
+    /// `info` | `warning` | `critical` (default `info`).
+    pub min_severity: Option<String>,
+    /// Optional HMAC-SHA256 signing secret.
+    pub secret: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+/// Partial update; an ABSENT field is left unchanged. `secret` is three-state: omitted = unchanged,
+/// null = clear the secret, a value = set it (the outer `Option` distinguishes "field omitted" from
+/// an explicit null — see [`de_field_present`]).
+#[derive(Debug, Deserialize, Default)]
+pub struct WebhookSubscriptionUpdate {
+    pub name: Option<String>,
+    pub url: Option<String>,
+    pub event_types: Option<Vec<String>>,
+    pub min_severity: Option<String>,
+    #[serde(default, deserialize_with = "de_field_present")]
+    pub secret: Option<Option<String>>,
+    pub enabled: Option<bool>,
+}
+
+/// One webhook delivery attempt (the at-least-once retry ledger). `status` is `delivered` | `failed`.
+#[derive(Debug, Clone, Serialize, FromRow)]
+pub struct WebhookDelivery {
+    pub id: String,
+    pub subscription_id: String,
+    pub event_id: Option<String>,
+    pub event_type: Option<String>,
+    pub status: String,
+    pub attempts: i64,
+    pub response_code: Option<i64>,
+    pub error: Option<String>,
+    pub created_at: DateTime<Utc>,
+    pub delivered_at: Option<DateTime<Utc>>,
 }
 
 /// Request body for POST /api/v1/archive/export — zip a selection of recorded footage on demand.
@@ -909,16 +979,16 @@ mod tests {
     }
 
     #[test]
-    fn alerting_update_webhook_is_three_state() {
-        // Omitted => None (leave unchanged).
-        let u: AlertingUpdate = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
-        assert!(u.webhook_url.is_none());
+    fn webhook_update_secret_is_three_state() {
+        // Omitted => None (leave the signing secret unchanged).
+        let u: WebhookSubscriptionUpdate = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
+        assert!(u.secret.is_none());
         assert_eq!(u.enabled, Some(true));
-        // Explicit null => Some(None) (clear).
-        let u: AlertingUpdate = serde_json::from_str(r#"{"webhook_url": null}"#).unwrap();
-        assert_eq!(u.webhook_url, Some(None));
-        // A value => Some(Some(v)) (set).
-        let u: AlertingUpdate = serde_json::from_str(r#"{"webhook_url": "https://x/y"}"#).unwrap();
-        assert_eq!(u.webhook_url, Some(Some("https://x/y".to_string())));
+        // Explicit null => Some(None) (clear the secret).
+        let u: WebhookSubscriptionUpdate = serde_json::from_str(r#"{"secret": null}"#).unwrap();
+        assert_eq!(u.secret, Some(None));
+        // A value => Some(Some(v)) (set the secret).
+        let u: WebhookSubscriptionUpdate = serde_json::from_str(r#"{"secret": "s3cr3t"}"#).unwrap();
+        assert_eq!(u.secret, Some(Some("s3cr3t".to_string())));
     }
 }

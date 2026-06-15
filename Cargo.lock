@@ -619,6 +619,7 @@ dependencies = [
  "base64",
  "chrono",
  "dotenvy",
+ "hmac",
  "libc",
  "md-5",
  "rand_core 0.6.4",

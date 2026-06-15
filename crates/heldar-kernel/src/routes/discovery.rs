@@ -3,6 +3,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
+use crate::auth::{self, Principal};
 use crate::error::{AppError, AppResult};
 use crate::services::discovery::{self, DiscoverOptions};
 use crate::state::AppState;
@@ -14,8 +15,18 @@ pub fn router() -> Router<AppState> {
 /// Scan a network range for cameras; optionally verify credentials and auto-register them.
 async fn discover_handler(
     State(st): State<AppState>,
+    principal: Principal,
     Json(opts): Json<DiscoverOptions>,
 ) -> AppResult<Json<Value>> {
+    // Scanning the LAN is an operational action (viewer+); auto-registering the cameras it finds is a
+    // registry mutation, so it additionally requires manage-registry.
+    principal.require(principal.can_view(), "scan for cameras")?;
+    if opts.auto_add {
+        principal.require(
+            principal.can_manage_registry(),
+            "auto-register discovered cameras",
+        )?;
+    }
     let devices = discovery::discover(&st.pool, &st.cfg, &st.http, &opts)
         .await
         .map_err(AppError::BadRequest)?;
@@ -36,6 +47,18 @@ async fn discover_handler(
                 }
             }
         }
+    }
+
+    if !added.is_empty() {
+        auth::audit(
+            &st.pool,
+            &principal,
+            "discover_auto_add",
+            "discovery",
+            "auto_add",
+            json!({ "added": &added }),
+        )
+        .await;
     }
 
     Ok(Json(json!({

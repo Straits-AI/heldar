@@ -23,7 +23,7 @@ const sidebars: SidebarsConfig = {
     {
       type: 'category',
       label: 'Develop',
-      items: ['develop/build-a-module', 'develop/ai-worker'],
+      items: ['develop/build-a-module', 'develop/ai-worker', 'develop/webhooks'],
     },
     {
       type: 'category',

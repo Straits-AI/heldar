@@ -49,3 +49,6 @@ sha1 = "0.10"
 base64 = "0.22"
 # HTTP Digest (RFC 2617) auth for HikVision ISAPI camera configuration; already resolved in Cargo.lock.
 md-5 = "0.10"
+# HMAC-SHA256 webhook signatures (X-Heldar-Signature). Already resolved in Cargo.lock (transitive
+# dep of argon2/digest); declared here so the webhooks delivery engine can sign delivery bodies.
+hmac = "0.12"

@@ -17,7 +17,7 @@ import type {
   VisionEvent,
 } from "../lib/types";
 import { BulkConfigPanel } from "../components/CameraConfigPanel";
-import { AlertingPanel } from "../components/AlertingPanel";
+import { WebhooksPanel } from "../components/WebhooksPanel";
 import {
   Button,
   EmptyState,
@@ -538,9 +538,9 @@ export function System() {
         </div>
       </div>
 
-      {/* ---- Alerting (UI-configurable webhook notifications) ---- */}
+      {/* ---- Webhooks (event-delivery subscriptions) ---- */}
       <div className="mt-4 stagger">
-        <AlertingPanel canManage={canManage} />
+        <WebhooksPanel canManage={canManage} />
       </div>
 
       {/* ---- Full-width: bulk camera configuration ---- */}

@@ -304,34 +304,77 @@ export interface SystemInfo {
   live_transcode_engine: string;
 }
 
-// ---- Alerting (UI-configurable webhook notifier; persisted server-side in app_state) ----
+// ---- Webhook subscriptions (the generic event-delivery substrate; supersedes single-URL alerting) ----
 
-/** Current alerting configuration (GET /api/v1/system/alerting). The webhook URL is MASKED
- * (scheme://host + a trailing ellipsis); the full path/token is never returned. */
-export interface AlertingConfig {
-  /** Whether a webhook is configured (stored, or via the HELDAR_ALERT_WEBHOOK_URL env fallback). */
-  configured: boolean;
-  /** Masked webhook url (scheme://host…); null when unconfigured. */
-  webhook_url_masked?: string | null;
-  /** Whether delivery is enabled (defaults to true when a webhook is set). */
+/** A webhook subscription (GET /api/v1/webhooks). The signing `secret` is never returned; only
+ * `has_secret` indicates whether one is configured. `event_types` of `["*"]` matches every type. */
+export interface WebhookSubscription {
+  id: string;
+  name: string;
+  url: string;
+  /** Exact-membership set of event types; `["*"]` means all types. */
+  event_types: string[];
+  min_severity: Severity;
+  /** Whether an HMAC-SHA256 signing secret is configured (the value itself is never returned). */
+  has_secret: boolean;
   enabled: boolean;
-  /** Threshold: `warning` (warning+critical) or `critical` (critical only). */
-  min_severity: "warning" | "critical";
+  /** Delivery cursor (an events.created_at); null until the first delivery cycle. */
+  cursor_at?: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
-/** Update for PUT /api/v1/system/alerting. A field that is ABSENT is left unchanged; an explicit
- * empty/null `webhook_url` CLEARS the configured webhook. */
-export interface AlertingUpdate {
-  webhook_url?: string | null;
+/** Create a webhook subscription (POST /api/v1/webhooks). */
+export interface WebhookSubscriptionCreate {
+  name: string;
+  url: string;
+  /** Omitted/empty = all types (`["*"]`). */
+  event_types?: string[];
+  min_severity?: Severity;
+  /** Optional HMAC-SHA256 signing secret. */
+  secret?: string;
   enabled?: boolean;
-  min_severity?: "warning" | "critical";
 }
 
-/** Result of POST /api/v1/system/alerting/test — a synthetic event delivery to the live webhook. */
-export interface AlertingTestResult {
+/** Partial update (PATCH /api/v1/webhooks/{id}). An ABSENT field is unchanged; `secret` is three-state:
+ * omit = unchanged, null/"" = clear, a value = set. */
+export interface WebhookSubscriptionUpdate {
+  name?: string;
+  url?: string;
+  event_types?: string[];
+  min_severity?: Severity;
+  secret?: string | null;
+  enabled?: boolean;
+}
+
+export type WebhookDeliveryStatus = "delivered" | "failed";
+
+/** One webhook delivery attempt (GET /api/v1/webhooks/{id}/deliveries). */
+export interface WebhookDelivery {
+  id: string;
+  subscription_id: string;
+  /** Source event id; null for synthetic /test deliveries. */
+  event_id?: string | null;
+  event_type?: string | null;
+  status: WebhookDeliveryStatus;
+  attempts: number;
+  response_code?: number | null;
+  error?: string | null;
+  created_at: string;
+  delivered_at?: string | null;
+}
+
+/** Result of POST /api/v1/webhooks/{id}/test — one synthetic signed delivery to the subscription. */
+export interface WebhookTestResult {
   ok: boolean;
   status?: number | null;
   error?: string | null;
+}
+
+/** One known event type plus a one-line description (GET /api/v1/events/types). */
+export interface EventTypeInfo {
+  event_type: string;
+  description: string;
 }
 
 // ---- Fleet outbox + site identity (open-core seam, edge->cloud uplink foundation) ----

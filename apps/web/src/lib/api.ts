@@ -7,9 +7,6 @@ import type {
   AiTask,
   AiTaskCreate,
   AiTaskUpdate,
-  AlertingConfig,
-  AlertingTestResult,
-  AlertingUpdate,
   ApiKeyCreated,
   ApiKeyView,
   ArchiveExportRequest,
@@ -49,6 +46,7 @@ import type {
   EnsureOnvifUserRequest,
   EntryEvent,
   EntryLogReport,
+  EventTypeInfo,
   ExceptionReport,
   Gaps,
   IncidentSummary,
@@ -95,6 +93,11 @@ import type {
   WatchlistCreate,
   WatchlistEntry,
   WatchlistUpdate,
+  WebhookDelivery,
+  WebhookSubscription,
+  WebhookSubscriptionCreate,
+  WebhookSubscriptionUpdate,
+  WebhookTestResult,
   WorkerTask,
   Zone,
   ZoneCreate,
@@ -321,18 +324,31 @@ export const api = {
   listEvents: (q: EventQuery = {}) => request<VisionEvent[]>(`/api/v1/events${qs(q)}`),
   system: () => request<SystemInfo>("/api/v1/system"),
 
-  // ---- Alerting (UI-configurable webhook notifier; persisted server-side in app_state) ----
-  /** Current alerting configuration (webhook MASKED + enabled + min-severity). */
-  getAlerting: () => request<AlertingConfig>("/api/v1/system/alerting"),
-  /** Update alerting (manager+). Omit `webhook_url` to leave it unchanged; null/empty clears it. */
-  putAlerting: (body: AlertingUpdate) =>
-    request<AlertingConfig>("/api/v1/system/alerting", {
-      method: "PUT",
+  // ---- Webhook subscriptions (generic event-delivery substrate; supersedes single-URL alerting) ----
+  /** Every webhook subscription, oldest first. Readable by any principal; the secret is never returned. */
+  listWebhooks: () => request<WebhookSubscription[]>("/api/v1/webhooks"),
+  /** Register a webhook subscription (manager+). Omit `event_types` (or pass `["*"]`) to match all types. */
+  createWebhook: (body: WebhookSubscriptionCreate) =>
+    request<WebhookSubscription>("/api/v1/webhooks", {
+      method: "POST",
       body: JSON.stringify(body),
     }),
-  /** Deliver a synthetic test event to the configured webhook (manager+). */
-  testAlerting: () =>
-    request<AlertingTestResult>("/api/v1/system/alerting/test", { method: "POST" }),
+  /** Patch a subscription (manager+). `secret`: omit = keep, null/"" = clear, value = set. */
+  updateWebhook: (id: string, body: WebhookSubscriptionUpdate) =>
+    request<WebhookSubscription>(`/api/v1/webhooks/${enc(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(body),
+    }),
+  deleteWebhook: (id: string) =>
+    request<void>(`/api/v1/webhooks/${enc(id)}`, { method: "DELETE" }),
+  /** Deliver one synthetic signed event to a subscription's URL (manager+). */
+  testWebhook: (id: string) =>
+    request<WebhookTestResult>(`/api/v1/webhooks/${enc(id)}/test`, { method: "POST" }),
+  /** Recent delivery attempts for a subscription, newest first. */
+  webhookDeliveries: (id: string, limit?: number) =>
+    request<WebhookDelivery[]>(`/api/v1/webhooks/${enc(id)}/deliveries${qs({ limit })}`),
+  /** The built-in event-type taxonomy (each `event_type` + a one-line description). */
+  eventTypes: () => request<EventTypeInfo[]>("/api/v1/events/types"),
 
   // ---- AI (Stage 2) ----
   /** AI tasks configured on one camera. */

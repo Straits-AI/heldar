@@ -94,8 +94,10 @@ fn validate_severity(s: &str) -> AppResult<()> {
 
 async fn list_zones(
     State(st): State<AppState>,
+    principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<Vec<Zone>>> {
+    principal.require(principal.can_view(), "list zones")?;
     let _ = load_camera(&st.pool, &id).await?;
     let zones = sqlx::query_as::<_, Zone>(
         "SELECT * FROM zones WHERE camera_id = ? ORDER BY created_at ASC",
@@ -271,9 +273,11 @@ struct ZoneEventQuery {
 
 async fn list_zone_events(
     State(st): State<AppState>,
+    principal: Principal,
     Path(id): Path<String>,
     Query(q): Query<ZoneEventQuery>,
 ) -> AppResult<Json<Vec<ZoneEvent>>> {
+    principal.require(principal.can_view(), "list zone events")?;
     let _ = load_camera(&st.pool, &id).await?;
     let limit = q.limit.unwrap_or(200).clamp(1, 5000);
     let parse = |s: &Option<String>, field: &str| -> AppResult<Option<chrono::DateTime<Utc>>> {

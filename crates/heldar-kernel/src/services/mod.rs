@@ -1,4 +1,3 @@
-pub mod alerting;
 pub mod anr;
 pub mod backup;
 pub mod camera_config;
@@ -10,7 +9,6 @@ pub mod indexer;
 pub mod mediamtx;
 pub mod metrics;
 pub mod mirror;
-pub mod notifier;
 pub mod onvif;
 pub mod playback_session;
 pub mod recorder;
@@ -21,4 +19,5 @@ pub mod schedule_watcher;
 pub mod snapshot;
 pub mod snapshot_scheduler;
 pub mod storage;
+pub mod webhooks;
 pub mod zones;

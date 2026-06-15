@@ -4,6 +4,7 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+use crate::auth::Principal;
 use crate::error::{AppError, AppResult};
 use crate::models::Segment;
 use crate::routes::cameras::load_camera;
@@ -73,9 +74,11 @@ fn parse_range(q: &RangeQuery) -> AppResult<OptTimeRange> {
 
 async fn list_segments(
     State(st): State<AppState>,
+    principal: Principal,
     Path(id): Path<String>,
     Query(q): Query<RangeQuery>,
 ) -> AppResult<Json<Vec<SegmentView>>> {
+    principal.require(principal.can_view(), "list recording segments")?;
     let _ = load_camera(&st.pool, &id).await?;
     let (from, to) = parse_range(&q)?;
     let limit = q.limit.unwrap_or(500).clamp(1, 5000);
@@ -182,9 +185,11 @@ fn coalesce(segments: &[Segment]) -> Vec<TimelineRange> {
 
 async fn timeline(
     State(st): State<AppState>,
+    principal: Principal,
     Path(id): Path<String>,
     Query(q): Query<RangeQuery>,
 ) -> AppResult<Json<Timeline>> {
+    principal.require(principal.can_view(), "view recording timeline")?;
     let _ = load_camera(&st.pool, &id).await?;
     let (from, to) = parse_range(&q)?;
     let segments = fetch_segments_in_range(&st.pool, &id, from, to).await?;
@@ -214,9 +219,11 @@ struct Gaps {
 /// Report holes in recording coverage (the spans between coalesced availability ranges).
 async fn gaps(
     State(st): State<AppState>,
+    principal: Principal,
     Path(id): Path<String>,
     Query(q): Query<RangeQuery>,
 ) -> AppResult<Json<Gaps>> {
+    principal.require(principal.can_view(), "view recording gaps")?;
     let _ = load_camera(&st.pool, &id).await?;
     let (from, to) = parse_range(&q)?;
     let segments = fetch_segments_in_range(&st.pool, &id, from, to).await?;
