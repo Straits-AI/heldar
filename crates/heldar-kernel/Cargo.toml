@@ -1,0 +1,51 @@
+[package]
+name = "heldar-kernel"
+version = "0.1.2"
+edition = "2021"
+rust-version = "1.85"
+description = "Heldar kernel — media/DVR control plane, perception ingest + sampler, zone engine, auth, and the worker SDK contract. The open, domain-agnostic platform that domain apps build on."
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/Straits-AI/heldar"
+keywords = ["cctv", "nvr", "rtsp", "surveillance", "video"]
+categories = ["multimedia::video", "web-programming::http-server"]
+
+[lib]
+name = "heldar_kernel"
+path = "src/lib.rs"
+
+[dependencies]
+tokio = { version = "1", features = ["full"] }
+axum = { version = "0.8", features = ["macros"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+    "chrono",
+    "macros",
+    "migrate",
+    "json",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1"
+thiserror = "1"
+dotenvy = "0.15"
+libc = "0.2"
+async-trait = "0.1"
+# Stage 4 (RBAC): argon2id password hashing + SHA-256 token hashing + CSPRNG for tokens/salts.
+argon2 = "0.5"
+sha2 = "0.10"
+rand_core = { version = "0.6", features = ["std"] }
+# ONVIF WS-Security UsernameToken digest = base64(sha1(nonce + created + password)). Both crates are
+# already resolved in Cargo.lock (transitive deps); declared here so the ONVIF service can use them.
+sha1 = "0.10"
+base64 = "0.22"
+# HTTP Digest (RFC 2617) auth for HikVision ISAPI camera configuration; already resolved in Cargo.lock.
+md-5 = "0.10"

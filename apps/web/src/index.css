@@ -1,0 +1,213 @@
+@import "tailwindcss";
+@config "../tailwind.config.js";
+
+/* ============================================================
+   Heldar Core — Operations console / SOC theme
+   Industrial, dark, signal-driven. Always dark.
+   ============================================================ */
+
+:root {
+  color-scheme: dark;
+
+  /* Palette (mirrors tailwind.config.js for raw CSS usage) */
+  --canvas: #09090b;
+  --panel: #121316;
+  --panel-2: #16181c;
+  --raised: #1c1f24;
+  --line: #26282e;
+
+  --fg: #f4f4f5;
+  --fg-secondary: #a1a1aa;
+  --fg-muted: #71717a;
+
+  --accent: #f59e0b;
+  --accent-soft: #fbbf24;
+  --accent-deep: #b45309;
+
+  --rec: #10b981;
+  --connecting: #fbbf24;
+  --offline: #71717a;
+  --error: #ef4444;
+  --disabled: #3f3f46;
+  --unknown: #52525b;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background-color: var(--canvas);
+  color: var(--fg);
+  font-family: "Hanken Grotesk", ui-sans-serif, system-ui, sans-serif;
+  font-feature-settings: "cv11", "ss01";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* All data-bearing text is monospace: timestamps, ids, counts, IPs, code. */
+code,
+kbd,
+samp,
+pre,
+[data-num],
+.font-mono {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+::selection {
+  background: rgba(245, 158, 11, 0.28);
+  color: #fff;
+}
+
+/* Thin, calm scrollbars to keep dense layouts quiet. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2f323a transparent;
+}
+*::-webkit-scrollbar {
+  width: 9px;
+  height: 9px;
+}
+*::-webkit-scrollbar-thumb {
+  background: #2f323a;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #3a3e47;
+  background-clip: padding-box;
+}
+
+/* Amber focus rings for accessibility across native + custom controls. */
+:focus-visible {
+  outline: 2px solid rgba(245, 158, 11, 0.85);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* ============================================================
+   Fixed control-room atmosphere: faint grid + scanlines + vignette.
+   ~3-6% opacity, never noisy, never interactive.
+   ============================================================ */
+.app-atmosphere {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-color: var(--canvas);
+  background-image:
+    /* soft radial vignette (darken edges) */
+    radial-gradient(120% 90% at 50% -10%, rgba(245, 158, 11, 0.04), transparent 55%),
+    radial-gradient(140% 120% at 50% 50%, transparent 52%, rgba(0, 0, 0, 0.55) 100%),
+    /* horizontal scanlines */
+    repeating-linear-gradient(
+      to bottom,
+      rgba(255, 255, 255, 0.018) 0px,
+      rgba(255, 255, 255, 0.018) 1px,
+      transparent 1px,
+      transparent 3px
+    ),
+    /* grid — vertical + horizontal hairlines */
+    linear-gradient(to right, rgba(255, 255, 255, 0.022) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.022) 1px, transparent 1px);
+  background-size:
+    100% 100%,
+    100% 100%,
+    100% 3px,
+    44px 44px,
+    44px 44px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+@layer components {
+  /* ---- Orchestrated page-load stagger ----
+     Apply `.stagger` to a container; direct children fade/slide up in sequence. */
+  .stagger > * {
+    animation: rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+  }
+  .stagger > *:nth-child(1) {
+    animation-delay: 0.02s;
+  }
+  .stagger > *:nth-child(2) {
+    animation-delay: 0.07s;
+  }
+  .stagger > *:nth-child(3) {
+    animation-delay: 0.12s;
+  }
+  .stagger > *:nth-child(4) {
+    animation-delay: 0.17s;
+  }
+  .stagger > *:nth-child(5) {
+    animation-delay: 0.22s;
+  }
+  .stagger > *:nth-child(6) {
+    animation-delay: 0.27s;
+  }
+  .stagger > *:nth-child(7) {
+    animation-delay: 0.32s;
+  }
+  .stagger > *:nth-child(n + 8) {
+    animation-delay: 0.37s;
+  }
+
+  /* ---- Reusable micro-label (uppercase mono) ---- */
+  .micro-label {
+    @apply font-mono text-[10px] uppercase tracking-micro text-fg-muted;
+  }
+
+  /* ============================================================
+     Back-compat component classes (used by not-yet-restyled pages).
+     Re-skinned onto the new SOC tokens so the app stays cohesive
+     between phases. Phase 2 may migrate to <Panel>/<Button> primitives.
+     ============================================================ */
+  .panel {
+    @apply rounded-panel border border-line bg-panel shadow-panel;
+  }
+  .panel-head {
+    @apply flex items-center justify-between border-b border-line px-4 py-2.5;
+  }
+  .panel-title {
+    @apply font-display text-sm font-bold tracking-tight text-fg;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md border border-line bg-raised px-3 py-1.5 text-sm font-medium text-fg transition-colors duration-150 hover:border-[#34373e] hover:bg-[#23262c] disabled:cursor-not-allowed disabled:opacity-50;
+  }
+  .btn-sm {
+    @apply px-2 py-1 text-xs;
+  }
+  .btn-primary {
+    @apply border-transparent bg-accent font-semibold text-accent-ink hover:bg-accent-soft hover:text-accent-ink;
+  }
+  .btn-danger {
+    @apply border-danger/40 bg-danger/10 text-red-300 hover:bg-danger/20 hover:text-red-200;
+  }
+
+  .input {
+    @apply w-full rounded-md border border-line bg-canvas px-3 py-1.5 font-mono text-sm text-fg placeholder:text-fg-muted/70 transition-colors duration-150 focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent;
+  }
+  .label {
+    @apply mb-1 block font-mono text-[10px] font-medium uppercase tracking-micro text-fg-secondary;
+  }
+
+  .stat-k {
+    @apply font-mono text-[10px] font-medium uppercase tracking-micro text-fg-muted;
+  }
+  .stat-v {
+    @apply font-mono text-sm font-semibold text-fg;
+  }
+}
