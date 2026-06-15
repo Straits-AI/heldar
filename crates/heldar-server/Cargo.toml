@@ -1,0 +1,28 @@
+[package]
+name = "heldar-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Heldar composing server: links the open kernel with the generic apps (entry/movement/search) into a runnable deployment."
+license = "Apache-2.0"
+publish = false  # composition bin, not a library
+
+[[bin]]
+name = "heldar-core"
+path = "src/main.rs"
+
+[dependencies]
+heldar-kernel = { path = "../heldar-kernel", version = "0.1.1" }
+heldar-entry = { path = "../heldar-entry", version = "0.1.1" }
+heldar-movement = { path = "../heldar-movement", version = "0.1.1" }
+heldar-search = { path = "../heldar-search", version = "0.1.1" }
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"
