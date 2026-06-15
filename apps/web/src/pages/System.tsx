@@ -17,6 +17,7 @@ import type {
   VisionEvent,
 } from "../lib/types";
 import { BulkConfigPanel } from "../components/CameraConfigPanel";
+import { AlertingPanel } from "../components/AlertingPanel";
 import {
   Button,
   EmptyState,
@@ -535,6 +536,11 @@ export function System() {
             error={events.error}
           />
         </div>
+      </div>
+
+      {/* ---- Alerting (UI-configurable webhook notifications) ---- */}
+      <div className="mt-4 stagger">
+        <AlertingPanel canManage={canManage} />
       </div>
 
       {/* ---- Full-width: bulk camera configuration ---- */}

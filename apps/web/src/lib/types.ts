@@ -304,6 +304,36 @@ export interface SystemInfo {
   live_transcode_engine: string;
 }
 
+// ---- Alerting (UI-configurable webhook notifier; persisted server-side in app_state) ----
+
+/** Current alerting configuration (GET /api/v1/system/alerting). The webhook URL is MASKED
+ * (scheme://host + a trailing ellipsis); the full path/token is never returned. */
+export interface AlertingConfig {
+  /** Whether a webhook is configured (stored, or via the HELDAR_ALERT_WEBHOOK_URL env fallback). */
+  configured: boolean;
+  /** Masked webhook url (scheme://host…); null when unconfigured. */
+  webhook_url_masked?: string | null;
+  /** Whether delivery is enabled (defaults to true when a webhook is set). */
+  enabled: boolean;
+  /** Threshold: `warning` (warning+critical) or `critical` (critical only). */
+  min_severity: "warning" | "critical";
+}
+
+/** Update for PUT /api/v1/system/alerting. A field that is ABSENT is left unchanged; an explicit
+ * empty/null `webhook_url` CLEARS the configured webhook. */
+export interface AlertingUpdate {
+  webhook_url?: string | null;
+  enabled?: boolean;
+  min_severity?: "warning" | "critical";
+}
+
+/** Result of POST /api/v1/system/alerting/test — a synthetic event delivery to the live webhook. */
+export interface AlertingTestResult {
+  ok: boolean;
+  status?: number | null;
+  error?: string | null;
+}
+
 // ---- Fleet outbox + site identity (open-core seam, edge->cloud uplink foundation) ----
 
 /** One durable outbox row: a committed detection batch (GET /api/v1/outbox, admin-only). */

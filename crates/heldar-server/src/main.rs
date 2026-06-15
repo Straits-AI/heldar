@@ -164,7 +164,7 @@ async fn main() -> anyhow::Result<()> {
         }
         // ANR edge re-fill: re-fetch missed footage from camera onboard storage to fill recording
         // gaps. Only supervise when enabled — run() returns immediately otherwise (avoids respawn
-        // churn, mirroring the notifier/backup guards).
+        // churn, mirroring the backup-scheduler guard).
         if cfg.anr_enabled {
             let (p, c) = (pool.clone(), cfg.clone());
             spawn_supervised("anr", move || services::anr::run(p.clone(), c.clone()));
@@ -185,16 +185,17 @@ async fn main() -> anyhow::Result<()> {
             });
         }
         // Backup scheduler (scheduled policy jobs). Only supervise when enabled — run() returns
-        // immediately otherwise, which would respawn it in a tight loop (mirrors the notifier guard).
+        // immediately otherwise, which would respawn it in a tight loop.
         if cfg.backup_enabled {
             let st = state.clone();
             spawn_supervised("backup_scheduler", move || {
                 services::backup::run(st.clone())
             });
         }
-        // Only supervise the notifier when a webhook is configured — otherwise run() returns
-        // immediately and the supervisor would respawn it in a tight loop.
-        if cfg.alert_webhook_url.is_some() {
+        // The alert notifier is spawned UNCONDITIONALLY: its webhook + severity threshold are now
+        // UI-configurable (stored in app_state, read every cycle), so it self-idles when unconfigured
+        // or disabled and never returns — there is no tight-loop respawn concern.
+        {
             let (p, c) = (pool.clone(), cfg.clone());
             spawn_supervised("notifier", move || {
                 services::notifier::run(p.clone(), c.clone())

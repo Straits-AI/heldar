@@ -811,6 +811,65 @@ pub struct CameraIsapi {
     pub fetched_at: DateTime<Utc>,
 }
 
+// ---- Alerting (UI-configurable webhook notifier; persisted in app_state) ----
+
+/// Current alerting configuration (GET /api/v1/system/alerting). The webhook URL is MASKED
+/// (`scheme://host` + a trailing ellipsis); the full path/token is never returned to clients.
+#[derive(Debug, Clone, Serialize)]
+pub struct AlertingConfig {
+    /// Whether a webhook is configured (stored in app_state, or the `HELDAR_ALERT_WEBHOOK_URL` env fallback).
+    pub configured: bool,
+    /// Masked webhook url (`scheme://host…`); null when unconfigured.
+    pub webhook_url_masked: Option<String>,
+    /// Whether delivery is enabled (defaults to true when a webhook is set).
+    pub enabled: bool,
+    /// Threshold: `warning` (warning+critical) or `critical` (critical only).
+    pub min_severity: String,
+}
+
+/// Partial update (PUT /api/v1/system/alerting). A field that is ABSENT is left unchanged; an
+/// explicit empty/null `webhook_url` CLEARS the configured webhook (the outer `Option` distinguishes
+/// "field omitted" from an explicit null/empty so a toggle-only update never wipes the webhook).
+#[derive(Debug, Deserialize, Default)]
+pub struct AlertingUpdate {
+    #[serde(default, deserialize_with = "de_field_present")]
+    pub webhook_url: Option<Option<String>>,
+    pub enabled: Option<bool>,
+    pub min_severity: Option<String>,
+}
+
+/// Deserialize a PRESENT field into `Some(inner)`. Combined with `#[serde(default)]` (which leaves a
+/// missing field as `None`), this yields three states: omitted = `None`, null = `Some(None)`,
+/// value = `Some(Some(v))`.
+fn de_field_present<'de, D>(deserializer: D) -> Result<Option<Option<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Some(Option::<String>::deserialize(deserializer)?))
+}
+
+/// Mask a webhook URL for display: keep only `scheme://host[:port]` and append `/…` so the path/token
+/// is never revealed. Returns None for an empty url; a url without a scheme is masked to `…` (it may
+/// be a bare token).
+pub fn mask_webhook_url(url: &str) -> Option<String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return None;
+    }
+    match url.split_once("://") {
+        Some((scheme, rest)) => {
+            let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+            let authority = &rest[..authority_end];
+            if authority_end < rest.len() {
+                Some(format!("{scheme}://{authority}/…"))
+            } else {
+                Some(format!("{scheme}://{authority}"))
+            }
+        }
+        None => Some("…".to_string()),
+    }
+}
+
 /// Request body for POST /api/v1/archive/export — zip a selection of recorded footage on demand.
 #[derive(Debug, Deserialize)]
 pub struct ArchiveExportRequest {
@@ -822,4 +881,44 @@ pub struct ArchiveExportRequest {
     pub incident_lock_only: Option<bool>,
     /// Trim each segment to the [from, to] window (re-mux with -c copy); requires both bounds.
     pub trim: Option<bool>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mask_webhook_url_hides_path_and_token() {
+        // Path/query/fragment are dropped behind an ellipsis; scheme + host (and port) are kept.
+        assert_eq!(
+            mask_webhook_url("https://hooks.slack.com/services/T000/B000/XXXXSECRET"),
+            Some("https://hooks.slack.com/…".to_string())
+        );
+        assert_eq!(
+            mask_webhook_url("https://example.com:8443/alert?token=abc"),
+            Some("https://example.com:8443/…".to_string())
+        );
+        // Host-only urls keep just scheme://host.
+        assert_eq!(
+            mask_webhook_url("https://example.com"),
+            Some("https://example.com".to_string())
+        );
+        // Empty/whitespace => None; schemeless => fully masked (may be a bare token).
+        assert_eq!(mask_webhook_url("   "), None);
+        assert_eq!(mask_webhook_url("not-a-url"), Some("…".to_string()));
+    }
+
+    #[test]
+    fn alerting_update_webhook_is_three_state() {
+        // Omitted => None (leave unchanged).
+        let u: AlertingUpdate = serde_json::from_str(r#"{"enabled": true}"#).unwrap();
+        assert!(u.webhook_url.is_none());
+        assert_eq!(u.enabled, Some(true));
+        // Explicit null => Some(None) (clear).
+        let u: AlertingUpdate = serde_json::from_str(r#"{"webhook_url": null}"#).unwrap();
+        assert_eq!(u.webhook_url, Some(None));
+        // A value => Some(Some(v)) (set).
+        let u: AlertingUpdate = serde_json::from_str(r#"{"webhook_url": "https://x/y"}"#).unwrap();
+        assert_eq!(u.webhook_url, Some(Some("https://x/y".to_string())));
+    }
 }

@@ -7,6 +7,9 @@ import type {
   AiTask,
   AiTaskCreate,
   AiTaskUpdate,
+  AlertingConfig,
+  AlertingTestResult,
+  AlertingUpdate,
   ApiKeyCreated,
   ApiKeyView,
   ArchiveExportRequest,
@@ -317,6 +320,19 @@ export const api = {
   cameraHealth: (id: string) => request<CameraStatus>(`/api/v1/cameras/${enc(id)}/health`),
   listEvents: (q: EventQuery = {}) => request<VisionEvent[]>(`/api/v1/events${qs(q)}`),
   system: () => request<SystemInfo>("/api/v1/system"),
+
+  // ---- Alerting (UI-configurable webhook notifier; persisted server-side in app_state) ----
+  /** Current alerting configuration (webhook MASKED + enabled + min-severity). */
+  getAlerting: () => request<AlertingConfig>("/api/v1/system/alerting"),
+  /** Update alerting (manager+). Omit `webhook_url` to leave it unchanged; null/empty clears it. */
+  putAlerting: (body: AlertingUpdate) =>
+    request<AlertingConfig>("/api/v1/system/alerting", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  /** Deliver a synthetic test event to the configured webhook (manager+). */
+  testAlerting: () =>
+    request<AlertingTestResult>("/api/v1/system/alerting/test", { method: "POST" }),
 
   // ---- AI (Stage 2) ----
   /** AI tasks configured on one camera. */

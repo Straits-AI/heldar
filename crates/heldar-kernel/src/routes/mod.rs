@@ -3,6 +3,7 @@ use axum::Router;
 use crate::state::AppState;
 
 pub mod ai;
+pub mod alerting;
 pub mod anr;
 pub mod auth;
 pub mod backup;
@@ -30,6 +31,7 @@ pub mod zones;
 pub fn api_router() -> Router<AppState> {
     Router::new()
         .merge(system::router())
+        .merge(alerting::router())
         .merge(camera_config::router())
         .merge(cameras::router())
         .merge(recordings::router())

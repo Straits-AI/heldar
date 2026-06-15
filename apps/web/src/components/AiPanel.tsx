@@ -6,7 +6,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { FormEvent } from "react";
 import { api, ApiError } from "../lib/api";
 import { usePoll } from "../lib/usePoll";
-import type { AiTask, Detection, StreamProfile } from "../lib/types";
+import type { AiTask, Detection, StreamProfile, ZonePoint } from "../lib/types";
 import { Button, Field, Input, Panel, Select, Spinner, cx } from "./ui";
 import { formatClock, timeAgo } from "../lib/format";
 
@@ -14,6 +14,26 @@ import { formatClock, timeAgo } from "../lib/format";
 
 /** Boxes older than this (vs. the latest detection's timestamp) are not drawn. */
 const OVERLAY_FRESH_MS = 20_000;
+
+/** Detection model choices written to the task's `config.weights`. */
+const MODEL_OPTIONS = [
+  { value: "yolo26n.pt", label: "YOLO26n (recommended)" },
+  { value: "yolov8n.pt", label: "YOLOv8n (faster)" },
+] as const;
+
+/** A full-frame polygon (normalized 0..1) — the one-click presence zone created by the presets. */
+const FULL_FRAME_POLYGON: ZonePoint[] = [
+  [0, 0],
+  [1, 0],
+  [1, 1],
+  [0, 1],
+];
+
+/** Object labels each one-click preset watches for. */
+const PRESET_LABELS = {
+  people: ["person"],
+  vehicles: ["car", "truck", "bus", "motorcycle"],
+} as const;
 
 function confidencePct(c?: number | null): string {
   if (c == null || !Number.isFinite(c)) return "—";
@@ -176,18 +196,23 @@ export function AiPanel({ cameraId }: { cameraId: string }) {
     5000,
     [cameraId],
   );
+  // Engine status: the per-camera sampler tells us whether frames are actually flowing to detection.
+  const samplers = usePoll(() => api.samplers(), 8000, []);
 
   // ---- Add form ----
   const [taskType, setTaskType] = useState("detection");
+  const [model, setModel] = useState<string>(MODEL_OPTIONS[0].value);
   const [fps, setFps] = useState("5");
   const [width, setWidth] = useState("1280");
   const [profile, setProfile] = useState<StreamProfile>("sub");
   const [addError, setAddError] = useState<string | null>(null);
+  const [presetNote, setPresetNote] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   async function addTask(e: FormEvent) {
     e.preventDefault();
     setAddError(null);
+    setPresetNote(null);
     const type = taskType.trim();
     if (!type) {
       setAddError("Task type is required.");
@@ -200,8 +225,42 @@ export function AiPanel({ cameraId }: { cameraId: string }) {
         fps: Number(fps) || undefined,
         width: Number(width) || undefined,
         stream_profile: profile,
+        // The detection model lives in the task config; only detection tasks consume it.
+        config: type === "detection" ? { weights: model } : undefined,
       });
       setTaskType("detection");
+      await tasks.refresh();
+    } catch (err) {
+      setAddError(err instanceof ApiError ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // One-click preset: create a detection task (chosen model) AND a full-frame presence zone that
+  // raises a warning when the chosen object class is present. Mirrors ZonePanel's createZone call.
+  async function createPreset(kind: "people" | "vehicles") {
+    setAddError(null);
+    setPresetNote(null);
+    setBusy(true);
+    const name = kind === "people" ? "People (auto)" : "Vehicles (auto)";
+    try {
+      await api.createAiTask(cameraId, {
+        task_type: "detection",
+        fps: Number(fps) || undefined,
+        width: Number(width) || undefined,
+        stream_profile: profile,
+        config: { weights: model },
+      });
+      await api.createZone(cameraId, {
+        name,
+        polygon: FULL_FRAME_POLYGON,
+        kind: "region",
+        severity: "warning",
+        dwell_seconds: 5,
+        labels: [...PRESET_LABELS[kind]],
+      });
+      setPresetNote(`Created a detection task and the "${name}" zone for this camera.`);
       await tasks.refresh();
     } catch (err) {
       setAddError(err instanceof ApiError ? err.message : String(err));
@@ -237,6 +296,12 @@ export function AiPanel({ cameraId }: { cameraId: string }) {
 
   const taskList = tasks.data ?? [];
   const detList = detections.data ?? [];
+
+  // A sampler that is sampling/connecting means the detection engine (AI worker) is attached and
+  // frames are flowing for this camera. Absent / stopped / error => detection cannot run yet.
+  const samplerActive = (samplers.data ?? []).some(
+    (s) => s.camera_id === cameraId && (s.state === "sampling" || s.state === "connecting"),
+  );
 
   // Overlay: draw boxes from the most recent detection batch, if fresh enough.
   const overlayBoxes = useMemo(() => {
@@ -292,6 +357,46 @@ export function AiPanel({ cameraId }: { cameraId: string }) {
             </ul>
           )}
 
+          {/* Engine-status hint: explains why detection may be idle (does not block creation). */}
+          {!samplerActive && (
+            <div className="mt-4 flex items-start gap-2 rounded-md border border-connecting/40 bg-connecting/10 px-3 py-2 font-mono text-[11px] leading-relaxed text-amber-200">
+              <span
+                className="mt-1 inline-flex h-1.5 w-1.5 shrink-0 rounded-full bg-connecting"
+                aria-hidden="true"
+              />
+              <span>Detection engine not connected — start the AI worker to run detection.</span>
+            </div>
+          )}
+
+          {/* One-click presets: a detection task + a full-frame presence zone, in a single click. */}
+          <div className="mt-4 space-y-2 border-t border-line pt-4">
+            <div className="font-mono text-[10px] uppercase tracking-micro text-fg-muted">
+              Quick setup
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="primary"
+                className="flex-1"
+                disabled={busy}
+                onClick={() => void createPreset("people")}
+              >
+                Detect people
+              </Button>
+              <Button
+                variant="primary"
+                className="flex-1"
+                disabled={busy}
+                onClick={() => void createPreset("vehicles")}
+              >
+                Detect vehicles
+              </Button>
+            </div>
+            <p className="text-[11px] leading-snug text-fg-muted">
+              Adds a detection task and a full-frame zone that alerts when the chosen objects appear.
+            </p>
+            {presetNote && <p className="font-mono text-[11px] text-rec">{presetNote}</p>}
+          </div>
+
           <form onSubmit={addTask} className="mt-4 space-y-3 border-t border-line pt-4">
             <div className="font-mono text-[10px] uppercase tracking-micro text-fg-muted">
               Add AI task
@@ -303,6 +408,19 @@ export function AiPanel({ cameraId }: { cameraId: string }) {
                 onChange={(e) => setTaskType(e.target.value)}
                 placeholder="detection"
               />
+            </Field>
+            <Field
+              label="Detection model"
+              htmlFor="ai-model"
+              hint="Applied to detection tasks (written to the task's weights)."
+            >
+              <Select id="ai-model" value={model} onChange={(e) => setModel(e.target.value)}>
+                {MODEL_OPTIONS.map((m) => (
+                  <option key={m.value} value={m.value}>
+                    {m.label}
+                  </option>
+                ))}
+              </Select>
             </Field>
             <div className="grid grid-cols-2 gap-3">
               <Field label="FPS" htmlFor="ai-fps">

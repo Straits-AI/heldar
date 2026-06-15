@@ -1,8 +1,11 @@
-//! Alert notifier: delivers new warning/critical events to a configured webhook (POST JSON).
-//! The delivery cursor is persisted (survives restarts, so events generated during downtime are
-//! still delivered); retryable failures (5xx / 429 / network) do not advance the cursor.
-//! `main` only supervises this task when a webhook is configured, so the no-webhook path returns
-//! once without a respawn storm.
+//! Alert notifier: delivers new events to a configured webhook (POST JSON), gated by a severity
+//! threshold. The webhook + threshold are read from the `app_state` table EVERY cycle (UI-configurable
+//! via `/api/v1/system/alerting`, no restart needed), falling back to the env `HELDAR_ALERT_WEBHOOK_URL`
+//! when nothing is stored. The delivery cursor is persisted (survives restarts, so events generated
+//! during downtime are still delivered); retryable failures (5xx / 429 / network) do not advance it.
+//!
+//! `run()` NEVER returns: when unconfigured or disabled it simply idles that cycle. The supervisor in
+//! `main` therefore spawns it unconditionally and never tight-loops respawning it.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,28 +16,27 @@ use sqlx::SqlitePool;
 
 use crate::config::Config;
 use crate::models::Event;
+use crate::services::alerting;
 
 const CURSOR_KEY: &str = "notifier_cursor";
 const BATCH: i64 = 100;
 
 pub async fn run(pool: SqlitePool, cfg: Arc<Config>) {
-    let Some(url) = cfg.alert_webhook_url.clone() else {
-        tracing::info!("notifier: no HELDAR_ALERT_WEBHOOK_URL set; alerting disabled");
-        return;
-    };
+    // Built once, outside the loop, and reused across cycles. On the (practically impossible) build
+    // failure, park forever rather than return — returning would have the supervisor respawn us.
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
     {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!(error = %e, "notifier: failed to build http client");
-            return;
+            tracing::error!(error = %e, "notifier: failed to build http client; idling");
+            std::future::pending::<reqwest::Client>().await
         }
     };
-    tracing::info!(%url, "notifier: alerting enabled (warning/critical events)");
 
-    // Resume from the persisted cursor; the first ever run starts at "now" (no history replay).
+    // Resume from the persisted cursor; the first ever run starts at "now" (no history replay). This
+    // is established up front so that a webhook configured LATER does not replay the full backlog.
     let mut cursor = match load_cursor(&pool).await {
         Some(c) => c,
         None => {
@@ -47,9 +49,18 @@ pub async fn run(pool: SqlitePool, cfg: Arc<Config>) {
     let mut tick = tokio::time::interval(Duration::from_secs(cfg.notifier_interval_s.max(5)));
     loop {
         tick.tick().await;
+        // Re-read the live settings each cycle (UI changes take effect without a restart).
+        let settings = alerting::resolve(&pool, cfg.alert_webhook_url.as_deref()).await;
+        if !settings.enabled {
+            continue;
+        }
+        let Some(url) = settings.webhook_url.as_deref() else {
+            // No webhook configured: idle this cycle (never return — see the module note).
+            continue;
+        };
         // Drain until a batch comes back not-full (backlog cleared) or a failure stops progress.
         loop {
-            match deliver_batch(&pool, &client, &url, cursor).await {
+            match deliver_batch(&pool, &client, url, cursor, &settings.min_severity).await {
                 Ok(Some((latest, n))) => {
                     cursor = latest;
                     let _ = save_cursor(&pool, cursor).await;
@@ -91,24 +102,28 @@ async fn save_cursor(pool: &SqlitePool, cursor: DateTime<Utc>) -> sqlx::Result<(
     Ok(())
 }
 
-/// Deliver one batch of events newer than `cursor`. Returns `Some((new_cursor, delivered))` after
-/// any progress, or `None` if there is nothing to deliver or delivery stopped at a retryable
-/// failure before any event was delivered (cursor must not advance past the failing event).
+/// Deliver one batch of events newer than `cursor` whose severity passes `min_severity`. Returns
+/// `Some((new_cursor, delivered))` after any progress, or `None` if there is nothing to deliver or
+/// delivery stopped at a retryable failure before any event was delivered (cursor must not advance
+/// past the failing event).
 async fn deliver_batch(
     pool: &SqlitePool,
     client: &reqwest::Client,
     url: &str,
     cursor: DateTime<Utc>,
+    min_severity: &str,
 ) -> anyhow::Result<Option<(DateTime<Utc>, usize)>> {
-    let events = sqlx::query_as::<_, Event>(
+    let sql = format!(
         "SELECT * FROM events
-         WHERE severity IN ('warning', 'critical') AND created_at > ?
+         WHERE {} AND created_at > ?
          ORDER BY created_at ASC LIMIT ?",
-    )
-    .bind(cursor)
-    .bind(BATCH)
-    .fetch_all(pool)
-    .await?;
+        alerting::severity_sql(min_severity),
+    );
+    let events = sqlx::query_as::<_, Event>(&sql)
+        .bind(cursor)
+        .bind(BATCH)
+        .fetch_all(pool)
+        .await?;
     if events.is_empty() {
         return Ok(None);
     }
