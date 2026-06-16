@@ -5,6 +5,35 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.3] — 2026-06-16
+
+### Added
+
+- **Dynamic module platform** — the dashboard builds its nav rail + routes from live
+  truth (`GET /api/v1/modules`) instead of a hardcoded list, so only loaded modules
+  appear. Each compiled app declares a `ModuleManifest`
+  (`heldar_kernel::modules`); the composing binary collects them into
+  `AppState.modules`.
+  - **Sidecar plugins** — install out-of-process plugins (any language) at runtime
+    with no rebuild. `POST /api/v1/modules` (admin) mints a least-privilege scoped
+    API key + a webhook subscription and reverse-proxies `/m/{id}/*` to the
+    sidecar's own UI + API (single-origin micro-frontend); `DELETE` reverses all
+    three. A `/heldar/health` probe loop badges reachability. New **Plugins**
+    dashboard page to install / list / uninstall. Reference template at
+    `examples/hello-module` + the SPI guide in the docs.
+- **Webhook subscriptions** — a generic, signed event-delivery substrate that
+  supersedes the single-URL alerting webhook. Each subscription is an independent
+  at-least-once deliverer with an event-type/severity filter, an optional
+  HMAC-SHA256 signing secret (`X-Heldar-Signature`), and a per-delivery ledger.
+  `GET /api/v1/events/types` exposes the event taxonomy.
+- **One-URL deploy** — `heldar-core` serves the built dashboard itself
+  (`HELDAR_WEB_DIR`), so the whole product is one binary at one URL.
+
+### Changed
+
+- Uniform route authorization — the `Principal` capability guard is applied across
+  all kernel routes (a no-op when `HELDAR_AUTH_ENABLED` is false).
+
 ## [0.1.2] — 2026-06-15
 
 ### Added
