@@ -32,6 +32,7 @@ import type {
   ModuleManifest,
   ModuleRegisterRequest,
   ModuleRegistered,
+  RegistryView,
   MovementCandidate,
   PlateSearchResult,
   QueryPlan,
@@ -342,6 +343,13 @@ export const api = {
   /** Uninstall a sidecar (admin): revokes its key + webhook subscription. */
   unregisterModule: (id: string) =>
     request<void>(`/api/v1/modules/${enc(id)}`, { method: "DELETE" }),
+
+  // ---- Plugin store (registry catalog: bundled + signed remote, cross-referenced) ----
+  /** The merged store catalog with per-entry installed state. Any principal; offline-safe. */
+  registry: () => request<RegistryView>("/api/v1/registry"),
+  /** Re-fetch the remote registries now (admin; performs outbound requests). */
+  refreshRegistry: () =>
+    request<RegistryView>("/api/v1/registry/refresh", { method: "POST" }),
 
   // ---- Webhook subscriptions (generic event-delivery substrate; supersedes single-URL alerting) ----
   /** Every webhook subscription, oldest first. Readable by any principal; the secret is never returned. */

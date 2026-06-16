@@ -1,7 +1,7 @@
 // Heldar Core — shared UI primitives (Operations console / SOC).
 // Phase 2 page clusters import from here; keep these names + signatures stable.
 
-import { useId } from "react";
+import { useEffect, useId, useRef } from "react";
 import type {
   ButtonHTMLAttributes,
   InputHTMLAttributes,
@@ -435,5 +435,98 @@ export function SectionLabel({ children }: { children: ReactNode }) {
     <span className="font-mono text-[10px] font-medium uppercase tracking-micro text-fg-muted">
       {children}
     </span>
+  );
+}
+
+/* ---------------------------------------------------------------- */
+/* Drawer — right slide-over (detail / install / credentials)       */
+/* ---------------------------------------------------------------- */
+
+/**
+ * An accessible right-side slide-over. role=dialog + aria-modal, Esc + overlay-click to close, focus
+ * moves into the panel on open, and body scroll is locked while open. Used by the plugin store.
+ */
+export function Drawer({
+  open,
+  onClose,
+  title,
+  subtitle,
+  children,
+  footer,
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: ReactNode;
+  subtitle?: ReactNode;
+  children: ReactNode;
+  footer?: ReactNode;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const titleId = useId();
+  // Hold onClose in a ref so the effect can depend on `open` alone — otherwise a fresh onClose closure
+  // on every parent re-render (e.g. a 60s registry poll) re-runs the effect and steals focus back into
+  // the panel mid-typing.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onCloseRef.current();
+    };
+    document.addEventListener("keydown", onKey);
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    panelRef.current?.focus();
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.body.style.overflow = prevOverflow;
+    };
+  }, [open]);
+
+  if (!open) return null;
+
+  return (
+    <div className="fixed inset-0 z-50 flex justify-end">
+      {/* Overlay */}
+      <div
+        className="absolute inset-0 animate-fade-in bg-black/60 backdrop-blur-sm"
+        onClick={onClose}
+        aria-hidden="true"
+      />
+      {/* Panel */}
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        className="relative flex h-full w-full max-w-md flex-col border-l border-line bg-panel shadow-[-20px_0_60px_-20px_rgba(0,0,0,0.7)] outline-none animate-slide-in"
+      >
+        <header className="flex items-start justify-between gap-3 border-b border-line px-5 py-4">
+          <div className="min-w-0">
+            <h2 id={titleId} className="font-display text-base font-bold tracking-tight text-fg">
+              {title}
+            </h2>
+            {subtitle != null && (
+              <p className="mt-0.5 text-xs text-fg-secondary">{subtitle}</p>
+            )}
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="shrink-0 rounded-md p-1 text-fg-muted transition-colors hover:bg-raised hover:text-fg"
+          >
+            <svg viewBox="0 0 20 20" width="18" height="18" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
+              <path d="M5 5l10 10M15 5L5 15" />
+            </svg>
+          </button>
+        </header>
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">{children}</div>
+        {footer != null && (
+          <footer className="border-t border-line px-5 py-3">{footer}</footer>
+        )}
+      </div>
+    </div>
   );
 }

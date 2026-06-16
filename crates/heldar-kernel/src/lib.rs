@@ -18,6 +18,7 @@ pub mod db;
 pub mod error;
 pub mod models;
 pub mod modules;
+pub mod registry;
 pub mod repo;
 pub mod routes;
 pub mod services;

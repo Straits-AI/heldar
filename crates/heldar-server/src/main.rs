@@ -120,6 +120,8 @@ async fn main() -> anyhow::Result<()> {
     ];
     modules.extend(verticals::manifests());
     let modules = Arc::new(modules);
+    // Plugin store catalog engine (bundled + signed remote registries).
+    let catalog = Arc::new(services::registry::CatalogService::new(&cfg));
     let state = AppState {
         pool: pool.clone(),
         cfg: cfg.clone(),
@@ -128,6 +130,7 @@ async fn main() -> anyhow::Result<()> {
         sampler: sampler.clone(),
         consumers,
         modules,
+        catalog: catalog.clone(),
         http,
         started_at: chrono::Utc::now(),
     };
@@ -219,6 +222,14 @@ async fn main() -> anyhow::Result<()> {
         {
             let p = pool.clone();
             spawn_supervised("module_health", move || services::modules::run(p.clone()));
+        }
+        // Plugin registry refresh: re-fetch + verify remote signed catalogs on a cadence. Parks when
+        // the registry is disabled or no URLs are configured (the bundled catalog needs no refresh).
+        {
+            let c = catalog.clone();
+            spawn_supervised("registry_refresh", move || {
+                services::registry::run(c.clone())
+            });
         }
     }
 

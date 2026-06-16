@@ -13,6 +13,7 @@ pub mod modules;
 pub mod onvif;
 pub mod playback_session;
 pub mod recorder;
+pub mod registry;
 pub mod remote_access;
 pub mod retention;
 pub mod sampler;

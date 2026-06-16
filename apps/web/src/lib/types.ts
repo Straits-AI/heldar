@@ -379,8 +379,8 @@ export interface EventTypeInfo {
 
 // ---- Modules (the plugin platform: GET /api/v1/modules drives the nav rail + routes) ----
 
-/** Provenance of a loaded module; drives store shelving + nav badging. */
-export type ModuleKind = "core" | "proprietary" | "imported";
+/** Provenance of a loaded module; drives store shelving + nav badging. Matches the kernel enum. */
+export type ModuleKind = "core" | "proprietary" | "community" | "imported";
 
 /** How the dashboard renders a module's content: a bundled page, or an iframe to /m/{id}/. */
 export type ModuleMount = "bundled" | "iframe";
@@ -442,6 +442,70 @@ export interface ModuleRegistered {
   module: ModuleDetail;
   api_key: string;
   webhook_secret: string;
+}
+
+// ---- Plugin store / registry (Phase C: GET /api/v1/registry) ----
+
+/** Which store shelf an entry belongs on. */
+export type Shelf = "core" | "proprietary" | "community" | "import";
+
+/** Live state of a catalog entry, cross-referenced against loaded/installed modules. */
+export type EntryState =
+  | "available" // sidecar, installable now
+  | "installed" // sidecar, registered
+  | "included" // compiled module present in this build
+  | "not_in_build" // compiled module advertised but not in this build (commercial add-on)
+  | "unreachable"; // installed sidecar whose health probe last failed
+
+/** How a catalog entry is installed (discriminated by `type`). */
+export type InstallSpec =
+  | { type: "builtin"; availability?: string | null; contact?: string | null }
+  | {
+      type: "sidecar";
+      image?: string | null;
+      default_base_url: string;
+      subscribes?: string[];
+      role?: string | null;
+      nav?: ModuleNavEntry[];
+      docs?: string | null;
+    };
+
+/** One catalog entry with its computed shelf/state/verification (flattened entry + extras). */
+export interface RegistryEntry {
+  id: string;
+  name: string;
+  publisher: string;
+  kind: ModuleKind;
+  summary: string;
+  description?: string | null;
+  version?: string | null;
+  icon?: string | null;
+  homepage?: string | null;
+  categories?: string[];
+  install: InstallSpec;
+  shelf: Shelf;
+  state: EntryState;
+  verified: boolean;
+  source: string; // "bundled" | "local" | url
+}
+
+/** A catalog source's signature status (for the registry indicator + diagnostics). */
+export interface RegistrySource {
+  source: string;
+  name: string;
+  verified: boolean;
+  first_party: boolean;
+  key_id?: string | null;
+  error?: string | null;
+  fetched_at?: string | null;
+  entry_count: number;
+}
+
+/** The full GET /api/v1/registry response. */
+export interface RegistryView {
+  enabled: boolean;
+  sources: RegistrySource[];
+  entries: RegistryEntry[];
 }
 
 // ---- Fleet outbox + site identity (open-core seam, edge->cloud uplink foundation) ----

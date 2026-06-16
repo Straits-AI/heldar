@@ -30,6 +30,8 @@ pub struct AppState {
     /// dashboard renders nav + routes from live truth. The kernel names no module — it only carries
     /// whatever the composing server populated.
     pub modules: Arc<Vec<ModuleManifest>>,
+    /// The plugin store's catalog engine (bundled + signed remote registries).
+    pub catalog: Arc<crate::services::registry::CatalogService>,
     pub http: reqwest::Client,
     pub started_at: DateTime<Utc>,
 }

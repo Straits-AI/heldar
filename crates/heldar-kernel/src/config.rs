@@ -167,6 +167,28 @@ pub struct Config {
     /// Optional site identifier stamped onto outbox rows and surfaced at `GET /api/v1/site` for the
     /// edge->cloud fleet uplink. Empty/unset = a single unnamed site.
     pub site_id: Option<String>,
+    // ---- Plugin registry / store (Phase C) ----
+    /// Master switch for the plugin store's remote-registry fetching. When false, the store shows only
+    /// the bundled open catalog + locally installed plugins (fully offline). The bundled catalog is
+    /// always available regardless.
+    pub registry_enabled: bool,
+    /// Remote signed-catalog URLs to fetch (comma-separated). Default EMPTY — no phone-home; an
+    /// operator (or the proprietary build) sets the official Straits-AI registry here to populate the
+    /// proprietary/community shelves.
+    pub registry_urls: Vec<String>,
+    /// How often the background loop refreshes remote registries (seconds).
+    pub registry_refresh_s: u64,
+    /// Per-fetch timeout for a remote catalog (seconds).
+    pub registry_fetch_timeout_s: u64,
+    /// Operator-pinned extra trust anchors, `key_id:base64pubkey` comma-separated, added to the
+    /// compile-time pinned keys (for private registries).
+    pub registry_trusted_keys: Vec<(String, String)>,
+    /// When true, surface a remote registry's entries even if its signature does not verify (badged
+    /// unverified). Default false — fail closed.
+    pub registry_allow_unverified: bool,
+    /// When true, allow remote registry URLs that resolve to private/link-local addresses (default
+    /// false; SSRF guard for the admin-configured fetch).
+    pub registry_allow_private: bool,
     // ---- Embedded dashboard (single-binary SPA serving) ----
     /// Directory holding the built React dashboard (`apps/web/dist`), served as a static SPA
     /// fallback so the whole product is one binary at one URL. Resolved from `HELDAR_WEB_DIR`; when
@@ -321,6 +343,25 @@ impl Config {
             live_transcode_engine: var_or("HELDAR_LIVE_TRANSCODE_ENGINE", "software"),
             vaapi_device: var_or("HELDAR_VAAPI_DEVICE", "/dev/dri/renderD128"),
             site_id: var("HELDAR_SITE_ID"),
+            registry_enabled: parse_bool("HELDAR_REGISTRY_ENABLED", true),
+            registry_urls: var_or("HELDAR_REGISTRY_URLS", "")
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            registry_refresh_s: parse_or("HELDAR_REGISTRY_REFRESH_S", 900),
+            registry_fetch_timeout_s: parse_or("HELDAR_REGISTRY_FETCH_TIMEOUT_S", 10),
+            registry_trusted_keys: var_or("HELDAR_REGISTRY_TRUSTED_KEYS", "")
+                .split(',')
+                .filter_map(|s| {
+                    let s = s.trim();
+                    s.split_once(':')
+                        .map(|(id, key)| (id.trim().to_string(), key.trim().to_string()))
+                        .filter(|(id, key)| !id.is_empty() && !key.is_empty())
+                })
+                .collect(),
+            registry_allow_unverified: parse_bool("HELDAR_REGISTRY_ALLOW_UNVERIFIED", false),
+            registry_allow_private: parse_bool("HELDAR_REGISTRY_ALLOW_PRIVATE", false),
             web_dir,
         }
     }

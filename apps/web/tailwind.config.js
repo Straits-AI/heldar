@@ -109,6 +109,11 @@ export default {
           "0%,100%": { backgroundPosition: "0% 50%" },
           "50%": { backgroundPosition: "100% 50%" },
         },
+        // Right slide-over (Drawer) entrance.
+        "slide-in": {
+          "0%": { transform: "translateX(100%)" },
+          "100%": { transform: "translateX(0)" },
+        },
       },
       animation: {
         rise: "rise 0.5s cubic-bezier(0.22,1,0.36,1) both",
@@ -118,6 +123,7 @@ export default {
         shimmer: "shimmer 1.8s linear infinite",
         "fade-in": "fade-in 0.6s ease-out both",
         "bifrost-pan": "bifrost-pan 8s ease-in-out infinite",
+        "slide-in": "slide-in 0.22s cubic-bezier(0.16,1,0.3,1) both",
       },
     },
   },

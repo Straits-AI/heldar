@@ -230,6 +230,7 @@ mod tests {
             mirror: None,
             consumers: Arc::new(Vec::new()),
             modules: Arc::new(modules),
+            catalog: Arc::new(crate::services::registry::CatalogService::new(&cfg)),
             http: reqwest::Client::new(),
             started_at: chrono::Utc::now(),
             pool,

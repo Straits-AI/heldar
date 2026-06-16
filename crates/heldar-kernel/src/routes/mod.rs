@@ -20,6 +20,7 @@ pub mod playback;
 pub mod playback_sessions;
 pub mod recording_control;
 pub mod recordings;
+pub mod registry;
 pub mod schedules;
 pub mod snapshot_schedules;
 pub mod system;
@@ -33,6 +34,7 @@ pub fn api_router() -> Router<AppState> {
     Router::new()
         .merge(system::router())
         .merge(modules::router())
+        .merge(registry::router())
         .merge(camera_config::router())
         .merge(cameras::router())
         .merge(recordings::router())

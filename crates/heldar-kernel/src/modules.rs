@@ -8,16 +8,19 @@
 
 use serde::{Deserialize, Serialize};
 
-/// Where a module comes from. Drives how the (future) plugin store shelves it and how the dashboard
-/// badges it. Runtime-imported plugins use [`ModuleKind::Imported`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+/// Where a module comes from. Drives how the plugin store shelves it and how the dashboard badges it.
+/// Runtime-imported (bring-your-own) plugins use [`ModuleKind::Imported`]; catalog-listed third-party
+/// plugins use [`ModuleKind::Community`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ModuleKind {
     /// First-party, open (Apache-2.0) module compiled into the build.
     Core,
     /// First-party proprietary vertical compiled into the build.
     Proprietary,
-    /// Third-party / user module loaded at runtime (later phase).
+    /// Third-party plugin listed in a registry catalog.
+    Community,
+    /// A runtime-loaded sidecar plugin (bring-your-own, installed by URL).
     Imported,
 }
 

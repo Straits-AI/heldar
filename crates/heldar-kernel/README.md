@@ -68,6 +68,8 @@ let state = AppState {
     // Module manifests, served at GET /api/v1/modules so the dashboard builds nav + routes
     // from live truth. The composing binary pushes each linked app's manifest() here.
     modules: Arc::new(vec![]),
+    // Plugin store catalog engine (bundled + signed remote registries), GET /api/v1/registry.
+    catalog: Arc::new(services::registry::CatalogService::new(&cfg)),
     http: reqwest::Client::new(),
     started_at: chrono::Utc::now(),
 };
