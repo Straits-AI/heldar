@@ -382,6 +382,9 @@ export interface EventTypeInfo {
 /** Provenance of a loaded module; drives store shelving + nav badging. */
 export type ModuleKind = "core" | "proprietary" | "imported";
 
+/** How the dashboard renders a module's content: a bundled page, or an iframe to /m/{id}/. */
+export type ModuleMount = "bundled" | "iframe";
+
 /** A nav destination a module contributes. `icon` is a key the dashboard maps to a glyph. */
 export interface ModuleNavEntry {
   path: string;
@@ -398,6 +401,47 @@ export interface ModuleManifest {
   kind: ModuleKind;
   description: string;
   nav: ModuleNavEntry[];
+  mount: ModuleMount;
+  /** Reachability of a sidecar plugin (`unknown`/`healthy`/`unreachable`); absent for compiled. */
+  health?: string;
+}
+
+/** Body to register a sidecar plugin (POST /api/v1/modules, admin). */
+export interface ModuleRegisterRequest {
+  id: string;
+  name: string;
+  version?: string;
+  publisher?: string;
+  description?: string;
+  base_url: string;
+  nav?: ModuleNavEntry[];
+  subscribes?: string[];
+  role?: "viewer" | "integration";
+}
+
+/** Admin detail for a registered sidecar. */
+export interface ModuleDetail {
+  id: string;
+  name: string;
+  version: string;
+  publisher: string;
+  description: string;
+  base_url: string;
+  nav: ModuleNavEntry[];
+  subscribes: string[];
+  role: string;
+  api_key_id?: string | null;
+  webhook_id?: string | null;
+  health: string;
+  health_checked_at?: string | null;
+  created_at: string;
+}
+
+/** Register response: the detail plus the once-only credentials the sidecar must be configured with. */
+export interface ModuleRegistered {
+  module: ModuleDetail;
+  api_key: string;
+  webhook_secret: string;
 }
 
 // ---- Fleet outbox + site identity (open-core seam, edge->cloud uplink foundation) ----

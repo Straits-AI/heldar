@@ -1,7 +1,7 @@
 import { Link, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import { Button, Spinner } from "./components/ui";
-import { MODULE_PAGES, ModulesProvider, useModules } from "./modules";
+import { MODULE_PAGES, ModuleFrame, ModulesProvider, useModules } from "./modules";
 import { Dashboard } from "./pages/Dashboard";
 import { CameraDetail } from "./pages/CameraDetail";
 import { AddCamera } from "./pages/AddCamera";
@@ -10,6 +10,7 @@ import { System } from "./pages/System";
 import { Ai } from "./pages/Ai";
 import { Backup } from "./pages/Backup";
 import { Incidents } from "./pages/Incidents";
+import { Plugins } from "./pages/Plugins";
 
 function NotFound() {
   return (
@@ -46,14 +47,21 @@ function AppRoutes() {
       <Route path="/ai" element={<Ai />} />
       <Route path="/incidents" element={<Incidents />} />
       <Route path="/backup" element={<Backup />} />
+      <Route path="/plugins" element={<Plugins />} />
       <Route path="/system" element={<System />} />
       <Route path="/cameras/:id" element={<CameraDetail />} />
 
-      {/* Modules — dynamic from GET /api/v1/modules */}
+      {/* Modules — dynamic from GET /api/v1/modules. Compiled modules render their bundled page;
+          imported sidecars (mount=iframe) render a micro-frontend proxied at /m/{id}/. */}
       {modules.flatMap((m) =>
         m.nav.map((n) => {
           const Page = MODULE_PAGES[m.id];
-          return Page ? <Route key={n.path} path={n.path} element={<Page />} /> : null;
+          const element = Page ? (
+            <Page />
+          ) : m.mount === "iframe" ? (
+            <ModuleFrame id={m.id} title={m.name} />
+          ) : null;
+          return element ? <Route key={n.path} path={n.path} element={element} /> : null;
         }),
       )}
 

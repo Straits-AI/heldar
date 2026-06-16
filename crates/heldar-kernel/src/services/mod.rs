@@ -9,6 +9,7 @@ pub mod indexer;
 pub mod mediamtx;
 pub mod metrics;
 pub mod mirror;
+pub mod modules;
 pub mod onvif;
 pub mod playback_session;
 pub mod recorder;

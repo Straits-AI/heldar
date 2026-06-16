@@ -136,6 +136,24 @@ function SystemIcon({ className }: IconProps) {
   );
 }
 
+function PluginsIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <path d="M7 3v2.5M13 3v2.5" />
+      <path d="M5 5.5h10v4a5 5 0 0 1-10 0z" />
+      <path d="M10 14.5V17" />
+    </svg>
+  );
+}
+
 // Platform chrome — the kernel console pages, always present. Domain modules are NOT listed here;
 // they come from GET /api/v1/modules (see the Modules section below), so only loaded modules appear.
 const NAV_ITEMS: { to: string; label: string; end?: boolean; Icon: (p: IconProps) => ReactNode }[] = [
@@ -145,6 +163,7 @@ const NAV_ITEMS: { to: string; label: string; end?: boolean; Icon: (p: IconProps
   { to: "/ai", label: "AI", Icon: AiIcon },
   { to: "/incidents", label: "Incidents", Icon: IncidentsIcon },
   { to: "/backup", label: "Backup", Icon: BackupIcon },
+  { to: "/plugins", label: "Plugins", Icon: PluginsIcon },
   { to: "/system", label: "System", Icon: SystemIcon },
 ];
 

@@ -7,13 +7,27 @@ sidebar_position: 1
 
 # Build a module
 
-This is the guide to building your own app against the open Heldar kernel. An app
-adds tables, routes, and perception logic without the kernel ever knowing it
-exists. You depend on `heldar-kernel`; a composing binary links you in.
+A module extends Heldar with its own tables, routes, UI, and perception logic. There are **two ways
+to build one**, and you pick by how deeply you integrate and what language you work in:
+
+- **Compiled-in app crate (this guide).** A Rust crate that depends on `heldar-kernel` and is linked
+  by a composing binary. It shares the kernel's SQLite pool and rides the `DetectionConsumer` ingest
+  seam — the tightest integration, for first-party apps. The open `heldar-entry`/`movement`/`search`
+  crates are built this way.
+- **Out-of-process sidecar plugin** ([separate guide](./sidecar-plugins.md)). Any HTTP service in any
+  language that Heldar reverse-proxies and feeds events to, **installed at runtime** with no rebuild.
+  Process/container-isolated, least-privilege. This is the path for third-party and self-made plugins,
+  and what the **Plugins** page installs.
+
+The rest of this page is the compiled-in path. An app adds tables, routes, and perception logic
+without the kernel ever knowing it exists. You depend on `heldar-kernel`; a composing binary links
+you in.
 
 Throughout, the worked reference is the open access-control app,
 [`heldar-entry`](https://github.com/Straits-AI/heldar/tree/main/crates/heldar-entry).
-It is a real, compiling example of every step below.
+It is a real, compiling example of every step below. A compiled-in app also declares a
+`manifest()` so it shows up in the dashboard nav (see the sidecar guide's "Manifest" section — the
+shape is the same; compiled modules just return it from code instead of registering it at runtime).
 
 ## The mental model
 

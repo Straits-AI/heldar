@@ -214,6 +214,12 @@ async fn main() -> anyhow::Result<()> {
                 services::webhooks::run(p.clone(), c.clone())
             });
         }
+        // Sidecar module health: probe each registered plugin's /heldar/health so the dashboard can
+        // badge healthy/unreachable. Self-idles when none are registered; never returns.
+        {
+            let p = pool.clone();
+            spawn_supervised("module_health", move || services::modules::run(p.clone()));
+        }
     }
 
     // Allow all origins if configured with "*" or left empty; otherwise restrict to the list.

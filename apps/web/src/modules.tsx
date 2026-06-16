@@ -132,8 +132,8 @@ export function moduleIcon(key: string): (p: IconProps) => ReactNode {
 }
 
 /**
- * Page component for each module `id`. A module reported by the server but absent here (no bundled
- * page in this build) is simply not routed. Phase B replaces these with mounted micro-frontends.
+ * Page component for each compiled (bundled) module `id`. Runtime sidecar plugins are NOT here — they
+ * are iframe-mounted via `ModuleFrame` (the kernel reverse-proxies /m/{id}/ to the sidecar).
  */
 export const MODULE_PAGES: Record<string, ComponentType> = {
   entry: Entry,
@@ -141,6 +141,24 @@ export const MODULE_PAGES: Record<string, ComponentType> = {
   search: Search,
   bakery: Bakery, // @module:bakery
 };
+
+/**
+ * Micro-frontend mount for an imported sidecar plugin: a full-bleed iframe to `/m/{id}/`, which the
+ * kernel reverse-proxies to the sidecar's own UI (single-origin with the console). The plugin's UI
+ * calls back to `/m/{id}/api/...` (same proxy) and to the kernel API with its minted key.
+ */
+export function ModuleFrame({ id, title }: { id: string; title: string }) {
+  return (
+    <iframe
+      src={`/m/${encodeURIComponent(id)}/`}
+      title={title}
+      className="h-[calc(100vh-3.5rem)] w-full border-0 bg-canvas"
+      // Sandboxed: the plugin runs scripts + same-origin (so its own cookies/storage work) but cannot
+      // navigate the top frame or trigger downloads on the console's behalf.
+      sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+    />
+  );
+}
 
 /* ---------------------------------------------------------------- */
 /* Live module context                                              */

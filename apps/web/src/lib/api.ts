@@ -28,7 +28,10 @@ import type {
   CameraCreate,
   CameraLink,
   CameraOnvif,
+  ModuleDetail,
   ModuleManifest,
+  ModuleRegisterRequest,
+  ModuleRegistered,
   MovementCandidate,
   PlateSearchResult,
   QueryPlan,
@@ -326,8 +329,19 @@ export const api = {
   system: () => request<SystemInfo>("/api/v1/system"),
 
   // ---- Modules (drives the dashboard nav rail + routes; only loaded modules appear) ----
-  /** Manifests of every module this Core binary links. Readable by any authenticated principal. */
+  /** Manifests of every loaded module: compiled-in + registered sidecars. Any principal may read. */
   modules: () => request<ModuleManifest[]>("/api/v1/modules"),
+  /** Admin detail for one registered sidecar (base URL + minted resource ids). */
+  moduleDetail: (id: string) => request<ModuleDetail>(`/api/v1/modules/${enc(id)}`),
+  /** Register a sidecar plugin (admin). Returns its minted key + webhook secret ONCE. */
+  registerModule: (body: ModuleRegisterRequest) =>
+    request<ModuleRegistered>("/api/v1/modules", {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  /** Uninstall a sidecar (admin): revokes its key + webhook subscription. */
+  unregisterModule: (id: string) =>
+    request<void>(`/api/v1/modules/${enc(id)}`, { method: "DELETE" }),
 
   // ---- Webhook subscriptions (generic event-delivery substrate; supersedes single-URL alerting) ----
   /** Every webhook subscription, oldest first. Readable by any principal; the secret is never returned. */
