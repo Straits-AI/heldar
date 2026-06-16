@@ -1,0 +1,53 @@
+# Heldar Core — gitignore
+
+# Rust (commit the workspace Cargo.lock; ignore build output)
+target/
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.uv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# AI worker model weights (auto-downloaded by ultralytics at first run)
+*.pt
+
+# Node / web
+node_modules/
+apps/web/dist/
+apps/web/.vite/
+
+# Runtime data (recordings, clips, snapshots, db) — never commit footage
+data/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite3
+
+# Media binaries fetched at setup time
+bin/
+infra/mediamtx/mediamtx
+infra/mediamtx/*.tar.gz
+
+# Secrets / local config
+.env
+.env.local
+*.pem
+*.crt
+*.key
+# MediaMTX writes a self-signed keypair into its working dir
+/auto.crt
+/auto.key
+
+# Tooling / agent local state
+.claude/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp

@@ -1,0 +1,22 @@
+# Heldar — open-core kernel + generic reference apps (Apache-2.0).
+#
+# `heldar-kernel` is the domain-agnostic platform (media/DVR, perception ingest + sampler, zone
+# engine, auth, observability, retention, remote-access overlay awareness, worker SDK contract).
+# `heldar-entry` (access control), `heldar-movement`, and `heldar-search` are generic
+# reference apps. `heldar-server` composes them into a runnable deployment. Proprietary vertical
+# products depend on these crates in a separate (private) workspace.
+[workspace]
+resolver = "2"
+members = [
+    "crates/heldar-kernel",
+    "crates/heldar-entry",
+    "crates/heldar-movement",
+    "crates/heldar-search",
+    "crates/heldar-server",
+]
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 2
