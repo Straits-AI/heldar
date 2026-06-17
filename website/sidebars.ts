@@ -26,6 +26,7 @@ const sidebars: SidebarsConfig = {
       items: [
         'develop/build-a-module',
         'develop/sidecar-plugins',
+        'develop/wasm-plugins',
         'develop/registry',
         'develop/ai-worker',
         'develop/webhooks',

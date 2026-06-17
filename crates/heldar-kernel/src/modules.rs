@@ -69,6 +69,9 @@ pub enum MountKind {
     Bundled,
     /// An iframe to `/m/{id}/`, which the kernel reverse-proxies to the sidecar (imported modules).
     Iframe,
+    /// No UI — a headless compute plugin (e.g. a sandboxed Wasm DetectionConsumer). Contributes no nav
+    /// route; the store lists it with a "compute" treatment and no Open affordance.
+    Headless,
 }
 
 impl ModuleManifest {

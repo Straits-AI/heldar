@@ -14,6 +14,12 @@ members = [
     "crates/heldar-movement",
     "crates/heldar-search",
     "crates/heldar-server",
+    "crates/heldar-wasm",
+]
+# The example Wasm guest targets wasm32-unknown-unknown and is built separately; excluding it keeps
+# `cargo build --workspace` (host target) from trying to compile a wasm-only cdylib.
+exclude = [
+    "examples/wasm-plugin",
 ]
 
 [profile.dev]

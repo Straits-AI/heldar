@@ -89,11 +89,12 @@ const STATE_LABEL: Record<EntryState, string> = {
   included: "Included",
   not_in_build: "Not in build",
   unreachable: "Unreachable",
+  loaded: "Loaded",
 };
 
 function StatePill({ state }: { state: EntryState }) {
   const tone =
-    state === "installed" || state === "included"
+    state === "installed" || state === "included" || state === "loaded"
       ? "recording"
       : state === "unreachable"
         ? "error"
@@ -193,6 +194,11 @@ function StoreCard({
 
       <div className="mt-3 flex items-center gap-2 border-t border-line/70 pt-3">
         {/* Action by state */}
+        {entry.mount === "headless" ? (
+          <span className="font-mono text-[10px] uppercase tracking-micro text-fg-muted">
+            Headless · sandboxed compute
+          </span>
+        ) : null}
         {entry.state === "available" && sidecar && canAdmin && (
           <Button variant="primary" size="sm" onClick={() => onInstall(entry)}>
             Install

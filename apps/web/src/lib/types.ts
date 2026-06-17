@@ -382,8 +382,9 @@ export interface EventTypeInfo {
 /** Provenance of a loaded module; drives store shelving + nav badging. Matches the kernel enum. */
 export type ModuleKind = "core" | "proprietary" | "community" | "imported";
 
-/** How the dashboard renders a module's content: a bundled page, or an iframe to /m/{id}/. */
-export type ModuleMount = "bundled" | "iframe";
+/** How the dashboard renders a module's content: a bundled page, an iframe to /m/{id}/, or headless
+ *  (no UI — a compute plugin like a sandboxed Wasm DetectionConsumer). */
+export type ModuleMount = "bundled" | "iframe" | "headless";
 
 /** A nav destination a module contributes. `icon` is a key the dashboard maps to a glyph. */
 export interface ModuleNavEntry {
@@ -455,7 +456,8 @@ export type EntryState =
   | "installed" // sidecar, registered
   | "included" // compiled module present in this build
   | "not_in_build" // compiled module advertised but not in this build (commercial add-on)
-  | "unreachable"; // installed sidecar whose health probe last failed
+  | "unreachable" // installed sidecar whose health probe last failed
+  | "loaded"; // headless plugin (e.g. Wasm) loaded from disk and running
 
 /** How a catalog entry is installed (discriminated by `type`). */
 export type InstallSpec =
@@ -487,6 +489,8 @@ export interface RegistryEntry {
   state: EntryState;
   verified: boolean;
   source: string; // "bundled" | "local" | url
+  /** Set for entries derived from a loaded module (e.g. "headless" for a Wasm plugin). */
+  mount?: ModuleMount;
 }
 
 /** A catalog source's signature status (for the registry indicator + diagnostics). */

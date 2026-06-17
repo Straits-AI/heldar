@@ -297,6 +297,38 @@ impl CatalogService {
             }
         }
 
+        // 4) headless plugins loaded from disk (e.g. Wasm DetectionConsumers): not catalog entries and
+        // not store-installable in v1, but surfaced so the operator sees what's running. State=Loaded,
+        // mount=Headless (the dashboard shows a compute treatment, no Open/Install).
+        for m in modules.iter().filter(|m| m.mount == MountKind::Headless) {
+            if seen.insert(m.id.clone()) {
+                let e = CatalogEntry {
+                    id: m.id.clone(),
+                    name: m.name.clone(),
+                    publisher: m.publisher.clone(),
+                    kind: m.kind,
+                    summary: m.description.clone(),
+                    description: None,
+                    version: Some(m.version.clone()).filter(|v| !v.is_empty()),
+                    icon: m.nav.first().map(|n| n.icon.clone()),
+                    homepage: None,
+                    categories: vec!["headless".into()],
+                    install: InstallSpec::Builtin {
+                        availability: Some("loaded".into()),
+                        contact: None,
+                    },
+                };
+                entries.push(RegistryEntryView {
+                    shelf: Shelf::from(e.kind),
+                    state: EntryState::Loaded,
+                    verified: false,
+                    source: "local".into(),
+                    mount: Some(MountKind::Headless),
+                    entry: e,
+                });
+            }
+        }
+
         RegistryView {
             enabled: self.enabled,
             sources,
@@ -334,6 +366,7 @@ fn make_view(
         state,
         verified,
         source: source.to_string(),
+        mount: None,
     }
 }
 

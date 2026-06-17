@@ -17,6 +17,9 @@ path = "src/main.rs"
 # private production bins enable this. At the polyrepo split the public server drops it entirely.
 default = ["verticals"]
 verticals = ["dep:heldar-bakery"]
+# `wasm` pulls the sandboxed in-process Wasm plugin host (heldar-wasm → wasmi). OFF by default so the
+# lean appliance binary never links a Wasm runtime; enable it to load `*.wasm` DetectionConsumer plugins.
+wasm = ["dep:heldar-wasm"]
 
 [dependencies]
 heldar-kernel = { path = "../heldar-kernel" }
@@ -26,6 +29,8 @@ heldar-movement = { path = "../heldar-movement" }
 heldar-search = { path = "../heldar-search" }
 # Proprietary verticals — optional, gated by the `verticals` feature.
 heldar-bakery = { path = "../heldar-bakery", optional = true }
+# Sandboxed Wasm plugin host — optional, gated by the `wasm` feature (keeps wasmi out of the default build).
+heldar-wasm = { path = "../heldar-wasm", optional = true }
 tokio = { version = "1", features = ["full"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 axum = { version = "0.8", features = ["macros"] }

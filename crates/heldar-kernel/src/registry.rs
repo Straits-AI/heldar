@@ -19,7 +19,7 @@ use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::modules::{ModuleKind, NavEntry};
+use crate::modules::{ModuleKind, MountKind, NavEntry};
 
 /// The signed catalog document (`heldar-catalog/v1`).
 #[derive(Clone, Debug, Deserialize)]
@@ -308,6 +308,8 @@ pub enum EntryState {
     NotInBuild,
     /// An installed sidecar whose health probe last failed.
     Unreachable,
+    /// A headless plugin (e.g. a Wasm DetectionConsumer) loaded from disk and running.
+    Loaded,
 }
 
 /// One catalog entry with its computed shelf/state/verification, ready for the dashboard.
@@ -320,6 +322,10 @@ pub struct RegistryEntryView {
     pub verified: bool,
     /// `bundled` or the source URL.
     pub source: String,
+    /// How the module mounts (only set for entries derived from a loaded module, e.g. `headless` for a
+    /// Wasm plugin); `None` for advertised catalog entries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount: Option<MountKind>,
 }
 
 /// A catalog source's status (for the "registry signature" indicator + diagnostics).

@@ -30,6 +30,8 @@ use heldar_kernel::{auth, db, routes, services};
 // no-op stub; the private workspace ships the real module (the proprietary verticals). Keeps main.rs identical
 // and free of any proprietary-crate reference in the open build.
 mod verticals;
+// Sandboxed Wasm plugin composition, isolated behind the `wasm` feature seam (no-op stub when off).
+mod wasm_plugins;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -98,28 +100,35 @@ async fn main() -> anyhow::Result<()> {
     let movement_cfg = Arc::new(heldar_movement::config::MovementConfig::from_env());
     let search_cfg = Arc::new(heldar_search::config::SearchConfig::from_env());
     use services::consumer::DetectionConsumer;
-    let consumers: Arc<Vec<Arc<dyn DetectionConsumer>>> = Arc::new(vec![
+    let mut consumers: Vec<Arc<dyn DetectionConsumer>> = vec![
         // Zone engine = kernel-open spatial primitive. Holds the recorder so a committed zone event
         // triggers event-mode recording (recorder is created above, before its consumers).
         services::zones::ZoneEngine::new(pool.clone(), cfg.clone(), recorder.clone()),
         // Access-control ANPR engine (open generic app), registered as a consumer over the seam.
         heldar_entry::anpr::AnprEngine::new(pool.clone(), cfg.clone(), entry_cfg.clone()),
-    ]);
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-        .context("building http client")?;
+    ];
     // Module manifests, composed here so GET /api/v1/modules reflects exactly what this binary links.
-    // The open generic apps register first; proprietary verticals add theirs via the seam (empty in
-    // the open build). The dashboard renders its nav + routes from this list — adding a module is a
-    // push here (plus its router merge below), not an edit to the kernel.
+    // The open generic apps register first; proprietary verticals add theirs via the seam (empty in the
+    // open build). The dashboard renders its nav + routes from this list.
     let mut modules = vec![
         heldar_entry::manifest(),
         heldar_movement::manifest(),
         heldar_search::manifest(),
     ];
     modules.extend(verticals::manifests());
+    // Sandboxed Wasm plugins register as additional consumers + headless modules via the seam (a no-op
+    // when the `wasm` feature is off). Pass the already-composed ids so a plugin can't collide with a
+    // compiled/vertical module id (which would duplicate it in GET /api/v1/modules).
+    let reserved_ids: Vec<String> = modules.iter().map(|m| m.id.clone()).collect();
+    let (wasm_consumers, wasm_modules) = wasm_plugins::load(&pool, &cfg.data_dir, &reserved_ids);
+    consumers.extend(wasm_consumers);
+    modules.extend(wasm_modules);
+    let consumers: Arc<Vec<Arc<dyn DetectionConsumer>>> = Arc::new(consumers);
     let modules = Arc::new(modules);
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .build()
+        .context("building http client")?;
     // Plugin store catalog engine (bundled + signed remote registries).
     let catalog = Arc::new(services::registry::CatalogService::new(&cfg));
     let state = AppState {

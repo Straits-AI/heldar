@@ -325,7 +325,8 @@ pub struct Detection {
 }
 
 /// One detection inside an ingest request.
-#[derive(Debug, Deserialize)]
+// `Serialize` so the Wasm plugin host (heldar-wasm) can marshal a batch to JSON for a sandboxed guest.
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DetectionIngest {
     pub label: Option<String>,
     pub confidence: Option<f64>,
