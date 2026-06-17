@@ -60,8 +60,6 @@ pub struct Config {
     /// Hard floor on free disk space; when free space drops below this, oldest unlocked segments
     /// are pruned regardless of age/size policy (protects the host from a full disk).
     pub min_free_disk_bytes: u64,
-    /// Optional webhook URL that receives warning/critical events as JSON (alerting).
-    pub alert_webhook_url: Option<String>,
     /// How often the alert notifier polls for new events to deliver.
     pub notifier_interval_s: u64,
     /// Master switch for AI frame sampling (Stage 2). Cameras still need an enabled AI task.
@@ -294,7 +292,6 @@ impl Config {
             cors_origins,
             max_recordings_bytes: (max_recordings_gb * 1024.0 * 1024.0 * 1024.0) as u64,
             min_free_disk_bytes: (min_free_disk_gb * 1024.0 * 1024.0 * 1024.0) as u64,
-            alert_webhook_url: var("HELDAR_ALERT_WEBHOOK_URL"),
             notifier_interval_s: parse_or("HELDAR_NOTIFIER_INTERVAL_S", 15),
             ai_enabled: parse_bool("HELDAR_AI_ENABLED", true),
             ai_max_total_fps: parse_or("HELDAR_AI_MAX_TOTAL_FPS", 40.0),
