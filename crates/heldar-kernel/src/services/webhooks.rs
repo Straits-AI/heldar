@@ -1,6 +1,5 @@
 //! Webhook delivery engine — the SINGLE deliverer of generic events to external systems, superseding
-//! the old single-URL alert notifier (whose stored `app_state` settings are folded into a "Default
-//! alerts" subscription by the one-time legacy migration below).
+//! the old single-URL alert notifier.
 //!
 //! Each enabled [`WebhookSubscription`] is an independent at-least-once deliverer: it keeps its own
 //! persisted `cursor_at` (an `events.created_at`, mirroring the old notifier cursor), an event-type +
@@ -49,12 +48,6 @@ pub async fn run(pool: SqlitePool, cfg: Arc<Config>) {
             std::future::pending::<reqwest::Client>().await
         }
     };
-
-    // One-time: fold the legacy single-URL alerting webhook into a "Default alerts" subscription so it
-    // keeps delivering under the new model. Best-effort — a failure just logs and retries next boot.
-    if let Err(e) = migrate_legacy_alerting(&pool, &cfg).await {
-        tracing::warn!(error = %e, "webhooks: legacy alerting migration failed");
-    }
 
     let mut tick = tokio::time::interval(Duration::from_secs(cfg.notifier_interval_s.max(5)));
     loop {
@@ -369,79 +362,6 @@ fn min_severity_sql(min_severity: &str) -> &'static str {
         "warning" => "severity IN ('warning', 'critical')",
         _ => "1 = 1",
     }
-}
-
-/// Read one `app_state` value (the legacy single-URL alerting settings were persisted here, keyed by
-/// `alert_webhook_url` / `alert_enabled` / `alert_min_severity`).
-async fn app_state(pool: &SqlitePool, key: &str) -> Option<String> {
-    sqlx::query_scalar::<_, String>("SELECT value FROM app_state WHERE key = ?")
-        .bind(key)
-        .fetch_optional(pool)
-        .await
-        .ok()
-        .flatten()
-}
-
-/// Fold the legacy single-URL alerting webhook (app_state / `HELDAR_ALERT_WEBHOOK_URL`) into a
-/// "Default alerts" subscription, once, so it keeps delivering under the subscription model. No-op when
-/// no legacy webhook is configured or a subscription already targets that url. Starts the new cursor at
-/// "now" so the upgrade does not replay historical events.
-async fn migrate_legacy_alerting(pool: &SqlitePool, cfg: &Config) -> sqlx::Result<()> {
-    // Resolve the legacy settings the old `services::alerting` module used to own: the stored webhook
-    // (app_state `alert_webhook_url`), falling back to the `HELDAR_ALERT_WEBHOOK_URL` env value, plus
-    // the stored enabled flag (default true) and severity floor (default `warning`).
-    let stored = app_state(pool, "alert_webhook_url")
-        .await
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let Some(url) = stored.or_else(|| {
-        cfg.alert_webhook_url
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-    }) else {
-        return Ok(());
-    };
-    let enabled = !matches!(
-        app_state(pool, "alert_enabled").await.as_deref(),
-        Some("false")
-    );
-    let min_severity = match app_state(pool, "alert_min_severity").await.as_deref() {
-        Some("critical") => "critical",
-        _ => "warning",
-    };
-
-    let exists: Option<i64> =
-        sqlx::query_scalar("SELECT 1 FROM webhook_subscriptions WHERE url = ? LIMIT 1")
-            .bind(&url)
-            .fetch_optional(pool)
-            .await?;
-    if exists.is_some() {
-        return Ok(());
-    }
-    let now = Utc::now();
-    let id = format!("whs_{}", Uuid::new_v4().simple());
-    sqlx::query(
-        "INSERT INTO webhook_subscriptions
-           (id, name, url, event_types, min_severity, secret, enabled, cursor_at, created_at, updated_at)
-         VALUES (?, 'Default alerts', ?, '[\"*\"]', ?, NULL, ?, ?, ?, ?)",
-    )
-    .bind(&id)
-    .bind(&url)
-    .bind(min_severity)
-    .bind(i64::from(enabled))
-    .bind(now)
-    .bind(now)
-    .bind(now)
-    .execute(pool)
-    .await?;
-    tracing::info!(
-        masked = crate::models::mask_webhook_url(&url),
-        enabled,
-        "webhooks: migrated legacy alerting webhook into a 'Default alerts' subscription"
-    );
-    Ok(())
 }
 
 #[cfg(test)]

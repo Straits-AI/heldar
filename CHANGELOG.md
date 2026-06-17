@@ -5,6 +5,16 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+- The deprecated single-URL alerting webhook (`HELDAR_ALERT_WEBHOOK_URL` / the `alert_webhook_url`
+  config + the legacy `app_state` migration path + the orphaned `app_state` table). It was
+  superseded by webhook subscriptions. **Upgrade note:** a deployment that set
+  `HELDAR_ALERT_WEBHOOK_URL` must recreate it as a webhook subscription via
+  `POST /api/v1/webhooks` (or the dashboard's Webhooks panel).
+
 ## [0.1.4] — 2026-06-17
 
 ### Added
