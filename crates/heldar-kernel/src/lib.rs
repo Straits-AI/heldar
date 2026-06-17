@@ -15,6 +15,7 @@ pub mod auth;
 pub mod camera_url;
 pub mod config;
 pub mod db;
+pub mod env;
 pub mod error;
 pub mod models;
 pub mod modules;
