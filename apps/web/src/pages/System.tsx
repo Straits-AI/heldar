@@ -8,12 +8,14 @@ import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import { usePoll } from "../lib/usePoll";
 import type {
+  AuditLogEntry,
   CameraStatus,
   CameraView,
   DiskStats,
   Principal,
   Severity,
   StorageReport,
+  SystemInfo,
   VisionEvent,
 } from "../lib/types";
 import { BulkConfigPanel } from "../components/CameraConfigPanel";
@@ -436,6 +438,131 @@ function PanelStatus({
   return <p className="font-mono text-xs text-fg-muted">No {label} available.</p>;
 }
 
+/* ---- System status: remote-access overlay + disk health + transcode engine ---- */
+
+function StatusRow({
+  label,
+  state,
+  value,
+  hint,
+}: {
+  label: ReactNode;
+  state: string;
+  value: ReactNode;
+  hint?: ReactNode;
+}) {
+  return (
+    <div className="flex items-start justify-between gap-3 border-b border-line/60 py-2.5 last:border-0">
+      <div className="flex items-center gap-2">
+        <StatusLed state={state} />
+        <span className="text-sm text-fg">{label}</span>
+      </div>
+      <div className="min-w-0 text-right">
+        <div className="font-mono text-xs text-fg-secondary">{value}</div>
+        {hint != null && <div className="mt-0.5 text-[11px] text-fg-muted">{hint}</div>}
+      </div>
+    </div>
+  );
+}
+
+function SystemStatusPanel({
+  info,
+  loading,
+  error,
+}: {
+  info: SystemInfo | null;
+  loading: boolean;
+  error: string | null;
+}) {
+  return (
+    <Panel title="System status" subtitle="Remote access · disk health · transcode">
+      {!info ? (
+        <PanelStatus loading={loading} error={error} label="system status" />
+      ) : (
+        <div>
+          {/* Remote access */}
+          <StatusRow
+            label="Remote access"
+            state={
+              !info.remote_access.enabled ? "disabled" : info.remote_access.up ? "recording" : "error"
+            }
+            value={
+              !info.remote_access.enabled
+                ? "LAN-only"
+                : `${info.remote_access.kind}${info.remote_access.iface ? ` · ${info.remote_access.iface}` : ""}`
+            }
+            hint={info.remote_access.enabled ? info.remote_access.note : undefined}
+          />
+          {/* Disk / array health */}
+          <StatusRow
+            label="Disk health"
+            state={info.disk_health_ok ? "recording" : "error"}
+            value={info.disk_health_ok ? "OK" : "Alert"}
+            hint={
+              info.last_disk_alert_at
+                ? `last alert ${timeAgo(info.last_disk_alert_at)}`
+                : "no SMART/RAID alerts"
+            }
+          />
+          {/* Live transcode engine */}
+          <StatusRow
+            label="Transcode"
+            state={info.live_transcode_engine === "software" ? "connecting" : "recording"}
+            value={info.live_transcode_engine}
+            hint={info.live_transcode_engine === "software" ? "CPU (libx264)" : "hardware-accelerated"}
+          />
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+/* ---- Audit log viewer (manager+) — who did what ---- */
+
+function AuditPanel() {
+  const audit = usePoll(() => api.listAudit({ limit: 100 }), 30000);
+  return (
+    <Panel
+      title="Audit log"
+      subtitle="Privileged actions (who did what)"
+      actions={
+        <Button size="sm" disabled={audit.loading} onClick={() => void audit.refresh()}>
+          {audit.loading ? <Spinner size={13} /> : "Refresh"}
+        </Button>
+      }
+    >
+      {audit.error ? (
+        <PanelStatus loading={false} error={audit.error} label="audit log" />
+      ) : !audit.data || audit.data.length === 0 ? (
+        <EmptyState title="No audit entries" hint="Privileged actions (config, registry, plugins) are recorded here." />
+      ) : (
+        <div className="max-h-96 overflow-y-auto">
+          {audit.data.map((e: AuditLogEntry) => (
+            <div key={e.id} className="flex items-start justify-between gap-3 border-b border-line/60 py-2 last:border-0">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="font-mono text-xs font-semibold text-accent">{e.action}</span>
+                  {e.target_type && (
+                    <span className="truncate font-mono text-[11px] text-fg-secondary">
+                      {e.target_type}
+                      {e.target_id ? `:${e.target_id}` : ""}
+                    </span>
+                  )}
+                </div>
+                <div className="mt-0.5 font-mono text-[10px] uppercase tracking-micro text-fg-muted">
+                  {e.actor_name ?? e.actor}
+                  {e.role ? ` · ${e.role}` : ""}
+                </div>
+              </div>
+              <span className="shrink-0 font-mono text-[10px] text-fg-muted">{timeAgo(e.created_at)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 /* -------------------------------- page -------------------------------- */
 
 export function System() {
@@ -527,8 +654,9 @@ export function System() {
           />
         </div>
 
-        {/* Side column: events feed */}
+        {/* Side column: system status + events feed */}
         <div className="stagger space-y-4">
+          <SystemStatusPanel info={system.data} loading={system.loading} error={system.error} />
           <EventsPanel
             events={events.data}
             cameras={cameras.data}
@@ -547,6 +675,13 @@ export function System() {
       <div className="mt-4 stagger">
         <BulkConfigPanel canManage={canManage} />
       </div>
+
+      {/* ---- Audit log (manager+; the endpoint enforces this too) ---- */}
+      {canManage && (
+        <div className="mt-4 stagger">
+          <AuditPanel />
+        </div>
+      )}
 
       {/* ---- Footer: raw endpoints ---- */}
       <footer className="mt-6 flex flex-wrap items-center gap-3 border-t border-line pt-4">

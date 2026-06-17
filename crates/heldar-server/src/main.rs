@@ -12,7 +12,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use axum::http::HeaderValue;
+use axum::extract::{FromRequestParts, Request, State};
+use axum::http::{HeaderValue, StatusCode};
+use axum::middleware::Next;
+use axum::response::{IntoResponse, Response};
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
@@ -168,6 +171,11 @@ async fn main() -> anyhow::Result<()> {
         spawn_supervised("entry_retention", move || {
             heldar_entry::retention::run(p.clone(), c.clone(), e.clone())
         });
+        // Forensic-search prunes its own query log.
+        let (p, c, s) = (pool.clone(), cfg.clone(), search_cfg.clone());
+        spawn_supervised("search_retention", move || {
+            heldar_search::retention::run(p.clone(), c.clone(), s.clone())
+        });
         // Proprietary verticals start their own background loops (no-op in the open build).
         verticals::spawn_loops(&pool);
         // Movement: the ReID candidate proposer + the red-zone breach rule engine.
@@ -269,12 +277,20 @@ async fn main() -> anyhow::Result<()> {
         .merge(heldar_movement::routes::router(movement_cfg.clone()))
         .merge(heldar_search::routes::router(search_cfg.clone()));
     // Proprietary verticals merge their routers via the seam (a no-op in the open build).
-    let app = verticals::merge_routes(app)
+    // Recorded media (/media/*) is the same sensitive footage the API gates — so guard it with the
+    // SAME auth when enabled. The browser sends the session cookie with <img>/<video> requests, so the
+    // dashboard keeps working; an unauthenticated client gets 401. No-op when auth is disabled.
+    let media = Router::new()
         .nest_service("/media/recordings", ServeDir::new(&cfg.recordings_dir))
         .nest_service("/media/clips", ServeDir::new(&cfg.clips_dir))
         .nest_service("/media/snapshots", ServeDir::new(&cfg.snapshots_dir))
         .nest_service("/media/playback", ServeDir::new(&cfg.playback_dir))
-        .nest_service("/media/archives", ServeDir::new(&cfg.archive_dir));
+        .nest_service("/media/archives", ServeDir::new(&cfg.archive_dir))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            media_guard,
+        ));
+    let app = verticals::merge_routes(app).merge(media);
 
     // Serve the built dashboard so the whole product is ONE binary at ONE URL. The /api/*, /media/*,
     // /healthz, /readyz and /metrics routes above are explicit and take precedence; the SPA is only
@@ -316,6 +332,20 @@ async fn main() -> anyhow::Result<()> {
         .context("server error")?;
 
     Ok(())
+}
+
+/// Auth guard for the recorded-media plane. When auth is enabled, requires a valid principal (resolved
+/// exactly like the API via the `Principal` extractor — cookie / Bearer / API key); 401 otherwise. A
+/// no-op pass-through when auth is disabled (the LAN-appliance default).
+async fn media_guard(State(st): State<AppState>, req: Request, next: Next) -> Response {
+    if !st.cfg.auth_enabled {
+        return next.run(req).await;
+    }
+    let (mut parts, body) = req.into_parts();
+    match auth::Principal::from_request_parts(&mut parts, &st).await {
+        Ok(_) => next.run(Request::from_parts(parts, body)).await,
+        Err(_) => StatusCode::UNAUTHORIZED.into_response(),
+    }
 }
 
 fn init_tracing() {

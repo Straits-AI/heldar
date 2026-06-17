@@ -155,10 +155,11 @@ function ntpAddressingFormat(host: string): string {
 
 /* =============================== Device info ============================== */
 
-function DeviceInfoSection({ cameraId }: { cameraId: string }) {
+function DeviceInfoSection({ cameraId, canManage }: { cameraId: string; canManage: boolean }) {
   const info = usePoll(() => api.getCameraDeviceInfo(cameraId), 0, [cameraId]);
   const onvif = usePoll(() => api.getCameraOnvifSettings(cameraId), 0, [cameraId]);
   const [busy, setBusy] = useState(false);
+  const [rebooting, setRebooting] = useState(false);
 
   async function refresh() {
     setBusy(true);
@@ -166,6 +167,19 @@ function DeviceInfoSection({ cameraId }: { cameraId: string }) {
       await Promise.all([info.refresh(), onvif.refresh()]);
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function reboot() {
+    if (!window.confirm("Reboot this camera? It will drop offline for ~1 minute.")) return;
+    setRebooting(true);
+    try {
+      await api.rebootCamera(cameraId);
+      window.alert("Reboot command sent.");
+    } catch (e) {
+      window.alert(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRebooting(false);
     }
   }
 
@@ -178,6 +192,11 @@ function DeviceInfoSection({ cameraId }: { cameraId: string }) {
       actions={
         <div className="flex items-center gap-2">
           <OnvifBadge enabled={onvif.data?.onvif_enabled} />
+          {canManage && (
+            <Button variant="danger" size="sm" disabled={rebooting} onClick={() => void reboot()}>
+              {rebooting ? "…" : "Reboot"}
+            </Button>
+          )}
           <Button size="sm" disabled={busy} onClick={() => void refresh()}>
             {busy ? "…" : "Refresh"}
           </Button>
@@ -751,7 +770,7 @@ export function CameraConfigPanel({
 
   return (
     <div className="space-y-4">
-      <DeviceInfoSection cameraId={cameraId} />
+      <DeviceInfoSection cameraId={cameraId} canManage={canManage} />
       <VideoConfigSection cameraId={cameraId} canManage={canManage} />
       <TimeNtpSection cameraId={cameraId} canManage={canManage} />
       <OnvifEnableSection cameraId={cameraId} canManage={canManage} />

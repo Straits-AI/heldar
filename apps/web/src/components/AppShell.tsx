@@ -173,16 +173,19 @@ function NavRow({
   label,
   end,
   Icon,
+  onClick,
 }: {
   to: string;
   label: string;
   end?: boolean;
   Icon: (p: IconProps) => ReactNode;
+  onClick?: () => void;
 }) {
   return (
     <NavLink
       to={to}
       end={end}
+      onClick={onClick}
       className={({ isActive }) =>
         cx(
           "group relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-[background-color,color] duration-150",
@@ -223,64 +226,105 @@ function SectionLabel({ children }: { children: ReactNode }) {
   );
 }
 
-function NavRail({ version }: { version?: string }) {
+/** The Operations + dynamic Modules nav sections, shared by the desktop rail and the mobile menu.
+ *  `onNavigate` fires when a destination is tapped (the mobile menu closes itself on navigation). */
+function NavSections({ onNavigate }: { onNavigate?: () => void }) {
   // Loaded modules drive the dynamic Modules section — only what this Core binary links is shown.
   const { modules } = useModules();
   return (
+    <nav className="stagger flex flex-1 flex-col gap-0.5 overflow-y-auto px-3 py-4">
+      <SectionLabel>Operations</SectionLabel>
+      {NAV_ITEMS.map(({ to, label, end, Icon }) => (
+        <NavRow key={to} to={to} label={label} end={end} Icon={Icon} onClick={onNavigate} />
+      ))}
+
+      {/* Modules — dynamic from GET /api/v1/modules; renders only when at least one is loaded. */}
+      {modules.length > 0 && (
+        <>
+          <SectionLabel>
+            <span className="mt-4 block">Modules</span>
+          </SectionLabel>
+          {modules.flatMap((m) =>
+            m.nav.map((n) => (
+              <NavRow
+                key={n.path}
+                to={n.path}
+                label={n.label}
+                Icon={moduleIcon(n.icon)}
+                onClick={onNavigate}
+              />
+            )),
+          )}
+        </>
+      )}
+    </nav>
+  );
+}
+
+function BrandHeader() {
+  return (
+    <div className="relative flex animate-fade-in items-center gap-3 px-5 py-5">
+      <span className="relative flex h-10 w-10 items-center justify-center rounded-lg border border-accent/35 bg-canvas shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_0_18px_-6px_rgba(245,158,11,0.5)]">
+        <span className="pointer-events-none absolute inset-0 rounded-lg bg-bifrost-soft opacity-50" />
+        <BrandMark size={24} className="relative" />
+      </span>
+      <div className="leading-none">
+        <div className="font-display text-[15px] font-extrabold tracking-wider text-fg">HELDAR</div>
+        <div className="mt-1.5 font-mono text-[9px] uppercase tracking-micro text-accent">Core</div>
+      </div>
+      <span aria-hidden="true" className="absolute inset-x-0 bottom-0 h-px bg-bifrost-line opacity-70" />
+    </div>
+  );
+}
+
+function BuildFooter({ version }: { version?: string }) {
+  return (
+    <div className="border-t border-line px-5 py-4">
+      <div className="font-mono text-[9px] uppercase tracking-micro text-fg-muted">Build</div>
+      <div className="mt-1 font-mono text-[11px] text-fg-secondary">{version ? `v${version}` : "—"}</div>
+    </div>
+  );
+}
+
+/** Desktop nav rail (hidden below sm; the mobile menu covers that breakpoint). */
+function NavRail({ version }: { version?: string }) {
+  return (
     <aside className="sticky top-0 z-30 hidden h-screen w-[232px] shrink-0 flex-col border-r border-line bg-panel sm:flex">
-      {/* Brand */}
-      <div className="relative flex animate-fade-in items-center gap-3 px-5 py-5">
-        <span className="relative flex h-10 w-10 items-center justify-center rounded-lg border border-accent/35 bg-canvas shadow-[inset_0_1px_0_rgba(255,255,255,0.05),0_0_18px_-6px_rgba(245,158,11,0.5)]">
-          <span className="pointer-events-none absolute inset-0 rounded-lg bg-bifrost-soft opacity-50" />
-          <BrandMark size={24} className="relative" />
-        </span>
-        <div className="leading-none">
-          <div className="font-display text-[15px] font-extrabold tracking-wider text-fg">
-            HELDAR
-          </div>
-          <div className="mt-1.5 font-mono text-[9px] uppercase tracking-micro text-accent">
-            Core
-          </div>
-        </div>
-        {/* Lone Bifrost hairline — the brand seam */}
-        <span
-          aria-hidden="true"
-          className="absolute inset-x-0 bottom-0 h-px bg-bifrost-line opacity-70"
-        />
-      </div>
-
-      {/* Nav */}
-      <nav className="stagger flex flex-1 flex-col gap-0.5 overflow-y-auto px-3 py-4">
-        <SectionLabel>Operations</SectionLabel>
-        {NAV_ITEMS.map(({ to, label, end, Icon }) => (
-          <NavRow key={to} to={to} label={label} end={end} Icon={Icon} />
-        ))}
-
-        {/* Modules — dynamic from GET /api/v1/modules; renders only when at least one is loaded. */}
-        {modules.length > 0 && (
-          <>
-            <SectionLabel>
-              <span className="mt-4 block">Modules</span>
-            </SectionLabel>
-            {modules.flatMap((m) =>
-              m.nav.map((n) => (
-                <NavRow key={n.path} to={n.path} label={n.label} Icon={moduleIcon(n.icon)} />
-              )),
-            )}
-          </>
-        )}
-      </nav>
-
-      {/* Footer */}
-      <div className="border-t border-line px-5 py-4">
-        <div className="font-mono text-[9px] uppercase tracking-micro text-fg-muted">
-          Build
-        </div>
-        <div className="mt-1 font-mono text-[11px] text-fg-secondary">
-          {version ? `v${version}` : "—"}
-        </div>
-      </div>
+      <BrandHeader />
+      <NavSections />
+      <BuildFooter version={version} />
     </aside>
+  );
+}
+
+/** Mobile slide-over nav (below sm), opened by the telemetry-bar hamburger. */
+function MobileNav({ open, onClose, version }: { open: boolean; onClose: () => void; version?: string }) {
+  useEffect(() => {
+    if (!open) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.body.style.overflow = prev;
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [open, onClose]);
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex sm:hidden">
+      <div className="absolute inset-0 animate-fade-in bg-black/60 backdrop-blur-sm" onClick={onClose} aria-hidden="true" />
+      <aside
+        role="dialog"
+        aria-modal="true"
+        aria-label="Navigation"
+        className="relative flex h-full w-[232px] flex-col border-r border-line bg-panel animate-fade-in"
+      >
+        <BrandHeader />
+        <NavSections onNavigate={onClose} />
+        <BuildFooter version={version} />
+      </aside>
+    </div>
   );
 }
 
@@ -338,7 +382,7 @@ function StorageGauge({ usedGb, maxGb }: { usedGb: number; maxGb: number }) {
   );
 }
 
-function TelemetryBar() {
+function TelemetryBar({ onMenu }: { onMenu: () => void }) {
   const { data, error } = usePoll(() => api.system(), 5000);
   const clock = useClock();
   const recording = data?.cameras_recording ?? 0;
@@ -347,6 +391,16 @@ function TelemetryBar() {
   return (
     <header className="sticky top-0 z-20 animate-fade-in border-b border-line bg-panel/85 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] backdrop-blur supports-[backdrop-filter]:bg-panel/70">
       <div className="flex h-14 items-center gap-5 overflow-x-auto px-4 sm:px-6">
+        {/* Mobile menu toggle (the nav rail is hidden below sm) */}
+        <button
+          onClick={onMenu}
+          aria-label="Open navigation"
+          className="-ml-1 shrink-0 rounded-md p-1.5 text-fg-secondary hover:bg-raised hover:text-fg sm:hidden"
+        >
+          <svg viewBox="0 0 20 20" width="20" height="20" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round">
+            <path d="M3 6h14M3 10h14M3 14h14" />
+          </svg>
+        </button>
         {/* Link status */}
         <div className="flex items-center gap-2">
           <StatusLed
@@ -426,13 +480,15 @@ function TelemetryBar() {
 
 export function AppShell({ children }: { children: ReactNode }) {
   const { data } = usePoll(() => api.system(), 30000);
+  const [menuOpen, setMenuOpen] = useState(false);
   return (
     <div className="relative min-h-screen">
       <div className="app-atmosphere" aria-hidden="true" />
       <div className="relative z-10 flex min-h-screen">
         <NavRail version={data?.version} />
+        <MobileNav open={menuOpen} onClose={() => setMenuOpen(false)} version={data?.version} />
         <div className="flex min-h-screen min-w-0 flex-1 flex-col">
-          <TelemetryBar />
+          <TelemetryBar onMenu={() => setMenuOpen(true)} />
           <main className="flex-1">{children}</main>
         </div>
       </div>

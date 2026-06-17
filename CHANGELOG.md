@@ -5,6 +5,34 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] — 2026-06-17
+
+### Added
+
+- **Plugin store** — a browsable catalog (`GET /api/v1/registry`) with Core / Proprietary /
+  Community / Import shelves, built from a bundled open catalog plus optional **signed remote
+  registries** (detached Ed25519, verified server-side against pinned keys; fail-closed). New
+  **Plugins** dashboard page to browse + install + uninstall. `scripts/sign-catalog.sh` + an example
+  registry are included.
+- **Sandboxed Wasm plugins** — install headless, capability-zero `DetectionConsumer` plugins (any
+  language compiled to wasm32) loaded from a local directory and run in a [wasmi](https://wasmi-labs.github.io/)
+  sandbox with no ambient authority (no filesystem/network/clock), bounded by fuel + memory + table +
+  event/log caps, with per-plugin failure isolation. Behind an **off-by-default `wasm`** server feature,
+  so the default appliance never links a Wasm runtime. Reference guest in `examples/wasm-plugin`.
+- **System status** dashboard panel surfacing remote-access overlay reachability, disk/array (SMART/
+  RAID) health, and the live-transcode engine; an **Audit log** viewer; a guarded camera **Reboot**
+  control; and a **mobile navigation** menu.
+- Optional ANPR plate-OCR backend via `apps/ai/requirements-anpr.txt`.
+
+### Changed
+
+- The recorded-media plane (`/media/*`) is now **authenticated** when `HELDAR_AUTH_ENABLED=true`
+  (it was previously served without auth).
+- `GET /api/v1/events/types` now also returns event types observed at runtime (plugin/app-emitted), not
+  just the static taxonomy.
+- Retention now prunes the `webhook_deliveries`, `recording_gaps`, `search_log`, and `bakery_reports`
+  ledgers (previously unbounded).
+
 ## [0.1.3] — 2026-06-16
 
 ### Added
@@ -75,6 +103,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   generic reference apps (access control, movement intelligence, semantic search)
   and the composing server. Apache-2.0.
 
+[0.1.4]: https://github.com/Straits-AI/heldar/releases/tag/v0.1.4
+[0.1.3]: https://github.com/Straits-AI/heldar/releases/tag/v0.1.3
 [0.1.2]: https://github.com/Straits-AI/heldar/releases/tag/v0.1.2
 [0.1.1]: https://github.com/Straits-AI/heldar/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Straits-AI/heldar/releases/tag/v0.1.0

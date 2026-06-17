@@ -24,6 +24,7 @@ pub mod config;
 pub mod planner;
 pub mod proof;
 pub mod query;
+pub mod retention;
 pub mod routes;
 pub mod schema;
 

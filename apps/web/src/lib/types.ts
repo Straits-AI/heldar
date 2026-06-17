@@ -282,6 +282,17 @@ export interface StorageReport {
   projected_days_remaining: number | null;
 }
 
+/** Remote-access overlay (WireGuard/Tailscale/NetBird) reachability, reported by the kernel. */
+export interface OverlayStatus {
+  enabled: boolean;
+  kind: string; // tailscale | netbird | wireguard | none
+  iface?: string | null;
+  present: boolean;
+  operstate?: string | null;
+  up: boolean;
+  note: string;
+}
+
 export interface SystemInfo {
   name: string;
   version: string;
@@ -296,6 +307,8 @@ export interface SystemInfo {
   recordings_gb: number;
   max_recordings_gb: number;
   storage: StorageReport;
+  /** Remote-access overlay status (LAN-only when not enabled). */
+  remote_access: OverlayStatus;
   /** No recent disk_smart_warning/raid_degraded events (SMART/RAID health pass). */
   disk_health_ok: boolean;
   /** Timestamp of the most recent disk-health alert (any time), or null if none. */

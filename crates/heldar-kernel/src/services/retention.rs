@@ -449,6 +449,37 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         tracing::info!(deleted = evpruned, "retention: pruned old event-log rows");
     }
 
+    // 8b) Prune the webhook delivery ledger (one row per delivery attempt, per subscription, per event)
+    //     past the audit horizon. The delivery cursor lives on the subscription, not these rows, so
+    //     deleting old attempt records is safe — they are an at-rest audit trail, not delivery state.
+    let wdpruned = sqlx::query("DELETE FROM webhook_deliveries WHERE created_at < ?")
+        .bind(audit_cutoff)
+        .execute(pool)
+        .await?
+        .rows_affected();
+    if wdpruned > 0 {
+        tracing::info!(
+            deleted = wdpruned,
+            "retention: pruned old webhook-delivery rows"
+        );
+    }
+
+    // 8c) Prune RESOLVED recording-gap rows (filled/failed) past the audit horizon. Pending gaps are
+    //     left for the ANR re-fill engine to act on (they age out of its query via anr_max_gap_hours).
+    let gpruned = sqlx::query(
+        "DELETE FROM recording_gaps WHERE fill_state IN ('filled','failed') AND created_at < ?",
+    )
+    .bind(audit_cutoff)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if gpruned > 0 {
+        tracing::info!(
+            deleted = gpruned,
+            "retention: pruned resolved recording-gap rows"
+        );
+    }
+
     // 9) Prune scheduled snapshots past their retention window. The cutoff is `taken_at` (capture
     //    time, not the row's `created_at`). Delete the file first; only drop the DB row when the
     //    file is gone (mirrors the segment unlink pattern). Skipped entirely when hours = 0.

@@ -70,6 +70,9 @@ source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
 # 2. Install dependencies
 pip install -r requirements.txt
+# (optional) enable ANPR plate reading — adds an OCR backend:
+#   pip install -r requirements-anpr.txt
+# Without it, "anpr" tasks emit vehicles without a plate (never a fabricated one).
 
 # 3. Run (point it at a running Heldar Core)
 python worker.py --api http://localhost:8000

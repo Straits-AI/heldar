@@ -161,12 +161,16 @@ impl DetectionConsumer for WasmConsumer {
             tokio::task::spawn_blocking(move || run_guest(&engine, &module, &input_bytes, &limits))
                 .await;
 
-        let events = match outcome {
-            Ok(Ok(events)) => events,
+        let (events, dropped) = match outcome {
+            Ok(Ok(out)) => out,
             Ok(Err(e)) => return self.record_failure(&e).await,
             Err(_) => return self.record_failure("guest task panicked").await,
         };
         self.consecutive_failures.store(0, Ordering::Relaxed);
+        if dropped > 0 {
+            // The guest emitted past max_events / oversized — surface the truncation, don't hide it.
+            tracing::warn!(plugin = %self.id, dropped, "wasm: plugin emitted events were dropped (cap hit)");
+        }
 
         // Persist emitted events: namespaced, severity-clamped, and FORCE-scoped to the batch camera
         // (a guest cannot forge events for another camera).
@@ -335,13 +339,14 @@ fn new_store(engine: &Engine, limits: &Limits) -> Result<Store<HostState>, Strin
 }
 
 /// Run one batch through a guest: fresh Store, write the input, call `heldar_handle`, return the
-/// buffered events. Any trap / fuel-exhaustion / bad ABI is an `Err` (the caller isolates it).
+/// buffered events plus the count of events the guest tried to emit past the caps (dropped). Any trap
+/// / fuel-exhaustion / bad ABI is an `Err` (the caller isolates it).
 fn run_guest(
     engine: &Engine,
     module: &Module,
     input: &[u8],
     limits: &Limits,
-) -> Result<Vec<GuestEvent>, String> {
+) -> Result<(Vec<GuestEvent>, u32), String> {
     let linker = build_linker(engine)?;
     let mut store = new_store(engine, limits)?;
     let instance = linker
@@ -380,7 +385,8 @@ fn run_guest(
     if rc != 0 {
         return Err(format!("guest returned {rc}"));
     }
-    Ok(store.into_data().events)
+    let data = store.into_data();
+    Ok((data.events, data.dropped))
 }
 
 /// Instantiate a freshly-compiled module once to read its self-description.
@@ -558,8 +564,9 @@ mod tests {
         let d = describe(&engine, &module, &limits()).unwrap();
         assert_eq!(d.id, "t");
         assert_eq!(d.interested_in, vec!["detection".to_string()]);
-        let events = run_guest(&engine, &module, b"{}", &limits()).unwrap();
+        let (events, dropped) = run_guest(&engine, &module, b"{}", &limits()).unwrap();
         assert_eq!(events.len(), 1);
+        assert_eq!(dropped, 0);
         assert_eq!(events[0].event_type, "hit");
         assert_eq!(events[0].severity.as_deref(), Some("warning"));
     }

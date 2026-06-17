@@ -1,0 +1,12 @@
+# Heldar AI worker — OPTIONAL ANPR plate-OCR backend.
+#
+# The "anpr" task type reads plates only when an OCR backend is installed; without one the AnprAnalyzer
+# emits vehicles WITHOUT a plate (never a fabricated one) and the entry engine logs unreadable-plate
+# events for guard review. Install this on top of the core requirements to enable plate reading:
+#
+#   pip install -r requirements.txt -r requirements-anpr.txt
+#
+# This pins PaddleOCR (PP-OCR), the preferred backend. To use EasyOCR instead, comment the line below
+# and uncomment easyocr (it shares torch with ultralytics). Both download models on first use.
+paddleocr>=2.7
+# easyocr>=1.7

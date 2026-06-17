@@ -17,6 +17,8 @@ pub struct SearchConfig {
     pub llm_model: String,
     /// Max hits returned per search.
     pub max_results: i64,
+    /// How long the `search_log` query-history/audit rows are kept before retention prunes them.
+    pub query_log_retention_days: i64,
 }
 
 impl SearchConfig {
@@ -33,6 +35,8 @@ impl SearchConfig {
                 .filter(|s| !s.trim().is_empty())
                 .unwrap_or_else(|| "gpt-4o-mini".to_string()),
             max_results: parse_or::<i64>("HELDAR_SEARCH_MAX_RESULTS", 200).clamp(1, 5000),
+            query_log_retention_days: parse_or::<i64>("HELDAR_SEARCH_QUERY_LOG_RETENTION_DAYS", 90)
+                .max(1),
         }
     }
 }

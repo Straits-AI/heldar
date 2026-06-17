@@ -389,7 +389,7 @@ async fn list_deliveries(
     Ok(Json(rows))
 }
 
-/// One known event type plus a one-line description.
+/// One known event type plus a one-line description (the built-in taxonomy).
 #[derive(Debug, Serialize)]
 struct EventTypeInfo {
     event_type: &'static str,
@@ -400,9 +400,9 @@ struct EventTypeInfo {
 /// Apps and AI workers may additionally emit their own custom `event_type` strings (the AI ingest path
 /// passes a worker-supplied type straight through), so this list is descriptive, not exhaustive.
 async fn event_types(
-    State(_st): State<AppState>,
+    State(st): State<AppState>,
     principal: Principal,
-) -> AppResult<Json<Vec<EventTypeInfo>>> {
+) -> AppResult<Json<Vec<serde_json::Value>>> {
     principal.require(principal.can_view(), "view event types")?;
     let types = vec![
         EventTypeInfo {
@@ -467,5 +467,23 @@ async fn event_types(
             description: "Access control: an entry matched a watchlist/blocklist and was denied.",
         },
     ];
-    Ok(Json(types))
+    // Start with the built-in taxonomy, then UNION in event types actually observed in the events table
+    // (plugin/app-emitted types like `wasm.*`, which the static list can't know), so they appear in the
+    // webhook subscription picker. Capped + best-effort: a query failure just returns the static set.
+    let known: std::collections::HashSet<&str> = types.iter().map(|t| t.event_type).collect();
+    let mut out: Vec<serde_json::Value> = types
+        .iter()
+        .map(|t| json!({ "event_type": t.event_type, "description": t.description }))
+        .collect();
+    if let Ok(rows) = sqlx::query_scalar::<_, String>(
+        "SELECT DISTINCT event_type FROM events ORDER BY event_type LIMIT 500",
+    )
+    .fetch_all(&st.pool)
+    .await
+    {
+        for ty in rows.into_iter().filter(|t| !known.contains(t.as_str())) {
+            out.push(json!({ "event_type": ty, "description": "Observed at runtime (plugin/app-emitted)." }));
+        }
+    }
+    Ok(Json(out))
 }
