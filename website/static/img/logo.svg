@@ -1,0 +1,25 @@
+<svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Heldar">
+  <defs>
+    <linearGradient id="heldarMark" x1="3" y1="11" x2="29" y2="11" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#fbbf24"/>
+      <stop offset="42%" stop-color="#f59e0b"/>
+      <stop offset="78%" stop-color="#a78bfa"/>
+      <stop offset="100%" stop-color="#2dd4bf"/>
+    </linearGradient>
+  </defs>
+  <!-- Bifrost arc — the lone spectral flourish (identical to the dashboard BrandMark) -->
+  <path d="M4.5 12.5a11.5 11.5 0 0 1 23 0" stroke="url(#heldarMark)" stroke-width="2" stroke-linecap="round"/>
+  <!-- Aperture / eye ring -->
+  <circle cx="16" cy="18" r="8" stroke="#f59e0b" stroke-width="1.7"/>
+  <!-- Aperture blades -->
+  <g stroke="#f59e0b" stroke-width="1.2" stroke-linecap="round" opacity="0.55">
+    <path d="M16 11.2 19.4 17"/>
+    <path d="M22.8 19.4 16.6 19.7"/>
+    <path d="M19 24.4 14.6 19.9"/>
+    <path d="M13 24.4 16 18.3"/>
+    <path d="M9.2 19.4 15.4 16.6"/>
+    <path d="M13 11.6 16 17"/>
+  </g>
+  <!-- Iris -->
+  <circle cx="16" cy="18" r="2.5" fill="#f59e0b"/>
+</svg>

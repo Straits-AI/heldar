@@ -1,0 +1,33 @@
+[package]
+name = "heldar-movement"
+version = "0.1.4"
+edition = "2021"
+rust-version = "1.85"
+description = "Heldar Movement intelligence — generic cross-camera ReID + movement trails + red-zone breach alerts. Multi-signal candidate matching (plate/attributes/topology/time), never pure visual embedding; ReID is probabilistic correlation with human review, not legal identity. Built on the heldar-kernel platform."
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/Straits-AI/heldar"
+keywords = ["reid", "cctv", "tracking", "surveillance", "video"]
+categories = ["multimedia::video"]
+
+[lib]
+name = "heldar_movement"
+path = "src/lib.rs"
+
+[dependencies]
+heldar-kernel = { path = "../heldar-kernel", version = "0.1.4" }
+axum = { version = "0.8", features = ["macros"] }
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+    "chrono",
+    "macros",
+    "json",
+] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+tracing = "0.1"
+tokio = { version = "1", features = ["time"] }
+anyhow = "1"
