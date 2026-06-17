@@ -1,5 +1,6 @@
-use std::env;
 use std::path::PathBuf;
+
+use crate::env::{parse_bool, parse_or, var, var_or};
 
 /// Runtime configuration, loaded from environment (see `.env.example`).
 #[derive(Clone, Debug)]
@@ -193,25 +194,6 @@ pub struct Config {
     /// unset it falls back to `apps/web/dist` relative to the binary CWD. `None` when neither path
     /// exists — the server then runs API-only (no dashboard).
     pub web_dir: Option<PathBuf>,
-}
-
-fn var(key: &str) -> Option<String> {
-    env::var(key).ok().filter(|s| !s.trim().is_empty())
-}
-
-fn var_or(key: &str, default: &str) -> String {
-    var(key).unwrap_or_else(|| default.to_string())
-}
-
-fn parse_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    var(key).and_then(|v| v.parse().ok()).unwrap_or(default)
-}
-
-fn parse_bool(key: &str, default: bool) -> bool {
-    match var(key) {
-        Some(v) => matches!(v.to_ascii_lowercase().as_str(), "1" | "true" | "yes" | "on"),
-        None => default,
-    }
 }
 
 impl Config {

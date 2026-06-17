@@ -1,12 +1,6 @@
 //! Movement-intelligence configuration (loaded from env by the composing server).
 
-fn parse_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key)
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
+use heldar_kernel::env::parse_or;
 
 #[derive(Clone, Debug)]
 pub struct MovementConfig {

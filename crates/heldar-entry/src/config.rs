@@ -1,13 +1,7 @@
 //! The access-control app's own configuration, loaded from the environment by the composing server. The open
 //! kernel does not carry any entry-app tuning knobs.
 
-fn parse_or<T: std::str::FromStr>(key: &str, default: T) -> T {
-    std::env::var(key)
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(default)
-}
+use heldar_kernel::env::parse_or;
 
 #[derive(Clone, Debug)]
 pub struct EntryConfig {
