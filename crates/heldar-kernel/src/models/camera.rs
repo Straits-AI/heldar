@@ -49,6 +49,9 @@ pub struct Camera {
     /// RTSP playback built from address+credentials.
     pub anr_replay_url_template: Option<String>,
     pub enabled: bool,
+    /// AI decode priority (higher = more important). The frame sampler favors high-priority cameras
+    /// under fps-budget pressure and sheds low-priority ones first.
+    pub priority: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -93,6 +96,7 @@ pub struct CameraView {
     pub anr_enabled: bool,
     pub anr_replay_url_template: Option<String>,
     pub enabled: bool,
+    pub priority: i64,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -134,6 +138,7 @@ impl From<Camera> for CameraView {
             anr_enabled: c.anr_enabled,
             anr_replay_url_template: c.anr_replay_url_template,
             enabled: c.enabled,
+            priority: c.priority,
             created_at: c.created_at,
             updated_at: c.updated_at,
         }
@@ -202,6 +207,7 @@ pub struct CameraUpdate {
     pub anr_enabled: Option<bool>,
     pub anr_replay_url_template: Option<String>,
     pub enabled: Option<bool>,
+    pub priority: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]

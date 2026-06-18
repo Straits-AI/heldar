@@ -194,6 +194,7 @@ mod tests {
             anr_enabled: false,
             anr_replay_url_template: None,
             enabled: true,
+            priority: 100,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

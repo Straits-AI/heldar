@@ -102,12 +102,12 @@ impl SamplerManager {
         }
 
         // Each (camera, stream_profile) with at least one enabled task, with its max fps + width.
-        let rows: Vec<(String, String, f64, i64)> = sqlx::query_as(
-            "SELECT c.id, t.stream_profile, MAX(t.fps) AS fps, MAX(t.width) AS width
+        let rows: Vec<(String, String, f64, i64, i64)> = sqlx::query_as(
+            "SELECT c.id, t.stream_profile, MAX(t.fps) AS fps, MAX(t.width) AS width, c.priority
              FROM cameras c JOIN ai_tasks t ON t.camera_id = c.id
              WHERE c.enabled = 1 AND t.enabled = 1
              GROUP BY c.id, t.stream_profile
-             ORDER BY c.id, t.stream_profile",
+             ORDER BY c.priority DESC, c.id, t.stream_profile",
         )
         .fetch_all(&self.pool)
         .await
@@ -121,25 +121,28 @@ impl SamplerManager {
         // Cap concurrent decoders so total fps cannot exceed the budget even at the MIN_FPS floor.
         let max_samplers = (budget / MIN_FPS).floor().max(1.0) as usize;
         let run = rows.len().min(max_samplers);
-        let per_camera_cap = budget / run as f64;
+        // Priority-aware allocation: rows are ordered priority DESC, so high-priority cameras (e.g. an
+        // ANPR gate lane) get their requested fps first and the lowest-priority cameras are floored to
+        // MIN_FPS or shed to 0 — instead of degrading every camera equally / blinding arbitrary ones.
+        let want: Vec<f64> = rows.iter().map(|r| r.2).collect();
+        let alloc = allocate_fps(&want, budget, max_samplers);
         if rows.len() > run {
             tracing::warn!(
                 requested = rows.len(),
                 running = run,
-                "sampler: AI fps budget exhausted; some cameras will not be sampled"
+                "sampler: AI fps budget exhausted; lowest-priority cameras will not be sampled"
             );
         }
         tracing::info!(
             samplers = run,
             budget,
-            per_camera_cap,
-            "sampler: rebalancing AI frame budget"
+            "sampler: rebalancing AI frame budget by priority"
         );
 
-        for (i, (cam, profile, max_fps, width)) in rows.into_iter().enumerate() {
-            if i < run {
-                let effective = max_fps.min(per_camera_cap).max(MIN_FPS);
-                self.spawn(cam, profile, effective, width).await;
+        for (i, (cam, profile, _max_fps, width, _priority)) in rows.into_iter().enumerate() {
+            let fps = alloc[i];
+            if fps > 0.0 {
+                self.spawn(cam, profile, fps, width).await;
             } else {
                 self.set_info(&cam, &profile, "budget_exhausted", 0.0).await;
             }
@@ -343,11 +346,65 @@ async fn sleep_or_stop(stop: &mut watch::Receiver<bool>, secs: u64) -> bool {
     }
 }
 
+/// Allocate the global AI fps `budget` across `want` (each camera's requested max fps), which MUST be
+/// ordered priority-high-first. Returns granted fps per camera (0.0 = shed / budget-exhausted). Greedy
+/// by priority: each running camera gets its requested fps while reserving `MIN_FPS` for the remaining
+/// running cameras — so high-priority cameras keep full fidelity, the lowest-priority are floored to
+/// `MIN_FPS`, and any beyond `max_samplers` are shed to 0.
+fn allocate_fps(want: &[f64], budget: f64, max_samplers: usize) -> Vec<f64> {
+    let run = want.len().min(max_samplers);
+    let mut out = vec![0.0; want.len()];
+    let mut remaining = budget;
+    for (i, &w) in want.iter().enumerate().take(run) {
+        let others_after = (run - i - 1) as f64;
+        let reserve = MIN_FPS * others_after;
+        let grant = w.min((remaining - reserve).max(MIN_FPS)).max(MIN_FPS);
+        out[i] = grant;
+        remaining -= grant;
+    }
+    out
+}
+
 impl SamplerManager {
     /// Filesystem path of the latest sampled frame for a (camera, profile).
     pub fn frame_path(&self, camera_id: &str, profile: &str) -> std::path::PathBuf {
         self.cfg
             .camera_frames_dir(camera_id)
             .join(frame_filename(profile))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn allocate_favors_priority_then_floors_the_rest() {
+        // Priority-ordered requests [10,5,5] against a budget of 10.
+        let got = allocate_fps(&[10.0, 5.0, 5.0], 10.0, 10);
+        assert_eq!(got.len(), 3);
+        assert!(
+            got[0] > got[1] && got[0] > got[2],
+            "highest-priority camera gets the most: {got:?}"
+        );
+        assert!(
+            got[1] >= MIN_FPS && got[2] >= MIN_FPS,
+            "running cameras stay >= MIN_FPS: {got:?}"
+        );
+        assert!(
+            (got.iter().sum::<f64>() - 10.0).abs() < 1e-9,
+            "the whole budget is allocated when demand exceeds it: {got:?}"
+        );
+    }
+
+    #[test]
+    fn allocate_sheds_lowest_priority_beyond_capacity() {
+        // Room for only 2 of 3 cameras: the last (lowest-priority) is shed to 0.
+        let got = allocate_fps(&[5.0, 5.0, 5.0], 10.0, 2);
+        assert_eq!(got[2], 0.0, "lowest-priority camera shed to 0: {got:?}");
+        assert!(
+            got[0] >= MIN_FPS && got[1] >= MIN_FPS,
+            "the two running cameras stay >= MIN_FPS: {got:?}"
+        );
     }
 }

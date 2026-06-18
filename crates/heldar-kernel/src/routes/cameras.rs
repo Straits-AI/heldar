@@ -255,6 +255,7 @@ async fn update_camera(
     let caps = SqlxJson(body.capabilities.unwrap_or(cur.capabilities.0));
     let record_enabled = body.record_enabled.unwrap_or(cur.record_enabled);
     let enabled = body.enabled.unwrap_or(cur.enabled);
+    let priority = body.priority.unwrap_or(cur.priority);
     let seg = body
         .segment_seconds
         .map(|v| v.clamp(2, 3600))
@@ -291,7 +292,7 @@ async fn update_camera(
             main_stream_url=?, sub_stream_url=?, record_stream=?, capabilities=?, record_enabled=?,
             segment_seconds=?, retention_hours=?, storage_quota_bytes=?, record_audio=?, record_mode=?,
             pre_roll_seconds=?, post_roll_seconds=?, mirror_enabled=?, anr_enabled=?,
-            anr_replay_url_template=?, enabled=?, updated_at=?
+            anr_replay_url_template=?, enabled=?, priority=?, updated_at=?
          WHERE id=?",
     )
     .bind(&name)
@@ -318,6 +319,7 @@ async fn update_camera(
     .bind(anr_enabled)
     .bind(&anr_replay_url_template)
     .bind(enabled)
+    .bind(priority)
     .bind(Utc::now())
     .bind(&id)
     .execute(&st.pool)
