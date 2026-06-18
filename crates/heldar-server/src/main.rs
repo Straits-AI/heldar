@@ -134,6 +134,8 @@ async fn main() -> anyhow::Result<()> {
         .context("building http client")?;
     // Plugin store catalog engine (bundled + signed remote registries).
     let catalog = Arc::new(services::registry::CatalogService::new(&cfg));
+    // Kept for the durable fan-out drainer (consumers is moved into AppState below).
+    let drain_consumers = Arc::clone(&consumers);
     let state = AppState {
         pool: pool.clone(),
         cfg: cfg.clone(),
@@ -165,6 +167,12 @@ async fn main() -> anyhow::Result<()> {
         let (p, c) = (pool.clone(), cfg.clone());
         spawn_supervised("retention", move || {
             services::retention::run(p.clone(), c.clone())
+        });
+        // Durable perception fan-out: replays detection batches whose consumer fan-out didn't
+        // complete before a crash (idempotent via consumer_fanout).
+        let (p, cons) = (pool.clone(), drain_consumers.clone());
+        spawn_supervised("fanout_drain", move || {
+            services::fanout::run(p.clone(), cons.clone())
         });
         // Bundled domain apps run their own retention loops (they own their data lifecycle).
         let (p, c, e) = (pool.clone(), cfg.clone(), entry_cfg.clone());

@@ -447,6 +447,10 @@ async fn ingest(
     // Fan the committed batch out to registered perception consumers (zones, ANPR/entry, future
     // apps). The kernel does not know or branch on which apps exist — each consumer self-selects by
     // task_type. Engines that need trustworthy timing use server time, not the worker timestamp.
+    //
+    // Durability: fan-out happens after commit, so a crash here would otherwise drop the consumer
+    // notification. `fan_out` claims each (consumer, frame) at-most-once; on success we mark the
+    // outbox batch fanned, and the `fanout` drainer replays any batch left un-fanned by a crash.
     let batch = crate::services::consumer::DetectionBatch {
         camera_id: &body.camera_id,
         site_id: cam.site_id.as_deref(),
@@ -454,10 +458,24 @@ async fn ingest(
         detections: &body.detections,
         timestamp: ts,
     };
-    for consumer in st.consumers.iter() {
-        if consumer.interested_in(&body.task_type) {
-            tracing::trace!(consumer = consumer.name(), task_type = %body.task_type, "ingest fan-out");
-            consumer.consume(&batch).await;
+    let fanned = crate::services::consumer::fan_out(
+        &st.pool,
+        &st.consumers,
+        &batch,
+        body.frame_id.as_deref(),
+    )
+    .await;
+    if fanned {
+        if let Some(fid) = body.frame_id.as_deref() {
+            let _ = sqlx::query(
+                "UPDATE outbox SET fanned_out_at = ? \
+                 WHERE topic = 'detections' AND camera_id = ? AND frame_id = ? AND fanned_out_at IS NULL",
+            )
+            .bind(Utc::now())
+            .bind(&body.camera_id)
+            .bind(fid)
+            .execute(&st.pool)
+            .await;
         }
     }
 
