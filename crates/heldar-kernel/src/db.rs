@@ -52,3 +52,54 @@ pub async fn clear_segment_read_locks(pool: &SqlitePool) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// First-principles concurrency invariant: under heavy concurrent writers on the real production
+    /// pool config (WAL + busy_timeout), a normal write must WAIT (serialize) rather than surface
+    /// SQLITE_BUSY as an error. If this ever fails, the busy_timeout is too low (and the 503 mapping
+    /// in error.rs is the user-facing safety net).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_writers_serialize_without_busy_errors() {
+        let dir = std::env::temp_dir().join(format!("heldar-walstress-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut cfg = Config::from_env();
+        cfg.database_url = format!("sqlite://{}", dir.join("t.db").display());
+        cfg.db_max_connections = 8;
+        let pool = init_pool(&cfg).await.unwrap();
+        run_migrations(&pool).await.unwrap();
+
+        // 64 concurrent writers contend for the single WAL writer slot.
+        let mut handles = Vec::new();
+        for i in 0..64 {
+            let p = pool.clone();
+            handles.push(tokio::spawn(async move {
+                let now = chrono::Utc::now();
+                sqlx::query(
+                    "INSERT INTO cameras (id, name, retention_hours, storage_quota_bytes, created_at, updated_at)
+                     VALUES (?, ?, 168, NULL, ?, ?)",
+                )
+                .bind(format!("cam{i}"))
+                .bind(format!("cam{i}"))
+                .bind(now)
+                .bind(now)
+                .execute(&p)
+                .await
+            }));
+        }
+        let mut errors = 0usize;
+        for h in handles {
+            if h.await.unwrap().is_err() {
+                errors += 1;
+            }
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            errors, 0,
+            "concurrent writers must not surface SQLITE_BUSY under WAL + busy_timeout ({errors} failed)"
+        );
+    }
+}
