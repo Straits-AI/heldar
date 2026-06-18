@@ -256,6 +256,15 @@ async fn main() -> anyhow::Result<()> {
                 services::registry::run(c.clone())
             });
         }
+        // Edge-side fleet self-registration: POST this node's identity to the control plane on boot +
+        // heartbeat so it joins the fleet without static config. Parks unless HELDAR_CP_URL +
+        // HELDAR_SITE_ID + HELDAR_PUBLIC_BASE_URL are all set (the fleet is opt-in).
+        {
+            let c = cfg.clone();
+            spawn_supervised("fleet_register", move || {
+                services::fleet_register::run(c.clone())
+            });
+        }
     }
 
     // Allow all origins if configured with "*" or left empty; otherwise restrict to the list.

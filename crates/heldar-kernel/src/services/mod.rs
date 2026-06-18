@@ -5,6 +5,7 @@ pub mod clip;
 pub mod consumer;
 pub mod discovery;
 pub mod fanout;
+pub mod fleet_register;
 pub mod health;
 pub mod indexer;
 pub mod mediamtx;

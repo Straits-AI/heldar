@@ -166,6 +166,23 @@ pub struct Config {
     /// Optional site identifier stamped onto outbox rows and surfaced at `GET /api/v1/site` for the
     /// edge->cloud fleet uplink. Empty/unset = a single unnamed site.
     pub site_id: Option<String>,
+    /// Control-plane base URL for edge-side self-registration (`HELDAR_CP_URL`). Unset (default) = this
+    /// node never phones home; the fleet is opt-in. When set together with `site_id` and
+    /// `public_base_url`, the node POSTs its identity to the control plane on boot + on a heartbeat, so
+    /// the control plane drains it without any static config or restart.
+    pub cp_url: Option<String>,
+    /// This node's externally reachable base URL, as the control plane should address it
+    /// (`HELDAR_PUBLIC_BASE_URL`, e.g. its overlay/WireGuard address). Required for self-registration —
+    /// the node cannot infer it (it binds `0.0.0.0`). Unset → self-registration parks.
+    pub public_base_url: Option<String>,
+    /// Bearer credential the control plane presents when draining this node's outbox
+    /// (`HELDAR_CP_TOKEN`). Empty (default) when this node runs with auth disabled (the LAN default);
+    /// when auth is enabled, set it to a valid API key the control plane may use.
+    pub cp_token: String,
+    /// Heartbeat cadence (seconds) for re-registration with the control plane
+    /// (`HELDAR_CP_REGISTER_INTERVAL_S`). Re-registration is idempotent, so the heartbeat also
+    /// re-teaches a control plane that restarted or lost its registry.
+    pub cp_register_interval_s: u64,
     // ---- Plugin registry / store (Phase C) ----
     /// Master switch for the plugin store's remote-registry fetching. When false, the store shows only
     /// the bundled open catalog + locally installed plugins (fully offline). The bundled catalog is
@@ -322,6 +339,10 @@ impl Config {
             live_transcode_engine: var_or("HELDAR_LIVE_TRANSCODE_ENGINE", "software"),
             vaapi_device: var_or("HELDAR_VAAPI_DEVICE", "/dev/dri/renderD128"),
             site_id: var("HELDAR_SITE_ID"),
+            cp_url: var("HELDAR_CP_URL"),
+            public_base_url: var("HELDAR_PUBLIC_BASE_URL"),
+            cp_token: var_or("HELDAR_CP_TOKEN", ""),
+            cp_register_interval_s: parse_or("HELDAR_CP_REGISTER_INTERVAL_S", 300),
             registry_enabled: parse_bool("HELDAR_REGISTRY_ENABLED", true),
             registry_urls: var_or("HELDAR_REGISTRY_URLS", "")
                 .split(',')
