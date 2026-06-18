@@ -5,6 +5,25 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed (breaking: schema reset)
+
+- **Consolidated the 24 incremental kernel migrations into a single `0001_init.sql` baseline.** Done
+  pre-1.0 with no production deployments, so the migration history was reset rather than preserved:
+  **fresh databases only** — a database created by an earlier `0.1.x` cannot be upgraded across this
+  collapse and must be recreated.
+- **Removed the vestigial multi-tenant scaffold** (`tenants` table + `sites.tenant_id`). Heldar is
+  single-tenant-per-deployment (each customer runs their own DVR); the tenant layer was never written
+  or read. `sites` stays (single-org multi-site is real).
+
+### Added
+
+- **Per-camera AI decode priority** (`cameras.priority`): under fps-budget pressure the sampler now
+  favors high-priority cameras (e.g. an ANPR gate lane) and sheds the lowest-priority first, instead
+  of degrading every camera equally / blinding cameras in arbitrary order.
+- `docs/adr/0001` — the scale + edge/cloud control-plane architecture program.
+
 ## [0.1.6] — 2026-06-18
 
 First-principles stress/adversarial pass over the kernel's critical paths (concurrency, failure
