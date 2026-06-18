@@ -5,6 +5,41 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.6] — 2026-06-18
+
+First-principles stress/adversarial pass over the kernel's critical paths (concurrency, failure
+injection, property tests). Twenty-four invariants tested; the eleven that didn't hold are fixed.
+
+### Fixed
+
+- **Retention (data loss):** the sweep unlinked a segment file and then deleted its row without
+  re-checking the lock predicate — an evidence-hold or export read-lock committing mid-sweep could be
+  destroyed. Deletion is now a TOCTOU-safe conditional `DELETE` (file unlinked only when the row is
+  actually removed). Also fixed over-pruning: the quota/size loops deleted a whole batch past budget;
+  they now stop the instant budget is met.
+- **Auth (lockout):** the "last active admin" guard was check-then-act; concurrent demotions could
+  drain admins to zero. Now an atomic single-statement guard.
+- **Recordings:** `fetch_segments_in_range` could silently drop the newest segments on long ranges
+  (false timeline gap); now keyset-paginated. Segments can no longer overlap in time (predecessor
+  clamped on index).
+- **Export read-locks:** clip/snapshot/backup released the segment read-lock only on the happy path;
+  a cancelled or panicking export leaked it (footage un-prunable). Now an RAII guard releases on every
+  outcome.
+- **Clip honesty:** exports report `covered_seconds` + `gaps[]` instead of silently bridging real
+  recording gaps.
+
+### Added
+
+- **Durable perception fan-out:** consumer fan-out happened after commit, best-effort — a crash
+  dropped the notification. A new drainer replays un-fanned `outbox` batches, made exactly-once-safe by
+  an at-most-once `consumer_fanout` claim per `(consumer, camera_id, frame_id)` (no consumer code
+  changed). Migrations 0022 (incident index) + 0023 (fan-out durability).
+
+### Hardened
+
+- Ingest body bounded before deserialization; the incidents roll-up is indexed + `LIMIT`ed; transient
+  DB busy/saturation maps to `503 Retry-After` instead of `500`.
+
 ## [0.1.5] — 2026-06-18
 
 ### Added
