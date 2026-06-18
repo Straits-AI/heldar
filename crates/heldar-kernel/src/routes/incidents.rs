@@ -157,7 +157,8 @@ async fn list_incidents(
          FROM segments
          WHERE incident_id IS NOT NULL
          GROUP BY incident_id
-         ORDER BY newest_end DESC",
+         ORDER BY newest_end DESC
+         LIMIT 1000",
     )
     .fetch_all(&st.pool)
     .await?;

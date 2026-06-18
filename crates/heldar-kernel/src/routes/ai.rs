@@ -2,7 +2,7 @@
 //! frame, post detections/events back), sampler status, and a detections query.
 
 use axum::body::Body;
-use axum::extract::{Path, Query, State};
+use axum::extract::{DefaultBodyLimit, Path, Query, State};
 use axum::http::{header, StatusCode};
 use axum::response::Response;
 use axum::routing::{get, post};
@@ -32,7 +32,13 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/v1/ai/tasks", get(list_all_tasks))
         .route("/api/v1/ai/samplers", get(sampler_status))
-        .route("/api/v1/ai/events", post(ingest))
+        // Bound the ingest body BEFORE deserialization so a hostile/buggy worker can't force a huge
+        // allocation (the MAX_INGEST_DETECTIONS count check only runs after the body is fully parsed).
+        // Generous headroom for MAX_INGEST_DETECTIONS rich detections; well under any real batch.
+        .route(
+            "/api/v1/ai/events",
+            post(ingest).layer(DefaultBodyLimit::max(INGEST_BODY_LIMIT_BYTES)),
+        )
         .route("/api/v1/cameras/{id}/frame", get(latest_frame))
         .route("/api/v1/cameras/{id}/detections", get(list_detections))
 }
@@ -348,6 +354,11 @@ async fn list_detections(
 
 /// Max detections accepted in a single ingest request (DoS / write-amplification bound).
 const MAX_INGEST_DETECTIONS: usize = 1000;
+
+/// Hard cap on the ingest request body, enforced by the framework BEFORE deserialization (defense
+/// in depth vs the post-parse count guard). 8 MiB comfortably fits MAX_INGEST_DETECTIONS detections
+/// with bounding boxes + attributes, while refusing a body crafted to exhaust memory.
+const INGEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
 /// Columns bound per detection row in the batched INSERT in [`ingest`].
 const DETECTION_INSERT_COLS: usize = 11;
