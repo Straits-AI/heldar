@@ -5,7 +5,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.1.5] — 2026-06-18
+
+### Added
+
+- **`heldar_kernel::env`** — a shared public module of env-parsing helpers (`var`, `var_or`,
+  `parse_or`, `parse_bool`) with one consistent empty/whitespace + bool-truthiness policy. The
+  generic app crates (`heldar-entry`, `heldar-movement`, `heldar-search`) now import `parse_or`
+  from it instead of each carrying a byte-identical private copy.
 
 ### Removed
 
@@ -14,6 +21,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   superseded by webhook subscriptions. **Upgrade note:** a deployment that set
   `HELDAR_ALERT_WEBHOOK_URL` must recreate it as a webhook subscription via
   `POST /api/v1/webhooks` (or the dashboard's Webhooks panel).
+
+### Internal
+
+- CI now gates the open (`--no-default-features`) build, the lean-appliance guarantee (no `wasmi`
+  by default), the `wasm` feature, RUSTSEC advisories, and the web typecheck. A fail-closed
+  proprietary-code gate aborts the open-repo generator if any BakerySense surface survives stripping.
 
 ## [0.1.4] — 2026-06-17
 
