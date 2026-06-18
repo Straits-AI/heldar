@@ -17,6 +17,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use anyhow::Context;
 use serde_json::{json, Value};
 
 use crate::config::Config;
@@ -30,6 +31,28 @@ fn register_url(cp_url: &str) -> String {
 /// it on, and the bearer the control plane presents when draining this node's outbox.
 fn register_body(site_id: &str, base_url: &str, token: &str) -> Value {
     json!({ "id": site_id, "base_url": base_url, "token": token })
+}
+
+/// Build the HTTP client used to register, configuring mTLS (client identity + control-plane CA) when
+/// `HELDAR_CP_TLS_*` is set. Errors only on unreadable/invalid cert material.
+fn build_client(cfg: &Config) -> anyhow::Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(10));
+    if let Some(t) = &cfg.cp_tls {
+        let cert = std::fs::read(&t.client_cert)
+            .with_context(|| format!("reading client cert {}", t.client_cert.display()))?;
+        let key = std::fs::read(&t.client_key)
+            .with_context(|| format!("reading client key {}", t.client_key.display()))?;
+        let ca = std::fs::read(&t.server_ca)
+            .with_context(|| format!("reading control-plane CA {}", t.server_ca.display()))?;
+        // reqwest's PEM identity wants key + cert chain in one buffer.
+        let mut identity_pem = key;
+        identity_pem.extend_from_slice(&cert);
+        let identity =
+            reqwest::Identity::from_pem(&identity_pem).context("building client identity")?;
+        let root = reqwest::Certificate::from_pem(&ca).context("parsing control-plane CA")?;
+        builder = builder.identity(identity).add_root_certificate(root);
+    }
+    builder.build().context("building HTTP client")
 }
 
 /// Edge-side self-registration loop. Parks forever unless fully configured for the fleet (control-plane
@@ -46,7 +69,15 @@ pub async fn run(cfg: Arc<Config>) {
         return;
     };
 
-    let client = reqwest::Client::new();
+    let client = match build_client(&cfg) {
+        Ok(c) => c,
+        Err(e) => {
+            // A persistent cert-config error: park rather than tight-loop respawning.
+            tracing::error!(error = %e, "fleet self-registration disabled: bad mTLS config");
+            std::future::pending::<()>().await;
+            return;
+        }
+    };
     let url = register_url(cp_url);
     let body = register_body(site_id, base_url, &cfg.cp_token);
     // `interval`'s first tick fires immediately → register on boot, then heartbeat on cadence.

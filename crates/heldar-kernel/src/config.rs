@@ -183,6 +183,11 @@ pub struct Config {
     /// (`HELDAR_CP_REGISTER_INTERVAL_S`). Re-registration is idempotent, so the heartbeat also
     /// re-teaches a control plane that restarted or lost its registry.
     pub cp_register_interval_s: u64,
+    /// Optional mTLS material for talking to the control plane: this node's client cert + key (to
+    /// present when registering) and the CA that signed the control plane's server cert (to verify
+    /// it). Required as a set when the control plane enforces mTLS; unset = plain HTTP to the control
+    /// plane (the LAN/overlay default).
+    pub cp_tls: Option<CpTlsCfg>,
     // ---- Plugin registry / store (Phase C) ----
     /// Master switch for the plugin store's remote-registry fetching. When false, the store shows only
     /// the bundled open catalog + locally installed plugins (fully offline). The bundled catalog is
@@ -211,6 +216,41 @@ pub struct Config {
     /// unset it falls back to `apps/web/dist` relative to the binary CWD. `None` when neither path
     /// exists — the server then runs API-only (no dashboard).
     pub web_dir: Option<PathBuf>,
+}
+
+/// mTLS material the edge presents to / uses to verify the control plane.
+#[derive(Clone, Debug)]
+pub struct CpTlsCfg {
+    /// PEM path: this node's client certificate (CN must equal `site_id`).
+    pub client_cert: PathBuf,
+    /// PEM path: the private key for the client certificate.
+    pub client_key: PathBuf,
+    /// PEM path: the CA that signed the control plane's server certificate.
+    pub server_ca: PathBuf,
+}
+
+/// Read the control-plane mTLS material from the environment. All-or-none: a partial set is a
+/// misconfiguration, so warn and disable mTLS (the heartbeat will then fail loudly against an https
+/// control plane, which is the visible signal to fix the config).
+fn cp_tls_from_env() -> Option<CpTlsCfg> {
+    match (
+        var("HELDAR_CP_TLS_CLIENT_CERT"),
+        var("HELDAR_CP_TLS_CLIENT_KEY"),
+        var("HELDAR_CP_TLS_CA"),
+    ) {
+        (None, None, None) => None,
+        (Some(client_cert), Some(client_key), Some(server_ca)) => Some(CpTlsCfg {
+            client_cert: client_cert.into(),
+            client_key: client_key.into(),
+            server_ca: server_ca.into(),
+        }),
+        _ => {
+            tracing::warn!(
+                "control-plane mTLS needs all of HELDAR_CP_TLS_CLIENT_CERT, HELDAR_CP_TLS_CLIENT_KEY, HELDAR_CP_TLS_CA; ignoring partial config"
+            );
+            None
+        }
+    }
 }
 
 impl Config {
@@ -343,6 +383,7 @@ impl Config {
             public_base_url: var("HELDAR_PUBLIC_BASE_URL"),
             cp_token: var_or("HELDAR_CP_TOKEN", ""),
             cp_register_interval_s: parse_or("HELDAR_CP_REGISTER_INTERVAL_S", 300),
+            cp_tls: cp_tls_from_env(),
             registry_enabled: parse_bool("HELDAR_REGISTRY_ENABLED", true),
             registry_urls: var_or("HELDAR_REGISTRY_URLS", "")
                 .split(',')
