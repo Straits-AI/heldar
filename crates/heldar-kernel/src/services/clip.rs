@@ -24,8 +24,61 @@ pub struct ClipResult {
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,
     pub requested_seconds: f64,
+    /// Seconds of the requested window for which footage actually exists. Equals `requested_seconds`
+    /// for a fully-covered clip; less when the window spans recording gaps.
+    pub covered_seconds: f64,
+    /// Recording gaps WITHIN the requested window. The concat output bridges these (the footage does
+    /// not exist), so they are reported here rather than silently presented as continuous video.
+    pub gaps: Vec<ClipGap>,
     pub size_bytes: u64,
     pub segment_count: usize,
+}
+
+/// A span within a requested clip window for which no recorded footage exists.
+#[derive(Debug, Serialize)]
+pub struct ClipGap {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+}
+
+/// Tolerance for sub-second seams between adjacent segments — below this, abutting segments are
+/// treated as continuous (not a gap).
+const GAP_TOLERANCE_MS: i64 = 1000;
+
+/// Compute covered seconds + the recording gaps within `[from, to]` from the (start-ordered)
+/// overlapping segments. A gap is a span longer than [`GAP_TOLERANCE_MS`] with no footage.
+fn coverage_and_gaps(
+    segments: &[Segment],
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+) -> (f64, Vec<ClipGap>) {
+    let mut gaps = Vec::new();
+    let mut cursor = from;
+    for s in segments {
+        let cs = s.start_time.max(from);
+        let ce = s.end_time.min(to);
+        if ce <= cs {
+            continue;
+        }
+        if (cs - cursor).num_milliseconds() > GAP_TOLERANCE_MS {
+            gaps.push(ClipGap {
+                from: cursor,
+                to: cs,
+            });
+        }
+        if ce > cursor {
+            cursor = ce;
+        }
+    }
+    if (to - cursor).num_milliseconds() > GAP_TOLERANCE_MS {
+        gaps.push(ClipGap { from: cursor, to });
+    }
+    let requested = (to - from).num_milliseconds() as f64 / 1000.0;
+    let gap_secs: f64 = gaps
+        .iter()
+        .map(|g| (g.to - g.from).num_milliseconds() as f64 / 1000.0)
+        .sum();
+    ((requested - gap_secs).max(0.0), gaps)
 }
 
 pub async fn export_clip(
@@ -160,6 +213,10 @@ pub async fn export_clip(
     // `_read_lock` releases on drop (here or on any early return above). Surface any export error.
     let size_bytes = size_outcome?;
 
+    // Report coverage honestly: the concat bridges any recording gaps in the window (that footage
+    // does not exist), so disclose them rather than presenting bridged video as continuous.
+    let (covered_seconds, gaps) = coverage_and_gaps(&segments, from, to);
+
     Ok(ClipResult {
         id,
         camera_id: camera_id.to_string(),
@@ -168,6 +225,8 @@ pub async fn export_clip(
         from,
         to,
         requested_seconds: requested,
+        covered_seconds,
+        gaps,
         size_bytes,
         segment_count: segments.len(),
     })
@@ -176,6 +235,56 @@ pub async fn export_clip(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn seg(start: DateTime<Utc>, end: DateTime<Utc>) -> Segment {
+        Segment {
+            id: "s".into(),
+            camera_id: "c".into(),
+            path: "/x.mp4".into(),
+            start_time: start,
+            end_time: end,
+            duration_s: (end - start).num_milliseconds() as f64 / 1000.0,
+            codec: None,
+            width: None,
+            height: None,
+            size_bytes: 0,
+            container: "mp4".into(),
+            locked: false,
+            evidence_locked: false,
+            incident_id: None,
+            created_at: start,
+        }
+    }
+
+    #[test]
+    fn coverage_and_gaps_detects_interior_and_trailing_gaps() {
+        let t0 = "2026-06-18T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let m = |secs: i64| t0 + chrono::Duration::seconds(secs);
+        // Window [0,100]; footage [0,30] and [60,90]. Gaps: interior [30,60] + trailing [90,100].
+        let segs = vec![seg(m(0), m(30)), seg(m(60), m(90))];
+        let (covered, gaps) = coverage_and_gaps(&segs, m(0), m(100));
+        assert_eq!(gaps.len(), 2, "{gaps:?}");
+        assert_eq!((gaps[0].from, gaps[0].to), (m(30), m(60)));
+        assert_eq!((gaps[1].from, gaps[1].to), (m(90), m(100)));
+        assert!((covered - 60.0).abs() < 0.01, "covered={covered}");
+    }
+
+    #[test]
+    fn coverage_and_gaps_tolerates_subsecond_seam() {
+        let t0 = "2026-06-18T00:00:00Z".parse::<DateTime<Utc>>().unwrap();
+        let m = |secs: i64| t0 + chrono::Duration::seconds(secs);
+        // A 0.5s seam (< tolerance) between abutting segments is NOT reported as a gap.
+        let segs = vec![
+            seg(m(0), m(50)),
+            seg(t0 + chrono::Duration::milliseconds(50_500), m(100)),
+        ];
+        let (covered, gaps) = coverage_and_gaps(&segs, m(0), m(100));
+        assert!(
+            gaps.is_empty(),
+            "sub-second seam must not be a gap: {gaps:?}"
+        );
+        assert!(covered > 99.0, "covered={covered}");
+    }
 
     async fn test_state() -> AppState {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()

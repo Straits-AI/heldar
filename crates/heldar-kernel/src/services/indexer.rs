@@ -137,6 +137,20 @@ async fn index_camera_dir(
         let _ = repo::record_segment_indexed(pool, camera_id, end, bitrate_kbps, probe.fps).await;
 
         if let Some((pe,)) = prev_end {
+            // Second-resolution segment filenames can make the previous segment's end overlap this
+            // one's start. Clamp any prior segment that overlaps this start so segments never overlap
+            // in time (A.end <= B.start) — keeps playback/timeline coverage unambiguous.
+            if pe > start {
+                let _ = sqlx::query(
+                    "UPDATE segments SET end_time = ? WHERE camera_id = ? AND end_time > ? AND start_time < ?",
+                )
+                .bind(start)
+                .bind(camera_id)
+                .bind(start)
+                .bind(start)
+                .execute(pool)
+                .await;
+            }
             let gap = (start - pe).num_seconds();
             if gap > 3 {
                 let _ = repo::log_event(
