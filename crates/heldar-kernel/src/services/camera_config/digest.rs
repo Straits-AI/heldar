@@ -60,6 +60,20 @@ fn parse_challenge(header: &str) -> HashMap<String, String> {
     params
 }
 
+/// Escape a value for an RFC 7616 §3.4 `quoted-string` parameter: each backslash and double-quote
+/// is prefixed with a backslash (`\` -> `\\`, `"` -> `\"`). All other characters pass through.
+/// This keeps the header well-formed when a credential/server field contains `"` or `\`.
+fn quote_escape(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        if c == '"' || c == '\\' {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
+}
+
 /// Build the `Authorization` header value from the parsed challenge fields and a chosen client nonce.
 #[allow(clippy::too_many_arguments)]
 fn build_header(
@@ -76,24 +90,33 @@ fn build_header(
 ) -> String {
     let ha1 = md5_hex(&format!("{username}:{realm}:{password}"));
     let ha2 = md5_hex(&format!("{method}:{uri}"));
+    // RFC 7616 §3.4: values emitted as `quoted-string` params must have `\` and `"` escaped. The
+    // digest above is computed over the *unescaped* values; only the rendered header is escaped.
+    // `response`/`nc`/`qop` are hex/tokens and are emitted verbatim.
+    let username_q = quote_escape(username);
+    let realm_q = quote_escape(realm);
+    let nonce_q = quote_escape(nonce);
+    let uri_q = quote_escape(uri);
+    let cnonce_q = quote_escape(cnonce);
     let mut header = match qop {
         Some(qop) => {
             let response = md5_hex(&format!("{ha1}:{nonce}:{nc}:{cnonce}:{qop}:{ha2}"));
             format!(
-                "Digest username=\"{username}\", realm=\"{realm}\", nonce=\"{nonce}\", \
-uri=\"{uri}\", response=\"{response}\", qop={qop}, nc={nc}, cnonce=\"{cnonce}\""
+                "Digest username=\"{username_q}\", realm=\"{realm_q}\", nonce=\"{nonce_q}\", \
+uri=\"{uri_q}\", response=\"{response}\", qop={qop}, nc={nc}, cnonce=\"{cnonce_q}\""
             )
         }
         None => {
             let response = md5_hex(&format!("{ha1}:{nonce}:{ha2}"));
             format!(
-                "Digest username=\"{username}\", realm=\"{realm}\", nonce=\"{nonce}\", \
-uri=\"{uri}\", response=\"{response}\""
+                "Digest username=\"{username_q}\", realm=\"{realm_q}\", nonce=\"{nonce_q}\", \
+uri=\"{uri_q}\", response=\"{response}\""
             )
         }
     };
     if let Some(opaque) = opaque {
-        header.push_str(&format!(", opaque=\"{opaque}\""));
+        let opaque_q = quote_escape(opaque);
+        header.push_str(&format!(", opaque=\"{opaque_q}\""));
     }
     header
 }
@@ -195,5 +218,38 @@ mod tests {
     fn missing_realm_or_nonce_yields_none() {
         assert!(digest_auth_header("GET", "/x", "u", "p", "Digest nonce=\"n\"").is_none());
         assert!(digest_auth_header("GET", "/x", "u", "p", "Digest realm=\"r\"").is_none());
+    }
+
+    #[test]
+    fn escapes_quote_and_backslash_in_quoted_string_params() {
+        // A username containing a double-quote must be backslash-escaped so the `quoted-string`
+        // stays well-formed (RFC 7616 §3.4); the bare `user"x` would prematurely close the value.
+        let header = build_header(
+            "GET",
+            "/x",
+            "user\"x",
+            "p",
+            "r",
+            "n",
+            Some("auth"),
+            None,
+            "0a4f113b",
+            "00000001",
+        );
+        assert!(
+            header.contains("username=\"user\\\"x\""),
+            "double-quote in username must be escaped: {header}"
+        );
+
+        // A backslash is doubled (legacy no-qop branch).
+        let header2 = build_header("GET", "/x", "ab\\cd", "p", "r", "n", None, None, "", "");
+        assert!(
+            header2.contains("username=\"ab\\\\cd\""),
+            "backslash in username must be doubled: {header2}"
+        );
+
+        // The helper itself escapes both specials and passes other characters through unchanged.
+        assert_eq!(quote_escape("a\"b\\c"), "a\\\"b\\\\c");
+        assert_eq!(quote_escape("plain"), "plain");
     }
 }
