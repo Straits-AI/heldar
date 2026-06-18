@@ -15,6 +15,7 @@ members = [
     "crates/heldar-search",
     "crates/heldar-server",
     "crates/heldar-wasm",
+    "crates/heldar-control-plane",
 ]
 # The example Wasm guest targets wasm32-unknown-unknown and is built separately; excluding it keeps
 # `cargo build --workspace` (host target) from trying to compile a wasm-only cdylib.
