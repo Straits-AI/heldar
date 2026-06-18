@@ -29,6 +29,34 @@ async fn unlink_segment(path: &str) -> bool {
     }
 }
 
+/// Remove one segment row IF it is still unlocked, then best-effort delete its file. Returns
+/// whether the row was removed.
+///
+/// The conditional `DELETE ... WHERE locked = 0 AND evidence_locked = 0` is a TOCTOU guard: SQLite
+/// serializes it against the incident/export lock `UPDATE`s, so an evidence-hold or export
+/// read-lock that commits AFTER this segment was selected for pruning wins the race — `rows_affected`
+/// is 0 and the file is never touched. Only when the row is actually removed do we unlink the file.
+/// A rare unlink failure then orphans the file (the `path` column is UNIQUE, so an orphan sweep can
+/// reclaim it) — strictly preferable to ever deleting protected evidence.
+async fn delete_segment_if_unlocked(
+    pool: &SqlitePool,
+    seg_id: &str,
+    path: &str,
+) -> anyhow::Result<bool> {
+    let removed =
+        sqlx::query("DELETE FROM segments WHERE id = ? AND locked = 0 AND evidence_locked = 0")
+            .bind(seg_id)
+            .execute(pool)
+            .await?
+            .rows_affected();
+    if removed == 1 {
+        unlink_segment(path).await;
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
 /// Delete a snapshot's file and report whether its DB row should now be removed. Mirrors
 /// [`unlink_segment`]: the row is removed only when the file is actually gone (deleted just now or
 /// already absent); on any other delete error we keep the row so the next sweep retries.
@@ -69,11 +97,7 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         .fetch_all(pool)
         .await?;
         for (seg_id, path) in rows {
-            if unlink_segment(&path).await {
-                sqlx::query("DELETE FROM segments WHERE id = ?")
-                    .bind(&seg_id)
-                    .execute(pool)
-                    .await?;
+            if delete_segment_if_unlocked(pool, &seg_id, &path).await? {
                 age_deleted += 1;
             }
         }
@@ -142,8 +166,8 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
             if deletable_total <= budget {
                 break;
             }
-            let batch: Vec<(String, String)> = sqlx::query_as(
-                "SELECT id, path FROM segments WHERE camera_id = ? AND locked = 0 AND evidence_locked = 0 ORDER BY end_time ASC LIMIT 20",
+            let batch: Vec<(String, String, i64)> = sqlx::query_as(
+                "SELECT id, path, size_bytes FROM segments WHERE camera_id = ? AND locked = 0 AND evidence_locked = 0 ORDER BY end_time ASC LIMIT 20",
             )
             .bind(&cam_id)
             .fetch_all(pool)
@@ -151,13 +175,18 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
             if batch.is_empty() {
                 break;
             }
+            let mut remaining = deletable_total;
             let mut progressed = 0u64;
-            for (seg_id, path) in batch {
-                if unlink_segment(&path).await {
-                    sqlx::query("DELETE FROM segments WHERE id = ?")
-                        .bind(&seg_id)
-                        .execute(pool)
-                        .await?;
+            for (seg_id, path, size) in batch {
+                // Stop the instant the budget is met — never over-prune within a batch. The oldest
+                // segments are deleted first; once enough have gone to bring the deletable footprint
+                // to-or-under budget, the rest are within quota and must be kept (footage is
+                // unrecoverable on a DVR).
+                if remaining <= budget {
+                    break;
+                }
+                if delete_segment_if_unlocked(pool, &seg_id, &path).await? {
+                    remaining -= size;
                     quota_deleted += 1;
                     progressed += 1;
                 }
@@ -231,21 +260,23 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
             if unlocked_total <= budget {
                 break;
             }
-            let batch: Vec<(String, String)> = sqlx::query_as(
-                "SELECT id, path FROM segments WHERE locked = 0 AND evidence_locked = 0 ORDER BY end_time ASC LIMIT 20",
+            let batch: Vec<(String, String, i64)> = sqlx::query_as(
+                "SELECT id, path, size_bytes FROM segments WHERE locked = 0 AND evidence_locked = 0 ORDER BY end_time ASC LIMIT 20",
             )
             .fetch_all(pool)
             .await?;
             if batch.is_empty() {
                 break;
             }
+            let mut remaining = unlocked_total;
             let mut progressed = 0u64;
-            for (seg_id, path) in batch {
-                if unlink_segment(&path).await {
-                    sqlx::query("DELETE FROM segments WHERE id = ?")
-                        .bind(&seg_id)
-                        .execute(pool)
-                        .await?;
+            for (seg_id, path, size) in batch {
+                // Stop the instant the global cap is satisfied — never over-prune within a batch.
+                if remaining <= budget {
+                    break;
+                }
+                if delete_segment_if_unlocked(pool, &seg_id, &path).await? {
+                    remaining -= size;
                     size_deleted += 1;
                     progressed += 1;
                 }
@@ -327,11 +358,7 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
                     break;
                 }
                 for (seg_id, path) in batch {
-                    if unlink_segment(&path).await {
-                        sqlx::query("DELETE FROM segments WHERE id = ?")
-                            .bind(&seg_id)
-                            .execute(pool)
-                            .await?;
+                    if delete_segment_if_unlocked(pool, &seg_id, &path).await? {
                         disk_deleted += 1;
                     }
                 }
@@ -781,7 +808,7 @@ mod tests {
     // ----- sweep: per-camera quota --------------------------------------
 
     #[tokio::test]
-    async fn sweep_camera_quota_prunes_unlocked_keeps_evidence() {
+    async fn sweep_camera_quota_prunes_only_to_budget_keeps_evidence() {
         let pool = mem_pool().await;
         let cfg = test_cfg();
         let now = Utc::now();
@@ -833,20 +860,70 @@ mod tests {
 
         sweep(&pool, &cfg).await.unwrap();
 
-        // The whole LIMIT-20 batch of deletable segments is removed in one iteration; only the
-        // evidence-locked segment remains.
+        // Correctness invariant: prune ONLY enough oldest segments to reach budget (400), then stop.
+        // Deleting s1+s2 brings the deletable footprint to exactly 400 == budget, so s3 is within
+        // quota and MUST be kept; pruning it would needlessly destroy recoverable footage.
         assert!(
             seg_exists(&pool, "sL").await,
             "evidence-locked footage must survive the quota prune"
         );
-        assert!(!seg_exists(&pool, "s1").await);
-        assert!(!seg_exists(&pool, "s2").await);
-        assert!(!seg_exists(&pool, "s3").await);
-        assert_eq!(seg_count(&pool).await, 1);
+        assert!(
+            !seg_exists(&pool, "s1").await,
+            "oldest over-budget segment is pruned"
+        );
+        assert!(
+            !seg_exists(&pool, "s2").await,
+            "second-oldest pruned to reach budget"
+        );
+        assert!(
+            seg_exists(&pool, "s3").await,
+            "s3 is within quota once s1+s2 are gone and must NOT be over-deleted"
+        );
+        assert_eq!(
+            seg_count(&pool).await,
+            2,
+            "only s1,s2 pruned to reach budget; sL+s3 remain"
+        );
         assert!(
             camera_quota_event_count(&pool).await >= 1,
             "a camera_quota disk_pressure event should be logged"
         );
+    }
+
+    #[tokio::test]
+    async fn delete_segment_if_unlocked_spares_locked_rows() {
+        // The TOCTOU guard: the conditional DELETE must refuse a row that became evidence-locked
+        // (or read-locked) since it was selected for pruning, and remove an unlocked one. This is
+        // the atomic primitive that makes pruning safe against a hold committing mid-sweep.
+        let pool = mem_pool().await;
+        let now = Utc::now();
+        insert_camera(&pool, "cam_t", 100_000, None).await;
+        insert_segment(&pool, "held", "cam_t", now, 100, 0, 1).await; // evidence_locked = 1
+        insert_segment(&pool, "rlok", "cam_t", now, 100, 1, 0).await; // locked = 1 (export read-lock)
+        insert_segment(&pool, "free", "cam_t", now, 100, 0, 0).await; // deletable
+
+        assert!(
+            !delete_segment_if_unlocked(&pool, "held", "/nonexistent/held.mp4")
+                .await
+                .unwrap(),
+            "evidence-locked row must not be removable"
+        );
+        assert!(
+            !delete_segment_if_unlocked(&pool, "rlok", "/nonexistent/rlok.mp4")
+                .await
+                .unwrap(),
+            "read-locked row must not be removable"
+        );
+        assert!(seg_exists(&pool, "held").await);
+        assert!(seg_exists(&pool, "rlok").await);
+
+        assert!(
+            delete_segment_if_unlocked(&pool, "free", "/nonexistent/free.mp4")
+                .await
+                .unwrap(),
+            "unlocked row is removed"
+        );
+        assert!(!seg_exists(&pool, "free").await);
     }
 
     #[tokio::test]
