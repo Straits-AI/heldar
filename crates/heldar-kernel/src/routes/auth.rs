@@ -191,20 +191,6 @@ async fn update_user(
         ));
     }
     let active = body.active.unwrap_or(cur.active);
-    // Guard against locking everyone out: do not let the last active admin be demoted/disabled.
-    if cur.role == "admin" && (role != "admin" || !active) {
-        let other_admins: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1 AND id != ?",
-        )
-        .bind(&id)
-        .fetch_one(&st.pool)
-        .await?;
-        if other_admins == 0 {
-            return Err(AppError::BadRequest(
-                "cannot demote or disable the last active admin".into(),
-            ));
-        }
-    }
     let display_name = body.display_name.or(cur.display_name);
     let password_hash = match body.password {
         Some(p) if p.len() >= MIN_PASSWORD_LEN => auth::hash_password(&p)?,
@@ -215,17 +201,45 @@ async fn update_user(
         }
         None => cur.password_hash,
     };
-    sqlx::query(
-        "UPDATE users SET password_hash=?, role=?, display_name=?, active=?, updated_at=? WHERE id=?",
-    )
-    .bind(&password_hash)
-    .bind(&role)
-    .bind(&display_name)
-    .bind(active)
-    .bind(Utc::now())
-    .bind(&id)
-    .execute(&st.pool)
-    .await?;
+    // Lockout guard, ATOMIC: when this change demotes/disables an admin, the UPDATE only applies if
+    // ANOTHER active admin still exists at write time. SQLite serializes writers, so two concurrent
+    // demotions of different admins cannot both succeed — the second finds the EXISTS false and is
+    // rejected, always leaving an admin standing. (A separate COUNT-then-UPDATE would race.)
+    let demoting_admin = cur.role == "admin" && (role != "admin" || !active);
+    let affected = if demoting_admin {
+        sqlx::query(
+            "UPDATE users SET password_hash=?, role=?, display_name=?, active=?, updated_at=? \
+             WHERE id=? AND EXISTS (SELECT 1 FROM users WHERE role='admin' AND active=1 AND id != ?)",
+        )
+        .bind(&password_hash)
+        .bind(&role)
+        .bind(&display_name)
+        .bind(active)
+        .bind(Utc::now())
+        .bind(&id)
+        .bind(&id)
+        .execute(&st.pool)
+        .await?
+        .rows_affected()
+    } else {
+        sqlx::query(
+            "UPDATE users SET password_hash=?, role=?, display_name=?, active=?, updated_at=? WHERE id=?",
+        )
+        .bind(&password_hash)
+        .bind(&role)
+        .bind(&display_name)
+        .bind(active)
+        .bind(Utc::now())
+        .bind(&id)
+        .execute(&st.pool)
+        .await?
+        .rows_affected()
+    };
+    if demoting_admin && affected == 0 {
+        return Err(AppError::BadRequest(
+            "cannot demote or disable the last active admin".into(),
+        ));
+    }
     // Revoke sessions if the account was disabled.
     if !active {
         let _ = sqlx::query("DELETE FROM sessions WHERE user_id = ?")
@@ -265,23 +279,29 @@ async fn delete_user(
         .fetch_optional(&st.pool)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("user {id} not found")))?;
-    if cur.role == "admin" {
-        let other_admins: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1 AND id != ?",
+    // Atomic last-admin guard (see update_user): the conditional DELETE removes an admin only if
+    // another active admin still exists, so concurrent deletes cannot drain the admins to zero.
+    let affected = if cur.role == "admin" {
+        sqlx::query(
+            "DELETE FROM users WHERE id = ? AND EXISTS (SELECT 1 FROM users WHERE role='admin' AND active=1 AND id != ?)",
         )
         .bind(&id)
-        .fetch_one(&st.pool)
-        .await?;
-        if other_admins == 0 {
-            return Err(AppError::BadRequest(
-                "cannot delete the last active admin".into(),
-            ));
-        }
-    }
-    sqlx::query("DELETE FROM users WHERE id = ?")
         .bind(&id)
         .execute(&st.pool)
-        .await?;
+        .await?
+        .rows_affected()
+    } else {
+        sqlx::query("DELETE FROM users WHERE id = ?")
+            .bind(&id)
+            .execute(&st.pool)
+            .await?
+            .rows_affected()
+    };
+    if cur.role == "admin" && affected == 0 {
+        return Err(AppError::BadRequest(
+            "cannot delete the last active admin".into(),
+        ));
+    }
     auth::audit(&st.pool, &principal, "delete_user", "user", &id, json!({})).await;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -608,6 +628,104 @@ mod tests {
         .err()
         .unwrap();
         assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    /// AppState around a caller-provided pool — for concurrency tests needing a shared,
+    /// multi-connection DB (the single-connection in-memory `test_state` would serialize the race).
+    async fn state_with_pool(pool: sqlx::SqlitePool) -> AppState {
+        let mut cfg = Config::from_env();
+        cfg.auth_enabled = false;
+        let cfg = std::sync::Arc::new(cfg);
+        AppState {
+            recorder: RecorderManager::new(pool.clone(), cfg.clone()),
+            sampler: SamplerManager::new(pool.clone(), cfg.clone()),
+            mirror: None,
+            consumers: std::sync::Arc::new(Vec::new()),
+            modules: std::sync::Arc::new(Vec::new()),
+            catalog: std::sync::Arc::new(crate::services::registry::CatalogService::new(&cfg)),
+            http: reqwest::Client::new(),
+            started_at: chrono::Utc::now(),
+            pool,
+            cfg,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_demotion_cannot_drain_the_last_admin() {
+        // Temp-FILE DB so the pool's connections see each other's committed writes — the
+        // single-connection in-memory pool used elsewhere would serialize and hide the race.
+        let dbpath =
+            std::env::temp_dir().join(format!("heldar-authrace-{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&dbpath);
+        let url = format!("sqlite://{}?mode=rwc", dbpath.display());
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let st = state_with_pool(pool.clone()).await;
+
+        // Exactly two active admins.
+        let mut ids = Vec::new();
+        for u in ["admin_a", "admin_b"] {
+            let (_, Json(v)) = create_user(
+                State(st.clone()),
+                Principal::system_admin(),
+                Json(UserCreate {
+                    username: u.into(),
+                    password: "x".repeat(MIN_PASSWORD_LEN),
+                    role: Some("admin".into()),
+                    display_name: None,
+                    active: None,
+                }),
+            )
+            .await
+            .unwrap();
+            ids.push(v.id);
+        }
+
+        let demote = || {
+            Json(UserUpdate {
+                role: Some("viewer".into()),
+                ..Default::default()
+            })
+        };
+        // Demote BOTH admins at once. Old check-then-act: both pass -> zero admins. Atomic guard:
+        // at least one is rejected, an admin always remains.
+        let (r1, r2) = tokio::join!(
+            update_user(
+                State(st.clone()),
+                Principal::system_admin(),
+                Path(ids[0].clone()),
+                demote(),
+            ),
+            update_user(
+                State(st.clone()),
+                Principal::system_admin(),
+                Path(ids[1].clone()),
+                demote(),
+            ),
+        );
+
+        let rejected = [r1.is_err(), r2.is_err()]
+            .into_iter()
+            .filter(|e| *e)
+            .count();
+        let remaining: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE role='admin' AND active=1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let _ = std::fs::remove_file(&dbpath);
+        assert!(
+            remaining >= 1,
+            "LOCKOUT: concurrent demotions drained all active admins (remaining={remaining})"
+        );
+        assert!(
+            rejected >= 1,
+            "at least one of two concurrent last-admin demotions must be rejected"
+        );
     }
 
     #[tokio::test]
