@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# Least privilege: CI only reads the repo.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: rust (fmt · clippy · build · test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: build
+        run: cargo build --workspace --locked
+      - name: test
+        run: cargo test --workspace --locked
+      - name: open build (no proprietary verticals) compiles
+        run: cargo build -p heldar-server --no-default-features --locked
+      - name: open build stays lean (no wasm runtime linked by default)
+        run: |
+          if cargo tree -p heldar-server --no-default-features | grep -q wasmi; then
+            echo "::error::wasmi is linked into the default/open heldar-server build"; exit 1
+          fi
+      - name: wasm plugin host compiles + lints
+        run: cargo clippy -p heldar-server --features wasm --all-targets --locked -- -D warnings
+
+  audit:
+    name: cargo audit (RUSTSEC advisories)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          # RUSTSEC-2023-0071 (rsa, Marvin timing side-channel): UNREACHABLE — `rsa` is pulled
+          # into Cargo.lock only by `sqlx-mysql`, and this is a sqlite-only build
+          # (sqlx default-features = false), so the vulnerable RSA code is never compiled.
+          # No upstream fix exists. Re-evaluate (and drop this ignore) if a MySQL/Postgres
+          # driver is ever enabled, or once a fixed `rsa` ships. Verify unreachability with:
+          #   cargo tree -i rsa --all-features   # -> "nothing to print"
+          ignore: RUSTSEC-2023-0071
+
+  web:
+    name: web (build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+        working-directory: apps/web
+      - run: npm run typecheck
+        working-directory: apps/web
+      - run: npm run build
+        working-directory: apps/web
