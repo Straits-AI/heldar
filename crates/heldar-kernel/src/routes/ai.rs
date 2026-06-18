@@ -349,6 +349,14 @@ async fn list_detections(
 /// Max detections accepted in a single ingest request (DoS / write-amplification bound).
 const MAX_INGEST_DETECTIONS: usize = 1000;
 
+/// Columns bound per detection row in the batched INSERT in [`ingest`].
+const DETECTION_INSERT_COLS: usize = 11;
+/// SQLite's compile-time bound-variable ceiling (SQLITE_MAX_VARIABLE_NUMBER). The batched insert is
+/// chunked so a single statement never exceeds it, even at [`MAX_INGEST_DETECTIONS`].
+const SQLITE_MAX_BIND_VARS: usize = 999;
+/// Detection rows per INSERT statement (≈90), keeping bound variables under [`SQLITE_MAX_BIND_VARS`].
+const DETECTION_INSERT_CHUNK: usize = SQLITE_MAX_BIND_VARS / DETECTION_INSERT_COLS;
+
 /// Ingest detections (and an optional event) posted by an AI worker. Detections are written in a
 /// single transaction so a batch is all-or-nothing.
 async fn ingest(
@@ -393,28 +401,35 @@ async fn ingest(
         tx.commit().await?;
         return Ok(Json(json!({ "detections_ingested": 0, "duplicate": true })));
     }
-    for d in &body.detections {
-        let bbox = d.bbox.clone().map(SqlxJson);
-        let attrs = SqlxJson(d.attributes.clone().unwrap_or_else(|| json!({})));
-        sqlx::query(
+    // Batched multi-row insert: one INSERT per chunk instead of one statement per detection. Same
+    // columns, values, and semantics as the prior per-row loop, still inside the transaction. We
+    // chunk so a single statement's bound-variable count stays under SQLite's limit even at
+    // MAX_INGEST_DETECTIONS.
+    for chunk in body.detections.chunks(DETECTION_INSERT_CHUNK) {
+        let tuples = vec!["(?,?,?,?,?,?,?,?,?,?,?)"; chunk.len()].join(",");
+        let sql = format!(
             "INSERT INTO detections
                (id, camera_id, task_type, timestamp, label, confidence, bbox, track_id, attributes, frame_id, created_at)
-             VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-        )
-        .bind(format!("det_{}", Uuid::new_v4().simple()))
-        .bind(&body.camera_id)
-        .bind(&body.task_type)
-        .bind(ts)
-        .bind(&d.label)
-        .bind(d.confidence)
-        .bind(bbox)
-        .bind(&d.track_id)
-        .bind(attrs)
-        .bind(&body.frame_id)
-        .bind(Utc::now())
-        .execute(&mut *tx)
-        .await?;
-        inserted += 1;
+             VALUES {tuples}"
+        );
+        let mut q = sqlx::query(&sql);
+        for d in chunk {
+            let bbox = d.bbox.clone().map(SqlxJson);
+            let attrs = SqlxJson(d.attributes.clone().unwrap_or_else(|| json!({})));
+            q = q
+                .bind(format!("det_{}", Uuid::new_v4().simple()))
+                .bind(&body.camera_id)
+                .bind(&body.task_type)
+                .bind(ts)
+                .bind(&d.label)
+                .bind(d.confidence)
+                .bind(bbox)
+                .bind(&d.track_id)
+                .bind(attrs)
+                .bind(&body.frame_id)
+                .bind(Utc::now());
+        }
+        inserted += q.execute(&mut *tx).await?.rows_affected();
     }
     tx.commit().await?;
 

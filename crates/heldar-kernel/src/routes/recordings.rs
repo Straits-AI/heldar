@@ -137,6 +137,11 @@ struct Timeline {
 /// Gaps below this many seconds between segments are treated as contiguous.
 const GAP_TOLERANCE_S: i64 = 2;
 
+/// Defensive upper bound on rows returned by a single segment range query. Generous enough for long
+/// timelines while preventing an unbounded result set from loading the whole table into memory; a
+/// hit is logged so truncation is never silent.
+const SEGMENT_QUERY_CAP: i64 = 5000;
+
 /// Fetch a camera's segments, honoring either or both optional bounds (open-ended otherwise).
 async fn fetch_segments_in_range(
     pool: &sqlx::SqlitePool,
@@ -149,15 +154,24 @@ async fn fetch_segments_in_range(
          WHERE camera_id = ?
            AND (? IS NULL OR start_time < ?)
            AND (? IS NULL OR end_time > ?)
-         ORDER BY start_time ASC",
+         ORDER BY start_time ASC
+         LIMIT ?",
     )
     .bind(id)
     .bind(to)
     .bind(to)
     .bind(from)
     .bind(from)
+    .bind(SEGMENT_QUERY_CAP)
     .fetch_all(pool)
     .await?;
+    if segments.len() as i64 >= SEGMENT_QUERY_CAP {
+        tracing::warn!(
+            camera_id = %id,
+            cap = SEGMENT_QUERY_CAP,
+            "segment range query hit the row cap; timeline/gaps results may be truncated"
+        );
+    }
     Ok(segments)
 }
 

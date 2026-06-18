@@ -164,17 +164,29 @@ async fn list_incidents(
     Ok(Json(rows))
 }
 
+/// Defensive upper bound on segments returned for one incident roll-up. Generous (an incident is a
+/// handful of pinned clips in practice); a hit is logged so truncation is never silent.
+const INCIDENT_SEGMENTS_CAP: i64 = 5000;
+
 async fn incident_segments(
     State(st): State<AppState>,
     Path(incident_id): Path<String>,
     _principal: Principal,
 ) -> AppResult<Json<Vec<SegmentView>>> {
     let segments = sqlx::query_as::<_, Segment>(
-        "SELECT * FROM segments WHERE incident_id = ? ORDER BY start_time ASC",
+        "SELECT * FROM segments WHERE incident_id = ? ORDER BY start_time ASC LIMIT ?",
     )
     .bind(&incident_id)
+    .bind(INCIDENT_SEGMENTS_CAP)
     .fetch_all(&st.pool)
     .await?;
+    if segments.len() as i64 >= INCIDENT_SEGMENTS_CAP {
+        tracing::warn!(
+            incident_id = %incident_id,
+            cap = INCIDENT_SEGMENTS_CAP,
+            "incident segment query hit the row cap; results may be truncated"
+        );
+    }
     let views = segments.into_iter().map(SegmentView::new).collect();
     Ok(Json(views))
 }
