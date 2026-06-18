@@ -548,3 +548,397 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ----- helpers -------------------------------------------------------
+
+    fn unique_path(prefix: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static N: AtomicU64 = AtomicU64::new(0);
+        let n = N.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("{prefix}-{}-{n}", std::process::id()))
+    }
+
+    async fn mem_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        pool
+    }
+
+    /// A Config wired so that ONLY age-retention (step 1) and per-camera quota (step 2) can act:
+    /// the global size cap is effectively infinite, the disk-free floor is 0 (step 4 never deletes,
+    /// regardless of whether statvfs succeeds), and snapshot/archive prunes are disabled.
+    fn test_cfg() -> Config {
+        let mut cfg = Config::from_env();
+        cfg.max_recordings_bytes = u64::MAX / 4;
+        cfg.min_free_disk_bytes = 0;
+        cfg.recordings_dir = std::env::temp_dir();
+        cfg.snapshot_retention_hours = 0;
+        cfg.archive_retention_hours = 0;
+        cfg.detection_retention_hours = 168;
+        cfg.audit_retention_days = 365;
+        cfg
+    }
+
+    async fn insert_camera(pool: &SqlitePool, id: &str, retention_hours: i64, quota: Option<i64>) {
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO cameras (id, name, retention_hours, storage_quota_bytes, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(retention_hours)
+        .bind(quota)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn insert_segment(
+        pool: &SqlitePool,
+        id: &str,
+        camera_id: &str,
+        end: DateTime<Utc>,
+        size_bytes: i64,
+        locked: i64,
+        evidence_locked: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO segments
+                (id, camera_id, path, start_time, end_time, duration_s, size_bytes, locked, evidence_locked, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(camera_id)
+        // points at a file that does not exist -> unlink_segment hits the NotFound->true branch.
+        .bind(format!("/nonexistent/heldar-test/{id}.mp4"))
+        .bind(end)
+        .bind(end)
+        .bind(60.0_f64)
+        .bind(size_bytes)
+        .bind(locked)
+        .bind(evidence_locked)
+        .bind(end)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seg_exists(pool: &SqlitePool, id: &str) -> bool {
+        let c: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM segments WHERE id = ?")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        c == 1
+    }
+
+    async fn seg_count(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM segments")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn event_type_count(pool: &SqlitePool, event_type: &str) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE event_type = ?")
+            .bind(event_type)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    async fn camera_quota_event_count(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events WHERE event_type = 'disk_pressure' AND payload LIKE '%camera_quota%'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap()
+    }
+
+    // ----- unlink helpers ------------------------------------------------
+
+    #[tokio::test]
+    async fn unlink_segment_reports_removable_for_missing_path() {
+        // Already-absent file: the DB row should be removed (returns true).
+        assert!(unlink_segment("/nonexistent/heldar/definitely-not-here.mp4").await);
+    }
+
+    #[tokio::test]
+    async fn unlink_segment_deletes_existing_file() {
+        let p = unique_path("heldar-seg");
+        tokio::fs::write(&p, b"x").await.unwrap();
+        assert!(p.exists());
+        assert!(unlink_segment(p.to_str().unwrap()).await);
+        assert!(!p.exists());
+    }
+
+    #[tokio::test]
+    async fn unlink_segment_keeps_row_for_directory() {
+        // remove_file on a directory fails with a non-NotFound error -> keep the row (false).
+        let d = unique_path("heldar-dir");
+        tokio::fs::create_dir(&d).await.unwrap();
+        assert!(!unlink_segment(d.to_str().unwrap()).await);
+        assert!(d.exists());
+        let _ = tokio::fs::remove_dir(&d).await;
+    }
+
+    #[tokio::test]
+    async fn unlink_snapshot_handles_missing_and_existing() {
+        // Mirrors unlink_segment: missing -> true; existing -> deleted + true.
+        assert!(unlink_snapshot("/nonexistent/heldar/none.jpg").await);
+        let p = unique_path("heldar-snap");
+        tokio::fs::write(&p, b"x").await.unwrap();
+        assert!(unlink_snapshot(p.to_str().unwrap()).await);
+        assert!(!p.exists());
+    }
+
+    // ----- sweep: age retention -----------------------------------------
+
+    #[tokio::test]
+    async fn sweep_age_retention_deletes_only_old_unlocked() {
+        let pool = mem_pool().await;
+        let cfg = test_cfg();
+        let now = Utc::now();
+
+        insert_camera(&pool, "cam_age", 24, None).await;
+        // Recent unlocked segment: kept (newer than the 24h cutoff).
+        insert_segment(
+            &pool,
+            "seg_recent",
+            "cam_age",
+            now - chrono::Duration::hours(1),
+            100,
+            0,
+            0,
+        )
+        .await;
+        // Old unlocked segment: deleted by age policy.
+        insert_segment(
+            &pool,
+            "seg_old",
+            "cam_age",
+            now - chrono::Duration::hours(48),
+            100,
+            0,
+            0,
+        )
+        .await;
+        // Old but read-locked (transient export lock): excluded from age prune -> kept.
+        insert_segment(
+            &pool,
+            "seg_old_locked",
+            "cam_age",
+            now - chrono::Duration::hours(48),
+            100,
+            1,
+            0,
+        )
+        .await;
+        // Old but evidence-locked (durable hold): excluded from age prune -> kept.
+        insert_segment(
+            &pool,
+            "seg_old_ev",
+            "cam_age",
+            now - chrono::Duration::hours(48),
+            100,
+            0,
+            1,
+        )
+        .await;
+
+        sweep(&pool, &cfg).await.unwrap();
+
+        assert!(seg_exists(&pool, "seg_recent").await);
+        assert!(
+            !seg_exists(&pool, "seg_old").await,
+            "old unlocked segment should be pruned by age"
+        );
+        assert!(
+            seg_exists(&pool, "seg_old_locked").await,
+            "read-locked segment must survive age prune"
+        );
+        assert!(
+            seg_exists(&pool, "seg_old_ev").await,
+            "evidence-locked segment must survive age prune"
+        );
+        assert_eq!(seg_count(&pool).await, 3);
+        // age_deleted > 0 logs exactly one retention_delete event for the sweep.
+        assert_eq!(event_type_count(&pool, "retention_delete").await, 1);
+    }
+
+    // ----- sweep: per-camera quota --------------------------------------
+
+    #[tokio::test]
+    async fn sweep_camera_quota_prunes_unlocked_keeps_evidence() {
+        let pool = mem_pool().await;
+        let cfg = test_cfg();
+        let now = Utc::now();
+
+        // Huge retention so age policy never fires; only the quota acts here.
+        insert_camera(&pool, "cam_q", 100_000, Some(1000)).await;
+        // Protected (evidence-locked) footage counts against the quota but is never deleted.
+        insert_segment(
+            &pool,
+            "sL",
+            "cam_q",
+            now - chrono::Duration::hours(5),
+            600,
+            0,
+            1,
+        )
+        .await;
+        // Three deletable segments (total 1200) over the budget (quota 1000 - protected 600 = 400).
+        insert_segment(
+            &pool,
+            "s1",
+            "cam_q",
+            now - chrono::Duration::hours(3),
+            400,
+            0,
+            0,
+        )
+        .await;
+        insert_segment(
+            &pool,
+            "s2",
+            "cam_q",
+            now - chrono::Duration::hours(2),
+            400,
+            0,
+            0,
+        )
+        .await;
+        insert_segment(
+            &pool,
+            "s3",
+            "cam_q",
+            now - chrono::Duration::hours(1),
+            400,
+            0,
+            0,
+        )
+        .await;
+
+        sweep(&pool, &cfg).await.unwrap();
+
+        // The whole LIMIT-20 batch of deletable segments is removed in one iteration; only the
+        // evidence-locked segment remains.
+        assert!(
+            seg_exists(&pool, "sL").await,
+            "evidence-locked footage must survive the quota prune"
+        );
+        assert!(!seg_exists(&pool, "s1").await);
+        assert!(!seg_exists(&pool, "s2").await);
+        assert!(!seg_exists(&pool, "s3").await);
+        assert_eq!(seg_count(&pool).await, 1);
+        assert!(
+            camera_quota_event_count(&pool).await >= 1,
+            "a camera_quota disk_pressure event should be logged"
+        );
+    }
+
+    #[tokio::test]
+    async fn sweep_camera_quota_protected_exceeds_deletes_nothing() {
+        let pool = mem_pool().await;
+        let cfg = test_cfg();
+        let now = Utc::now();
+
+        // Protected footage alone (500) exceeds the quota (100): deleting other footage cannot help,
+        // so nothing is pruned and a warning is logged instead.
+        insert_camera(&pool, "cam_over", 100_000, Some(100)).await;
+        insert_segment(
+            &pool,
+            "ovL",
+            "cam_over",
+            now - chrono::Duration::hours(5),
+            500,
+            0,
+            1,
+        )
+        .await;
+        insert_segment(
+            &pool,
+            "ov1",
+            "cam_over",
+            now - chrono::Duration::hours(1),
+            50,
+            0,
+            0,
+        )
+        .await;
+
+        sweep(&pool, &cfg).await.unwrap();
+
+        assert!(seg_exists(&pool, "ovL").await);
+        assert!(
+            seg_exists(&pool, "ov1").await,
+            "other footage must not be wiped when protected footage exceeds the quota"
+        );
+        assert_eq!(seg_count(&pool).await, 2);
+        assert!(
+            camera_quota_event_count(&pool).await >= 1,
+            "a camera_quota warning should be logged"
+        );
+    }
+
+    // ----- sweep: detection pruning -------------------------------------
+
+    #[tokio::test]
+    async fn sweep_prunes_old_detections() {
+        let pool = mem_pool().await;
+        let cfg = test_cfg(); // detection_retention_hours = 168
+
+        insert_camera(&pool, "cam_d", 24, None).await;
+        let now = Utc::now();
+        // Older than the 168h TTL -> pruned.
+        sqlx::query(
+            "INSERT INTO detections (id, camera_id, task_type, timestamp, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("det_old")
+        .bind("cam_d")
+        .bind("object")
+        .bind(now - chrono::Duration::hours(200))
+        .bind(now - chrono::Duration::hours(200))
+        .execute(&pool)
+        .await
+        .unwrap();
+        // Recent -> kept.
+        sqlx::query(
+            "INSERT INTO detections (id, camera_id, task_type, timestamp, created_at) VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind("det_new")
+        .bind("cam_d")
+        .bind("object")
+        .bind(now - chrono::Duration::hours(1))
+        .bind(now - chrono::Duration::hours(1))
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sweep(&pool, &cfg).await.unwrap();
+
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM detections")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(remaining, 1);
+        let kept: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM detections WHERE id = ?")
+            .bind("det_new")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(kept, 1, "the recent detection must be retained");
+    }
+}

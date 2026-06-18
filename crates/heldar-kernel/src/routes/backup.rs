@@ -602,3 +602,96 @@ async fn list_archive_exports(
     .await?;
     Ok(Json(rows))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn valid_kind_accepts_known_and_rejects_others() {
+        assert!(valid_kind("local"));
+        assert!(valid_kind("sftp"));
+        assert!(valid_kind("ftp"));
+        assert!(valid_kind("s3"));
+        // Unknown, empty, and wrong-case are all rejected (case-sensitive match).
+        assert!(!valid_kind("gcs"));
+        assert!(!valid_kind(""));
+        assert!(!valid_kind("Local"));
+        assert!(!valid_kind("S3"));
+    }
+
+    #[test]
+    fn valid_kinds_list_is_exact() {
+        assert_eq!(VALID_KINDS, &["local", "sftp", "ftp", "s3"]);
+    }
+
+    #[test]
+    fn merge_secret_config_restores_placeholder_from_old() {
+        let old = json!({ "password": "hunter2", "host": "old.example" });
+        let new = json!({ "password": "***", "host": "new.example" });
+        let merged = merge_secret_config(&old, new);
+        // The *** placeholder is replaced with the stored secret...
+        assert_eq!(merged["password"], json!("hunter2"));
+        // ...while non-secret fields take the newly submitted value.
+        assert_eq!(merged["host"], json!("new.example"));
+    }
+
+    #[test]
+    fn merge_secret_config_drops_placeholder_when_no_stored_secret() {
+        let old = json!({ "host": "h" });
+        let new = json!({ "secret": "***", "host": "h2" });
+        let merged = merge_secret_config(&old, new);
+        // No previously-stored `secret`, so the placeholder key is removed entirely.
+        assert!(merged.as_object().unwrap().get("secret").is_none());
+        assert_eq!(merged["host"], json!("h2"));
+    }
+
+    #[test]
+    fn merge_secret_config_keeps_new_non_placeholder_secret() {
+        let old = json!({ "password": "old" });
+        let new = json!({ "password": "brandnew" });
+        let merged = merge_secret_config(&old, new);
+        // A real new value (not the placeholder) is preserved, overwriting the old secret.
+        assert_eq!(merged["password"], json!("brandnew"));
+    }
+
+    #[test]
+    fn merge_secret_config_handles_all_secret_keys() {
+        let old = json!({ "pass": "a", "password": "b", "secret_key": "c", "secret": "d" });
+        let new = json!({ "pass": "***", "password": "***", "secret_key": "***", "secret": "***" });
+        let merged = merge_secret_config(&old, new);
+        assert_eq!(merged["pass"], json!("a"));
+        assert_eq!(merged["password"], json!("b"));
+        assert_eq!(merged["secret_key"], json!("c"));
+        assert_eq!(merged["secret"], json!("d"));
+    }
+
+    #[test]
+    fn merge_secret_config_passthrough_for_non_objects() {
+        // When either side is not a JSON object, the new value is returned unchanged.
+        let old = json!("not-an-object");
+        let new = json!([1, 2, 3]);
+        let merged = merge_secret_config(&old, new.clone());
+        assert_eq!(merged, new);
+    }
+
+    #[test]
+    fn parse_opt_ts_none_valid_and_invalid() {
+        // None input yields Ok(None).
+        assert!(parse_opt_ts(&None, "from").unwrap().is_none());
+
+        // A valid RFC3339 timestamp (trailing Z accepted) parses to Some.
+        let ok = parse_opt_ts(&Some("2024-01-02T03:04:05Z".to_string()), "from").unwrap();
+        assert!(ok.is_some());
+
+        // An invalid timestamp surfaces a BadRequest mentioning the field name.
+        let err = parse_opt_ts(&Some("not-a-timestamp".to_string()), "to").unwrap_err();
+        match err {
+            AppError::BadRequest(msg) => {
+                assert!(msg.contains("to"));
+                assert!(msg.contains("invalid"));
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+}

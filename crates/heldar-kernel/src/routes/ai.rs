@@ -459,3 +459,61 @@ fn parse_opt_ts(s: &Option<String>, field: &str) -> AppResult<Option<chrono::Dat
         None => Ok(None),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn validate_profile_accepts_sub_and_main() {
+        assert!(validate_profile("sub").is_ok());
+        assert!(validate_profile("main").is_ok());
+    }
+
+    #[test]
+    fn validate_profile_rejects_other_values() {
+        // Case-sensitive and whitespace-sensitive: only the exact lowercase tokens pass.
+        for bad in ["", "Sub", "MAIN", " sub", "sub ", "substream", "foo"] {
+            match validate_profile(bad) {
+                Err(AppError::BadRequest(m)) => {
+                    assert!(
+                        m.contains("stream_profile"),
+                        "unexpected message for {bad:?}: {m}"
+                    );
+                }
+                other => panic!("expected BadRequest for {bad:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn parse_opt_ts_none_is_ok_none() {
+        let out = parse_opt_ts(&None, "from").unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn parse_opt_ts_valid_matches_util() {
+        let raw = "2026-06-13T05:02:19Z".to_string();
+        let parsed = parse_opt_ts(&Some(raw.clone()), "from").unwrap();
+        // parse_opt_ts is a thin wrapper over crate::util::parse_rfc3339: anchor to it.
+        assert_eq!(parsed, crate::util::parse_rfc3339(&raw));
+        assert_eq!(parsed.unwrap().to_rfc3339(), "2026-06-13T05:02:19+00:00");
+    }
+
+    #[test]
+    fn parse_opt_ts_invalid_reports_field() {
+        match parse_opt_ts(&Some("not-a-timestamp".to_string()), "to") {
+            Err(AppError::BadRequest(m)) => {
+                assert!(m.contains("to"), "message should name the field: {m}");
+                assert!(m.contains("timestamp"), "message: {m}");
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn max_ingest_detections_bound_is_stable() {
+        assert_eq!(MAX_INGEST_DETECTIONS, 1000);
+    }
+}

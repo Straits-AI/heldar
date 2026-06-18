@@ -172,3 +172,122 @@ pub async fn export_clip(
         segment_count: segments.len(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn test_state() -> AppState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let cfg = std::sync::Arc::new(crate::config::Config::from_env());
+        AppState {
+            recorder: crate::services::recorder::RecorderManager::new(pool.clone(), cfg.clone()),
+            sampler: crate::services::sampler::SamplerManager::new(pool.clone(), cfg.clone()),
+            mirror: None,
+            consumers: std::sync::Arc::new(Vec::new()),
+            modules: std::sync::Arc::new(Vec::new()),
+            catalog: std::sync::Arc::new(crate::services::registry::CatalogService::new(&cfg)),
+            http: reqwest::Client::new(),
+            started_at: Utc::now(),
+            pool,
+            cfg,
+        }
+    }
+
+    async fn insert_camera(pool: &sqlx::SqlitePool, id: &str) {
+        let now = Utc::now();
+        sqlx::query("INSERT INTO cameras (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
+            .bind(id)
+            .bind(format!("Camera {id}"))
+            .bind(now)
+            .bind(now)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_to_before_from() {
+        let state = test_state().await;
+        let from = Utc::now();
+        let to = from - chrono::Duration::seconds(5);
+        match export_clip(&state, "anycam", from, to).await {
+            Err(AppError::BadRequest(msg)) => assert_eq!(msg, "`to` must be after `from`"),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_to_equal_from() {
+        // `to <= from` covers the equality boundary.
+        let state = test_state().await;
+        let from = Utc::now();
+        match export_clip(&state, "anycam", from, from).await {
+            Err(AppError::BadRequest(msg)) => assert_eq!(msg, "`to` must be after `from`"),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn rejects_clip_exceeding_max_length() {
+        // 3601s exceeds the 3600s cap; rejected before any DB lookup, so no camera is needed.
+        let state = test_state().await;
+        let from = Utc::now();
+        let to = from + chrono::Duration::seconds(3601);
+        match export_clip(&state, "anycam", from, to).await {
+            Err(AppError::BadRequest(msg)) => {
+                assert!(msg.contains("clip too long"), "msg was: {msg}");
+                assert!(msg.contains("3601s"), "msg was: {msg}");
+                assert!(msg.contains("3600s"), "msg was: {msg}");
+            }
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn max_length_boundary_passes_length_check() {
+        // Exactly MAX_CLIP_SECONDS (3600s) is allowed (the guard uses a strict `>`), so validation
+        // falls through to the camera lookup instead of returning the length error.
+        let state = test_state().await;
+        let from = Utc::now();
+        let to = from + chrono::Duration::seconds(3600);
+        match export_clip(&state, "cam_boundary", from, to).await {
+            Err(AppError::NotFound(msg)) => assert_eq!(msg, "camera cam_boundary not found"),
+            other => {
+                panic!(
+                    "expected NotFound (length check should pass at the boundary), got {other:?}"
+                )
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_camera_is_not_found() {
+        let state = test_state().await;
+        let from = Utc::now();
+        let to = from + chrono::Duration::seconds(60);
+        match export_clip(&state, "ghost", from, to).await {
+            Err(AppError::NotFound(msg)) => assert_eq!(msg, "camera ghost not found"),
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_camera_without_segments_is_not_found() {
+        let state = test_state().await;
+        insert_camera(&state.pool, "cam_empty").await;
+        let from = Utc::now();
+        let to = from + chrono::Duration::seconds(60);
+        match export_clip(&state, "cam_empty", from, to).await {
+            Err(AppError::NotFound(msg)) => {
+                assert_eq!(msg, "no recorded footage in the requested range")
+            }
+            other => panic!("expected NotFound, got {other:?}"),
+        }
+    }
+}

@@ -367,3 +367,374 @@ async fn delete_api_key(
     .await;
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Config;
+    use crate::services::recorder::RecorderManager;
+    use crate::services::sampler::SamplerManager;
+    use std::sync::Arc;
+
+    /// Build a minimal in-memory AppState (single connection so the :memory: DB persists across
+    /// queries) with real migrations applied, mirroring the helper used by the other route tests.
+    async fn test_state(auth_enabled: bool) -> AppState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let mut cfg = Config::from_env();
+        cfg.auth_enabled = auth_enabled;
+        let cfg = Arc::new(cfg);
+        AppState {
+            recorder: RecorderManager::new(pool.clone(), cfg.clone()),
+            sampler: SamplerManager::new(pool.clone(), cfg.clone()),
+            mirror: None,
+            consumers: Arc::new(Vec::new()),
+            modules: Arc::new(Vec::new()),
+            catalog: Arc::new(crate::services::registry::CatalogService::new(&cfg)),
+            http: reqwest::Client::new(),
+            started_at: chrono::Utc::now(),
+            pool,
+            cfg,
+        }
+    }
+
+    fn viewer() -> Principal {
+        Principal {
+            id: "usr_viewer".into(),
+            name: "vee".into(),
+            role: Role::Viewer,
+            kind: auth::PrincipalKind::User,
+        }
+    }
+
+    #[tokio::test]
+    async fn me_reports_principal_role_and_kind() {
+        // System admin (auth-disabled implicit principal) reports role=admin, kind=system.
+        let Json(v) = me(Principal::system_admin()).await.unwrap();
+        assert_eq!(v["id"], "system");
+        assert_eq!(v["name"], "system");
+        assert_eq!(v["role"], "admin");
+        assert_eq!(v["kind"], "system");
+
+        // A user-kind principal maps to kind=user and echoes its role.
+        let Json(v) = me(viewer()).await.unwrap();
+        assert_eq!(v["role"], "viewer");
+        assert_eq!(v["kind"], "user");
+    }
+
+    #[tokio::test]
+    async fn create_user_validation_rejects_bad_input() {
+        let st = test_state(false).await;
+
+        // Empty (whitespace-only) username.
+        let err = create_user(
+            State(st.clone()),
+            Principal::system_admin(),
+            Json(UserCreate {
+                username: "   ".into(),
+                password: "x".repeat(MIN_PASSWORD_LEN),
+                role: None,
+                display_name: None,
+                active: None,
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        match err {
+            AppError::BadRequest(m) => assert!(m.contains("username")),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+
+        // Password shorter than MIN_PASSWORD_LEN.
+        let err = create_user(
+            State(st.clone()),
+            Principal::system_admin(),
+            Json(UserCreate {
+                username: "joe".into(),
+                password: "x".repeat(MIN_PASSWORD_LEN - 1),
+                role: None,
+                display_name: None,
+                active: None,
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        match err {
+            AppError::BadRequest(m) => assert!(m.contains("password")),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+
+        // Unrecognized role.
+        let err = create_user(
+            State(st.clone()),
+            Principal::system_admin(),
+            Json(UserCreate {
+                username: "joe".into(),
+                password: "x".repeat(MIN_PASSWORD_LEN),
+                role: Some("superuser".into()),
+                display_name: None,
+                active: None,
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        match err {
+            AppError::BadRequest(m) => assert!(m.contains("role")),
+            other => panic!("expected BadRequest, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_user_defaults_and_list_orders() {
+        let st = test_state(false).await;
+
+        // Surrounding whitespace is trimmed; role defaults to viewer; active defaults to true.
+        let (status, Json(uv)) = create_user(
+            State(st.clone()),
+            Principal::system_admin(),
+            Json(UserCreate {
+                username: "  bravo  ".into(),
+                password: "x".repeat(MIN_PASSWORD_LEN),
+                role: None,
+                display_name: None,
+                active: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(uv.username, "bravo");
+        assert_eq!(uv.role, "viewer");
+        assert!(uv.active);
+
+        let _ = create_user(
+            State(st.clone()),
+            Principal::system_admin(),
+            Json(UserCreate {
+                username: "alpha".into(),
+                password: "x".repeat(MIN_PASSWORD_LEN),
+                role: Some("manager".into()),
+                display_name: Some("Al".into()),
+                active: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        // list_users is ordered by username ASC.
+        let Json(users) = list_users(State(st.clone()), Principal::system_admin())
+            .await
+            .unwrap();
+        assert_eq!(users.len(), 2);
+        assert_eq!(users[0].username, "alpha");
+        assert_eq!(users[1].username, "bravo");
+        assert_eq!(users[0].role, "manager");
+    }
+
+    #[tokio::test]
+    async fn non_admin_is_forbidden() {
+        let st = test_state(false).await;
+
+        let err = list_users(State(st.clone()), viewer()).await.err().unwrap();
+        assert!(matches!(err, AppError::Forbidden(_)));
+
+        let err = create_api_key(
+            State(st.clone()),
+            viewer(),
+            Json(ApiKeyCreate {
+                name: "k".into(),
+                role: None,
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(err, AppError::Forbidden(_)));
+    }
+
+    #[tokio::test]
+    async fn delete_user_rejects_self() {
+        let st = test_state(false).await;
+        // system_admin has id "system"; deleting that same id hits the self-deletion guard before
+        // any existence check.
+        let err = delete_user(
+            State(st.clone()),
+            Principal::system_admin(),
+            Path("system".to_string()),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn update_user_protects_last_admin() {
+        let st = test_state(false).await;
+
+        // The only admin in the table.
+        let (_, Json(admin)) = create_user(
+            State(st.clone()),
+            Principal::system_admin(),
+            Json(UserCreate {
+                username: "rootadmin".into(),
+                password: "x".repeat(MIN_PASSWORD_LEN),
+                role: Some("admin".into()),
+                display_name: None,
+                active: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Demoting the last active admin is refused.
+        let err = update_user(
+            State(st.clone()),
+            Principal::system_admin(),
+            Path(admin.id.clone()),
+            Json(UserUpdate {
+                role: Some("viewer".into()),
+                ..Default::default()
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(err, AppError::BadRequest(_)));
+    }
+
+    #[tokio::test]
+    async fn create_api_key_shape_and_validation() {
+        let st = test_state(false).await;
+
+        // Empty name is rejected.
+        let err = create_api_key(
+            State(st.clone()),
+            Principal::system_admin(),
+            Json(ApiKeyCreate {
+                name: "  ".into(),
+                role: None,
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(err, AppError::BadRequest(_)));
+
+        // Valid creation: role defaults to integration, the secret is prefixed and returned once.
+        let (status, Json(v)) = create_api_key(
+            State(st.clone()),
+            Principal::system_admin(),
+            Json(ApiKeyCreate {
+                name: "  cam-bridge  ".into(),
+                role: None,
+            }),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(v["name"], "cam-bridge");
+        assert_eq!(v["role"], "integration");
+        let key = v["key"].as_str().unwrap();
+        assert!(key.starts_with(auth::APIKEY_PREFIX));
+    }
+
+    #[tokio::test]
+    async fn login_unknown_wrong_then_success() {
+        let st = test_state(false).await;
+
+        // No users yet -> unknown user is uniformly Unauthorized.
+        let err = login(
+            State(st.clone()),
+            Json(LoginRequest {
+                username: "ghost".into(),
+                password: "whatever1".into(),
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(err, AppError::Unauthorized(_)));
+
+        // Seed an operator.
+        let _ = create_user(
+            State(st.clone()),
+            Principal::system_admin(),
+            Json(UserCreate {
+                username: "operator".into(),
+                password: "operator-pass".into(),
+                role: Some("manager".into()),
+                display_name: None,
+                active: None,
+            }),
+        )
+        .await
+        .unwrap();
+
+        // Wrong password for an existing user is also Unauthorized.
+        let err = login(
+            State(st.clone()),
+            Json(LoginRequest {
+                username: "operator".into(),
+                password: "not-the-pass".into(),
+            }),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert!(matches!(err, AppError::Unauthorized(_)));
+
+        // Correct credentials succeed: 200, an HttpOnly session cookie, and one persisted session.
+        let resp = login(
+            State(st.clone()),
+            Json(LoginRequest {
+                username: "operator".into(),
+                password: "operator-pass".into(),
+            }),
+        )
+        .await
+        .unwrap()
+        .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let set_cookie = resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.contains(auth::SESSION_COOKIE));
+        assert!(set_cookie.contains("HttpOnly"));
+
+        let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap();
+        assert_eq!(sessions, 1);
+    }
+
+    #[tokio::test]
+    async fn logout_is_no_content_and_clears_cookie() {
+        let st = test_state(false).await;
+        // No credentials present -> still a clean, idempotent logout.
+        let resp = logout(State(st.clone()), HeaderMap::new())
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+        let set_cookie = resp
+            .headers()
+            .get(header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap();
+        assert!(set_cookie.contains(auth::SESSION_COOKIE));
+        assert!(set_cookie.contains("Max-Age=0"));
+    }
+}
