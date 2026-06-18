@@ -32,7 +32,7 @@ pub async fn snapshot_at(
 
     // Read-lock the source segment so retention can't delete it out from under ffmpeg (TOCTOU).
     let seg_ids = vec![seg.id.clone()];
-    crate::repo::set_segments_locked(&state.pool, &seg_ids, true).await;
+    let _read_lock = crate::repo::SegReadLock::acquire(&state.pool, seg_ids).await;
 
     let outcome: AppResult<Vec<u8>> = async {
         let offset = ((at - seg.start_time).num_milliseconds() as f64 / 1000.0).max(0.0);
@@ -72,7 +72,7 @@ pub async fn snapshot_at(
     }
     .await;
 
-    crate::repo::set_segments_locked(&state.pool, &seg_ids, false).await;
+    // `_read_lock` releases on drop (here, or on cancellation/panic of the await above).
     outcome
 }
 

@@ -137,42 +137,55 @@ struct Timeline {
 /// Gaps below this many seconds between segments are treated as contiguous.
 const GAP_TOLERANCE_S: i64 = 2;
 
-/// Defensive upper bound on rows returned by a single segment range query. Generous enough for long
-/// timelines while preventing an unbounded result set from loading the whole table into memory; a
-/// hit is logged so truncation is never silent.
-const SEGMENT_QUERY_CAP: i64 = 5000;
+/// Page size for the keyset-paginated range scan. Each query is bounded (flat memory) but the loop
+/// fetches the WHOLE range, so a long timeline is never silently truncated at the tail.
+const SEGMENT_PAGE: i64 = 5000;
 
-/// Fetch a camera's segments, honoring either or both optional bounds (open-ended otherwise).
+/// Fetch ALL of a camera's segments in the range (either/both bounds optional), keyset-paginated by
+/// `(start_time, id)`. A prior version used a single `LIMIT 5000 ORDER BY start_time ASC`, which on a
+/// range with more than 5000 segments silently dropped the NEWEST ones — making timeline/gaps report
+/// a false trailing hole. Paging keeps per-query memory bounded while returning the complete range;
+/// per-camera segment counts are bounded by retention, so it terminates quickly in practice.
 async fn fetch_segments_in_range(
     pool: &sqlx::SqlitePool,
     id: &str,
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
 ) -> AppResult<Vec<Segment>> {
-    let segments = sqlx::query_as::<_, Segment>(
-        "SELECT * FROM segments
-         WHERE camera_id = ?
-           AND (? IS NULL OR start_time < ?)
-           AND (? IS NULL OR end_time > ?)
-         ORDER BY start_time ASC
-         LIMIT ?",
-    )
-    .bind(id)
-    .bind(to)
-    .bind(to)
-    .bind(from)
-    .bind(from)
-    .bind(SEGMENT_QUERY_CAP)
-    .fetch_all(pool)
-    .await?;
-    if segments.len() as i64 >= SEGMENT_QUERY_CAP {
-        tracing::warn!(
-            camera_id = %id,
-            cap = SEGMENT_QUERY_CAP,
-            "segment range query hit the row cap; timeline/gaps results may be truncated"
-        );
+    let mut out: Vec<Segment> = Vec::new();
+    loop {
+        let (cur_start, cur_id) = match out.last() {
+            Some(s) => (Some(s.start_time), Some(s.id.clone())),
+            None => (None, None),
+        };
+        let page = sqlx::query_as::<_, Segment>(
+            "SELECT * FROM segments
+             WHERE camera_id = ?
+               AND (? IS NULL OR start_time < ?)
+               AND (? IS NULL OR end_time > ?)
+               AND (? IS NULL OR start_time > ? OR (start_time = ? AND id > ?))
+             ORDER BY start_time ASC, id ASC
+             LIMIT ?",
+        )
+        .bind(id)
+        .bind(to)
+        .bind(to)
+        .bind(from)
+        .bind(from)
+        .bind(cur_start)
+        .bind(cur_start)
+        .bind(cur_start)
+        .bind(&cur_id)
+        .bind(SEGMENT_PAGE)
+        .fetch_all(pool)
+        .await?;
+        let n = page.len() as i64;
+        out.extend(page);
+        if n < SEGMENT_PAGE {
+            break;
+        }
     }
-    Ok(segments)
+    Ok(out)
 }
 
 /// Coalesce contiguous segments into availability ranges (gaps > tolerance split a range).

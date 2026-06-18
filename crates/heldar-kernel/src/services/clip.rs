@@ -78,9 +78,10 @@ pub async fn export_clip(
     let list_path = state.cfg.clips_dir.join(format!("{id}.txt"));
 
     // Read-lock the source segments so the retention sweeper can't delete them out from under ffmpeg
-    // mid-export (TOCTOU). Released on EVERY outcome below.
+    // mid-export (TOCTOU). The RAII guard releases on EVERY outcome — normal return, `?` error,
+    // timeout, AND cancellation/panic (where a manual unlock would be skipped, leaking the lock).
     let seg_ids: Vec<String> = segments.iter().map(|s| s.id.clone()).collect();
-    crate::repo::set_segments_locked(&state.pool, &seg_ids, true).await;
+    let _read_lock = crate::repo::SegReadLock::acquire(&state.pool, seg_ids).await;
 
     let size_outcome: AppResult<u64> = async {
         let mut list = String::new();
@@ -156,8 +157,7 @@ pub async fn export_clip(
     }
     .await;
 
-    // Release the read-lock on every outcome, then surface any error.
-    crate::repo::set_segments_locked(&state.pool, &seg_ids, false).await;
+    // `_read_lock` releases on drop (here or on any early return above). Surface any export error.
     let size_bytes = size_outcome?;
 
     Ok(ClipResult {

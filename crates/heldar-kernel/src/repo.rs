@@ -191,6 +191,39 @@ pub async fn set_segments_locked(pool: &SqlitePool, ids: &[String], locked: bool
     }
 }
 
+/// RAII read-lock over a set of segments. `acquire` sets `locked = 1`; `Drop` releases it
+/// best-effort even if the holder is cancelled (e.g. the HTTP client disconnects and the handler
+/// future is dropped) or panics — so an interrupted export never leaves footage permanently
+/// un-prunable. `Drop` can't await, so it spawns the release; the startup `clear_segment_read_locks`
+/// is the backstop if that spawn can't finish.
+pub struct SegReadLock {
+    pool: SqlitePool,
+    ids: Vec<String>,
+}
+
+impl SegReadLock {
+    pub async fn acquire(pool: &SqlitePool, ids: Vec<String>) -> Self {
+        set_segments_locked(pool, &ids, true).await;
+        Self {
+            pool: pool.clone(),
+            ids,
+        }
+    }
+}
+
+impl Drop for SegReadLock {
+    fn drop(&mut self) {
+        if self.ids.is_empty() {
+            return;
+        }
+        let pool = self.pool.clone();
+        let ids = std::mem::take(&mut self.ids);
+        tokio::spawn(async move {
+            set_segments_locked(&pool, &ids, false).await;
+        });
+    }
+}
+
 /// Set or clear the DURABLE evidence lock on a single segment (distinct from the transient `locked`
 /// read-lock). When `incident_id` is supplied it is recorded; `COALESCE` preserves any existing tag
 /// when `incident_id` is `None` (so unlocking — or locking without a tag — never erases the case

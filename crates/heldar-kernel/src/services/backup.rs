@@ -222,10 +222,9 @@ async fn execute_job(state: &AppState, job_id: &str, timeout: Duration) {
     // Read-lock the source segments so retention cannot prune them mid-transfer; always released
     // after the (possibly timed-out) transfer future settles.
     let seg_ids: Vec<String> = segments.iter().map(|s| s.id.clone()).collect();
-    repo::set_segments_locked(&state.pool, &seg_ids, true).await;
+    let _read_lock = repo::SegReadLock::acquire(&state.pool, seg_ids).await;
     let outcome =
         tokio::time::timeout(timeout, copy_segments(state, job_id, &dest, &segments)).await;
-    repo::set_segments_locked(&state.pool, &seg_ids, false).await;
 
     match outcome {
         Err(_) => set_job_error(state, job_id, "backup job timed out").await,
@@ -421,14 +420,13 @@ pub async fn create_archive(
 
     // Read-lock the sources for the duration of the zip/trim (released on every outcome).
     let seg_ids: Vec<String> = segments.iter().map(|s| s.id.clone()).collect();
-    repo::set_segments_locked(&state.pool, &seg_ids, true).await;
+    let _read_lock = repo::SegReadLock::acquire(&state.pool, seg_ids).await;
     let timeout = Duration::from_secs(state.cfg.backup_job_timeout_s.max(30));
     let outcome = tokio::time::timeout(
         timeout,
         build_archive_zip(state, &job_id, &segments, from, to, trim),
     )
     .await;
-    repo::set_segments_locked(&state.pool, &seg_ids, false).await;
 
     let out_path = state.cfg.archive_dir.join(format!("{job_id}.zip"));
     match outcome {
