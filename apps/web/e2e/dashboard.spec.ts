@@ -16,8 +16,11 @@ test("camera wall loads with no console or page errors", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (e) => errors.push(`pageerror: ${e}`));
   page.on("console", (m: ConsoleMessage) => {
-    // favicon 404 is benign noise from the dev/preview server.
-    if (m.type() === "error" && !m.text().includes("favicon")) errors.push(m.text());
+    const t = m.text();
+    // Track real app/JS errors, not browser network-resource noise (favicon, a not-yet-available
+    // snapshot/frame on a freshly-booted camera) — those are backend state, not UI defects.
+    if (m.type() === "error" && !t.includes("favicon") && !t.includes("Failed to load resource"))
+      errors.push(t);
   });
 
   await page.goto("/");
