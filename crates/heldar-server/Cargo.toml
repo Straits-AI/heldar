@@ -1,0 +1,39 @@
+[package]
+name = "heldar-server"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Heldar composing server: links the open kernel with the generic apps (entry/movement/search) into a runnable deployment."
+license = "Apache-2.0"
+publish = false  # composition bin, not a library
+
+[[bin]]
+name = "heldar-core"
+path = "src/main.rs"
+
+[features]
+# Sandboxed Wasm plugin host — OFF by default so the lean appliance binary never links a Wasm runtime.
+wasm = ["dep:heldar-wasm"]
+# Email/SMTP notifier — OFF by default so the lean appliance binary links no SMTP/TLS stack. Enable to
+# deliver matching events by email (env-configured: HELDAR_SMTP_*). Forwards to the kernel feature.
+smtp = ["heldar-kernel/smtp"]
+
+[dependencies]
+# Path-only (no version pins): heldar-server is publish=false, so it always builds against the
+# in-workspace crates. This avoids a per-release version-bump chore here and any stale pin.
+heldar-kernel = { path = "../heldar-kernel" }
+heldar-entry = { path = "../heldar-entry" }
+heldar-movement = { path = "../heldar-movement" }
+heldar-search = { path = "../heldar-search" }
+# Sandboxed Wasm plugin host — optional, gated by the `wasm` feature (keeps wasmi out of the default build).
+heldar-wasm = { path = "../heldar-wasm", optional = true }
+tokio = { version = "1", features = ["full"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+axum = { version = "0.8", features = ["macros"] }
+tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
+chrono = { version = "0.4", features = ["serde"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"
