@@ -26,4 +26,6 @@ pub mod snapshot;
 pub mod snapshot_scheduler;
 pub mod storage;
 pub mod webhooks;
+#[cfg(feature = "wireguard")]
+pub mod wireguard;
 pub mod zones;

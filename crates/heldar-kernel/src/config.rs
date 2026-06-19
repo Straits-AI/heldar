@@ -114,6 +114,22 @@ pub struct Config {
     pub overlay_kind: String,
     /// The overlay's network interface to probe (e.g. `tailscale0`, `wt0`, `wg0`).
     pub overlay_iface: Option<String>,
+    // ---- Kernel-managed WireGuard (the off-by-default `wireguard` feature) ----
+    /// Master switch for Heldar's OWN, isolated WireGuard interface (distinct from `overlay_*`, which
+    /// only *observes* an external daemon). When true AND the binary holds CAP_NET_ADMIN, the kernel
+    /// brings up a dedicated interface for remote viewing, auto-selecting a non-conflicting name,
+    /// subnet, and port so it never touches existing interfaces/routes. Off by default (LAN-only).
+    pub wg_managed: bool,
+    /// Override the managed interface name (default: auto-pick a free `heldar<N>`). Never `wg0`/existing.
+    pub wg_iface: Option<String>,
+    /// Override the managed /24 subnet, e.g. `10.99.0.0/24` (default: auto-pick a free block, skipping
+    /// every subnet already present on the host — LAN, Docker bridges, other WireGuard interfaces).
+    pub wg_subnet: Option<String>,
+    /// Override the UDP listen port (default: auto-pick a free port; never collides with an existing one).
+    pub wg_port: Option<u16>,
+    /// Public endpoint advertised to enrolled peers as `host:port` (default: auto-detect the host's
+    /// global IPv6). Set this to a public IPv4:port or DNS name if peers reach the host another way.
+    pub wg_endpoint: Option<String>,
     // ---- Backup subsystem (kernel platform feature) ----
     /// Path to the `rclone` binary used for sftp/ftp/s3 remote backups. Local/NAS-mount backups use
     /// std fs copy and never need it; remote backups degrade to a clear job error when it is missing.
@@ -368,6 +384,11 @@ impl Config {
             overlay_enabled: parse_bool("HELDAR_OVERLAY_ENABLED", false),
             overlay_kind: var_or("HELDAR_OVERLAY_KIND", "none"),
             overlay_iface: var("HELDAR_OVERLAY_IFACE"),
+            wg_managed: parse_bool("HELDAR_WG_MANAGED", false),
+            wg_iface: var("HELDAR_WG_IFACE"),
+            wg_subnet: var("HELDAR_WG_SUBNET"),
+            wg_port: var("HELDAR_WG_PORT").and_then(|s| s.parse().ok()),
+            wg_endpoint: var("HELDAR_WG_ENDPOINT"),
             rclone_bin: var_or("HELDAR_RCLONE_BIN", "rclone"),
             backup_enabled: parse_bool("HELDAR_BACKUP_ENABLED", true),
             backup_scheduler_interval_s: parse_or("HELDAR_BACKUP_SCHEDULER_INTERVAL_S", 60),

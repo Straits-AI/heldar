@@ -23,6 +23,9 @@ wasm = ["dep:heldar-wasm"]
 # `smtp` links the email notifier (kernel SMTP client). OFF by default so the appliance binary links no
 # SMTP/TLS stack; enable to deliver matching events by email (env-configured: HELDAR_SMTP_*).
 smtp = ["heldar-kernel/smtp"]
+# `wireguard` links kernel-managed WireGuard remote access. OFF by default; enable to let the kernel
+# bring up its OWN isolated WireGuard interface (needs CAP_NET_ADMIN at runtime: setcap on heldar-core).
+wireguard = ["heldar-kernel/wireguard"]
 
 [dependencies]
 heldar-kernel = { path = "../heldar-kernel" }
