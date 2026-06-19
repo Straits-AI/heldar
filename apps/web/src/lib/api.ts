@@ -816,12 +816,19 @@ export const api = {
   remoteAccess: () => request<RemoteAccessStatus>("/api/v1/remote-access"),
   /** Enrolled devices on the managed interface (no secrets). Any principal. */
   listRemotePeers: () => request<RemotePeerInfo[]>("/api/v1/remote-access/peers"),
-  /** Enroll a device (manager+). Returns the `.conf` for the remote WireGuard client — shown ONCE. */
-  enrollRemotePeer: (name: string) =>
+  /** Enroll a device (manager+). Pass a client-generated `publicKey` so the private key never leaves
+   *  this browser; the returned `.conf` then carries a placeholder you fill in locally. */
+  enrollRemotePeer: (name: string, publicKey?: string) =>
     request<EnrolledPeer>("/api/v1/remote-access/peers", {
       method: "POST",
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, public_key: publicKey }),
     }),
+  /** Mint a short-TTL, single-use pairing token (manager+) for QR-pairing a phone. */
+  mintPairingToken: () =>
+    request<{ token: string; expires_at: number; ttl_seconds: number }>(
+      "/api/v1/remote-access/pairing",
+      { method: "POST" },
+    ),
   /** Remove a device by its base64 public key (manager+). */
   removeRemotePeer: (publicKey: string) =>
     request<void>(`/api/v1/remote-access/peers?key=${enc(publicKey)}`, { method: "DELETE" }),

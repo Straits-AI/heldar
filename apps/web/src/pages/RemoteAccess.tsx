@@ -5,9 +5,11 @@
 // When the feature isn't built/enabled the API 404s; we render setup guidance instead of an error.
 
 import { useCallback, useEffect, useState } from "react";
+import QRCode from "qrcode";
 import { ApiError, api } from "../lib/api";
 import type { EnrolledPeer, RemoteAccessStatus, RemotePeerInfo } from "../lib/types";
 import { Button, EmptyState, Panel, SectionLabel, Spinner, StatusPill, cx } from "../components/ui";
+import { fillPrivateKey, generateWgKeypair } from "../lib/wgkeys";
 
 function handshakeLabel(unixSecs: number): string {
   if (!unixSecs) return "never connected";
@@ -29,7 +31,9 @@ export function RemoteAccess() {
   const [name, setName] = useState("");
   const [enrolling, setEnrolling] = useState(false);
   const [enrolled, setEnrolled] = useState<EnrolledPeer | null>(null); // shown ONCE after enroll
+  const [confQr, setConfQr] = useState<string | null>(null); // QR of the .conf (scan into WireGuard app)
   const [copied, setCopied] = useState(false);
+  const [pairing, setPairing] = useState<{ qr: string; expiresAt: number } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -59,14 +63,34 @@ export function RemoteAccess() {
     setEnrolling(true);
     setError(null);
     try {
-      const peer = await api.enrollRemotePeer(trimmed);
-      setEnrolled(peer);
+      // Generate the keypair HERE so the private key never leaves this browser; send only the public key.
+      const kp = generateWgKeypair();
+      const peer = await api.enrollRemotePeer(trimmed, kp.publicKey);
+      const filled = { ...peer, config: fillPrivateKey(peer.config, kp.privateKey) };
+      setEnrolled(filled);
+      setConfQr(await QRCode.toDataURL(filled.config, { margin: 1, width: 320 }));
       setName("");
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {
       setEnrolling(false);
+    }
+  }
+
+  async function startPairing() {
+    setError(null);
+    try {
+      const t = await api.mintPairingToken();
+      const payload = JSON.stringify({
+        v: 1,
+        token: t.token,
+        apiBase: window.location.origin,
+        expiresAt: t.expires_at,
+      });
+      setPairing({ qr: await QRCode.toDataURL(payload, { margin: 1, width: 320 }), expiresAt: t.expires_at });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
     }
   }
 
@@ -178,6 +202,24 @@ export function RemoteAccess() {
             </Button>
           </div>
 
+          <div className="mb-4 flex flex-wrap items-center gap-3">
+            <Button size="sm" onClick={() => void startPairing()} data-testid="ra-pair">
+              Pair a phone (Heldar app)
+            </Button>
+            <span className="text-xs text-fg-muted">
+              One-time QR for the Heldar mobile app — auto-configures the tunnel (10-min expiry).
+            </span>
+          </div>
+          {pairing && (
+            <div className="mb-4 flex flex-col items-center gap-2 rounded-md border border-line bg-canvas/40 p-3">
+              <img src={pairing.qr} alt="Heldar pairing QR" className="rounded-md bg-white p-2" width={200} height={200} />
+              <span className="text-xs text-fg-muted">Scan with the Heldar app. Expires in ~10 minutes.</span>
+              <button className="text-xs text-fg-muted hover:text-fg" onClick={() => setPairing(null)}>
+                Dismiss
+              </button>
+            </div>
+          )}
+
           {peers.length === 0 ? (
             <EmptyState title="No devices yet" hint="Enroll a device to view your cameras remotely." />
           ) : (
@@ -205,16 +247,28 @@ export function RemoteAccess() {
           title={`Configure “${enrolled.name}”`}
           subtitle="Import this into the WireGuard app on the device — shown only once"
           actions={
-            <button className="text-xs text-fg-muted hover:text-fg" onClick={() => setEnrolled(null)}>
+            <button
+              className="text-xs text-fg-muted hover:text-fg"
+              onClick={() => {
+                setEnrolled(null);
+                setConfQr(null);
+              }}
+            >
               Dismiss
             </button>
           }
         >
           <p className="mb-2 text-xs text-fg-muted">
-            Address <code className="text-fg">{enrolled.address}</code>. On a phone, install WireGuard,
-            “Import from file”, then connect. Recorded playback works immediately; for live video also
-            point the media bases at the WireGuard host IP (see docs).
+            Address <code className="text-fg">{enrolled.address}</code>. On a phone, install WireGuard
+            and <strong>scan the QR</strong> below (or import the config file). The private key was
+            generated in your browser and never sent to the server. Recorded playback works immediately;
+            for live video also point the media bases at the WireGuard host IP (see docs).
           </p>
+          {confQr && (
+            <div className="mb-3 flex justify-center">
+              <img src={confQr} alt="WireGuard config QR" className="rounded-md bg-white p-2" width={220} height={220} />
+            </div>
+          )}
           <pre
             className={cx(
               "max-h-64 overflow-auto rounded-md border border-line bg-canvas p-3 text-xs text-fg-secondary",
