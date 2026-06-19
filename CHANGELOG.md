@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.8] — 2026-06-19
+
+### Added
+
+- **Email/SMTP notifier** (off-by-default `smtp` cargo feature): relays matching events to configured
+  recipients over SMTP (`HELDAR_SMTP_*`). The lean appliance build links no SMTP/TLS stack unless
+  compiled with `--features smtp`. Webhooks stay the durable, UI-managed channel; this is a lightweight
+  always-on inbox relay. Starts at boot (no backlog replay) and is at-most-once best-effort, so a dead
+  relay can never wedge the loop.
+- **Multi-camera synchronized playback** (dashboard): a Playback page that plays several cameras'
+  recorded footage over a shared timeline with one transport (play/pause/seek/speed), clock-mastered so
+  the views stay in lockstep within a small drift tolerance.
+- **DVR-style multi-view camera wall** (dashboard): layout picker (1 / 2×2 / 3×3 / 4×4) with
+  pagination; the chosen layout + page persist in the URL and `localStorage`.
+- **Digital zoom + pan on live view** (dashboard): scroll/control-driven zoom on a live tile, plus live
+  audio playback for cameras that opt in to audio recording.
+
+### Changed
+
+- The MediaMTX live-preview path now carries audio for cameras with audio recording enabled (was
+  always muted with `-an`).
+
+### Testing
+
+- New Playwright UI e2e suite + a full-stack synthetic-camera harness (MediaMTX + synthetic RTSP
+  cameras + core on an isolated port/DB) covering the dashboard, camera wall, single-camera, and
+  synchronized-playback flows.
+
 ## [0.1.7] — 2026-06-19
 
 ### Changed (breaking: schema reset)
