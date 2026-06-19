@@ -23,6 +23,9 @@ kernel:              ## Build the open kernel crate standalone (no proprietary a
 setup-mediamtx:      ## Download the MediaMTX binary into infra/mediamtx/
 	bash scripts/setup_mediamtx.sh
 
+appliance-image:     ## Build a native (no-Docker) appliance rootfs with systemd services
+	bash scripts/build-appliance-image.sh
+
 dev: build           ## Run MediaMTX + the control plane
 	bash scripts/dev.sh
 
