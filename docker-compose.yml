@@ -1,7 +1,7 @@
 # Heldar Core — dev/single-node stack.
 # Host networking keeps things simple on Linux: the control plane's default MediaMTX URLs
 # (127.0.0.1:9997/8888/8554/8889) work as-is, and cameras on the LAN are directly reachable.
-name: heldar
+# Project name is set with `-p heldar` (a top-level `name:` would require Compose v2.3.3+).
 
 services:
   mediamtx:
