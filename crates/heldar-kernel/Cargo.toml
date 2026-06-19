@@ -14,7 +14,20 @@ categories = ["multimedia::video", "web-programming::http-server"]
 name = "heldar_kernel"
 path = "src/lib.rs"
 
+[features]
+# Email/SMTP alerting — OFF by default so the lean appliance build links no SMTP/TLS stack. Enable to
+# deliver matching events by email (env-configured: HELDAR_SMTP_*). Mirrors the `wasm` opt-in pattern.
+smtp = ["dep:lettre"]
+
 [dependencies]
+# Optional SMTP client for the `smtp` feature (email notifier). Async (tokio) + rustls TLS.
+lettre = { version = "0.11", default-features = false, features = [
+    "builder",
+    "smtp-transport",
+    "tokio1",
+    "tokio1-rustls-tls",
+    "ring",
+], optional = true }
 tokio = { version = "1", features = ["full"] }
 axum = { version = "0.8", features = ["macros"] }
 tower = "0.5"

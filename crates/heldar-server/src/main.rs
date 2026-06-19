@@ -265,6 +265,14 @@ async fn main() -> anyhow::Result<()> {
                 services::fleet_register::run(c.clone())
             });
         }
+        // Email notifier (the off-by-default `smtp` feature): relays matching events to configured
+        // recipients over SMTP. Parks unless HELDAR_SMTP_HOST/_FROM/_RECIPIENTS are set, so it never
+        // returns and there is no tight-loop respawn concern (mirrors the webhook engine).
+        #[cfg(feature = "smtp")]
+        {
+            let (p, c) = (pool.clone(), cfg.clone());
+            spawn_supervised("email", move || services::email::run(p.clone(), c.clone()));
+        }
     }
 
     // Allow all origins if configured with "*" or left empty; otherwise restrict to the list.

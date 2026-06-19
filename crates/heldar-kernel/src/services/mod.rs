@@ -4,6 +4,8 @@ pub mod camera_config;
 pub mod clip;
 pub mod consumer;
 pub mod discovery;
+#[cfg(feature = "smtp")]
+pub mod email;
 pub mod fanout;
 pub mod fleet_register;
 pub mod health;

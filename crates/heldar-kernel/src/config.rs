@@ -216,6 +216,22 @@ pub struct Config {
     /// unset it falls back to `apps/web/dist` relative to the binary CWD. `None` when neither path
     /// exists — the server then runs API-only (no dashboard).
     pub web_dir: Option<PathBuf>,
+    // ---- Email / SMTP notifier (the off-by-default `smtp` feature) ----
+    /// SMTP relay host. Unset = email notifications disabled (the notifier parks).
+    pub smtp_host: Option<String>,
+    pub smtp_port: u16,
+    pub smtp_username: Option<String>,
+    pub smtp_password: Option<String>,
+    /// Envelope/From address (e.g. `heldar@site.example`). Required to send.
+    pub smtp_from: Option<String>,
+    /// `starttls` (587, default) | `implicit` (465) | `none`.
+    pub smtp_tls: String,
+    /// Recipient addresses that receive matching-event emails.
+    pub smtp_recipients: Vec<String>,
+    /// Severity floor for emailed events: `info` | `warning` (default) | `critical`.
+    pub smtp_min_severity: String,
+    /// How often the notifier polls for new events to email (seconds).
+    pub smtp_interval_s: u64,
 }
 
 /// mTLS material the edge presents to / uses to verify the control plane.
@@ -404,6 +420,19 @@ impl Config {
             registry_allow_unverified: parse_bool("HELDAR_REGISTRY_ALLOW_UNVERIFIED", false),
             registry_allow_private: parse_bool("HELDAR_REGISTRY_ALLOW_PRIVATE", false),
             web_dir,
+            smtp_host: var("HELDAR_SMTP_HOST"),
+            smtp_port: parse_or("HELDAR_SMTP_PORT", 587u16),
+            smtp_username: var("HELDAR_SMTP_USERNAME"),
+            smtp_password: var("HELDAR_SMTP_PASSWORD"),
+            smtp_from: var("HELDAR_SMTP_FROM"),
+            smtp_tls: var_or("HELDAR_SMTP_TLS", "starttls"),
+            smtp_recipients: var_or("HELDAR_SMTP_RECIPIENTS", "")
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            smtp_min_severity: var_or("HELDAR_SMTP_MIN_SEVERITY", "warning"),
+            smtp_interval_s: parse_or("HELDAR_SMTP_INTERVAL_S", 30),
         }
     }
 

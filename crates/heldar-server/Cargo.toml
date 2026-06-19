@@ -20,6 +20,9 @@ verticals = ["dep:heldar-bakery"]
 # `wasm` pulls the sandboxed in-process Wasm plugin host (heldar-wasm → wasmi). OFF by default so the
 # lean appliance binary never links a Wasm runtime; enable it to load `*.wasm` DetectionConsumer plugins.
 wasm = ["dep:heldar-wasm"]
+# `smtp` links the email notifier (kernel SMTP client). OFF by default so the appliance binary links no
+# SMTP/TLS stack; enable to deliver matching events by email (env-configured: HELDAR_SMTP_*).
+smtp = ["heldar-kernel/smtp"]
 
 [dependencies]
 heldar-kernel = { path = "../heldar-kernel" }
