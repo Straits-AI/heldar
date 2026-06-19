@@ -44,9 +44,31 @@ export function LiveView({
   onRetry,
 }: Props) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [ready, setReady] = useState(false);
+
+  // Digital zoom (client-side): wheel/buttons to zoom, drag to pan when zoomed. Pan is a percent
+  // translate clamped so the magnified frame's edges never leave the viewport.
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const dragRef = useRef<{ x: number; y: number; px: number; py: number } | null>(null);
+  const ZOOM_MAX = 6;
+  const clampPan = (p: { x: number; y: number }, z: number) => {
+    const max = (z - 1) * 50; // each side can pan by half the overflow ((z-1)·100%/2)
+    return { x: Math.min(max, Math.max(-max, p.x)), y: Math.min(max, Math.max(-max, p.y)) };
+  };
+  const applyZoom = (next: number) =>
+    setZoom(() => {
+      const nz = Math.min(ZOOM_MAX, Math.max(1, Math.round(next * 100) / 100));
+      setPan((p) => (nz <= 1 ? { x: 0, y: 0 } : clampPan(p, nz)));
+      return nz;
+    });
+  const resetZoom = () => {
+    setZoom(1);
+    setPan({ x: 0, y: 0 });
+  };
 
   useEffect(() => {
     const video = videoRef.current;
@@ -133,6 +155,48 @@ export function LiveView({
     };
   }, []);
 
+  // Wheel-to-zoom via a non-passive native listener (React's synthetic onWheel can't preventDefault).
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.2 : 1 / 1.2;
+      setZoom((z) => {
+        const nz = Math.min(ZOOM_MAX, Math.max(1, z * factor));
+        setPan((p) => (nz <= 1 ? { x: 0, y: 0 } : clampPan(p, nz)));
+        return nz;
+      });
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
+  // A new stream resets the zoom so a fresh camera starts un-zoomed.
+  useEffect(() => resetZoom(), [hlsUrl]);
+
+  function handleMouseDown(e: React.MouseEvent) {
+    if (zoom <= 1) return;
+    dragRef.current = { x: e.clientX, y: e.clientY, px: pan.x, py: pan.y };
+  }
+  function handleMouseMove(e: React.MouseEvent) {
+    const d = dragRef.current;
+    if (!d) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    setPan(
+      clampPan(
+        {
+          x: d.px + ((e.clientX - d.x) / r.width) * 100,
+          y: d.py + ((e.clientY - d.y) / r.height) * 100,
+        },
+        zoom,
+      ),
+    );
+  }
+  const endDrag = () => {
+    dragRef.current = null;
+  };
+
   function handlePlay() {
     videoRef.current?.play().catch(() => {
       /* user gesture should satisfy autoplay; ignore */
@@ -145,19 +209,71 @@ export function LiveView({
 
   return (
     <div
+      ref={containerRef}
       className={cx(
         "group relative aspect-video w-full overflow-hidden rounded-panel border border-line bg-black shadow-panel",
+        zoom > 1 && (dragRef.current ? "cursor-grabbing" : "cursor-grab"),
         className,
       )}
+      onMouseDown={handleMouseDown}
+      onMouseMove={handleMouseMove}
+      onMouseUp={endDrag}
+      onMouseLeave={endDrag}
     >
       <video
         ref={videoRef}
         className="h-full w-full bg-black"
+        style={{
+          transform: `translate(${pan.x}%, ${pan.y}%) scale(${zoom})`,
+          transformOrigin: "center",
+          transition: dragRef.current ? "none" : "transform 0.12s ease-out",
+        }}
         poster={poster}
         muted
         playsInline
-        controls
+        // Native controls (incl. mute/volume) at zoom 1; hidden while zoomed so they don't scale and
+        // the whole frame is drag-to-pan. Reset zoom to get them back.
+        controls={zoom === 1}
       />
+
+      {/* Digital-zoom controls — appear on hover (and stay while zoomed). */}
+      {!!hlsUrl && ready && (
+        <div
+          className={cx(
+            "absolute right-2 top-1/2 z-10 flex -translate-y-1/2 flex-col items-center gap-1 rounded-md border border-line bg-black/60 p-1 backdrop-blur-sm transition-opacity duration-150",
+            zoom > 1 ? "opacity-100" : "opacity-0 group-hover:opacity-100",
+          )}
+        >
+          <button
+            type="button"
+            aria-label="Zoom in"
+            onClick={() => applyZoom(zoom * 1.5)}
+            className="flex h-7 w-7 items-center justify-center rounded text-fg-secondary hover:bg-raised hover:text-fg"
+          >
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true"><path d="M8 4v8M4 8h8" /></svg>
+          </button>
+          <span className="font-mono text-[10px] tabular-nums text-fg-secondary">{zoom.toFixed(1)}×</span>
+          <button
+            type="button"
+            aria-label="Zoom out"
+            onClick={() => applyZoom(zoom / 1.5)}
+            disabled={zoom <= 1}
+            className="flex h-7 w-7 items-center justify-center rounded text-fg-secondary hover:bg-raised hover:text-fg disabled:opacity-30"
+          >
+            <svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true"><path d="M4 8h8" /></svg>
+          </button>
+          {zoom > 1 && (
+            <button
+              type="button"
+              aria-label="Reset zoom"
+              onClick={resetZoom}
+              className="flex h-7 w-7 items-center justify-center rounded text-fg-secondary hover:bg-raised hover:text-fg"
+            >
+              <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="M2 6V2.5h3.5M14 10v3.5h-3.5M13.5 6A5.5 5.5 0 0 0 3.5 4M2.5 10a5.5 5.5 0 0 0 10 2" /></svg>
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Top overlay: name + status (left), LIVE badge (right). Non-interactive. */}
       <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-3 bg-gradient-to-b from-black/75 via-black/25 to-transparent px-3 py-2.5">

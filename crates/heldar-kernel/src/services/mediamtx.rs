@@ -79,8 +79,16 @@ pub async fn ensure_live(state: &AppState, camera_id: &str) -> AppResult<LiveUrl
         // $MTX_PATH / $RTSP_PORT are substituted by MediaMTX; credentials stay server-side. The
         // video encoder args are selected by HELDAR_LIVE_TRANSCODE_ENGINE (software | vaapi | nvenc).
         let codec_args = transcode_codec_args(&state.cfg);
+        // Live audio is opt-in per camera, reusing the same `record_audio` intent as the recorder:
+        // a camera you record audio for can also be listened to live (re-encoded to AAC for HLS; a
+        // no-op when the source has no audio track). Cameras without it stay video-only (`-an`).
+        let audio_args = if cam.record_audio {
+            "-c:a aac -b:a 96k"
+        } else {
+            "-an"
+        };
         let run_on_demand = format!(
-            "ffmpeg -nostdin -rtsp_transport tcp -timeout 10000000 -i {source} -an \
+            "ffmpeg -nostdin -rtsp_transport tcp -timeout 10000000 -i {source} {audio_args} \
 {codec_args} \
 -f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH"
         );
