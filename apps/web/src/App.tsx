@@ -19,6 +19,7 @@ const Ai = lazy(() => import("./pages/Ai").then((m) => ({ default: m.Ai })));
 const Backup = lazy(() => import("./pages/Backup").then((m) => ({ default: m.Backup })));
 const Incidents = lazy(() => import("./pages/Incidents").then((m) => ({ default: m.Incidents })));
 const Plugins = lazy(() => import("./pages/Plugins").then((m) => ({ default: m.Plugins })));
+const Playback = lazy(() => import("./pages/Playback").then((m) => ({ default: m.Playback })));
 
 function NotFound() {
   return (
@@ -51,6 +52,7 @@ function AppRoutes() {
       <Routes>
         {/* Platform — the kernel console, always present */}
         <Route path="/" element={<Dashboard />} />
+        <Route path="/playback" element={<Playback />} />
         <Route path="/cameras/new" element={<AddCamera />} />
         <Route path="/discover" element={<Discover />} />
         <Route path="/ai" element={<Ai />} />

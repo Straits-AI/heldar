@@ -29,7 +29,9 @@ export default defineConfig({
     : {
         command: "bash ../../scripts/e2e_stack.sh",
         url: `${baseURL}/healthz`,
-        reuseExistingServer: !process.env.CI,
+        // Always boot a fresh stack on the dedicated port (the script self-cleans any prior one), so a
+        // stale stack from a killed run is never reused with out-of-window footage.
+        reuseExistingServer: false,
         timeout: 120_000,
         stdout: "pipe",
         stderr: "pipe",

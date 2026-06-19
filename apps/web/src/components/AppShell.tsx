@@ -154,10 +154,28 @@ function PluginsIcon({ className }: IconProps) {
   );
 }
 
+function PlaybackIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <rect x="2.5" y="4" width="15" height="12" rx="1.5" />
+      <path d="M8.5 8l3.5 2-3.5 2z" fill="currentColor" />
+    </svg>
+  );
+}
+
 // Platform chrome — the kernel console pages, always present. Domain modules are NOT listed here;
 // they come from GET /api/v1/modules (see the Modules section below), so only loaded modules appear.
 const NAV_ITEMS: { to: string; label: string; end?: boolean; Icon: (p: IconProps) => ReactNode }[] = [
   { to: "/", label: "Wall", end: true, Icon: WallIcon },
+  { to: "/playback", label: "Playback", Icon: PlaybackIcon },
   { to: "/discover", label: "Discover", Icon: DiscoverIcon },
   { to: "/cameras/new", label: "Add Camera", Icon: AddCameraIcon },
   { to: "/ai", label: "AI", Icon: AiIcon },

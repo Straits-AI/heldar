@@ -22,6 +22,12 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
+# Free the ports + kill leftovers from a previous run that may have been killed before its trap ran,
+# so every boot starts clean (the core port + MediaMTX's RTSP/API ports, and the synthetic publishers).
+fuser -k "${PORT}/tcp" 8554/tcp 9997/tcp 2>/dev/null || true
+pkill -9 -f 'rtsp://127.0.0.1:8554/cam_e2e_' 2>/dev/null || true
+sleep 1
+
 echo "[e2e_stack] MediaMTX"
 "$MTX" "$ROOT/infra/mediamtx/mediamtx.yml" >"$LOG/mediamtx.log" 2>&1 & PIDS+=($!)
 sleep 2
