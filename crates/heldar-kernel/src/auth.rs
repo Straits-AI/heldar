@@ -464,8 +464,8 @@ mod tests {
 
     #[test]
     fn password_hash_roundtrip() {
-        let h = hash_password("REDACTED-TEST-CREDENTIAL").unwrap();
-        assert!(verify_password("REDACTED-TEST-CREDENTIAL", &h));
+        let h = hash_password("correct-horse-battery-staple").unwrap();
+        assert!(verify_password("correct-horse-battery-staple", &h));
         assert!(!verify_password("wrong", &h));
     }
 
