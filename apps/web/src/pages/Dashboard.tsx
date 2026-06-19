@@ -1,10 +1,27 @@
 import { useMemo, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { usePoll } from "../lib/usePoll";
 import type { CameraStatus } from "../lib/types";
 import { CameraCard } from "../components/CameraCard";
 import { Button, EmptyState, SectionLabel, Spinner, Stat } from "../components/ui";
+
+// DVR-style multi-view layouts. `auto` keeps the responsive grid; the fixed layouts page through the
+// cameras N-per-page (N = cells) like an NVR. `cols` maps to a static Tailwind class so the grid is a
+// true fixed grid (not viewport-driven).
+type LayoutKey = "auto" | "1" | "4" | "9" | "16";
+const LAYOUTS: { key: LayoutKey; label: string; cells: number | null; colsClass: string }[] = [
+  { key: "auto", label: "Auto", cells: null, colsClass: "" },
+  { key: "1", label: "1", cells: 1, colsClass: "grid-cols-1" },
+  { key: "4", label: "2×2", cells: 4, colsClass: "grid-cols-2" },
+  { key: "9", label: "3×3", cells: 9, colsClass: "grid-cols-3" },
+  { key: "16", label: "4×4", cells: 16, colsClass: "grid-cols-4" },
+];
+const LAYOUT_STORAGE_KEY = "heldar.wall.layout";
+
+function isLayoutKey(v: string | null): v is LayoutKey {
+  return v != null && LAYOUTS.some((l) => l.key === v);
+}
 
 export function Dashboard() {
   const cameras = usePoll(() => api.listCameras(), 10000);
@@ -21,6 +38,49 @@ export function Dashboard() {
   const recording = statuses.filter((s) => s.state === "recording").length;
   const offline = statuses.filter((s) => s.state === "offline").length;
   const errored = statuses.filter((s) => s.state === "error").length;
+
+  // Layout + page live in the URL (shareable, e2e-driveable); the chosen layout also persists in
+  // localStorage so a fresh visit (no URL param) restores the operator's last view.
+  const [params, setParams] = useSearchParams();
+  const urlLayout = params.get("layout");
+  const layout: LayoutKey = isLayoutKey(urlLayout)
+    ? urlLayout
+    : ((typeof localStorage !== "undefined" &&
+        isLayoutKey(localStorage.getItem(LAYOUT_STORAGE_KEY)) &&
+        (localStorage.getItem(LAYOUT_STORAGE_KEY) as LayoutKey)) ||
+      "auto");
+  const cfg = LAYOUTS.find((l) => l.key === layout) ?? LAYOUTS[0];
+
+  const cells = cfg.cells; // null = auto (all on one page)
+  const pageCount = cells ? Math.max(1, Math.ceil(list.length / cells)) : 1;
+  const page = Math.min(Math.max(1, Number(params.get("page") ?? "1") || 1), pageCount);
+  const visible = cells ? list.slice((page - 1) * cells, page * cells) : list;
+
+  const setLayout = (key: LayoutKey) => {
+    if (typeof localStorage !== "undefined") localStorage.setItem(LAYOUT_STORAGE_KEY, key);
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (key === "auto") next.delete("layout");
+        else next.set("layout", key);
+        next.delete("page"); // reset to page 1 on layout change
+        return next;
+      },
+      { replace: true },
+    );
+  };
+
+  const goToPage = (p: number) => {
+    setParams(
+      (prev) => {
+        const next = new URLSearchParams(prev);
+        if (p <= 1) next.delete("page");
+        else next.set("page", String(p));
+        return next;
+      },
+      { replace: true },
+    );
+  };
 
   const [refreshing, setRefreshing] = useState(false);
   const refresh = () => {
@@ -45,6 +105,30 @@ export function Dashboard() {
             </h1>
           </div>
           <div className="flex items-center gap-2">
+            {/* Layout picker (NVR multi-view) */}
+            <div
+              className="flex items-center gap-px overflow-hidden rounded-md border border-line bg-line"
+              role="group"
+              aria-label="Wall layout"
+              data-testid="wall-layout-picker"
+            >
+              {LAYOUTS.map((l) => (
+                <button
+                  key={l.key}
+                  type="button"
+                  onClick={() => setLayout(l.key)}
+                  aria-pressed={layout === l.key}
+                  data-testid={`wall-layout-${l.key}`}
+                  className={`px-2.5 py-1.5 font-mono text-xs tracking-micro transition-colors ${
+                    layout === l.key
+                      ? "bg-accent text-accent-ink"
+                      : "bg-panel text-fg-secondary hover:text-fg"
+                  }`}
+                >
+                  {l.label}
+                </button>
+              ))}
+            </div>
             <Button onClick={refresh} disabled={refreshing} aria-label="Refresh wall">
               {refreshing ? (
                 <Spinner size={14} />
@@ -150,11 +234,57 @@ export function Dashboard() {
             />
           </div>
         ) : (
-          <div className="stagger grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
-            {list.map((cam) => (
-              <CameraCard key={cam.id} camera={cam} status={statusById.get(cam.id)} />
-            ))}
-          </div>
+          <>
+            {/* Pager (only meaningful for fixed layouts that overflow one page) */}
+            {pageCount > 1 && (
+              <div
+                className="mb-3 flex items-center justify-end gap-3"
+                data-testid="wall-pager"
+              >
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => goToPage(page - 1)}
+                  disabled={page <= 1}
+                  aria-label="Previous page"
+                  data-testid="wall-prev"
+                >
+                  ‹ Prev
+                </button>
+                <span
+                  className="font-mono text-xs uppercase tracking-micro text-fg-secondary"
+                  data-testid="wall-page-indicator"
+                >
+                  Page {page} / {pageCount}
+                </span>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => goToPage(page + 1)}
+                  disabled={page >= pageCount}
+                  aria-label="Next page"
+                  data-testid="wall-next"
+                >
+                  Next ›
+                </button>
+              </div>
+            )}
+
+            <div
+              className={
+                layout === "auto"
+                  ? "stagger grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5"
+                  : `stagger grid gap-3 ${cfg.colsClass}`
+              }
+              data-testid="camera-grid"
+              data-layout={layout}
+              data-page={page}
+            >
+              {visible.map((cam) => (
+                <CameraCard key={cam.id} camera={cam} status={statusById.get(cam.id)} />
+              ))}
+            </div>
+          </>
         )}
       </div>
     </div>
