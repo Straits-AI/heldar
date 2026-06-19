@@ -709,7 +709,7 @@ dependencies = [
 
 [[package]]
 name = "heldar-entry"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -726,7 +726,7 @@ dependencies = [
 
 [[package]]
 name = "heldar-kernel"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "argon2",
@@ -757,7 +757,7 @@ dependencies = [
 
 [[package]]
 name = "heldar-movement"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "axum",
@@ -773,7 +773,7 @@ dependencies = [
 
 [[package]]
 name = "heldar-search"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "anyhow",
  "axum",

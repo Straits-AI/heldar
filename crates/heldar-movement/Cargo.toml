@@ -1,6 +1,6 @@
 [package]
 name = "heldar-movement"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 rust-version = "1.85"
 description = "Heldar Movement intelligence — generic cross-camera ReID + movement trails + red-zone breach alerts. Multi-signal candidate matching (plate/attributes/topology/time), never pure visual embedding; ReID is probabilistic correlation with human review, not legal identity. Built on the heldar-kernel platform."
@@ -15,7 +15,7 @@ name = "heldar_movement"
 path = "src/lib.rs"
 
 [dependencies]
-heldar-kernel = { path = "../heldar-kernel", version = "0.1.6" }
+heldar-kernel = { path = "../heldar-kernel", version = "0.1.7" }
 axum = { version = "0.8", features = ["macros"] }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",

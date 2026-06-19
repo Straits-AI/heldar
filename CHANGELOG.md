@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.7] — 2026-06-19
+
 ### Changed (breaking: schema reset)
 
 - **Consolidated the 24 incremental kernel migrations into a single `0001_init.sql` baseline.** Done
@@ -22,7 +24,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Per-camera AI decode priority** (`cameras.priority`): under fps-budget pressure the sampler now
   favors high-priority cameras (e.g. an ANPR gate lane) and sheds the lowest-priority first, instead
   of degrading every camera equally / blinding cameras in arbitrary order.
-- `docs/adr/0001` — the scale + edge/cloud control-plane architecture program.
+- **Edge-side fleet self-registration** (`services/fleet_register`): with `HELDAR_CP_URL` +
+  `HELDAR_SITE_ID` + `HELDAR_PUBLIC_BASE_URL` set, a node POSTs its identity to a fleet control plane on
+  boot and on a heartbeat, so it joins the fleet with no static config. Opt-in — unset means the node
+  never phones home (the LAN/overlay default).
+- **mTLS to the control plane** (`HELDAR_CP_TLS_CLIENT_CERT` / `_KEY` / `_CA`): the edge can present a
+  client certificate and verify the control plane's server certificate when registering.
 
 ## [0.1.6] — 2026-06-18
 
