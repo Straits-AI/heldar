@@ -28,10 +28,17 @@ RUN apt-get update \
 RUN groupadd -r -g 10001 heldar && useradd -r -u 10001 -g heldar heldar
 WORKDIR /app
 COPY --from=builder /app/target/release/heldar-core /usr/local/bin/heldar-core
-# Bake the network capability into the binary (build-time, no host sudo) so the non-root user can bring
-# up its own WireGuard interface at runtime. Inert unless the `wireguard` feature + HELDAR_WG_MANAGED.
+# Bake the network capability (build-time, no host sudo) so the non-root user can bring up its own
+# WireGuard interface at runtime. Inert unless the `wireguard` feature + HELDAR_WG_MANAGED.
+# Capability the binary itself, AND the `ip`/`wg` helpers it execs: with a non-root container user,
+# caps from `cap_add` sit in the bounding set but NOT the inheritable set (runc dropped inheritable
+# caps in 2022), so they don't pass through exec via ambient. File caps on ip/wg make them elevate
+# directly within the bounding set — the robust, stay-non-root fix. (Runtime still needs cap_add: NET_ADMIN.)
+# readlink -f resolves symlinks (e.g. /usr/sbin/ip -> /usr/bin/ip) — setcap on a symlink silently no-ops.
 RUN if echo "$FEATURES" | grep -qw wireguard; then \
       setcap cap_net_admin,cap_net_raw+eip /usr/local/bin/heldar-core; \
+      setcap cap_net_admin,cap_net_raw+ep "$(readlink -f "$(command -v ip)")"; \
+      setcap cap_net_admin,cap_net_raw+ep "$(readlink -f "$(command -v wg)")"; \
     fi
 ENV HELDAR_DATA_DIR=/data
 RUN mkdir -p /data && chown -R heldar:heldar /data /app
