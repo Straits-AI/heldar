@@ -199,15 +199,20 @@ fn run(program: &str, args: &[&str]) -> anyhow::Result<String> {
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-/// `ip` that tolerates an idempotent "exists" (re-running bring-up must not error).
+/// `ip` that tolerates the "already there" errors so re-running bring-up (restart / reboot, when the
+/// interface or address persisted) is a no-op rather than a failure: `ip link add` on an existing link
+/// → "File exists"; `ip address add` on an already-addressed link → "Address already assigned".
 fn run_idempotent(program: &str, args: &[&str]) -> anyhow::Result<()> {
     match run(program, args) {
         Ok(_) => Ok(()),
-        Err(e) if e.to_string().contains("exists") || e.to_string().contains("File exists") => {
-            Ok(())
-        }
+        Err(e) if is_already_there(&e.to_string()) => Ok(()),
         Err(e) => Err(e),
     }
+}
+
+/// True for the "the thing I'm adding is already present" errors that make a bring-up re-run a no-op.
+fn is_already_there(msg: &str) -> bool {
+    msg.contains("exists") || msg.contains("already assigned")
 }
 
 fn inuse_cidrs() -> Vec<Cidr> {
@@ -693,6 +698,16 @@ mod tests {
         let (host, peer) = host_and_first_peer(net);
         assert_eq!(host, Ipv4Addr::new(10, 200, 0, 1));
         assert_eq!(peer, Ipv4Addr::new(10, 200, 0, 2));
+    }
+
+    #[test]
+    fn idempotent_errors_tolerated() {
+        // Re-running bring-up after a restart hits these; they must be treated as success.
+        assert!(is_already_there("RTNETLINK answers: File exists"));
+        assert!(is_already_there("Error: ipv4: Address already assigned."));
+        assert!(!is_already_there(
+            "RTNETLINK answers: Operation not permitted"
+        ));
     }
 
     #[test]
