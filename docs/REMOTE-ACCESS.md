@@ -101,6 +101,39 @@ This keeps the device graph/metadata on infrastructure **you** control, WireGuar
 and a managed-like UX — at materially lower ops than Headscale (which lags upstream protocol changes).
 Headscale + a self-hosted DERP is the maximal-privacy variant, but the highest ops.
 
+## Recipe C — kernel-managed WireGuard (built in): zero extra software, IPv6-first
+
+For deployments that **have a reachable endpoint** — a routable IPv6 (common) or a public IPv4 / port-
+forward — Heldar can manage its own WireGuard interface directly, with no Tailscale/NetBird daemon and
+no coordinator. Enable the off-by-default `wireguard` cargo feature:
+
+1. Build/run with the feature and grant the binary network privilege once:
+   ```bash
+   cargo build -p heldar-server --features wireguard
+   sudo setcap cap_net_admin,cap_net_raw+eip ./target/debug/heldar-core
+   ```
+2. Turn it on:
+   ```bash
+   HELDAR_WG_MANAGED=true
+   # all optional — sensible non-conflicting values are auto-selected otherwise:
+   # HELDAR_WG_IFACE=heldar0   HELDAR_WG_SUBNET=10.200.0.0/24   HELDAR_WG_PORT=51820
+   # HELDAR_WG_ENDPOINT=[2001:db8::1]:51820   # defaults to the host's public IPv6
+   ```
+   On boot the kernel brings up its own interface, **auto-selecting a name / subnet / port that don't
+   collide with anything already on the host** (the LAN, Docker bridges, *other WireGuard tunnels*). It
+   touches only the interface it creates plus that interface's own scope route — never an existing
+   interface, the default route, or DNS.
+3. Enroll a device in the dashboard (**Remote** page) or via `POST /api/v1/remote-access/peers`; import
+   the returned `.conf` into the device's WireGuard app and connect. The dashboard + recorded playback
+   are reachable at the host's WireGuard address (e.g. `http://10.200.0.1:8000`). For **live** video
+   over the tunnel, also set `HELDAR_MEDIAMTX_HLS_BASE`/`_WEBRTC_BASE` to that same WireGuard host IP so
+   the browser fetches streams over the tunnel rather than its own localhost.
+
+**When to prefer this vs Recipe A/B:** kernel-managed plain WireGuard needs **one side to be reachable**
+(IPv6 endpoint, or a public IPv4 / port-forward). It does **no** hole-punching or relay, so behind
+**dual** CGNAT with no IPv6 it can't connect — use Tailscale/NetBird (which relay-fallback) there. It is
+the lightest option when the host has a routable endpoint (this is the common IPv6 case).
+
 ---
 
 ## Security: authenticate before any exposure
@@ -115,13 +148,17 @@ trusted viewers. But:
 
 ## What the kernel provides (and what it doesn't)
 
-- **Provides (open, Apache-2.0):** overlay-status awareness — config (`HELDAR_OVERLAY_*`) and a
-  probe of the configured interface (`/sys/class/net/<iface>`), surfaced at
-  `GET /api/v1/system → remote_access { enabled, kind, iface, present, operstate, up, note }`.
-  Transport-agnostic: any overlay that presents a network interface is supported.
-- **Does not provide:** the WireGuard data plane itself (that's the external Tailscale/NetBird/
-  `wg` daemon) or any managed hosted control plane. A managed multi-site offering, if ever built,
-  would live in a proprietary crate — the default open path needs none of it.
+- **Provides (open, Apache-2.0), always on:** overlay-status *awareness* for an external daemon —
+  config (`HELDAR_OVERLAY_*`) and a probe of the configured interface (`/sys/class/net/<iface>`),
+  surfaced at `GET /api/v1/system → remote_access { enabled, kind, iface, present, operstate, up, note }`.
+  Transport-agnostic: any overlay that presents a network interface is supported (Recipes A/B).
+- **Provides (open, Apache-2.0), behind the `wireguard` feature:** a kernel-*managed* WireGuard
+  interface (Recipe C) — collision-free auto-allocation, peer enrollment, and status at
+  `GET /api/v1/remote-access`. Off by default; needs `CAP_NET_ADMIN`. It manages only its own
+  interface and never disturbs existing host networking.
+- **Does not provide:** NAT hole-punching or a relay/coordinator (so dual-CGNAT-without-IPv6 still
+  wants Tailscale/NetBird), nor any managed hosted multi-site control plane — that would live in a
+  proprietary crate; the default open path needs none of it.
 
 ## Alternatives (and why they're not the default)
 
