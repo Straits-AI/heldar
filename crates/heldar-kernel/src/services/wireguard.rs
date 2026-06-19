@@ -123,7 +123,7 @@ use serde::Serialize;
 use crate::config::Config;
 
 /// The concrete, collision-checked parameters of the managed interface.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct Resolved {
     pub iface: String,
     pub subnet: String,
@@ -264,25 +264,38 @@ fn free_udp_port(start: u16) -> u16 {
     start
 }
 
-/// Resolve the managed interface parameters: honor any `HELDAR_WG_*` override, else auto-select a
-/// name / subnet / port / endpoint that does not collide with anything already on the host.
+/// Resolve the managed interface parameters with this precedence per field: explicit `HELDAR_WG_*`
+/// override → the values persisted by a prior `ensure_up` → a fresh auto-pick. The persisted layer is
+/// what keeps `status`/`add_peer` pointing at the SAME interface that was brought up — without it the
+/// auto-allocator would pick the next free name once the interface it created already exists.
 pub fn resolve(cfg: &Config) -> anyhow::Result<Resolved> {
+    let saved = load_resolved(cfg);
     let iface = cfg
         .wg_iface
         .clone()
+        .or_else(|| saved.as_ref().map(|s| s.iface.clone()))
         .unwrap_or_else(|| pick_iface(&existing_ifaces()));
     let net24 = match &cfg.wg_subnet {
         Some(s) => parse_cidr(s)
             .map(|(n, _)| n)
             .ok_or_else(|| anyhow::anyhow!("bad HELDAR_WG_SUBNET: {s}"))?,
-        None => {
-            pick_subnet(&inuse_cidrs()).ok_or_else(|| anyhow::anyhow!("no free /24 to allocate"))?
-        }
+        None => match saved.as_ref() {
+            Some(s) => s.net24,
+            None => pick_subnet(&inuse_cidrs())
+                .ok_or_else(|| anyhow::anyhow!("no free /24 to allocate"))?,
+        },
     };
     let (host_ip, _) = host_and_first_peer(net24);
-    let port = cfg.wg_port.unwrap_or_else(|| free_udp_port(51820));
-    let endpoint = match &cfg.wg_endpoint {
-        Some(e) => e.clone(),
+    let port = cfg
+        .wg_port
+        .or_else(|| saved.as_ref().map(|s| s.port))
+        .unwrap_or_else(|| free_udp_port(51820));
+    let endpoint = match cfg
+        .wg_endpoint
+        .clone()
+        .or_else(|| saved.as_ref().map(|s| s.endpoint.clone()))
+    {
+        Some(e) => e,
         None => {
             let host = detect_ipv6().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -304,6 +317,27 @@ pub fn resolve(cfg: &Config) -> anyhow::Result<Resolved> {
 
 fn key_dir(cfg: &Config) -> std::path::PathBuf {
     cfg.data_dir.join("wireguard")
+}
+
+fn resolved_path(cfg: &Config) -> std::path::PathBuf {
+    key_dir(cfg).join("resolved.json")
+}
+
+/// Load the parameters a prior `ensure_up` chose (so later calls reuse the same interface). None if
+/// never brought up or the file is missing/garbage.
+fn load_resolved(cfg: &Config) -> Option<Resolved> {
+    std::fs::read_to_string(resolved_path(cfg))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+}
+
+/// Persist the chosen parameters after a successful bring-up (best-effort; a write failure only costs
+/// determinism, not correctness).
+fn persist_resolved(cfg: &Config, r: &Resolved) {
+    let _ = std::fs::create_dir_all(key_dir(cfg));
+    if let Ok(j) = serde_json::to_string_pretty(r) {
+        let _ = std::fs::write(resolved_path(cfg), j);
+    }
 }
 
 /// Ensure the host keypair exists (private key persisted 0600); returns (private_key, public_key).
@@ -399,19 +433,25 @@ pub fn ensure_up(cfg: &Config) -> anyhow::Result<Resolved> {
         ],
     )?;
     run("ip", &["link", "set", "up", "dev", &r.iface])?;
+    // Persist the chosen parameters so status/add_peer/list_peers (which each call resolve()) reuse this
+    // exact interface instead of auto-picking the next free name now that it exists.
+    persist_resolved(cfg, &r);
     tracing::info!(iface = %r.iface, subnet = %r.subnet, port = r.port, endpoint = %r.endpoint, "managed WireGuard up");
     Ok(r)
 }
 
 /// Tear down ONLY the managed interface (removes its addresses + scope route with it). No-op if absent.
 pub fn teardown(cfg: &Config) -> anyhow::Result<()> {
-    let iface = cfg
-        .wg_iface
-        .clone()
-        .unwrap_or_else(|| pick_iface(&existing_ifaces()));
+    // Use the persisted/resolved iface (what we actually brought up), not a fresh auto-pick.
+    let iface = resolve(cfg).map(|r| r.iface).unwrap_or_else(|_| {
+        cfg.wg_iface
+            .clone()
+            .unwrap_or_else(|| pick_iface(&existing_ifaces()))
+    });
     if iface_present(&iface) {
         run("ip", &["link", "del", "dev", &iface])?;
     }
+    let _ = std::fs::remove_file(resolved_path(cfg)); // fresh bring-up re-picks cleanly
     Ok(())
 }
 
