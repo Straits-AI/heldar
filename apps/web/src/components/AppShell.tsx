@@ -171,6 +171,24 @@ function PlaybackIcon({ className }: IconProps) {
   );
 }
 
+function RemoteAccessIcon({ className }: IconProps) {
+  return (
+    <svg
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.6"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+    >
+      <circle cx="10" cy="10" r="2" />
+      <path d="M6.5 6.5a5 5 0 0 0 0 7M13.5 6.5a5 5 0 0 1 0 7" />
+      <path d="M4 4a8 8 0 0 0 0 12M16 4a8 8 0 0 1 0 12" />
+    </svg>
+  );
+}
+
 // Platform chrome — the kernel console pages, always present. Domain modules are NOT listed here;
 // they come from GET /api/v1/modules (see the Modules section below), so only loaded modules appear.
 const NAV_ITEMS: { to: string; label: string; end?: boolean; Icon: (p: IconProps) => ReactNode }[] = [
@@ -182,6 +200,7 @@ const NAV_ITEMS: { to: string; label: string; end?: boolean; Icon: (p: IconProps
   { to: "/incidents", label: "Incidents", Icon: IncidentsIcon },
   { to: "/backup", label: "Backup", Icon: BackupIcon },
   { to: "/plugins", label: "Plugins", Icon: PluginsIcon },
+  { to: "/remote-access", label: "Remote", Icon: RemoteAccessIcon },
   { to: "/system", label: "System", Icon: SystemIcon },
 ];
 

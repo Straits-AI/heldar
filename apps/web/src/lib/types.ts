@@ -1483,3 +1483,35 @@ export interface BulkConfigResponse {
   succeeded: number;
   failed: number;
 }
+
+// ---- Kernel-managed WireGuard remote access (the server `wireguard` feature) ----
+
+/** Status of Heldar's own managed WireGuard interface (GET /api/v1/remote-access). */
+export interface RemoteAccessStatus {
+  managed: boolean;
+  iface?: string | null;
+  subnet?: string | null;
+  port?: number | null;
+  endpoint?: string | null;
+  present: boolean;
+  up: boolean;
+  peers: number;
+  note: string;
+}
+
+/** A device currently enrolled on the managed interface (no secrets). */
+export interface RemotePeerInfo {
+  name: string;
+  public_key: string;
+  address: string;
+  /** Unix seconds of the last handshake; 0 = never connected yet. */
+  last_handshake: number;
+}
+
+/** A freshly enrolled device — `config` is the WireGuard `.conf` for the remote device to import. */
+export interface EnrolledPeer {
+  name: string;
+  public_key: string;
+  address: string;
+  config: string;
+}

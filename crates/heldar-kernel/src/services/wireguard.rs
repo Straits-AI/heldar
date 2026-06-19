@@ -8,8 +8,8 @@
 //! subnet, and it never reads or writes any pre-existing interface, the default route, or DNS.
 //!
 //! Privilege: managing a WireGuard device needs `CAP_NET_ADMIN`. The binary is expected to carry that
-//! capability (`setcap cap_net_admin,cap_net_raw+eip`); [`spawn_priv`] raises it into the ambient set
-//! so the `ip`/`wg` children inherit it. With no capability the manager logs and parks — it never
+//! capability (`setcap cap_net_admin,cap_net_raw+eip`); `run` raises it into the ambient set so the
+//! `ip`/`wg` children inherit it. With no capability the manager logs and parks — it never
 //! falls back to anything that could disturb host networking.
 //!
 //! Dependency-free by design: it shells out to `ip` and `wg` (the codebase already drives ffmpeg /
