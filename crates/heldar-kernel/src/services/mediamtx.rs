@@ -49,8 +49,72 @@ pub struct LiveUrls {
     pub rtsp_url: String,
 }
 
-/// Ensure a MediaMTX path exists for this camera and return its playback URLs.
-pub async fn ensure_live(state: &AppState, camera_id: &str) -> AppResult<LiveUrls> {
+/// MediaMTX (and our default config) listen on loopback. A playback URL like `http://127.0.0.1:8888/…`
+/// is useless to a REMOTE client — over the WireGuard tunnel (or on the LAN) `127.0.0.1` is the client
+/// itself, not the box. When the configured base points at loopback/unspecified, rewrite its HOST to the
+/// one the client used to reach us (the request's `Host` header), preserving scheme + port. An explicitly
+/// external base (a real hostname/IP, e.g. a CDN) is left untouched so operator overrides still win.
+fn client_facing_base(base: &str, request_host: Option<&str>) -> String {
+    let Some(host) = request_host.and_then(host_only) else {
+        return base.to_string();
+    };
+    let Some((scheme, rest)) = base.split_once("://") else {
+        return base.to_string();
+    };
+    let (authority, tail) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, ""),
+    };
+    let (cur_host, port) = split_host_port(authority);
+    if !is_loopback_host(cur_host) {
+        return base.to_string();
+    }
+    let h = if host.contains(':') {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    match port {
+        Some(p) => format!("{scheme}://{h}:{p}{tail}"),
+        None => format!("{scheme}://{h}{tail}"),
+    }
+}
+
+fn is_loopback_host(h: &str) -> bool {
+    matches!(h, "127.0.0.1" | "localhost" | "0.0.0.0" | "::1" | "[::1]")
+}
+
+/// Hostname from a `Host` header value: `"10.0.0.1:8000"` → `"10.0.0.1"`, `"[::1]:8000"` → `"::1"`.
+fn host_only(host_header: &str) -> Option<String> {
+    let h = host_header.trim();
+    if h.is_empty() {
+        return None;
+    }
+    if let Some(rest) = h.strip_prefix('[') {
+        return rest.split(']').next().map(str::to_string); // IPv6 literal
+    }
+    Some(h.rsplit_once(':').map_or(h, |(host, _)| host).to_string())
+}
+
+/// Split a URL authority into `(host, port?)`, handling `[ipv6]:port`.
+fn split_host_port(authority: &str) -> (&str, Option<&str>) {
+    if let Some(rest) = authority.strip_prefix('[') {
+        if let Some(close) = rest.find(']') {
+            return (&rest[..close], rest[close + 1..].strip_prefix(':'));
+        }
+    }
+    authority
+        .rsplit_once(':')
+        .map_or((authority, None), |(h, p)| (h, Some(p)))
+}
+
+/// Ensure a MediaMTX path exists for this camera and return its playback URLs. `request_host` is the
+/// `Host` header of the originating request, used to make loopback stream URLs reachable by the client.
+pub async fn ensure_live(
+    state: &AppState,
+    camera_id: &str,
+    request_host: Option<&str>,
+) -> AppResult<LiveUrls> {
     let cam: Option<Camera> = sqlx::query_as::<_, Camera>("SELECT * FROM cameras WHERE id = ?")
         .bind(camera_id)
         .fetch_optional(&state.pool)
@@ -113,9 +177,14 @@ pub async fn ensure_live(state: &AppState, camera_id: &str) -> AppResult<LiveUrl
         }
     }
 
-    let hls = state.cfg.mediamtx_hls_base.trim_end_matches('/');
-    let webrtc = state.cfg.mediamtx_webrtc_base.trim_end_matches('/');
-    let rtsp = state.cfg.mediamtx_rtsp_base.trim_end_matches('/');
+    // Rewrite loopback bases to the host the client actually reached us on, so streams are reachable
+    // over the tunnel / LAN (not just from the box itself).
+    let hls_base = client_facing_base(&state.cfg.mediamtx_hls_base, request_host);
+    let webrtc_base = client_facing_base(&state.cfg.mediamtx_webrtc_base, request_host);
+    let rtsp_base = client_facing_base(&state.cfg.mediamtx_rtsp_base, request_host);
+    let hls = hls_base.trim_end_matches('/');
+    let webrtc = webrtc_base.trim_end_matches('/');
+    let rtsp = rtsp_base.trim_end_matches('/');
     Ok(LiveUrls {
         hls_url: format!("{hls}/{name}/index.m3u8"),
         webrtc_url: format!("{webrtc}/{name}"),
@@ -127,6 +196,47 @@ pub async fn ensure_live(state: &AppState, camera_id: &str) -> AppResult<LiveUrl
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn loopback_base_is_rewritten_to_the_request_host() {
+        // tunnel client: dashboard reached at 10.200.0.1:8000 -> stream at 10.200.0.1:8888
+        assert_eq!(
+            client_facing_base("http://127.0.0.1:8888", Some("10.200.0.1:8000")),
+            "http://10.200.0.1:8888"
+        );
+        // LAN client, localhost base, hostname Host, path preserved
+        assert_eq!(
+            client_facing_base("http://localhost:8889/", Some("192.168.1.50:8000")),
+            "http://192.168.1.50:8889/"
+        );
+        // rtsp scheme + 0.0.0.0 also rewritten
+        assert_eq!(
+            client_facing_base("rtsp://0.0.0.0:8554", Some("box.local")),
+            "rtsp://box.local:8554"
+        );
+    }
+
+    #[test]
+    fn non_loopback_base_and_missing_host_are_left_untouched() {
+        // operator set a real external base -> respected
+        assert_eq!(
+            client_facing_base("https://cdn.example.com:8888", Some("10.200.0.1:8000")),
+            "https://cdn.example.com:8888"
+        );
+        // no Host header -> unchanged
+        assert_eq!(
+            client_facing_base("http://127.0.0.1:8888", None),
+            "http://127.0.0.1:8888"
+        );
+    }
+
+    #[test]
+    fn ipv6_request_host_is_bracketed() {
+        assert_eq!(
+            client_facing_base("http://127.0.0.1:8888", Some("[fd00::1]:8000")),
+            "http://[fd00::1]:8888"
+        );
+    }
 
     #[test]
     fn codec_args_select_by_engine() {

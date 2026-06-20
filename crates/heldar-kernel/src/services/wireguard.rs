@@ -138,11 +138,11 @@ fn peer_config(
     peer_ip: &Ipv4Addr,
     host_pub: &str,
     endpoint: &str,
-    host_ip: &str,
+    allowed_ips: &str,
 ) -> String {
     format!(
         "[Interface]\n{private_line}\nAddress = {peer_ip}/32\n\n\
-         [Peer]\nPublicKey = {host_pub}\nEndpoint = {endpoint}\nAllowedIPs = {host_ip}/32\nPersistentKeepalive = 25\n"
+         [Peer]\nPublicKey = {host_pub}\nEndpoint = {endpoint}\nAllowedIPs = {allowed_ips}\nPersistentKeepalive = 25\n"
     )
 }
 
@@ -163,6 +163,11 @@ pub struct Resolved {
     pub port: u16,
     /// `host:port` advertised to peers (bracketed if IPv6).
     pub endpoint: String,
+    /// What peers route over the tunnel (the `.conf` AllowedIPs). Defaults to `{host_ip}/32` (split
+    /// tunnel: only the box). Override with `HELDAR_WG_ALLOWED_IPS` to reach cameras/MediaMTX on other
+    /// IPs. `#[serde(default)]` so Resolved blobs persisted before this field still load.
+    #[serde(default)]
+    pub allowed_ips: String,
     net24: u32,
 }
 
@@ -342,12 +347,21 @@ pub fn resolve(cfg: &Config) -> anyhow::Result<Resolved> {
             format!("[{host}]:{port}")
         }
     };
+    // Split tunnel by default (only the box's /32); an operator can widen this to reach cameras or a
+    // separate MediaMTX host. Trimmed so an empty override falls back to the default.
+    let allowed_ips = cfg
+        .wg_allowed_ips
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map_or_else(|| format!("{host_ip}/32"), str::to_string);
     Ok(Resolved {
         iface,
         subnet: format!("{}/24", Ipv4Addr::from(net24)),
         host_ip: host_ip.to_string(),
         port,
         endpoint,
+        allowed_ips,
         net24,
     })
 }
@@ -575,7 +589,13 @@ pub fn add_peer(
     names.insert(peer_pub.clone(), name.to_string());
     save_names(cfg, &r.iface, &names)?;
 
-    let config = peer_config(&private_line, &peer_ip, &host_pub, &r.endpoint, &r.host_ip);
+    let config = peer_config(
+        &private_line,
+        &peer_ip,
+        &host_pub,
+        &r.endpoint,
+        &r.allowed_ips,
+    );
     tracing::info!(iface = %r.iface, %name, address = %peer_ip, client_key = client_public_key.is_some(), "enrolled WireGuard peer");
     Ok(EnrolledPeer {
         name: name.to_string(),
@@ -780,12 +800,24 @@ mod tests {
             &ip,
             "hostpubkey=",
             "[2001:db8::1]:51820",
-            "10.200.0.1",
+            "10.200.0.1/32",
         );
         assert!(cfg.contains(CLIENT_KEY_PLACEHOLDER));
         assert!(cfg.contains("Address = 10.200.0.2/32"));
         assert!(cfg.contains("AllowedIPs = 10.200.0.1/32"));
         assert!(cfg.contains("PersistentKeepalive = 25"));
+    }
+
+    #[test]
+    fn peer_config_passes_through_a_wider_allowed_ips() {
+        let cfg = peer_config(
+            "PrivateKey = x",
+            &Ipv4Addr::new(10, 200, 0, 2),
+            "hostpub=",
+            "host:51820",
+            "10.200.0.1/32, 192.168.1.0/24",
+        );
+        assert!(cfg.contains("AllowedIPs = 10.200.0.1/32, 192.168.1.0/24"));
     }
 
     #[test]

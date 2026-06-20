@@ -118,6 +118,9 @@ no coordinator. Enable the off-by-default `wireguard` cargo feature:
    # all optional — sensible non-conflicting values are auto-selected otherwise:
    # HELDAR_WG_IFACE=heldar0   HELDAR_WG_SUBNET=10.200.0.0/24   HELDAR_WG_PORT=51820
    # HELDAR_WG_ENDPOINT=[2001:db8::1]:51820   # defaults to the host's public IPv6
+   # HELDAR_WG_ALLOWED_IPS="10.200.0.1/32"    # what peers route over the tunnel; default = the box only
+   #   (split tunnel). Widen it — e.g. "10.200.0.1/32, 192.168.1.0/24" — only if cameras or a separate
+   #   MediaMTX host live on other IPs the client must reach directly.
    ```
    On boot the kernel brings up its own interface, **auto-selecting a name / subnet / port that don't
    collide with anything already on the host** (the LAN, Docker bridges, *other WireGuard tunnels*). It
@@ -125,9 +128,12 @@ no coordinator. Enable the off-by-default `wireguard` cargo feature:
    interface, the default route, or DNS.
 3. Enroll a device in the dashboard (**Remote** page) or via `POST /api/v1/remote-access/peers`; import
    the returned `.conf` into the device's WireGuard app and connect. The dashboard + recorded playback
-   are reachable at the host's WireGuard address (e.g. `http://10.200.0.1:8000`). For **live** video
-   over the tunnel, also set `HELDAR_MEDIAMTX_HLS_BASE`/`_WEBRTC_BASE` to that same WireGuard host IP so
-   the browser fetches streams over the tunnel rather than its own localhost.
+   are reachable at the host's WireGuard address (e.g. `http://10.200.0.1:8000`). **Live** video works
+   over the tunnel out of the box: when the MediaMTX bases point at loopback (the default), the kernel
+   rewrites the HLS/WebRTC stream host to the address the client used to reach the dashboard (the `Host`
+   header) — so a phone on the tunnel fetches streams from `10.200.0.1:8888`, a LAN browser from the LAN
+   IP, both without per-client config. Set `HELDAR_MEDIAMTX_HLS_BASE`/`_WEBRTC_BASE` to a real external
+   host only to override that (e.g. a CDN); an explicit non-loopback base is left untouched.
 
 **When to prefer this vs Recipe A/B:** kernel-managed plain WireGuard needs **one side to be reachable**
 (IPv6 endpoint, or a public IPv4 / port-forward). It does **no** hole-punching or relay, so behind

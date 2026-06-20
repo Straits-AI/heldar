@@ -1,4 +1,5 @@
 use axum::extract::{Path, State};
+use axum::http::{header::HOST, HeaderMap};
 use axum::routing::get;
 use axum::{Json, Router};
 
@@ -18,9 +19,12 @@ pub fn router() -> Router<AppState> {
 async fn liveview(
     State(st): State<AppState>,
     principal: Principal,
+    headers: HeaderMap,
     Path(id): Path<String>,
 ) -> AppResult<Json<LiveUrls>> {
     // Operational action (viewer+); the extractor enforces auth when it is enabled.
     principal.require(principal.can_view(), "view live streams")?;
-    Ok(Json(mediamtx::ensure_live(&st, &id).await?))
+    // The Host the client used lets us hand back stream URLs reachable over the tunnel / LAN.
+    let host = headers.get(HOST).and_then(|v| v.to_str().ok());
+    Ok(Json(mediamtx::ensure_live(&st, &id, host).await?))
 }

@@ -130,6 +130,10 @@ pub struct Config {
     /// Public endpoint advertised to enrolled peers as `host:port` (default: auto-detect the host's
     /// global IPv6). Set this to a public IPv4:port or DNS name if peers reach the host another way.
     pub wg_endpoint: Option<String>,
+    /// What enrolled peers route over the tunnel (the `.conf` AllowedIPs). Default: `{host_ip}/32` — a
+    /// split tunnel that reaches only the box. Widen it (e.g. `10.200.0.1/32, 192.168.1.0/24`) when
+    /// cameras or a separate MediaMTX host live on other IPs the phone must reach.
+    pub wg_allowed_ips: Option<String>,
     // ---- Backup subsystem (kernel platform feature) ----
     /// Path to the `rclone` binary used for sftp/ftp/s3 remote backups. Local/NAS-mount backups use
     /// std fs copy and never need it; remote backups degrade to a clear job error when it is missing.
@@ -389,6 +393,7 @@ impl Config {
             wg_subnet: var("HELDAR_WG_SUBNET"),
             wg_port: var("HELDAR_WG_PORT").and_then(|s| s.parse().ok()),
             wg_endpoint: var("HELDAR_WG_ENDPOINT"),
+            wg_allowed_ips: var("HELDAR_WG_ALLOWED_IPS"),
             rclone_bin: var_or("HELDAR_RCLONE_BIN", "rclone"),
             backup_enabled: parse_bool("HELDAR_BACKUP_ENABLED", true),
             backup_scheduler_interval_s: parse_or("HELDAR_BACKUP_SCHEDULER_INTERVAL_S", 60),
