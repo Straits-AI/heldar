@@ -74,3 +74,26 @@ jobs:
         working-directory: apps/web
       - run: npm run build
         working-directory: apps/web
+
+  mobile:
+    name: mobile (typecheck + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/mobile/package-lock.json
+      - run: npm ci
+        working-directory: apps/mobile
+      - run: npm run typecheck
+        working-directory: apps/mobile
+      - run: npm test
+        working-directory: apps/mobile
+      # Config-eval smoke: catches a broken app.config.ts or a broken config plugin (both plugin sets).
+      # Does NOT run a native prebuild — just evaluates the config graph.
+      - run: npx expo config --type public > /dev/null
+        working-directory: apps/mobile
+      - run: HELDAR_IOS_PLUGINS=1 npx expo config --type public > /dev/null
+        working-directory: apps/mobile
