@@ -371,32 +371,25 @@ const RELAY_POLLERS: usize = 4;
 /// Cap on a relayed request/response body (defensive; Stage C is small JSON + the odd snapshot).
 const MAX_RELAY_BODY: usize = 8 * 1024 * 1024;
 
-/// What the box will replay in Stage C: GET on the REST/media READ surface, plus the auth login/logout
-/// lifecycle. Credential/admin/internal surfaces are refused here regardless of role (defense in depth —
-/// the kernel RBAC remains the real gate). Writes/config arrive in Stage B.
+/// What the box will replay for the remote dashboard (Stage B): the full REST + media surface, all HTTP
+/// methods. The kernel's own auth + RBAC (run on the forwarded per-user Bearer) is the real authorization
+/// gate; this allowlist is defense in depth — it pins the surface to `/api/v1/*` + `/media/*`, blocks
+/// path traversal/smuggling, and never relays the Worker-internal/metrics surfaces.
 fn relay_allowed(method: &str, path: &str) -> bool {
     if !path.starts_with('/') || path.contains("..") || path.contains("//") || path.contains('@') {
         return false;
     }
-    const DENY: &[&str] = &[
-        "/api/v1/users",
-        "/api/v1/api-keys",
-        "/api/v1/relay",
-        "/api/v1/rendezvous",
-        "/api/v1/admin",
-        "/metrics",
-    ];
+    const DENY: &[&str] = &["/api/v1/relay", "/api/v1/rendezvous", "/metrics"];
     if DENY
         .iter()
         .any(|d| path == *d || path.starts_with(&format!("{d}/")))
     {
         return false;
     }
-    match method {
-        "GET" => path.starts_with("/api/v1/") || path.starts_with("/media/"),
-        "POST" => path == "/api/v1/auth/login" || path == "/api/v1/auth/logout",
-        _ => false,
+    if !(path.starts_with("/api/v1/") || path.starts_with("/media/")) {
+        return false;
     }
+    matches!(method, "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE")
 }
 
 /// Request headers the box forwards from the browser to the local kernel (everything else stripped, so
@@ -595,18 +588,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn relay_allowlist_permits_reads_and_login_only() {
+    fn relay_allowlist_pins_surface_and_blocks_internal_and_traversal() {
+        // the full REST + media surface, all methods (kernel RBAC is the real gate)
         assert!(relay_allowed("GET", "/api/v1/cameras"));
+        assert!(relay_allowed("POST", "/api/v1/cameras"));
+        assert!(relay_allowed("PATCH", "/api/v1/cameras/cam2"));
+        assert!(relay_allowed("DELETE", "/api/v1/cameras/cam2"));
         assert!(relay_allowed("GET", "/media/recordings/x.mp4"));
         assert!(relay_allowed("POST", "/api/v1/auth/login"));
-        // writes, admin surfaces, traversal, and credential management are refused
-        assert!(!relay_allowed("POST", "/api/v1/cameras"));
-        assert!(!relay_allowed("DELETE", "/api/v1/cameras/cam2"));
-        assert!(!relay_allowed("GET", "/api/v1/users"));
-        assert!(!relay_allowed("GET", "/api/v1/api-keys"));
+        // off-surface, Worker-internal, metrics, traversal, smuggling are refused
+        assert!(!relay_allowed("GET", "/healthz"));
         assert!(!relay_allowed("GET", "/api/v1/relay/poll"));
-        assert!(!relay_allowed("GET", "/api/v1/../secrets"));
+        assert!(!relay_allowed("GET", "/api/v1/rendezvous/poll"));
         assert!(!relay_allowed("GET", "/metrics"));
+        assert!(!relay_allowed("GET", "/api/v1/../secrets"));
+        assert!(!relay_allowed("GET", "/api/v1//cameras"));
+        assert!(!relay_allowed("TRACE", "/api/v1/cameras"));
     }
 
     #[test]

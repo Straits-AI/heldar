@@ -7,6 +7,9 @@ import tailwindcss from "@tailwindcss/vite";
 const CORE = "http://localhost:8000";
 
 export default defineConfig({
+  // Served at `/` on the appliance (same-origin with the kernel); built with VITE_BASE_PATH=/app/ when
+  // hosted as the remote dashboard behind the rendezvous Worker (ADR 0003 P3, Stage B).
+  base: process.env.VITE_BASE_PATH || "/",
   plugins: [react(), tailwindcss()],
   server: {
     port: 5173,
