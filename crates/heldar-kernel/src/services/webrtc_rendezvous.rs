@@ -111,6 +111,23 @@ async fn bridge_to_local_whep(
 /// Largest browser SDP offer we'll bridge (defensive — the rendezvous already caps it well below this).
 const MAX_SDP_BYTES: usize = 512 * 1024;
 
+/// The box's camera list (id + display name) advertised to the rendezvous on each poll, so the grid
+/// viewer can enumerate cameras without reaching the box's REST API (that is the Stage C relay). Read
+/// straight from local state (no self-HTTP, so it is unaffected by whether the REST API requires auth);
+/// names fall back to the id. Exposes only id+name — never a stream URL or credential.
+async fn camera_catalog(state: &AppState) -> Vec<serde_json::Value> {
+    sqlx::query_as::<_, (String, Option<String>)>("SELECT id, name FROM cameras ORDER BY id ASC")
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(id, name)| {
+            let name = name.filter(|n| !n.is_empty()).unwrap_or_else(|| id.clone());
+            json!({ "id": id, "name": name })
+        })
+        .collect()
+}
+
 /// One long-poll cycle: ask for the next session; if one arrives, bridge it and report the answer (or the
 /// error) back. Returns `Ok(true)` when a bridge FAILED (so the caller can rate-limit a persistent local
 /// failure), `Ok(false)` on a clean cycle (work handled or nothing pending). `Err` only on a transport
@@ -125,7 +142,8 @@ async fn poll_once(
     let resp = client
         .post(poll_url(rendezvous_url))
         .bearer_auth(token)
-        .json(&json!({ "site_id": site_id }))
+        // Piggy-back the camera list so the grid viewer can enumerate cameras (refreshed every poll).
+        .json(&json!({ "site_id": site_id, "cameras": camera_catalog(state).await }))
         .send()
         .await
         .context("rendezvous poll request")?;
