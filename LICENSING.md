@@ -19,9 +19,10 @@ private `heldar-proprietary` repo, depending on the open crates through publishe
 
 The **open kernel** is the domain-agnostic platform anyone can self-host and build on. The **open
 generic apps** are complete, deployable reference applications (access control, movement, search) —
-they make the kernel immediately useful and carry no client-specific logic. **Remote access** (the
-WireGuard-overlay awareness; see `docs/REMOTE-ACCESS.md`) is an open kernel capability, so every open
-deployment gets private, P2P-first remote viewing.
+they make the kernel immediately useful and carry no client-specific logic. **Remote access** is
+browser-based and WebRTC-first (NAT traversal via signaling + TURN, MediaMTX/WHEP for video; see
+`docs/REMOTE-ACCESS.md`); the open kernel also carries **overlay awareness** (it observes an external
+Tailscale/NetBird/WireGuard daemon and reports reachability), the optional path for self-hosters.
 
 **Vertical/client products** (BakerySense; the future Campus school suite with its students/guardians
 model and parental-app integration) are proprietary crates that depend on the open generic crates and

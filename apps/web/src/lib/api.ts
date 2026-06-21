@@ -11,9 +11,6 @@ import type {
   ApiKeyView,
   ArchiveExportRequest,
   AuditLogEntry,
-  EnrolledPeer,
-  RemoteAccessStatus,
-  RemotePeerInfo,
   BackupDestinationCreate,
   BackupDestinationUpdate,
   BackupDestinationView,
@@ -810,26 +807,4 @@ export const api = {
   getSite: () => request<SiteInfo>("/api/v1/site"),
   /** Drain the durable detection outbox in `seq` order from a cursor (admin-only). */
   listOutbox: (params: OutboxQuery = {}) => request<OutboxPage>(`/api/v1/outbox${qs(params)}`),
-
-  // ---- Kernel-managed WireGuard remote access (server `wireguard` feature; 404 when not built/enabled) ----
-  /** Managed-WireGuard status. Any principal. */
-  remoteAccess: () => request<RemoteAccessStatus>("/api/v1/remote-access"),
-  /** Enrolled devices on the managed interface (no secrets). Any principal. */
-  listRemotePeers: () => request<RemotePeerInfo[]>("/api/v1/remote-access/peers"),
-  /** Enroll a device (manager+). Pass a client-generated `publicKey` so the private key never leaves
-   *  this browser; the returned `.conf` then carries a placeholder you fill in locally. */
-  enrollRemotePeer: (name: string, publicKey?: string) =>
-    request<EnrolledPeer>("/api/v1/remote-access/peers", {
-      method: "POST",
-      body: JSON.stringify({ name, public_key: publicKey }),
-    }),
-  /** Mint a short-TTL, single-use pairing token (manager+) for QR-pairing a phone. */
-  mintPairingToken: () =>
-    request<{ token: string; expires_at: number; ttl_seconds: number }>(
-      "/api/v1/remote-access/pairing",
-      { method: "POST" },
-    ),
-  /** Remove a device by its base64 public key (manager+). */
-  removeRemotePeer: (publicKey: string) =>
-    request<void>(`/api/v1/remote-access/peers?key=${enc(publicKey)}`, { method: "DELETE" }),
 };

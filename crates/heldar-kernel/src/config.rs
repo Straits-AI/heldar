@@ -114,26 +114,6 @@ pub struct Config {
     pub overlay_kind: String,
     /// The overlay's network interface to probe (e.g. `tailscale0`, `wt0`, `wg0`).
     pub overlay_iface: Option<String>,
-    // ---- Kernel-managed WireGuard (the off-by-default `wireguard` feature) ----
-    /// Master switch for Heldar's OWN, isolated WireGuard interface (distinct from `overlay_*`, which
-    /// only *observes* an external daemon). When true AND the binary holds CAP_NET_ADMIN, the kernel
-    /// brings up a dedicated interface for remote viewing, auto-selecting a non-conflicting name,
-    /// subnet, and port so it never touches existing interfaces/routes. Off by default (LAN-only).
-    pub wg_managed: bool,
-    /// Override the managed interface name (default: auto-pick a free `heldar<N>`). Never `wg0`/existing.
-    pub wg_iface: Option<String>,
-    /// Override the managed /24 subnet, e.g. `10.99.0.0/24` (default: auto-pick a free block, skipping
-    /// every subnet already present on the host — LAN, Docker bridges, other WireGuard interfaces).
-    pub wg_subnet: Option<String>,
-    /// Override the UDP listen port (default: auto-pick a free port; never collides with an existing one).
-    pub wg_port: Option<u16>,
-    /// Public endpoint advertised to enrolled peers as `host:port` (default: auto-detect the host's
-    /// global IPv6). Set this to a public IPv4:port or DNS name if peers reach the host another way.
-    pub wg_endpoint: Option<String>,
-    /// What enrolled peers route over the tunnel (the `.conf` AllowedIPs). Default: `{host_ip}/32` — a
-    /// split tunnel that reaches only the box. Widen it (e.g. `10.200.0.1/32, 192.168.1.0/24`) when
-    /// cameras or a separate MediaMTX host live on other IPs the phone must reach.
-    pub wg_allowed_ips: Option<String>,
     // ---- Backup subsystem (kernel platform feature) ----
     /// Path to the `rclone` binary used for sftp/ftp/s3 remote backups. Local/NAS-mount backups use
     /// std fs copy and never need it; remote backups degrade to a clear job error when it is missing.
@@ -208,6 +188,10 @@ pub struct Config {
     /// it). Required as a set when the control plane enforces mTLS; unset = plain HTTP to the control
     /// plane (the LAN/overlay default).
     pub cp_tls: Option<CpTlsCfg>,
+    /// Public WebRTC rendezvous URL (`HELDAR_REMOTE_RENDEZVOUS_URL`) the box dials OUT to for universal
+    /// remote viewing (ADR 0003, P2). Unset (default) → the rendezvous client parks; remote access is
+    /// opt-in. Reuses `site_id` for identity, `cp_token` as bearer, and `cp_tls` for mTLS.
+    pub rendezvous_url: Option<String>,
     // ---- Plugin registry / store (Phase C) ----
     /// Master switch for the plugin store's remote-registry fetching. When false, the store shows only
     /// the bundled open catalog + locally installed plugins (fully offline). The bundled catalog is
@@ -388,12 +372,6 @@ impl Config {
             overlay_enabled: parse_bool("HELDAR_OVERLAY_ENABLED", false),
             overlay_kind: var_or("HELDAR_OVERLAY_KIND", "none"),
             overlay_iface: var("HELDAR_OVERLAY_IFACE"),
-            wg_managed: parse_bool("HELDAR_WG_MANAGED", false),
-            wg_iface: var("HELDAR_WG_IFACE"),
-            wg_subnet: var("HELDAR_WG_SUBNET"),
-            wg_port: var("HELDAR_WG_PORT").and_then(|s| s.parse().ok()),
-            wg_endpoint: var("HELDAR_WG_ENDPOINT"),
-            wg_allowed_ips: var("HELDAR_WG_ALLOWED_IPS"),
             rclone_bin: var_or("HELDAR_RCLONE_BIN", "rclone"),
             backup_enabled: parse_bool("HELDAR_BACKUP_ENABLED", true),
             backup_scheduler_interval_s: parse_or("HELDAR_BACKUP_SCHEDULER_INTERVAL_S", 60),
@@ -426,6 +404,7 @@ impl Config {
             cp_token: var_or("HELDAR_CP_TOKEN", ""),
             cp_register_interval_s: parse_or("HELDAR_CP_REGISTER_INTERVAL_S", 300),
             cp_tls: cp_tls_from_env(),
+            rendezvous_url: var("HELDAR_REMOTE_RENDEZVOUS_URL"),
             registry_enabled: parse_bool("HELDAR_REGISTRY_ENABLED", true),
             registry_urls: var_or("HELDAR_REGISTRY_URLS", "")
                 .split(',')

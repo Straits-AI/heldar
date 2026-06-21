@@ -21,8 +21,6 @@ pub mod playback_sessions;
 pub mod recording_control;
 pub mod recordings;
 pub mod registry;
-#[cfg(feature = "wireguard")]
-pub mod remote_access;
 pub mod schedules;
 pub mod snapshot_schedules;
 pub mod system;
@@ -33,8 +31,7 @@ pub mod zones;
 /// auth admin surface stays here for now; domain apps merge their own routers in
 /// the server binary.
 pub fn api_router() -> Router<AppState> {
-    #[cfg_attr(not(feature = "wireguard"), allow(unused_mut))]
-    let mut router = Router::new()
+    Router::new()
         .merge(system::router())
         .merge(modules::router())
         .merge(registry::router())
@@ -57,10 +54,5 @@ pub fn api_router() -> Router<AppState> {
         .merge(onvif::router())
         .merge(outbox::router())
         .merge(webhooks::router())
-        .merge(auth::router());
-    #[cfg(feature = "wireguard")]
-    {
-        router = router.merge(remote_access::router());
-    }
-    router
+        .merge(auth::router())
 }

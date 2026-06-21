@@ -399,7 +399,7 @@ export function CameraDetail() {
           {/* Hero: live player */}
           <Panel
             title="Live View"
-            subtitle="Low-latency HLS"
+            subtitle="Low-latency WebRTC (HLS fallback)"
             padded={false}
             actions={
               <Button size="sm" onClick={() => void startLive()} disabled={liveLoading}>
@@ -409,6 +409,8 @@ export function CameraDetail() {
           >
             <div className="p-3">
               <LiveView
+                webrtcUrl={live?.webrtc_url}
+                iceServers={live?.ice_servers}
                 hlsUrl={live?.hls_url}
                 poster={api.snapshotUrl(id)}
                 name={cam?.name ?? id}

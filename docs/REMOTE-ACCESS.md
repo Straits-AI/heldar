@@ -3,22 +3,35 @@
 How to view a Heldar deployment from outside its LAN — when the site is behind **CGNAT** (the
 common case for home/small-site internet: a shared public IPv4, no inbound port-forward, DDNS
 useless). This is an **open kernel** capability: every deployment of the Apache-2.0 kernel gets
-private, peer-to-peer-first remote viewing out of the box.
+private remote viewing out of the box.
+
+The product direction is **WebRTC-primary, browser-based** remote access — see
+[`docs/adr/0003-webrtc-remote-access.md`](adr/0003-webrtc-remote-access.md) for the design of
+record. It is being delivered in phases and is **not all shipped yet** (see _Status & phasing_
+below). For full-L3 reach today, the optional self-hoster **overlay** paths (Recipes A/B) work now.
 
 ---
 
 ## TL;DR
 
-- **Transport:** a **WireGuard overlay** running as an external daemon on the host.
+- **Primary (forthcoming): WebRTC, in the browser.** A viewer opens the dashboard in any browser and
+  the box **dials out** — no inbound port, no client install. Universal NAT traversal comes from
+  **signaling + TURN hosted in `heldar-control-plane`**; live video rides **MediaMTX / WHEP**
+  (`:8889`). Media is **end-to-end encrypted (DTLS-SRTP)**: the rendezvous brokers only SDP/ICE and
+  relayed control, never the video bytes. Design of record:
+  [`docs/adr/0003-webrtc-remote-access.md`](adr/0003-webrtc-remote-access.md).
+- **Optional (works today): a WireGuard overlay** running as an external daemon on the host, for
+  self-hosters who want full L3 reachability rather than just the browser view.
   - **Your own / dev use → Tailscale** (Personal, free): zero servers, near-zero ops, $0.
   - **Shipped product (paying clients) → NetBird self-hosted**: a single container per deployment,
     no per-seat licensing, no third-party metadata — fits the single-tenant-per-deployment model.
-- **Why an overlay (not port-forward / DDNS / a public reverse proxy):** CGNAT blocks all inbound,
-  so the only thing that works is the local node **dialing out**. An overlay does exactly that, and
-  is **P2P-first** (direct hole-punch / IPv6 when possible; an encrypted relay only as fallback) and
-  **end-to-end encrypted** (no relay can ever decrypt your camera video).
-- **The kernel's role is thin:** it does **not** embed or manage WireGuard. It reports whether the
-  configured overlay interface is up (`/api/v1/system → remote_access`) so the dashboard can show
+- **Why outbound-dialing (not port-forward / DDNS / a public reverse proxy):** CGNAT blocks all
+  inbound, so the only thing that reliably works is the local node **dialing out**. Both the WebRTC
+  path and an overlay do exactly that. Overlays are additionally **P2P-first** (direct hole-punch /
+  IPv6 when possible; an encrypted relay only as fallback) and **end-to-end encrypted** (no relay can
+  ever decrypt your camera video).
+- **The kernel's role is thin:** it does **not** embed or manage WireGuard. For overlays it reports
+  whether the configured interface is up (`/api/v1/system → remote_access`) so the dashboard can show
   remote-access health. The overlay is orthogonal to the media stack.
 
 ---
@@ -30,34 +43,55 @@ private, peer-to-peer-first remote viewing out of the box.
 | Port-forward a public IP | ❌ | No dedicated public IPv4; you can't forward a port on the carrier's shared NAT. |
 | DDNS | ❌ | Nothing to point a hostname at; still can't accept inbound. |
 | IPv6 direct | ⚠️ sometimes | The site usually has routable IPv6, but **viewer-side** v6 is unreliable (mobile/hotel/corporate are often v4-only). Good when both ends have it; can't be the only path. |
-| **Outbound overlay (WireGuard)** | ✅ | The node dials **out** to a coordinator; CGNAT always allows outbound. Reachability needs no inbound port. |
+| Plain WireGuard (manual peer) | ❌ behind CGNAT | A bare WireGuard peer needs **one side reachable** (a routable IPv6 endpoint, or a public IPv4 / port-forward). With dual CGNAT and no IPv6 there's no endpoint to dial and **no built-in hole-punch or relay**, so it can't connect. Works only when you already have an endpoint. |
+| **WebRTC (signaling + TURN)** | ✅ | The box dials **out** to the control-plane rendezvous; CGNAT always allows outbound. TURN relays media when a direct path can't be punched. No inbound port. |
+| **Outbound overlay (Tailscale / NetBird)** | ✅ | The node dials **out** to a coordinator; CGNAT always allows outbound. P2P-first with an encrypted relay fallback, so it connects even under dual symmetric CGNAT. |
 
-Carrier CGNAT is typically **symmetric NAT**, which defeats plain STUN hole-punching. This is why a
-naive WebRTC/STUN setup ends up relaying through TURN most of the time, and why the overlay's smarter
-NAT traversal (hole-punch **+ UDP port prediction**) matters — it recovers a **direct** path in the
-common case (symmetric CGNAT camera side + endpoint-independent home/mobile viewer), keeping the
-relay a true fallback rather than the primary path.
+Carrier CGNAT is typically **symmetric NAT**, which defeats plain STUN hole-punching — so a naive
+WebRTC/STUN setup ends up relaying through TURN much of the time. The control-plane therefore hosts
+TURN as a first-class relay (the universal-reach path), while overlays add smarter NAT traversal
+(hole-punch **+ UDP port prediction**) that recovers a **direct** path in the common case (symmetric
+CGNAT camera side + endpoint-independent home/mobile viewer), keeping the relay a true fallback.
 
 ## P2P-first, and "no proxy reads my bytes"
 
-Two layers, deliberately separate:
+The privacy guarantee holds on **both** the WebRTC and overlay paths:
 
-- **Reachability (control + media transport): the overlay.** WireGuard establishes a direct
-  encrypted tunnel between the viewer's device and the camera-site host whenever NAT traversal
-  succeeds. When the hostile case hits (symmetric NAT on *both* ends), it falls back to a relay
-  (Tailscale DERP / NetBird relay) **that forwards only ciphertext** — it can never decrypt the
-  traffic. So even on the fallback path, no proxy sees your video.
-- **Media:** MediaMTX keeps serving its normal **WebRTC (WHEP)** / HLS on its normal ports; over the
-  overlay it's reachable at the host's overlay address. WebRTC media is itself DTLS-SRTP encrypted,
-  a second independent layer.
+- **WebRTC (primary, forthcoming): media is end-to-end over DTLS-SRTP.** The control-plane rendezvous
+  only brokers the **SDP/ICE handshake + relayed control** — it never terminates the media. When a
+  direct peer path can't be punched, TURN relays **encrypted** packets it cannot read. So even on the
+  relayed path, no proxy (and not the control-plane) ever sees decrypted video, URLs, or credentials.
+- **Overlay (optional): WireGuard is end-to-end.** The overlay establishes a direct encrypted tunnel
+  between the viewer's device and the camera-site host whenever NAT traversal succeeds. When the
+  hostile case hits (symmetric NAT on *both* ends), it falls back to a relay (Tailscale DERP /
+  NetBird relay) **that forwards only ciphertext** — it can never decrypt the traffic. Over the
+  overlay, MediaMTX still serves its normal **WebRTC (WHEP)** / HLS, itself DTLS-SRTP encrypted — a
+  second independent layer.
 
-**Net:** content privacy is strong on every path. The only thing a managed coordinator (Tailscale
-Inc.) sees is **connection metadata** (device keys/names, the camera + viewer public IPs, timestamps,
-ACL topology) — never video, URLs, or camera credentials. Self-hosting the coordinator (NetBird /
+**Net:** content privacy is strong on every path. On the WebRTC path the control-plane sees only
+signaling/connection metadata; on a managed overlay the only thing a coordinator (Tailscale Inc.)
+sees is **connection metadata** (device keys/names, the camera + viewer public IPs, timestamps, ACL
+topology) — never video, URLs, or camera credentials. Self-hosting the coordinator (NetBird /
 Headscale) removes even that third-party metadata, at the cost of a small VPS to run + patch.
 
-> The genuine tradeoff: you cannot have **zero-ops + zero-cost + zero-third-party-metadata**
-> simultaneously. Managed Tailscale gives the first two; self-hosting buys the third with a VPS.
+> The genuine tradeoff for the overlay path: you cannot have **zero-ops + zero-cost +
+> zero-third-party-metadata** simultaneously. Managed Tailscale gives the first two; self-hosting
+> buys the third with a VPS.
+
+---
+
+## Status & phasing
+
+WebRTC remote access is **forthcoming, delivered in phases** (full plan in
+[`docs/adr/0003-webrtc-remote-access.md`](adr/0003-webrtc-remote-access.md)):
+
+- **P1 — LAN / WHEP:** sub-second live video in the browser over MediaMTX WHEP (`:8889`) on the LAN.
+- **P2 — universal reach:** the box dials out to **signaling + TURN in `heldar-control-plane`**, so
+  the same browser view works from anywhere behind CGNAT, no inbound port.
+- **P3 — full dashboard:** the complete dashboard (recorded playback, config, events) over the same
+  brokered, end-to-end-encrypted path.
+
+Until those land, use the overlay recipes below for full-L3 remote access today.
 
 ---
 
@@ -101,45 +135,6 @@ This keeps the device graph/metadata on infrastructure **you** control, WireGuar
 and a managed-like UX — at materially lower ops than Headscale (which lags upstream protocol changes).
 Headscale + a self-hosted DERP is the maximal-privacy variant, but the highest ops.
 
-## Recipe C — kernel-managed WireGuard (built in): zero extra software, IPv6-first
-
-For deployments that **have a reachable endpoint** — a routable IPv6 (common) or a public IPv4 / port-
-forward — Heldar can manage its own WireGuard interface directly, with no Tailscale/NetBird daemon and
-no coordinator. Enable the off-by-default `wireguard` cargo feature:
-
-1. Build/run with the feature and grant the binary network privilege once:
-   ```bash
-   cargo build -p heldar-server --features wireguard
-   sudo setcap cap_net_admin,cap_net_raw+eip ./target/debug/heldar-core
-   ```
-2. Turn it on:
-   ```bash
-   HELDAR_WG_MANAGED=true
-   # all optional — sensible non-conflicting values are auto-selected otherwise:
-   # HELDAR_WG_IFACE=heldar0   HELDAR_WG_SUBNET=10.200.0.0/24   HELDAR_WG_PORT=51820
-   # HELDAR_WG_ENDPOINT=[2001:db8::1]:51820   # defaults to the host's public IPv6
-   # HELDAR_WG_ALLOWED_IPS="10.200.0.1/32"    # what peers route over the tunnel; default = the box only
-   #   (split tunnel). Widen it — e.g. "10.200.0.1/32, 192.168.1.0/24" — only if cameras or a separate
-   #   MediaMTX host live on other IPs the client must reach directly.
-   ```
-   On boot the kernel brings up its own interface, **auto-selecting a name / subnet / port that don't
-   collide with anything already on the host** (the LAN, Docker bridges, *other WireGuard tunnels*). It
-   touches only the interface it creates plus that interface's own scope route — never an existing
-   interface, the default route, or DNS.
-3. Enroll a device in the dashboard (**Remote** page) or via `POST /api/v1/remote-access/peers`; import
-   the returned `.conf` into the device's WireGuard app and connect. The dashboard + recorded playback
-   are reachable at the host's WireGuard address (e.g. `http://10.200.0.1:8000`). **Live** video works
-   over the tunnel out of the box: when the MediaMTX bases point at loopback (the default), the kernel
-   rewrites the HLS/WebRTC stream host to the address the client used to reach the dashboard (the `Host`
-   header) — so a phone on the tunnel fetches streams from `10.200.0.1:8888`, a LAN browser from the LAN
-   IP, both without per-client config. Set `HELDAR_MEDIAMTX_HLS_BASE`/`_WEBRTC_BASE` to a real external
-   host only to override that (e.g. a CDN); an explicit non-loopback base is left untouched.
-
-**When to prefer this vs Recipe A/B:** kernel-managed plain WireGuard needs **one side to be reachable**
-(IPv6 endpoint, or a public IPv4 / port-forward). It does **no** hole-punching or relay, so behind
-**dual** CGNAT with no IPv6 it can't connect — use Tailscale/NetBird (which relay-fallback) there. It is
-the lightest option when the host has a routable endpoint (this is the common IPv6 case).
-
 ---
 
 ## Security: authenticate before any exposure
@@ -149,8 +144,10 @@ default). On a tailnet/overlay an ACL gates who can reach it, which is sufficien
 trusted viewers. But:
 
 - Add the signed read tokens for MediaMTX playback before exposing it even on the overlay.
-- For **any** public endpoint (a Cloudflare/VPS browser gateway, if ever added), authentication in
-  front of the endpoint is **mandatory** — never expose the media surface publicly unauthenticated.
+- For **any** public endpoint (the control-plane WebRTC rendezvous, or a VPS browser gateway),
+  authentication in front of the endpoint is **mandatory** — never expose the media surface publicly
+  unauthenticated. On the WebRTC path the rendezvous brokers signaling only and never sees media, but
+  the signaling/control surface itself must still be authenticated.
 
 ## What the kernel provides (and what it doesn't)
 
@@ -158,13 +155,15 @@ trusted viewers. But:
   config (`HELDAR_OVERLAY_*`) and a probe of the configured interface (`/sys/class/net/<iface>`),
   surfaced at `GET /api/v1/system → remote_access { enabled, kind, iface, present, operstate, up, note }`.
   Transport-agnostic: any overlay that presents a network interface is supported (Recipes A/B).
-- **Provides (open, Apache-2.0), behind the `wireguard` feature:** a kernel-*managed* WireGuard
-  interface (Recipe C) — collision-free auto-allocation, peer enrollment, and status at
-  `GET /api/v1/remote-access`. Off by default; needs `CAP_NET_ADMIN`. It manages only its own
-  interface and never disturbs existing host networking.
-- **Does not provide:** NAT hole-punching or a relay/coordinator (so dual-CGNAT-without-IPv6 still
-  wants Tailscale/NetBird), nor any managed hosted multi-site control plane — that would live in a
-  proprietary crate; the default open path needs none of it.
+- **Provides (forthcoming): WebRTC remote access** — browser-based live video (MediaMTX/WHEP) and
+  dashboard over signaling + TURN brokered by `heldar-control-plane`, media end-to-end over
+  DTLS-SRTP. Delivered in phases (see _Status & phasing_); design of record in
+  [`docs/adr/0003-webrtc-remote-access.md`](adr/0003-webrtc-remote-access.md).
+- **Does not provide:** an embedded/kernel-managed WireGuard interface (removed — the WebRTC path
+  supersedes it), NAT hole-punching baked into the kernel, nor a managed hosted multi-site control
+  plane in the open kernel — the rendezvous (signaling + TURN) lives in the separate
+  `heldar-control-plane`. The default open path stands up the overlay recipes with no extra kernel
+  code.
 
 ## Alternatives (and why they're not the default)
 
@@ -172,7 +171,8 @@ trusted viewers. But:
   *browser* viewing with no client, and effectively free for occasional use — but the Tunnel
   terminates TLS (so Cloudflare reads control-plane payloads + WHEP SDP in plaintext), TURN relay is
   the *primary* media path under CGNAT (metered bandwidth), and it's the most moving parts to build/
-  maintain. Choose it only if "send anyone a link, no client install" is a hard requirement.
+  maintain. The control-plane-hosted rendezvous (above) keeps signaling under our control while still
+  brokering only SDP/ICE, never media.
   ⚠️ Never reverse-proxy the camera **video** over the Tunnel — that violates Cloudflare's CDN ToS;
   media must ride WebRTC/TURN, the Tunnel carries only the small control API + SDP signaling.
 - **Self-hosted reverse tunnel (frp/rathole + coturn on your VPS):** best privacy (you own every

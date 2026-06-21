@@ -27,8 +27,9 @@ Each link below opens the in-repo guide on GitHub:
   - the health/metrics/events APIs, Prometheus exposition, the alert webhook,
   storage monitoring, and recording-gap reporting.
 - [Remote Access](https://github.com/Straits-AI/heldar/blob/main/docs/REMOTE-ACCESS.md)
-  - reaching a site behind CGNAT over a WireGuard overlay, peer-to-peer first and
-  end-to-end encrypted, with no proxy seeing the video.
+  - browser-based remote viewing over WebRTC, with NAT traversal handled by a
+  signaling + TURN relay and the media stream end-to-end encrypted, plus an
+  optional self-hosted network overlay for reaching a site behind CGNAT.
 - [Sizing](https://github.com/Straits-AI/heldar/blob/main/docs/sizing.md)
   - capacity planning for cameras, storage, and the AI frame budget.
 - [Commissioning](https://github.com/Straits-AI/heldar/blob/main/docs/commissioning-checklist.md)

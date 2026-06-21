@@ -18,7 +18,7 @@
 - **Auth / RBAC.** Opt-in via `HELDAR_AUTH_ENABLED`; argon2id password hashing, 256-bit tokens stored only as SHA-256, an HttpOnly `SameSite=Strict` session cookie plus `X-API-Key`, five roles, a `Principal` request extractor, and an immutable audit log.
 - **Observability.** Prometheus `/metrics`, `/healthz` + `/readyz`, per-camera health (`/api/v1/health/cameras`), a generic event stream (`/api/v1/events`), recording-gap tracking (`/api/v1/cameras/{id}/gaps`), and an optional alert webhook notifier.
 - **Retention.** Size, age, and free-disk pruning of recording segments plus detection/audit row retention.
-- **Remote-access awareness.** Probes the configured WireGuard-overlay interface and reports remote-access health (`OverlayStatus`) via `/api/v1/system`; the kernel observes but does not manage the overlay.
+- **Remote-access awareness.** Probes the configured external-overlay interface (Tailscale/NetBird/WireGuard daemon) and reports remote-access health (`OverlayStatus`) via `/api/v1/system`; the kernel observes but does not manage the overlay.
 - **Self-installing store.** SQLite with WAL and embedded migrations (`db::run_migrations`), plus crash-safe segment read-lock recovery on startup.
 
 ## Where it fits

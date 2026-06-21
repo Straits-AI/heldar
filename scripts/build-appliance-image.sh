@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Scaffold: build a Heldar APPLIANCE rootfs — native binaries under systemd, NO Docker.
 #
-# Produces a Debian rootfs (tarball) with heldar-core + mediamtx baked in as systemd services, the
-# remote-access capability granted via the unit's AmbientCapabilities (no setcap, no sudo at boot).
+# Produces a Debian rootfs (tarball) with heldar-core + mediamtx baked in as systemd services, running
+# unprivileged under systemd (no setcap, no sudo at boot).
 # Boot it to test with systemd-nspawn, or extend it into a board-specific bootable disk image (add a
 # kernel + bootloader for your DVR SoC — that part is hardware-specific and left as a TODO below).
 #
@@ -25,9 +25,9 @@ have() { command -v "$1" >/dev/null 2>&1; }
 
 have mmdebstrap || { echo "ERROR: mmdebstrap not found — apt-get install mmdebstrap" >&2; exit 1; }
 
-# ---- 1. Build the native binary (release + remote access) ----
-say "build heldar-core (release, --features wireguard)"
-( cd "$ROOT" && cargo build --release -p heldar-server --features wireguard )
+# ---- 1. Build the native binary (release) ----
+say "build heldar-core (release)"
+( cd "$ROOT" && cargo build --release -p heldar-server )
 BIN="$ROOT/target/release/heldar-core"
 [ -x "$BIN" ] || { echo "ERROR: $BIN missing after build" >&2; exit 1; }
 
@@ -52,7 +52,7 @@ mkdir -p "$OUT"
 mmdebstrap \
   --variant=minbase \
   --architectures="$ARCH" \
-  --include=systemd,systemd-sysv,dbus,udev,ffmpeg,iproute2,wireguard-tools,ca-certificates,curl,libcap2-bin \
+  --include=systemd,systemd-sysv,dbus,udev,ffmpeg,ca-certificates,curl \
   --customize-hook='
     # service user + data dir
     chroot "$1" useradd -r -s /usr/sbin/nologin heldar || true
@@ -71,7 +71,7 @@ Rootfs: $ROOTFS_TAR
 
 Test it (no flashing) with systemd-nspawn:
   sudo mkdir -p /tmp/heldar-rootfs && sudo tar -C /tmp/heldar-rootfs -xf "$ROOTFS_TAR"
-  sudo systemd-nspawn -D /tmp/heldar-rootfs --boot --capability=CAP_NET_ADMIN
+  sudo systemd-nspawn -D /tmp/heldar-rootfs --boot
 
 Turn it into a bootable DVR image (board-specific, the remaining TODO):
   1. Create a partitioned disk image (e.g. via 'genimage' or manual: parted + mkfs).

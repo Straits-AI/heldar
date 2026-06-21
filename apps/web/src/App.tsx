@@ -20,9 +20,6 @@ const Backup = lazy(() => import("./pages/Backup").then((m) => ({ default: m.Bac
 const Incidents = lazy(() => import("./pages/Incidents").then((m) => ({ default: m.Incidents })));
 const Plugins = lazy(() => import("./pages/Plugins").then((m) => ({ default: m.Plugins })));
 const Playback = lazy(() => import("./pages/Playback").then((m) => ({ default: m.Playback })));
-const RemoteAccess = lazy(() =>
-  import("./pages/RemoteAccess").then((m) => ({ default: m.RemoteAccess })),
-);
 
 function NotFound() {
   return (
@@ -62,7 +59,6 @@ function AppRoutes() {
         <Route path="/incidents" element={<Incidents />} />
         <Route path="/backup" element={<Backup />} />
         <Route path="/plugins" element={<Plugins />} />
-        <Route path="/remote-access" element={<RemoteAccess />} />
         <Route path="/system" element={<System />} />
         <Route path="/cameras/:id" element={<CameraDetail />} />
 

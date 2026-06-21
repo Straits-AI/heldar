@@ -9,23 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **Kernel-managed WireGuard remote access** (off-by-default `wireguard` feature): the kernel brings up
-  its OWN isolated WireGuard interface for private, peer-to-peer remote viewing, auto-selecting a
-  non-conflicting interface name / subnet / port (never disturbs an existing tunnel, route, or DNS).
-  Status + device enrollment at `GET/POST/DELETE /api/v1/remote-access(/peers)`; a Remote Access page
-  in the dashboard. Needs `CAP_NET_ADMIN` at runtime; distinct from the existing external-overlay
-  awareness. Connects directly to the host's public IPv6 — no relay, no coordinator, $0 infra.
-- **Client-generated enrollment keys**: a device can send its own WireGuard public key so the peer
-  private key never crosses the wire (the dashboard generates the keypair in-browser). Server-side
-  key generation remains only as a fallback.
-- **Pairing tokens** for zero-config onboarding: `POST /api/v1/remote-access/pairing` (manager-minted,
-  short-TTL, single-use) + a token-gated, login-less `POST /api/v1/remote-access/pair` that requires a
-  client public key. The dashboard renders a QR for the future Heldar mobile app.
-- **Deployment paths**: a Docker dev stack (`docker-compose.remote.yml`), a native systemd appliance
-  engine (`infra/systemd/`, capability via `AmbientCapabilities` — no Docker, no sudo), and an
-  appliance-image scaffold (`scripts/build-appliance-image.sh`). `docs/REMOTE-ACCESS.md` Recipe C.
-- **`apps/mobile`**: a React Native app scaffold (embeds WireGuard, wraps the dashboard in a WebView)
-  for one-tap remote viewing — not yet buildable; see its README.
+- **Deployment paths**: a Docker dev stack (`docker-compose.yml`), a native systemd appliance engine
+  (`infra/systemd/`), and an appliance-image scaffold (`scripts/build-appliance-image.sh`).
 - **`scripts/release.sh`**: one-command release (bump → verify → regenerate open tree → tag → publish).
 
 ## [0.1.8] — 2026-06-19

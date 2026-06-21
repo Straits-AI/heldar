@@ -154,23 +154,6 @@ async fn main() -> anyhow::Result<()> {
         m.start_all().await.context("starting mirror recorders")?;
     }
     sampler.start_all().await;
-    // Kernel-managed WireGuard remote access (the `wireguard` feature): bring up Heldar's OWN isolated
-    // interface at boot when enabled. Best-effort — a failure (e.g. missing CAP_NET_ADMIN) is logged,
-    // never fatal, and never touches any pre-existing interface or route.
-    #[cfg(feature = "wireguard")]
-    if cfg.wg_managed {
-        let c = cfg.clone();
-        match tokio::task::spawn_blocking(move || services::wireguard::ensure_up(&c)).await {
-            Ok(Ok(r)) => {
-                tracing::info!(iface = %r.iface, endpoint = %r.endpoint, "managed WireGuard ready")
-            }
-            Ok(Err(e)) => tracing::error!(
-                error = %e,
-                "managed WireGuard bring-up failed; remote access unavailable. Grant CAP_NET_ADMIN (setcap cap_net_admin+eip on heldar-core)"
-            ),
-            Err(e) => tracing::error!(error = %e, "managed WireGuard bring-up task panicked"),
-        }
-    }
     // Supervise the background services: if one panics, it is respawned (production resilience).
     {
         let (p, c) = (pool.clone(), cfg.clone());
@@ -280,6 +263,15 @@ async fn main() -> anyhow::Result<()> {
             let c = cfg.clone();
             spawn_supervised("fleet_register", move || {
                 services::fleet_register::run(c.clone())
+            });
+        }
+        // Box-side WebRTC rendezvous: dial OUT to the public signaling service for universal remote
+        // viewing (ADR 0003, P2). Bridges browser WHEP sessions to the local MediaMTX. Parks unless
+        // HELDAR_REMOTE_RENDEZVOUS_URL + HELDAR_SITE_ID are set (remote access is opt-in).
+        {
+            let st = state.clone();
+            spawn_supervised("webrtc_rendezvous", move || {
+                services::webrtc_rendezvous::run(st.clone())
             });
         }
         // Email notifier (the off-by-default `smtp` feature): relays matching events to configured

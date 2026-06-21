@@ -18,11 +18,6 @@ path = "src/lib.rs"
 # Email/SMTP alerting — OFF by default so the lean appliance build links no SMTP/TLS stack. Enable to
 # deliver matching events by email (env-configured: HELDAR_SMTP_*). Mirrors the `wasm` opt-in pattern.
 smtp = ["dep:lettre"]
-# Kernel-managed WireGuard remote access — OFF by default. When enabled (+ CAP_NET_ADMIN at runtime) the
-# kernel brings up its OWN isolated WireGuard interface for remote viewing. Adds no extra crates (shells
-# out to `ip`/`wg`, like the existing ffmpeg/rclone/mediamtx integrations); the gate keeps the privileged
-# network-management code out of the default appliance build entirely.
-wireguard = []
 
 [dependencies]
 # Optional SMTP client for the `smtp` feature (email notifier). Async (tokio) + rustls TLS.

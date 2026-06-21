@@ -158,7 +158,7 @@ const pillars = [
   {
     icon: icons.hardware,
     title: 'Your hardware, your data',
-    text: 'Runs on-prem on your own boxes. WireGuard remote access keeps operators connected without shipping footage to a cloud you do not control.',
+    text: 'Runs on-prem on your own boxes. Browser-based WebRTC remote access keeps operators connected with the video end-to-end encrypted — only signaling and relay are hosted, never your footage.',
   },
 ];
 

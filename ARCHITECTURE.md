@@ -477,13 +477,16 @@ gateway** (Layer 3: `Camera → media gateway → browser`, never
    (already exists / race) is tolerated; other failures surface as 500.
 3. Return non-credentialed playback URLs the browser can consume directly:
    - HLS: `{hls_base}/cam_{id}/index.m3u8` (`:8888`)
-   - WebRTC: `{webrtc_base}/cam_{id}` (`:8889`)
+   - WebRTC (WHEP): `{webrtc_base}/cam_{id}` (`:8889`)
    - RTSP: `{rtsp_base}/cam_{id}` (`:8554`)
 
 The **camera credentials never leave the server** — they live only inside the
 MediaMTX `source` config; the browser only ever sees the gateway path name.
 `sourceOnDemand:true` means MediaMTX only pulls from the camera while a viewer is
-connected, avoiding a permanent extra session per camera.
+connected, avoiding a permanent extra session per camera. The WebRTC (WHEP) URL is
+also the **remote live-video transport**: over WebRTC remote access (§21) the same
+WHEP endpoint is what the off-site browser viewer plays, DTLS-SRTP encrypted
+end-to-end.
 
 ---
 
@@ -1800,33 +1803,35 @@ latent world memory** progression applied to search: a typed, evidence-backed,
 deterministic query layer whose **only** inference — reading the question — is surfaced,
 fallible, and decoupled from the answer.
 
-## 21. Remote access — the WireGuard overlay model
+## 21. Remote access — the WebRTC model
 
 A deployment is normally behind **CGNAT** (shared public IPv4, no inbound port-forward, DDNS
-useless), so the only thing that reaches it is the node **dialing out**. Heldar standardizes
-on a **WireGuard overlay** (Tailscale for personal/dev, NetBird self-hosted for shipped products)
-running as an **external daemon** on the host. This is an **open kernel** capability — every
-Apache-2.0 deployment gets private, P2P-first remote viewing with no proprietary component. Full
-rationale, the transport comparison (vs Cloudflare-native and self-hosted reverse tunnels), and the
-deploy recipes live in `docs/REMOTE-ACCESS.md`; this section records the architecture.
+useless), so the only thing that reaches it is the node **dialing out**. Remote access is therefore
+**browser-based WebRTC**: the box dials OUT to a **signaling + TURN service** in the control plane,
+NAT traversal is negotiated over ICE, and a browser viewer plays live video over **WHEP** (served by
+MediaMTX). Full rationale and the deploy recipes live in `docs/REMOTE-ACCESS.md` and
+`docs/adr/0003-webrtc-remote-access.md`; this section records the architecture.
 
-**Two layers, kept separate.** *Reachability* is the overlay: WireGuard builds a direct encrypted
-tunnel between viewer and camera-site host whenever NAT traversal succeeds (hole-punch **+ UDP port
-prediction**, or end-to-end IPv6), and falls back to an encrypted relay (DERP / NetBird relay) only
-in the symmetric-on-both-ends case — a relay that forwards **ciphertext it cannot decrypt**. *Media*
-is unchanged: MediaMTX serves its normal WebRTC (WHEP) / HLS on its normal ports, now reachable at
-the host's overlay address; WHEP media is itself DTLS-SRTP encrypted (a second, independent layer).
-So **content is private on every path**; only connection *metadata* is exposed, and only to a managed
-coordinator — self-hosting the coordinator (NetBird/Headscale) removes even that.
+**Two layers, kept separate.** *Reachability* is WebRTC: the box and the browser exchange SDP/ICE
+through the control-plane **signaling** endpoint, then establish a direct peer connection whenever
+NAT traversal succeeds (ICE/STUN hole-punch, or end-to-end IPv6), and fall back to the control-plane
+**TURN** relay only in the symmetric-on-both-ends case — a relay that forwards **DTLS-SRTP ciphertext
+it cannot decrypt**. *Media* is MediaMTX's normal **WebRTC (WHEP)** path: the browser viewer pulls
+the camera stream as it would on the LAN, now reachable from anywhere; WHEP media is DTLS-SRTP
+encrypted end-to-end. So **content is private on every path**; only connection *metadata* reaches the
+coordinator, and self-hosting the signaling/TURN service removes even that. The signaling + TURN
+coordinator lives in the **proprietary control plane** (`heldar-control-plane`); the media transport
+itself is the kernel's own WHEP path and ships in the open build.
 
-**The overlay is orthogonal to the kernel.** Critically, remote access required **no** media-stack
-changes: the overlay is a deployment concern (install a client, set an ACL), not kernel code. The
-kernel does **not** embed or manage WireGuard — duplicating mature daemons would be wrong. Its entire
-contribution is *awareness*: `config` reads `HELDAR_OVERLAY_{ENABLED,KIND,IFACE}`, and
-`services::remote_access::status` probes the configured interface via `/sys/class/net/<iface>`
-(dependency-free; TUN devices report `operstate=unknown` when healthy, so `unknown` is treated as
-up), surfaced at `GET /api/v1/system → remote_access`. Transport-agnostic by construction: any
-overlay that presents a network interface is reported. A managed, hosted, multi-site control plane —
-if ever built — would be a **proprietary** crate; the default open path needs none of it. This is the
-open-core boundary applied to connectivity: the platform-level, non-domain capability stays in the
-Apache-2.0 kernel; only client-specific gateway customization would be proprietary.
+**The optional self-hoster overlay path.** A deployment that prefers not to dial the hosted
+coordinator can instead front the kernel with its **own external overlay** (Tailscale, NetBird,
+Headscale, or a plain WireGuard daemon) and reach the dashboard/WHEP endpoints over that private
+network. This is a **deployment concern** (install a client, set an ACL), not kernel code — the
+kernel does **not** embed or manage any tunnel daemon. Its entire contribution here is *awareness*:
+`config` reads `HELDAR_OVERLAY_{ENABLED,KIND,IFACE}`, and `services::remote_access::status` probes
+the configured interface via `/sys/class/net/<iface>` (dependency-free; TUN devices report
+`operstate=unknown` when healthy, so `unknown` is treated as up), surfaced at
+`GET /api/v1/system → remote_access`. Transport-agnostic by construction: any overlay that presents a
+network interface is reported. This is the open-core boundary applied to connectivity: the
+platform-level, non-domain media path stays in the Apache-2.0 kernel; the hosted, multi-site
+signaling/TURN coordinator is the proprietary control plane.

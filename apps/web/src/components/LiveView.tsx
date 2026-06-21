@@ -1,9 +1,14 @@
 import Hls from "hls.js";
 import { useEffect, useRef, useState } from "react";
 import { cx, Spinner, StatusLed } from "./ui";
+import { startWhep, type WhepHandle } from "../lib/whep";
 
 interface Props {
-  /** HLS .m3u8 URL from the liveview endpoint. */
+  /** WebRTC/WHEP base URL from the liveview endpoint — the preferred low-latency transport. */
+  webrtcUrl?: string | null;
+  /** STUN/TURN ICE servers for the WebRTC path (from the liveview endpoint; empty = LAN/host-only). */
+  iceServers?: RTCIceServer[] | null;
+  /** HLS .m3u8 URL from the liveview endpoint — fallback when WebRTC can't connect. */
   hlsUrl?: string | null;
   className?: string;
   poster?: string;
@@ -26,15 +31,17 @@ function PlayGlyph({ className }: { className?: string }) {
 }
 
 /**
- * HLS live player. Attaches an hls.js instance (or native HLS on Safari) to a
- * <video>, and tears it down cleanly when the URL changes or the component
- * unmounts. Fatal network/media errors are auto-recovered before giving up.
+ * Live player. Prefers WebRTC/WHEP (sub-second, browser-native — ADR 0003) and falls back to HLS
+ * (hls.js, or native HLS on Safari) when WebRTC can't connect. Tears the transport down cleanly when
+ * the URL changes or the component unmounts; fatal HLS network/media errors are auto-recovered before
+ * giving up.
  *
- * Presentation only: a LIVE LED badge, connecting / paused / error overlays, a
- * play-or-retry control, and an on-image name + status overlay. The transport
- * logic below is unchanged.
+ * Presentation (transport-agnostic — it only watches the <video>): a LIVE LED badge, connecting /
+ * paused / error overlays, a play-or-retry control, digital zoom/pan, and an on-image name + status overlay.
  */
 export function LiveView({
+  webrtcUrl,
+  iceServers,
   hlsUrl,
   className = "",
   poster,
@@ -48,6 +55,12 @@ export function LiveView({
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [ready, setReady] = useState(false);
+  const [transport, setTransport] = useState<"webrtc" | "hls" | null>(null);
+  // WebRTC→HLS fallback is keyed per stream URL via a ref (not lagging state): once WHEP fails for a
+  // given webrtcUrl we record it and bump retryTick to re-run into the HLS branch. A new URL is
+  // naturally not "failed", so it tries WebRTC again — no double-init/flicker on camera switches.
+  const failedWhepUrlRef = useRef<string | null>(null);
+  const [retryTick, setRetryTick] = useState(0);
 
   // Digital zoom (client-side): wheel/buttons to zoom, drag to pan when zoomed. Pan is a percent
   // translate clamped so the magnified frame's edges never leave the viewport.
@@ -72,14 +85,50 @@ export function LiveView({
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !hlsUrl) return;
+    if (!video) return;
 
     setError(null);
     setPlaying(false);
     setReady(false);
     let hls: Hls | null = null;
+    let whep: WhepHandle | null = null;
     let disposed = false;
 
+    // Preferred transport: WebRTC/WHEP. On failure, fall back to HLS for the same stream.
+    const whepFailed = !!webrtcUrl && failedWhepUrlRef.current === webrtcUrl;
+    if (webrtcUrl && !whepFailed && typeof RTCPeerConnection !== "undefined") {
+      setTransport("webrtc");
+      whep = startWhep(video, `${webrtcUrl}/whep`, {
+        iceServers: iceServers ?? undefined,
+        onConnected: () => {
+          // Mark ready independent of autoplay so the play overlay can appear if autoplay is blocked.
+          setReady(true);
+          video.play().catch(() => {
+            /* autoplay may be blocked until user interaction */
+          });
+        },
+        onError: () => {
+          if (disposed) return;
+          if (hlsUrl) {
+            failedWhepUrlRef.current = webrtcUrl; // re-run takes the HLS branch for this URL
+            setRetryTick((t) => t + 1);
+          } else {
+            setError("WebRTC connection failed.");
+          }
+        },
+      });
+      return () => {
+        disposed = true;
+        whep?.close();
+      };
+    }
+
+    if (!hlsUrl) {
+      setTransport(null);
+      return;
+    }
+
+    setTransport("hls");
     if (Hls.isSupported()) {
       hls = new Hls({
         lowLatencyMode: true,
@@ -119,7 +168,7 @@ export function LiveView({
         video.load();
       };
     } else {
-      setError("HLS playback is not supported in this browser.");
+      setError("Live playback is not supported in this browser.");
     }
 
     return () => {
@@ -128,7 +177,7 @@ export function LiveView({
       video.removeAttribute("src");
       video.load();
     };
-  }, [hlsUrl]);
+  }, [webrtcUrl, iceServers, hlsUrl, retryTick]);
 
   // Track playback state for the overlays (no transport effects).
   useEffect(() => {
@@ -173,7 +222,7 @@ export function LiveView({
   }, []);
 
   // A new stream resets the zoom so a fresh camera starts un-zoomed.
-  useEffect(() => resetZoom(), [hlsUrl]);
+  useEffect(() => resetZoom(), [webrtcUrl, hlsUrl]);
 
   function handleMouseDown(e: React.MouseEvent) {
     if (zoom <= 1) return;
@@ -203,9 +252,10 @@ export function LiveView({
     });
   }
 
-  const connecting = !error && (loading || (!!hlsUrl && !ready));
-  const detached = !hlsUrl && !loading && !error;
-  const paused = !error && !connecting && !!hlsUrl && ready && !playing;
+  const streamUrl = webrtcUrl || hlsUrl;
+  const connecting = !error && (loading || (!!streamUrl && !ready));
+  const detached = !streamUrl && !loading && !error;
+  const paused = !error && !connecting && !!streamUrl && ready && !playing;
 
   return (
     <div
@@ -237,7 +287,7 @@ export function LiveView({
       />
 
       {/* Digital-zoom controls — appear on hover (and stay while zoomed). */}
-      {!!hlsUrl && ready && (
+      {!!streamUrl && ready && (
         <div
           className={cx(
             "absolute right-2 top-1/2 z-10 flex -translate-y-1/2 flex-col items-center gap-1 rounded-md border border-line bg-black/60 p-1 backdrop-blur-sm transition-opacity duration-150",
@@ -296,6 +346,11 @@ export function LiveView({
             <span className="font-mono text-[10px] font-semibold uppercase tracking-micro text-rec">
               Live
             </span>
+            {transport && (
+              <span className="font-mono text-[9px] uppercase tracking-micro text-fg-muted">
+                {transport === "webrtc" ? "RTC" : "HLS"}
+              </span>
+            )}
           </span>
         )}
       </div>
