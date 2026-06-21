@@ -51,3 +51,6 @@ infra/mediamtx/*.tar.gz
 .idea/
 .vscode/
 *.swp
+
+# Playwright MCP scratch (screenshots/console logs)
+.playwright-mcp/

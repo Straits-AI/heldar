@@ -75,6 +75,10 @@ fn build_client(cfg: &Config) -> anyhow::Result<reqwest::Client> {
 /// Bridge a browser SDP offer to the local MediaMTX WHEP endpoint and return the answer. Reuses
 /// `ensure_live` (which creates the `cam_<id>` path on demand) with `request_host = None`, so the
 /// returned `webrtc_url` keeps its loopback base — exactly the address the box POSTs to its own MediaMTX.
+///
+/// Authorization note: the rendezvous (the `heldar` Worker, `apps/edge/`) is the sole authority on WHO may
+/// view WHICH camera — it verifies a signed ticket before relaying a session here. The box only talks to
+/// the rendezvous it dialed OUT to, so it trusts the session it is handed; it does not re-check the ticket.
 async fn bridge_to_local_whep(
     state: &AppState,
     camera_id: &str,
@@ -87,6 +91,9 @@ async fn bridge_to_local_whep(
     let answer = state
         .http
         .post(&whep)
+        // MediaMTX answers a WHEP offer only once its on-demand HEVC→H.264 transcode has started, which
+        // can exceed `state.http`'s default 10s timeout — give the cold start room (still under the poll).
+        .timeout(Duration::from_secs(25))
         .header(CONTENT_TYPE, "application/sdp")
         .header(ACCEPT, "application/sdp")
         .body(sdp_offer.to_owned())
@@ -101,16 +108,20 @@ async fn bridge_to_local_whep(
     Ok(answer)
 }
 
+/// Largest browser SDP offer we'll bridge (defensive — the rendezvous already caps it well below this).
+const MAX_SDP_BYTES: usize = 512 * 1024;
+
 /// One long-poll cycle: ask for the next session; if one arrives, bridge it and report the answer (or the
-/// error) back. Returns Ok on a clean cycle (work handled or nothing pending) so the caller re-polls
-/// immediately; Err only on a transport failure, which the caller backs off on.
+/// error) back. Returns `Ok(true)` when a bridge FAILED (so the caller can rate-limit a persistent local
+/// failure), `Ok(false)` on a clean cycle (work handled or nothing pending). `Err` only on a transport
+/// failure talking to the rendezvous, which the caller backs off on.
 async fn poll_once(
     state: &AppState,
     client: &reqwest::Client,
     rendezvous_url: &str,
     site_id: &str,
     token: &str,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<bool> {
     let resp = client
         .post(poll_url(rendezvous_url))
         .bearer_auth(token)
@@ -119,7 +130,7 @@ async fn poll_once(
         .await
         .context("rendezvous poll request")?;
     if resp.status() == StatusCode::NO_CONTENT {
-        return Ok(()); // long-poll timed out with no work — re-poll
+        return Ok(false); // long-poll timed out with no work — re-poll
     }
     let session: PendingSession = resp
         .error_for_status()
@@ -128,7 +139,14 @@ async fn poll_once(
         .await
         .context("decoding pending session")?;
 
-    let result = bridge_to_local_whep(state, &session.camera_id, &session.sdp_offer).await;
+    let result = if session.sdp_offer.len() > MAX_SDP_BYTES {
+        Err(anyhow::anyhow!(
+            "offer too large ({} bytes)",
+            session.sdp_offer.len()
+        ))
+    } else {
+        bridge_to_local_whep(state, &session.camera_id, &session.sdp_offer).await
+    };
     // `site_id` lets the rendezvous route the answer back to this box's session (the Durable Object
     // keyed by site id). `session_id` matches it to the waiting browser request.
     let body = match &result {
@@ -151,7 +169,7 @@ async fn poll_once(
         .context("posting answer to rendezvous")?
         .error_for_status()
         .context("rendezvous rejected the answer")?;
-    Ok(())
+    Ok(result.is_err())
 }
 
 /// The dial-out loop. Parks forever unless `HELDAR_REMOTE_RENDEZVOUS_URL` + `HELDAR_SITE_ID` are set
@@ -175,11 +193,19 @@ pub async fn run(state: AppState) {
         }
     };
 
+    if cfg.cp_token.is_empty() {
+        tracing::warn!(
+            "webrtc rendezvous: HELDAR_CP_TOKEN is empty; the rendezvous will reject polls if it enforces a bearer (BOX_TOKEN)"
+        );
+    }
     tracing::info!(site = %site_id, rendezvous = %rendezvous_url, "webrtc rendezvous: dialing out for remote viewing");
     let mut backoff = Duration::from_secs(1);
     loop {
         match poll_once(&state, &client, rendezvous_url, site_id, &cfg.cp_token).await {
-            Ok(()) => backoff = Duration::from_secs(1),
+            Ok(false) => backoff = Duration::from_secs(1),
+            // A bridge to the local MediaMTX failed (e.g. camera/transcode down) — the answer/error was
+            // already reported to the browser; pause briefly so a persistent failure can't tight-loop.
+            Ok(true) => tokio::time::sleep(Duration::from_secs(2)).await,
             Err(e) => {
                 tracing::warn!(site = %site_id, error = %e, "webrtc rendezvous poll failed; backing off");
                 tokio::time::sleep(backoff).await;

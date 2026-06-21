@@ -69,6 +69,7 @@ export function startWhep(
   let closed = false;
   let resourceUrl: string | null = null;
   let watchdog: ReturnType<typeof setTimeout> | null = null;
+  let errored = false;
   const hasIceServers = (opts.iceServers?.length ?? 0) > 0;
 
   const pc = new RTCPeerConnection({ iceServers: opts.iceServers ?? [] });
@@ -90,6 +91,14 @@ export function startWhep(
       watchdog = null;
     }
   };
+  // Single-shot failure: clears the watchdog and fires onError at most once, so a terminal 'failed'
+  // can't also trip the connect-timeout watchdog (~10s later) and double-fire the caller's fallback.
+  const fail = (err: Error) => {
+    if (closed || errored) return;
+    errored = true;
+    clearWatchdog();
+    opts.onError?.(err);
+  };
 
   pc.onconnectionstatechange = () => {
     if (closed) return;
@@ -100,7 +109,7 @@ export function startWhep(
     } else if (st === "failed") {
       // 'failed' is terminal. 'disconnected' may be a transient blip, so we don't fall back on it
       // directly — the post-answer watchdog covers a connect that stalls and never recovers.
-      opts.onError?.(new Error("WebRTC connection failed"));
+      fail(new Error("WebRTC connection failed"));
     }
   };
 
@@ -134,10 +143,10 @@ export function startWhep(
       watchdog = setTimeout(() => {
         if (closed) return;
         const st = pc.connectionState;
-        if (st !== "connected") opts.onError?.(new Error("WebRTC connect timeout"));
+        if (st !== "connected") fail(new Error("WebRTC connect timeout"));
       }, CONNECT_WATCHDOG_MS);
     } catch (err) {
-      if (!closed) opts.onError?.(err instanceof Error ? err : new Error(String(err)));
+      fail(err instanceof Error ? err : new Error(String(err)));
     }
   })();
 

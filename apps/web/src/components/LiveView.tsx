@@ -252,6 +252,14 @@ export function LiveView({
     });
   }
 
+  // Explicit user retry: clear any sticky WebRTC-failed mark and force the transport effect to re-run,
+  // so a camera that fell back to HLS gets another shot at WebRTC (even if the live URL is unchanged).
+  function handleRetry() {
+    failedWhepUrlRef.current = null;
+    setRetryTick((t) => t + 1);
+    onRetry?.();
+  }
+
   const streamUrl = webrtcUrl || hlsUrl;
   const connecting = !error && (loading || (!!streamUrl && !ready));
   const detached = !streamUrl && !loading && !error;
@@ -388,7 +396,7 @@ export function LiveView({
           {onRetry && (
             <button
               type="button"
-              onClick={onRetry}
+              onClick={handleRetry}
               className="pointer-events-auto inline-flex items-center gap-1.5 rounded-md border border-accent bg-accent px-3 py-1.5 font-mono text-[11px] font-semibold uppercase tracking-micro text-accent-ink transition-colors duration-150 hover:bg-accent-soft focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-black"
             >
               <PlayGlyph className="h-3.5 w-3.5" />
@@ -407,7 +415,7 @@ export function LiveView({
           <p className="max-w-md font-mono text-xs text-fg-secondary">{error}</p>
           <button
             type="button"
-            onClick={() => (onRetry ? onRetry() : handlePlay())}
+            onClick={() => (onRetry ? handleRetry() : handlePlay())}
             className="pointer-events-auto inline-flex items-center gap-1.5 rounded-md border border-line bg-raised px-3 py-1.5 text-xs font-medium text-fg transition-colors duration-150 hover:border-[#34373e] hover:bg-[#23262c] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-black"
           >
             Retry

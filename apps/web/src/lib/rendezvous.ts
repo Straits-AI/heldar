@@ -1,11 +1,15 @@
 /**
- * Browser-side helpers for remote camera viewing via the Heldar WebRTC rendezvous (ADR 0003, P2).
+ * Browser-side helpers for remote camera viewing via the Heldar WebRTC rendezvous (ADR 0003).
  *
  * For a box behind CGNAT, the viewer can't reach it directly. Instead it fetches short-lived Cloudflare
  * TURN ICE servers from the rendezvous Worker, then relays its WHEP offer through the Worker to the box
  * (which bridges it to its own MediaMTX). Pair `fetchRendezvousIce` (ICE) with `rendezvousExchange`
- * (offer→answer relay) and hand both to `startWhep` (the `iceServers` + `exchange` options). See
- * `apps/rendezvous/` for the Worker.
+ * (offer→answer relay) and hand both to `startWhep` (the `iceServers` + `exchange` options).
+ *
+ * STATUS: building blocks for the **P3** integration of remote viewing into this dashboard's `LiveView`
+ * (when the dashboard learns the box's rendezvous URL + a viewing ticket). The *current* remote viewer is
+ * the standalone `/view` page served by the Worker itself (`apps/edge/src/index.ts`), so these helpers
+ * are not yet wired into a component. Kept here so the dashboard path is a small step, not a rewrite.
  */
 
 /** Where a remote box's rendezvous lives, as the viewer is configured/handed it. */
