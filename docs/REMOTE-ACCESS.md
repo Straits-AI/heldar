@@ -167,6 +167,20 @@ trusted viewers. But:
   - **Heldar-hosted** — point `HELDAR_REMOTE_RENDEZVOUS_URL` at the managed `heldar` rendezvous; the
     kernel fetches short-lived TURN from it and refreshes the credentials automatically.
   - Neither set → MediaMTX stays on the STUN baseline (`mediamtx.yml`), i.e. LAN / non-symmetric-NAT only.
+- **Provides (open): an authenticated read-only REST relay for the remote dashboard** (ADR 0003 P3,
+  Stage C). A second dial-out channel (`webrtc_relay`) lets a remote browser drive the kernel's REST API
+  through the rendezvous, under a **two-gate** model that keeps the kernel the sole identity/RBAC
+  authority:
+  - **Outer gate** — a short-lived, per-user, site-scoped HMAC **relay capability** (the rendezvous mints
+    it after a real kernel login; separate `RELAY_CAP_SECRET`) proves the browser may *reach* this box.
+  - **Inner gate** — the browser's **real kernel session** is forwarded verbatim; the box replays the
+    request against its own `127.0.0.1` kernel, which runs its normal auth + RBAC. The relay is a dumb,
+    **allowlisted** pipe (GET reads + login/out only in Stage C; traversal/admin/internal paths refused),
+    never an auth-bypass. The kernel session token lives in a Worker-side **HttpOnly** cookie, so browser
+    JS never holds it.
+  - **Fail-safe:** the relay **refuses to run unless `HELDAR_AUTH_ENABLED=true` and a real user exists** —
+    the open auth-off API is never exposed remotely. Pair with a short `HELDAR_SESSION_TTL_HOURS` +
+    `HELDAR_SESSION_IDLE_TIMEOUT_MIN` and `HELDAR_AUTH_COOKIE_SECURE=true`.
 - **Does not provide (the managed tier, kept private):** the **rendezvous** itself — the signaling
   broker + TURN credential minting. That is the `heldar` Cloudflare **Worker + Durable Object**
   (`apps/edge/`, NOT in the open repo). The open kernel only *dials* it; it never sees media (DTLS-SRTP
