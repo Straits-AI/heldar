@@ -78,6 +78,8 @@ import type {
   SnapshotSchedule,
   SnapshotScheduleCreate,
   SnapshotScheduleUpdate,
+  RetentionLimits,
+  RetentionUpdate,
   SnapshotView,
   StreamProfile,
   SystemInfo,
@@ -328,6 +330,12 @@ export const api = {
   cameraHealth: (id: string) => request<CameraStatus>(`/api/v1/cameras/${enc(id)}/health`),
   listEvents: (q: EventQuery = {}) => request<VisionEvent[]>(`/api/v1/events${qs(q)}`),
   system: () => request<SystemInfo>("/api/v1/system"),
+  getRetention: () => request<RetentionLimits>("/api/v1/system/retention"),
+  setRetention: (body: RetentionUpdate) =>
+    request<RetentionLimits>("/api/v1/system/retention", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
 
   // ---- Modules (drives the dashboard nav rail + routes; only loaded modules appear) ----
   /** Manifests of every loaded module: compiled-in + registered sidecars. Any principal may read. */

@@ -319,6 +319,21 @@ export interface SystemInfo {
   live_transcode_engine: string;
 }
 
+/** Recording disk-limit policy the retention sweeper enforces (effective values; `*_overridden` flags
+ *  whether each is an operator override vs the env default). */
+export interface RetentionLimits {
+  max_recordings_gb: number;
+  max_recordings_bytes: number;
+  max_overridden: boolean;
+  min_free_disk_gb: number;
+  min_free_disk_bytes: number;
+  min_free_overridden: boolean;
+}
+export interface RetentionUpdate {
+  max_recordings_gb?: number;
+  min_free_disk_gb?: number;
+}
+
 // ---- Webhook subscriptions (the generic event-delivery substrate; supersedes single-URL alerting) ----
 
 /** A webhook subscription (GET /api/v1/webhooks). The signing `secret` is never returned; only

@@ -4,11 +4,13 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::error::AppResult;
+use crate::auth::Principal;
+use crate::error::{AppError, AppResult};
 use crate::services::remote_access::{self, OverlayStatus};
+use crate::services::settings;
 use crate::services::storage::{self, StorageReport};
 use crate::state::AppState;
 
@@ -17,6 +19,102 @@ pub fn router() -> Router<AppState> {
         .route("/healthz", get(healthz))
         .route("/readyz", get(readyz))
         .route("/api/v1/system", get(system_info))
+        .route(
+            "/api/v1/system/retention",
+            get(get_retention).put(put_retention),
+        )
+}
+
+const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
+
+/// The recording disk-limit policy enforced by the retention sweeper. Each value is the operator
+/// override (settings table) when set, otherwise the env default — `overridden` flags which is which.
+#[derive(Debug, Serialize)]
+struct RetentionLimits {
+    max_recordings_gb: f64,
+    max_recordings_bytes: i64,
+    max_overridden: bool,
+    min_free_disk_gb: f64,
+    min_free_disk_bytes: i64,
+    min_free_overridden: bool,
+}
+
+async fn effective_limits(st: &AppState) -> RetentionLimits {
+    let max_override = settings::get_i64(&st.pool, settings::RECORDING_MAX_BYTES)
+        .await
+        .filter(|&v| v > 0);
+    let floor_override = settings::get_i64(&st.pool, settings::RECORDING_MIN_FREE_BYTES)
+        .await
+        .filter(|&v| v >= 0);
+    let max = max_override.unwrap_or(st.cfg.max_recordings_bytes as i64);
+    let floor = floor_override.unwrap_or(st.cfg.min_free_disk_bytes as i64);
+    RetentionLimits {
+        max_recordings_gb: max as f64 / BYTES_PER_GB,
+        max_recordings_bytes: max,
+        max_overridden: max_override.is_some(),
+        min_free_disk_gb: floor as f64 / BYTES_PER_GB,
+        min_free_disk_bytes: floor,
+        min_free_overridden: floor_override.is_some(),
+    }
+}
+
+/// Current recording disk limits (effective values). Any authenticated caller may read.
+async fn get_retention(State(st): State<AppState>) -> AppResult<Json<RetentionLimits>> {
+    Ok(Json(effective_limits(&st).await))
+}
+
+#[derive(Debug, Deserialize)]
+struct RetentionUpdate {
+    /// New global recordings cap in GB (> 0). Omit to leave unchanged.
+    max_recordings_gb: Option<f64>,
+    /// New free-disk floor in GB (>= 0; 0 disables the floor). Omit to leave unchanged.
+    min_free_disk_gb: Option<f64>,
+}
+
+/// Set the recording disk limits at runtime (admin only) — the retention sweeper picks them up on its
+/// next pass, no restart. Stored in the settings table; clearing them reverts to the env defaults.
+async fn put_retention(
+    State(st): State<AppState>,
+    principal: Principal,
+    Json(body): Json<RetentionUpdate>,
+) -> AppResult<Json<RetentionLimits>> {
+    principal.require(principal.can_admin(), "change recording limits")?;
+    if let Some(gb) = body.max_recordings_gb {
+        if !gb.is_finite() || gb <= 0.0 {
+            return Err(AppError::BadRequest(
+                "`max_recordings_gb` must be greater than 0".into(),
+            ));
+        }
+        settings::set_i64(
+            &st.pool,
+            settings::RECORDING_MAX_BYTES,
+            (gb * BYTES_PER_GB) as i64,
+        )
+        .await?;
+    }
+    if let Some(gb) = body.min_free_disk_gb {
+        if !gb.is_finite() || gb < 0.0 {
+            return Err(AppError::BadRequest(
+                "`min_free_disk_gb` must be 0 or greater".into(),
+            ));
+        }
+        settings::set_i64(
+            &st.pool,
+            settings::RECORDING_MIN_FREE_BYTES,
+            (gb * BYTES_PER_GB) as i64,
+        )
+        .await?;
+    }
+    crate::auth::audit(
+        &st.pool,
+        &principal,
+        "update_retention_limits",
+        "settings",
+        "recording",
+        json!({ "max_recordings_gb": body.max_recordings_gb, "min_free_disk_gb": body.min_free_disk_gb }),
+    )
+    .await;
+    Ok(Json(effective_limits(&st).await))
 }
 
 /// Liveness: the process is up.
@@ -130,6 +228,7 @@ async fn system_info(State(st): State<AppState>) -> AppResult<Json<SystemInfo>> 
             .await?;
     let active_recorders = st.recorder.active_ids().await.len();
     let storage = storage::storage_report(&st.pool, &st.cfg).await?;
+    let limits = effective_limits(&st).await;
 
     // Disk health: the latest disk-health alert (any time) and whether one fired recently (within a
     // few SMART-check cycles). With checks disabled no such events exist, so health reads as OK.
@@ -163,7 +262,7 @@ async fn system_info(State(st): State<AppState>) -> AppResult<Json<SystemInfo>> 
         segments_total,
         recordings_bytes,
         recordings_gb: recordings_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
-        max_recordings_gb: st.cfg.max_recordings_bytes as f64 / 1024.0 / 1024.0 / 1024.0,
+        max_recordings_gb: limits.max_recordings_gb,
         storage,
         remote_access: remote_access::status(&st.cfg),
         disk_health_ok: recent_disk_alerts == 0,

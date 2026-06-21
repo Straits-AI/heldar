@@ -5,7 +5,7 @@
 import { useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { api } from "../lib/api";
+import { api, ApiError } from "../lib/api";
 import { usePoll } from "../lib/usePoll";
 import type {
   AuditLogEntry,
@@ -185,6 +185,133 @@ function StoragePanel({
           {storage.newest_segment ? formatClock(storage.newest_segment) : "—"}
         </span>
       </div>
+    </Panel>
+  );
+}
+
+/* --------------------- recording disk-limit panel --------------------- */
+
+function RecordingLimitsPanel({
+  canAdmin,
+  recordingsBytes,
+}: {
+  canAdmin: boolean;
+  recordingsBytes: number | null;
+}) {
+  const limits = usePoll(() => api.getRetention(), 15000);
+  const [editing, setEditing] = useState(false);
+  const [maxGb, setMaxGb] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const data = limits.data;
+
+  function startEdit() {
+    setMaxGb(data ? String(Math.round(data.max_recordings_gb * 10) / 10) : "");
+    setError(null);
+    setEditing(true);
+  }
+  async function save() {
+    const gb = parseFloat(maxGb);
+    if (!Number.isFinite(gb) || gb <= 0) {
+      setError("Enter a size in GB greater than 0.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await api.setRetention({ max_recordings_gb: gb });
+      await limits.refresh();
+      setEditing(false);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const usedPct =
+    data && recordingsBytes != null && data.max_recordings_bytes > 0
+      ? Math.min(100, (recordingsBytes / data.max_recordings_bytes) * 100)
+      : null;
+  const barColor = usedPct != null && usedPct > 90 ? "#ef4444" : usedPct != null && usedPct > 75 ? "#fbbf24" : "#f59e0b";
+
+  return (
+    <Panel
+      title="Recording limit"
+      subtitle="Cap on total recordings — oldest footage is evicted to stay under it"
+      actions={
+        canAdmin && !editing && data ? (
+          <Button size="sm" onClick={startEdit}>
+            Edit
+          </Button>
+        ) : undefined
+      }
+    >
+      {!data ? (
+        <PanelStatus loading={limits.loading} error={limits.error} label="recording limit" />
+      ) : editing ? (
+        <div className="space-y-3">
+          <label className="block">
+            <SectionLabel>Maximum total size (GB)</SectionLabel>
+            <input
+              type="number"
+              min="1"
+              step="1"
+              value={maxGb}
+              onChange={(e) => setMaxGb(e.target.value)}
+              className="mt-1.5 w-full rounded-md border border-line bg-canvas px-3 py-2 font-mono text-sm text-fg outline-none focus:border-accent"
+              autoFocus
+            />
+          </label>
+          {error && (
+            <div className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-[11px] text-red-300">
+              {error}
+            </div>
+          )}
+          <div className="flex gap-2">
+            <Button size="sm" variant="primary" disabled={saving} onClick={() => void save()}>
+              {saving ? <Spinner size={13} /> : "Save"}
+            </Button>
+            <Button size="sm" disabled={saving} onClick={() => setEditing(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="flex items-end justify-between gap-4">
+            <div>
+              <SectionLabel>Maximum size</SectionLabel>
+              <div className="mt-1 font-mono text-3xl font-semibold tabular-nums text-fg">
+                {Math.round(data.max_recordings_gb)}
+                <span className="ml-1 text-sm text-fg-muted">GB</span>
+              </div>
+            </div>
+            <div className="text-right font-mono text-[11px] leading-relaxed text-fg-muted">
+              <div>{data.max_overridden ? "operator-set" : "default (env)"}</div>
+              <div className="mt-0.5">free-disk floor {Math.round(data.min_free_disk_gb)} GB</div>
+            </div>
+          </div>
+          {usedPct != null && (
+            <div>
+              <div className="h-2.5 w-full overflow-hidden rounded-full bg-line">
+                <div
+                  className="h-full rounded-full transition-[width] duration-500"
+                  style={{ width: `${usedPct}%`, backgroundColor: barColor }}
+                />
+              </div>
+              <div className="mt-1 font-mono text-[11px] text-fg-muted">
+                {recordingsBytes != null ? formatBytes(recordingsBytes) : "—"} of{" "}
+                {Math.round(data.max_recordings_gb)} GB used ({usedPct.toFixed(0)}%)
+              </div>
+            </div>
+          )}
+          <p className="font-mono text-[11px] leading-relaxed text-fg-muted">
+            When recordings exceed this, the retention sweeper deletes the oldest segments first
+            (evidence-locked footage is never touched), so the disk can&apos;t fill up.
+          </p>
+        </div>
+      )}
     </Panel>
   );
 }
@@ -645,6 +772,10 @@ export function System() {
             storage={system.data?.storage ?? null}
             loading={system.loading}
             error={system.error}
+          />
+          <RecordingLimitsPanel
+            canAdmin={principal?.role === "admin"}
+            recordingsBytes={system.data?.recordings_bytes ?? null}
           />
           <HealthPanel
             statuses={health.data}

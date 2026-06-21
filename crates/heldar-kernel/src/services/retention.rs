@@ -12,7 +12,7 @@ use sqlx::SqlitePool;
 
 use crate::config::Config;
 use crate::repo;
-use crate::services::storage;
+use crate::services::{settings, storage};
 
 /// Delete a segment's file and report whether its DB row should now be removed. The row is removed
 /// only when the file is actually gone — deleted just now, or already absent (`NotFound`). If the
@@ -218,7 +218,13 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
     //    the protected footprint by `evidence_locked = 1` (the DURABLE hold), not the transient
     //    `locked` read-lock: an in-flight export must not inflate the protected total and starve the
     //    cap. Deletable = `locked = 0 AND evidence_locked = 0` (skip both the read-lock and the hold).
-    let max = cfg.max_recordings_bytes as i64;
+    // Operator-tunable from the dashboard (settings table); a positive override wins, else the env
+    // default (`HELDAR_MAX_RECORDINGS_GB`). Non-positive overrides are ignored so a stray 0 can't
+    // silently disable the cap.
+    let max = settings::get_i64(pool, settings::RECORDING_MAX_BYTES)
+        .await
+        .filter(|&v| v > 0)
+        .unwrap_or(cfg.max_recordings_bytes as i64);
     let protected_bytes: i64 = sqlx::query_scalar(
         "SELECT COALESCE(SUM(size_bytes), 0) FROM segments WHERE evidence_locked = 1",
     )
@@ -305,7 +311,13 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
     //    oldest unlocked segments until back above it. Self-limiting: it stops if a delete batch
     //    does not actually recover free space (disk filled by non-recording data), and refuses to
     //    run if the floor exceeds the whole disk — so it never destroys the footprint for nothing.
-    let floor = cfg.min_free_disk_bytes;
+    // Operator-tunable free-disk floor (settings table); env default `HELDAR_MIN_FREE_DISK_GB` otherwise.
+    // 0 is a valid override meaning "no floor".
+    let floor = settings::get_i64(pool, settings::RECORDING_MIN_FREE_BYTES)
+        .await
+        .filter(|&v| v >= 0)
+        .map(|v| v as u64)
+        .unwrap_or(cfg.min_free_disk_bytes);
     let mut disk_deleted: u64 = 0;
     match storage::disk_stats_async(cfg.recordings_dir.clone()).await {
         None => {

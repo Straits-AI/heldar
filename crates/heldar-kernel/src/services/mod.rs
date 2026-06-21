@@ -22,6 +22,7 @@ pub mod remote_access;
 pub mod retention;
 pub mod sampler;
 pub mod schedule_watcher;
+pub mod settings;
 pub mod snapshot;
 pub mod snapshot_scheduler;
 pub mod storage;
