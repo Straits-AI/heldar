@@ -1,7 +1,10 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, useEffect, useState } from "react";
 import { Link, Route, Routes } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
+import Login from "./components/Login";
 import { Button, Spinner } from "./components/ui";
+import { api } from "./lib/api";
+import type { Principal } from "./lib/types";
 import { MODULE_PAGES, ModuleFrame, ModulesProvider, useModules } from "./modules";
 
 // Route-level code-splitting: each page is its own chunk, loaded on demand instead of
@@ -82,12 +85,62 @@ function AppRoutes() {
   );
 }
 
+/** Gate the whole console behind authentication. On the appliance (auth disabled) `/auth/me` returns a
+ *  synthetic `system` principal and the app renders straight through. When auth is enabled (the remote
+ *  dashboard), an unauthenticated `/auth/me` 401s → render the sign-in form; on success the app mounts
+ *  and a sign-out control appears (hidden for the appliance's `system` principal). */
+function AuthGate({ children }: { children: React.ReactNode }) {
+  const [principal, setPrincipal] = useState<Principal | null | "loading">("loading");
+  useEffect(() => {
+    let alive = true;
+    api
+      .me()
+      .then((p) => alive && setPrincipal(p))
+      .catch(() => alive && setPrincipal(null));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  if (principal === "loading") {
+    return (
+      <div className="flex min-h-screen items-center justify-center text-fg-muted">
+        <Spinner size={20} />
+      </div>
+    );
+  }
+  if (principal === null) return <Login onSuccess={setPrincipal} />;
+  return (
+    <>
+      {children}
+      {principal.kind !== "system" && (
+        <button
+          type="button"
+          onClick={async () => {
+            try {
+              await api.logout();
+            } catch {
+              /* clear local state regardless */
+            }
+            setPrincipal(null);
+          }}
+          className="fixed bottom-3 right-3 z-50 rounded-md border border-line bg-panel px-3 py-1.5 font-mono text-[11px] text-fg-secondary shadow-panel hover:text-fg"
+        >
+          sign out · {principal.name || principal.id}
+        </button>
+      )}
+    </>
+  );
+}
+
 export default function App() {
   return (
-    <ModulesProvider>
-      <AppShell>
-        <AppRoutes />
-      </AppShell>
-    </ModulesProvider>
+    <AuthGate>
+      <ModulesProvider>
+        <AppShell>
+          <AppRoutes />
+        </AppShell>
+      </ModulesProvider>
+    </AuthGate>
   );
 }
