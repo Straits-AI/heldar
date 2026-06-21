@@ -64,7 +64,7 @@ base64 = "0.22"
 md-5 = "0.10"
 # HMAC-SHA256 webhook signatures (X-Heldar-Signature). Already resolved in Cargo.lock (transitive
 # dep of argon2/digest); declared here so the webhooks delivery engine can sign delivery bodies.
-hmac = "0.12"
+hmac = "0.13"
 # Ed25519 verification of signed plugin-registry catalogs (the "verified publisher" badge). ring is
 # already resolved in Cargo.lock (the rustls TLS backend under reqwest), so declaring it directly adds
 # zero new compiled crates while giving asymmetric verify with a PUBLIC key (no forgeable secret).
