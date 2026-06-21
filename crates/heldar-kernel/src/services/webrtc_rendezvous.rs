@@ -215,6 +215,106 @@ pub async fn run(state: AppState) {
     }
 }
 
+/// The box-facing TURN endpoint on the rendezvous (mints ICE for the box's own MediaMTX).
+fn box_turn_url(rendezvous_url: &str) -> String {
+    format!("{}/api/v1/box/turn", rendezvous_url.trim_end_matches('/'))
+}
+
+/// Fetch short-lived TURN credentials from the rendezvous and shape them into a MediaMTX
+/// `webrtcICEServers2` array (`[{url, username?, password?}]`).
+async fn fetch_rendezvous_ice(
+    client: &reqwest::Client,
+    rendezvous_url: &str,
+    token: &str,
+) -> anyhow::Result<serde_json::Value> {
+    let data: serde_json::Value = client
+        .get(box_turn_url(rendezvous_url))
+        .bearer_auth(token)
+        .send()
+        .await
+        .context("rendezvous box/turn request")?
+        .error_for_status()
+        .context("rendezvous box/turn rejected")?
+        .json()
+        .await
+        .context("decoding box/turn")?;
+    let ice = data
+        .get("iceServers")
+        .ok_or_else(|| anyhow::anyhow!("box/turn response missing iceServers"))?;
+    let user = ice.get("username").and_then(|v| v.as_str());
+    let cred = ice.get("credential").and_then(|v| v.as_str());
+    let urls = ice
+        .get("urls")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| anyhow::anyhow!("box/turn response missing iceServers.urls"))?;
+    let list: Vec<serde_json::Value> = urls
+        .iter()
+        .filter_map(|u| u.as_str())
+        .map(|u| {
+            if u.starts_with("stun:") {
+                json!({ "url": u })
+            } else {
+                json!({ "url": u, "username": user, "password": cred })
+            }
+        })
+        .collect();
+    Ok(serde_json::Value::Array(list))
+}
+
+/// Resolve the ICE servers to program into MediaMTX, and how long until the next refresh.
+async fn resolve_ice(cfg: &Config, client: &reqwest::Client) -> (serde_json::Value, Duration) {
+    // 1) Operator-provided (their own STUN/TURN) — static, refresh rarely.
+    if let Some(raw) = &cfg.webrtc_ice_servers {
+        match serde_json::from_str::<serde_json::Value>(raw) {
+            Ok(v) => return (v, Duration::from_secs(12 * 3600)),
+            Err(e) => {
+                tracing::error!(error = %e, "HELDAR_WEBRTC_ICE_SERVERS is not valid JSON; ignoring")
+            }
+        }
+    }
+    // 2) Heldar-hosted: short-lived TURN from the rendezvous (creds expire → refresh often).
+    if let Some(url) = cfg.rendezvous_url.as_deref() {
+        match fetch_rendezvous_ice(client, url, &cfg.cp_token).await {
+            Ok(v) => return (v, Duration::from_secs(30 * 60)),
+            Err(e) => {
+                tracing::warn!(error = %e, "webrtc ICE: rendezvous TURN fetch failed; using STUN only")
+            }
+        }
+    }
+    // 3) Fallback: STUN only (works for non-symmetric NAT).
+    (
+        json!([{ "url": "stun:stun.cloudflare.com:3478" }]),
+        Duration::from_secs(30 * 60),
+    )
+}
+
+/// Periodically program MediaMTX's WebRTC ICE servers for remote viewing — the operator's own
+/// `HELDAR_WEBRTC_ICE_SERVERS`, else short-lived TURN fetched from the rendezvous, else STUN. Parks when
+/// remote viewing is not configured (neither ICE config nor a rendezvous URL set).
+pub async fn run_ice(state: AppState) {
+    let cfg = state.cfg.clone();
+    if cfg.webrtc_ice_servers.is_none() && cfg.rendezvous_url.is_none() {
+        std::future::pending::<()>().await;
+        return;
+    }
+    let client = match build_client(&cfg) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "webrtc ICE disabled: bad mTLS config");
+            std::future::pending::<()>().await;
+            return;
+        }
+    };
+    loop {
+        let (ice, cadence) = resolve_ice(&cfg, &client).await;
+        match mediamtx::set_webrtc_ice_servers(&state, &ice).await {
+            Ok(()) => tracing::info!("webrtc ICE: programmed MediaMTX ICE servers"),
+            Err(e) => tracing::warn!(error = %e, "webrtc ICE: failed to program MediaMTX"),
+        }
+        tokio::time::sleep(cadence).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

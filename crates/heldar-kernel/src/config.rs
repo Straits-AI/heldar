@@ -192,6 +192,13 @@ pub struct Config {
     /// remote viewing (ADR 0003, P2). Unset (default) → the rendezvous client parks; remote access is
     /// opt-in. Reuses `site_id` for identity, `cp_token` as bearer, and `cp_tls` for mTLS.
     pub rendezvous_url: Option<String>,
+    /// WebRTC ICE servers (`HELDAR_WEBRTC_ICE_SERVERS`) the kernel programs into MediaMTX so it gathers
+    /// reachable candidates for remote viewing — **bring your own** STUN/TURN. A JSON array in MediaMTX
+    /// `webrtcICEServers2` shape, e.g. `[{"url":"turn:turn.example.com:3478","username":"u","password":"p"}]`.
+    /// When unset but a `rendezvous_url` is configured, the kernel fetches short-lived TURN credentials
+    /// from the rendezvous (the Heldar-hosted option) and refreshes them; when neither is set, MediaMTX
+    /// is left as-is (LAN-only).
+    pub webrtc_ice_servers: Option<String>,
     // ---- Plugin registry / store (Phase C) ----
     /// Master switch for the plugin store's remote-registry fetching. When false, the store shows only
     /// the bundled open catalog + locally installed plugins (fully offline). The bundled catalog is
@@ -405,6 +412,7 @@ impl Config {
             cp_register_interval_s: parse_or("HELDAR_CP_REGISTER_INTERVAL_S", 300),
             cp_tls: cp_tls_from_env(),
             rendezvous_url: var("HELDAR_REMOTE_RENDEZVOUS_URL"),
+            webrtc_ice_servers: var("HELDAR_WEBRTC_ICE_SERVERS"),
             registry_enabled: parse_bool("HELDAR_REGISTRY_ENABLED", true),
             registry_urls: var_or("HELDAR_REGISTRY_URLS", "")
                 .split(',')

@@ -159,6 +159,9 @@ pub async fn ensure_live(
         let body = json!({
             "runOnDemand": run_on_demand,
             "runOnDemandRestart": true,
+            // The HEVC→H.264 transcode cold-start (ffmpeg connect + first keyframe) routinely exceeds
+            // MediaMTX's 10s default, which would drop the WHEP/HLS reader before the source is ready.
+            "runOnDemandStartTimeout": "30s",
             "runOnDemandCloseAfter": "10s",
         });
         let resp = state
@@ -191,6 +194,28 @@ pub async fn ensure_live(
         rtsp_url: format!("{rtsp}/{name}"),
         name,
     })
+}
+
+/// Program MediaMTX's WebRTC ICE servers (STUN/TURN) so it gathers reachable candidates for remote
+/// viewing — needed for symmetric-NAT traversal. `ice` is a MediaMTX `webrtcICEServers2` array
+/// (`[{"url":..,"username"?:..,"password"?:..}]`). Patches the RUNNING MediaMTX over its API (no restart).
+pub async fn set_webrtc_ice_servers(state: &AppState, ice: &serde_json::Value) -> AppResult<()> {
+    let api = state.cfg.mediamtx_api_url.trim_end_matches('/');
+    let resp = state
+        .http
+        .patch(format!("{api}/v3/config/global/patch"))
+        .json(&json!({ "webrtcICEServers2": ice }))
+        .send()
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("MediaMTX unreachable at {api}: {e}")))?;
+    if !resp.status().is_success() {
+        let code = resp.status();
+        let txt = resp.text().await.unwrap_or_default();
+        return Err(AppError::Other(anyhow::anyhow!(
+            "MediaMTX set-ice failed ({code}): {txt}"
+        )));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

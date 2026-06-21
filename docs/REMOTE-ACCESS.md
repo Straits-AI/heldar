@@ -155,26 +155,22 @@ trusted viewers. But:
   config (`HELDAR_OVERLAY_*`) and a probe of the configured interface (`/sys/class/net/<iface>`),
   surfaced at `GET /api/v1/system → remote_access { enabled, kind, iface, present, operstate, up, note }`.
   Transport-agnostic: any overlay that presents a network interface is supported (Recipes A/B).
-- **Provides (forthcoming): WebRTC remote access** — browser-based live video (MediaMTX/WHEP) and
-  dashboard over signaling + TURN brokered by `heldar-control-plane`, media end-to-end over
-  DTLS-SRTP. Delivered in phases (see _Status & phasing_); design of record in
+- **Provides (open, Apache-2.0): the box-side of WebRTC remote access.** Opt-in via
+  `HELDAR_REMOTE_RENDEZVOUS_URL`, the kernel **dials OUT** to a rendezvous (`services/webrtc_rendezvous.rs`)
+  and bridges browser WHEP offers to its own MediaMTX; it also **programs MediaMTX's ICE servers** so the
+  box gathers a relay candidate for symmetric-NAT traversal. Live video is MediaMTX/WHEP; media is
+  end-to-end over DTLS-SRTP. Design of record:
   [`docs/adr/0003-webrtc-remote-access.md`](adr/0003-webrtc-remote-access.md).
-- **Does not provide:** an embedded/kernel-managed WireGuard interface (removed — the WebRTC path
-  supersedes it), NAT hole-punching baked into the kernel, nor a managed hosted multi-site control
-  plane in the open kernel — the rendezvous (signaling + TURN) lives in the separate
-  `heldar-control-plane`. The default open path stands up the overlay recipes with no extra kernel
-  code.
-
-## Alternatives (and why they're not the default)
-
-- **Cloudflare-native (Tunnel + Workers/D1/KV + WebRTC via Cloudflare Realtime TURN):** zero-install
-  *browser* viewing with no client, and effectively free for occasional use — but the Tunnel
-  terminates TLS (so Cloudflare reads control-plane payloads + WHEP SDP in plaintext), TURN relay is
-  the *primary* media path under CGNAT (metered bandwidth), and it's the most moving parts to build/
-  maintain. The control-plane-hosted rendezvous (above) keeps signaling under our control while still
-  brokering only SDP/ICE, never media.
-  ⚠️ Never reverse-proxy the camera **video** over the Tunnel — that violates Cloudflare's CDN ToS;
-  media must ride WebRTC/TURN, the Tunnel carries only the small control API + SDP signaling.
+- **Bring your own TURN, or use ours.** TURN is the only thing that needs hosting:
+  - **Your own** — set `HELDAR_WEBRTC_ICE_SERVERS` (a MediaMTX `webrtcICEServers2` JSON array) to point
+    MediaMTX at any STUN/TURN you run (coturn, your Cloudflare Realtime, …). The kernel programs it in.
+  - **Heldar-hosted** — point `HELDAR_REMOTE_RENDEZVOUS_URL` at the managed `heldar` rendezvous; the
+    kernel fetches short-lived TURN from it and refreshes the credentials automatically.
+  - Neither set → MediaMTX stays on the STUN baseline (`mediamtx.yml`), i.e. LAN / non-symmetric-NAT only.
+- **Does not provide (the managed tier, kept private):** the **rendezvous** itself — the signaling
+  broker + TURN credential minting. That is the `heldar` Cloudflare **Worker + Durable Object**
+  (`apps/edge/`, NOT in the open repo). The open kernel only *dials* it; it never sees media (DTLS-SRTP
+  rides TURN). Removed entirely: the old kernel-managed WireGuard interface (the WebRTC path supersedes it).
 - **Self-hosted reverse tunnel (frp/rathole + coturn on your VPS):** best privacy (you own every
   hop) and browser-zero-install, but the heaviest ops (a VPS + three daemons + certs) and not free.
   Use WebRTC+coturn (or TLS passthrough) so the VPS only ever sees ciphertext.

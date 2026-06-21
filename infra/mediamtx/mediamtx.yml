@@ -20,6 +20,12 @@ hlsVariant: mpegts
 # WebRTC output (lower-latency live view).
 webrtc: yes
 webrtcAddress: :8889
+# ICE servers for WebRTC. STUN is a safe, credential-free baseline (works on the LAN + non-symmetric
+# NAT). For remote viewing through a CGNAT'd box (ADR 0003) the kernel programs these at runtime over the
+# MediaMTX API — operator-provided TURN (HELDAR_WEBRTC_ICE_SERVERS) or short-lived TURN fetched from the
+# rendezvous — so a relay candidate is available for symmetric-NAT traversal.
+webrtcICEServers2:
+  - url: stun:stun.cloudflare.com:3478
 
 rtmp: no
 srt: no

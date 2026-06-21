@@ -274,6 +274,15 @@ async fn main() -> anyhow::Result<()> {
                 services::webrtc_rendezvous::run(st.clone())
             });
         }
+        // Program MediaMTX's WebRTC ICE servers for remote viewing (the operator's own STUN/TURN via
+        // HELDAR_WEBRTC_ICE_SERVERS, else short-lived TURN fetched from the rendezvous). Parks when
+        // remote viewing isn't configured.
+        {
+            let st = state.clone();
+            spawn_supervised("webrtc_ice", move || {
+                services::webrtc_rendezvous::run_ice(st.clone())
+            });
+        }
         // Email notifier (the off-by-default `smtp` feature): relays matching events to configured
         // recipients over SMTP. Parks unless HELDAR_SMTP_HOST/_FROM/_RECIPIENTS are set, so it never
         // returns and there is no tight-loop respawn concern (mirrors the webhook engine).
