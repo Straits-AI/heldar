@@ -13,9 +13,12 @@
 //! `HELDAR_CP_TLS_*` mTLS identity when configured (not needed for the Cloudflare Worker — it uses the
 //! `HELDAR_CP_TOKEN` bearer).
 
+use std::collections::HashMap;
 use std::time::Duration;
 
 use anyhow::Context;
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use reqwest::StatusCode;
 use serde::Deserialize;
@@ -333,9 +336,278 @@ pub async fn run_ice(state: AppState) {
     }
 }
 
+// ---- Stage C: authenticated read-only HTTP relay ----
+//
+// A SECOND outbound channel so an authenticated remote browser can drive the kernel's REST API
+// (read-only in Stage C). The rendezvous hands the box a `RelayJob` — an HTTP request the browser made,
+// carrying the user's REAL kernel Bearer — and the box REPLAYS it against its own local kernel
+// (`127.0.0.1:api_port`). The kernel runs its NORMAL auth + RBAC, so the relay is a dumb, allowlisted
+// pipe — never an auth-bypass, never a fabricated principal. Independent of the WHEP channel (separate
+// poll → no head-of-line blocking). FAIL-SAFE: this loop refuses to run unless kernel auth is ENABLED
+// and a real user exists, so the REST API is never exposed remotely while it would answer as the
+// synthetic auth-off admin.
+
+fn relay_poll_url(u: &str) -> String {
+    format!("{}/api/v1/relay/poll", u.trim_end_matches('/'))
+}
+fn relay_respond_url(u: &str) -> String {
+    format!("{}/api/v1/relay/respond", u.trim_end_matches('/'))
+}
+
+/// An HTTP request the rendezvous asks the box to replay against its local kernel.
+#[derive(Debug, Deserialize)]
+struct RelayJob {
+    job_id: String,
+    method: String,
+    path: String,
+    #[serde(default)]
+    headers: HashMap<String, String>,
+    #[serde(default)]
+    body_b64: Option<String>,
+}
+
+/// Concurrent relay pollers, so a few dashboard reads can be in flight at once (vs fully serialized).
+const RELAY_POLLERS: usize = 4;
+/// Cap on a relayed request/response body (defensive; Stage C is small JSON + the odd snapshot).
+const MAX_RELAY_BODY: usize = 8 * 1024 * 1024;
+
+/// What the box will replay in Stage C: GET on the REST/media READ surface, plus the auth login/logout
+/// lifecycle. Credential/admin/internal surfaces are refused here regardless of role (defense in depth —
+/// the kernel RBAC remains the real gate). Writes/config arrive in Stage B.
+fn relay_allowed(method: &str, path: &str) -> bool {
+    if !path.starts_with('/') || path.contains("..") || path.contains("//") || path.contains('@') {
+        return false;
+    }
+    const DENY: &[&str] = &[
+        "/api/v1/users",
+        "/api/v1/api-keys",
+        "/api/v1/relay",
+        "/api/v1/rendezvous",
+        "/api/v1/admin",
+        "/metrics",
+    ];
+    if DENY
+        .iter()
+        .any(|d| path == *d || path.starts_with(&format!("{d}/")))
+    {
+        return false;
+    }
+    match method {
+        "GET" => path.starts_with("/api/v1/") || path.starts_with("/media/"),
+        "POST" => path == "/api/v1/auth/login" || path == "/api/v1/auth/logout",
+        _ => false,
+    }
+}
+
+/// Request headers the box forwards from the browser to the local kernel (everything else stripped, so
+/// a client cannot smuggle X-Forwarded-For / trust headers).
+fn forward_request_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "authorization"
+            | "accept"
+            | "content-type"
+            | "range"
+            | "if-none-match"
+            | "if-modified-since"
+    )
+}
+/// Response headers the box passes back through the relay (Set-Cookie deliberately NOT forwarded — the
+/// box's own cookie is meaningless cross-origin and the Worker manages the browser session).
+fn forward_response_header(name: &str) -> bool {
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "content-type"
+            | "content-length"
+            | "content-range"
+            | "accept-ranges"
+            | "cache-control"
+            | "etag"
+            | "last-modified"
+    )
+}
+
+/// Replay one relay job against the local kernel; returns (status, response headers, base64 body).
+async fn replay_relay_job(
+    state: &AppState,
+    job: &RelayJob,
+) -> (u16, HashMap<String, String>, String) {
+    if !relay_allowed(&job.method, &job.path) {
+        return (
+            403,
+            HashMap::new(),
+            B64.encode(br#"{"error":"relay path not allowed"}"#),
+        );
+    }
+    let url = format!("http://127.0.0.1:{}{}", state.cfg.api_port, job.path);
+    let method = reqwest::Method::from_bytes(job.method.as_bytes()).unwrap_or(reqwest::Method::GET);
+    let mut req = state
+        .http
+        .request(method, &url)
+        .timeout(Duration::from_secs(20));
+    for (k, v) in &job.headers {
+        if forward_request_header(k) {
+            req = req.header(k, v);
+        }
+    }
+    if let Some(b) = &job.body_b64 {
+        if let Ok(bytes) = B64.decode(b) {
+            if bytes.len() <= MAX_RELAY_BODY {
+                req = req.body(bytes);
+            }
+        }
+    }
+    match req.send().await {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            let mut headers = HashMap::new();
+            for (k, v) in resp.headers() {
+                if forward_response_header(k.as_str()) {
+                    if let Ok(vs) = v.to_str() {
+                        headers.insert(k.as_str().to_string(), vs.to_string());
+                    }
+                }
+            }
+            let body = resp.bytes().await.unwrap_or_default();
+            let slice = if body.len() > MAX_RELAY_BODY {
+                &body[..MAX_RELAY_BODY]
+            } else {
+                &body[..]
+            };
+            (status, headers, B64.encode(slice))
+        }
+        Err(e) => (
+            502,
+            HashMap::new(),
+            B64.encode(format!(r#"{{"error":"relay upstream: {e}"}}"#).as_bytes()),
+        ),
+    }
+}
+
+/// One relay poller cycle: long-poll for a job, replay it, post the response. `Err` only on a transport
+/// failure with the rendezvous (the caller backs off).
+async fn relay_poll_once(
+    state: &AppState,
+    client: &reqwest::Client,
+    rendezvous_url: &str,
+    site_id: &str,
+    token: &str,
+) -> anyhow::Result<()> {
+    let resp = client
+        .post(relay_poll_url(rendezvous_url))
+        .bearer_auth(token)
+        .json(&json!({ "site_id": site_id, "auth_enforced": true }))
+        .send()
+        .await
+        .context("relay poll request")?;
+    if resp.status() == StatusCode::NO_CONTENT {
+        return Ok(());
+    }
+    let job: RelayJob = resp
+        .error_for_status()
+        .context("relay poll rejected")?
+        .json()
+        .await
+        .context("decoding relay job")?;
+    let (status, headers, body_b64) = replay_relay_job(state, &job).await;
+    client
+        .post(relay_respond_url(rendezvous_url))
+        .bearer_auth(token)
+        .json(&json!({
+            "site_id": site_id,
+            "job_id": job.job_id,
+            "status": status,
+            "headers": headers,
+            "body_b64": body_b64,
+        }))
+        .send()
+        .await
+        .context("posting relay response")?
+        .error_for_status()
+        .context("rendezvous rejected relay response")?;
+    Ok(())
+}
+
+/// The relay dial-out loop (Stage C). Parks unless remote viewing is configured AND kernel auth is
+/// enabled AND a real (active) user exists — so the REST API is never relayed while auth is off. Runs a
+/// small pool of concurrent pollers for responsiveness.
+pub async fn run_relay(state: AppState) {
+    let cfg = state.cfg.clone();
+    let (Some(rendezvous_url), Some(site_id)) = (cfg.rendezvous_url.clone(), cfg.site_id.clone())
+    else {
+        std::future::pending::<()>().await;
+        return;
+    };
+    if !cfg.auth_enabled {
+        tracing::warn!(
+            "webrtc relay disabled: kernel auth is OFF (HELDAR_AUTH_ENABLED=false). The remote REST \
+             relay refuses to run until auth is enabled, so the open API is never exposed remotely."
+        );
+        std::future::pending::<()>().await;
+        return;
+    }
+    let users: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users WHERE active = 1")
+        .fetch_one(&state.pool)
+        .await
+        .unwrap_or(0);
+    if users == 0 {
+        tracing::warn!("webrtc relay disabled: kernel auth is on but no active users exist yet");
+        std::future::pending::<()>().await;
+        return;
+    }
+    let client = match build_client(&cfg) {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::error!(error = %e, "webrtc relay disabled: bad mTLS config");
+            std::future::pending::<()>().await;
+            return;
+        }
+    };
+    tracing::info!(site = %site_id, "webrtc relay: dialing out for the authenticated remote dashboard (read-only)");
+    let mut tasks = Vec::new();
+    for _ in 0..RELAY_POLLERS {
+        let state = state.clone();
+        let client = client.clone();
+        let rendezvous_url = rendezvous_url.clone();
+        let site_id = site_id.clone();
+        let token = cfg.cp_token.clone();
+        tasks.push(tokio::spawn(async move {
+            let mut backoff = Duration::from_secs(1);
+            loop {
+                match relay_poll_once(&state, &client, &rendezvous_url, &site_id, &token).await {
+                    Ok(()) => backoff = Duration::from_secs(1),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "webrtc relay poll failed; backing off");
+                        tokio::time::sleep(backoff).await;
+                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                    }
+                }
+            }
+        }));
+    }
+    for t in tasks {
+        let _ = t.await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn relay_allowlist_permits_reads_and_login_only() {
+        assert!(relay_allowed("GET", "/api/v1/cameras"));
+        assert!(relay_allowed("GET", "/media/recordings/x.mp4"));
+        assert!(relay_allowed("POST", "/api/v1/auth/login"));
+        // writes, admin surfaces, traversal, and credential management are refused
+        assert!(!relay_allowed("POST", "/api/v1/cameras"));
+        assert!(!relay_allowed("DELETE", "/api/v1/cameras/cam2"));
+        assert!(!relay_allowed("GET", "/api/v1/users"));
+        assert!(!relay_allowed("GET", "/api/v1/api-keys"));
+        assert!(!relay_allowed("GET", "/api/v1/relay/poll"));
+        assert!(!relay_allowed("GET", "/api/v1/../secrets"));
+        assert!(!relay_allowed("GET", "/metrics"));
+    }
 
     #[test]
     fn endpoints_append_paths_and_trim_trailing_slash() {

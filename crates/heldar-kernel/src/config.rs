@@ -96,6 +96,10 @@ pub struct Config {
     pub auth_enabled: bool,
     /// Lifetime of an issued login session token.
     pub session_ttl_hours: i64,
+    /// Idle timeout (minutes): a session unused for longer than this is rejected even before its
+    /// absolute TTL. 0 (default) disables it. Recommended for internet-exposed remote-dashboard
+    /// access (bounds a stolen token's window), paired with a shorter `session_ttl_hours`.
+    pub session_idle_timeout_minutes: i64,
     /// Add `Secure` to the session cookie (require HTTPS). Default false for HTTP LAN/overlay
     /// appliances; set true when the deployment is served over TLS.
     pub auth_cookie_secure: bool,
@@ -372,6 +376,7 @@ impl Config {
             max_playback_seconds: parse_or("HELDAR_MAX_PLAYBACK_SECONDS", 7200.0),
             auth_enabled: parse_bool("HELDAR_AUTH_ENABLED", false),
             session_ttl_hours: parse_or("HELDAR_SESSION_TTL_HOURS", 12),
+            session_idle_timeout_minutes: parse_or("HELDAR_SESSION_IDLE_TIMEOUT_MIN", 0),
             auth_cookie_secure: parse_bool("HELDAR_AUTH_COOKIE_SECURE", false),
             bootstrap_admin_user: var("HELDAR_BOOTSTRAP_ADMIN_USER"),
             bootstrap_admin_password: var("HELDAR_BOOTSTRAP_ADMIN_PASSWORD"),

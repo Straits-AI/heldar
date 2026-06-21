@@ -272,8 +272,13 @@ pub fn clear_session_cookie(cfg: &Config) -> String {
     format!("{SESSION_COOKIE}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{secure}")
 }
 
-/// Resolve a token to a principal, or None if it is unknown / expired / disabled.
-async fn resolve_token(pool: &SqlitePool, token: &str) -> AppResult<Option<Principal>> {
+/// Resolve a token to a principal, or None if it is unknown / expired / idle-timed-out / disabled.
+/// `idle_minutes > 0` rejects a session unused for longer than that (independent of its absolute TTL).
+async fn resolve_token(
+    pool: &SqlitePool,
+    token: &str,
+    idle_minutes: i64,
+) -> AppResult<Option<Principal>> {
     let hash = token_hash(token);
     let now = Utc::now();
     if token.starts_with(APIKEY_PREFIX) {
@@ -309,7 +314,7 @@ async fn resolve_token(pool: &SqlitePool, token: &str) -> AppResult<Option<Princ
     }
     // Otherwise treat as a session token.
     let row: Option<SessionRow> = sqlx::query_as(
-        "SELECT s.id AS sid, s.expires_at, u.id AS uid, u.display_name, u.role, u.active
+        "SELECT s.id AS sid, s.expires_at, s.last_used_at, u.id AS uid, u.display_name, u.role, u.active
            FROM sessions s JOIN users u ON u.id = s.user_id
           WHERE s.id = ?",
     )
@@ -317,7 +322,10 @@ async fn resolve_token(pool: &SqlitePool, token: &str) -> AppResult<Option<Princ
     .fetch_optional(pool)
     .await?;
     if let Some(r) = row {
-        if r.expires_at <= now {
+        // Absolute TTL, then idle timeout — either drops the session.
+        let idle_expired =
+            idle_minutes > 0 && r.last_used_at < now - Duration::minutes(idle_minutes);
+        if r.expires_at <= now || idle_expired {
             let _ = sqlx::query("DELETE FROM sessions WHERE id = ?")
                 .bind(&r.sid)
                 .execute(pool)
@@ -351,6 +359,7 @@ async fn resolve_token(pool: &SqlitePool, token: &str) -> AppResult<Option<Princ
 struct SessionRow {
     sid: String,
     expires_at: DateTime<Utc>,
+    last_used_at: DateTime<Utc>,
     uid: String,
     display_name: Option<String>,
     role: String,
@@ -362,18 +371,20 @@ impl FromRequestParts<AppState> for Principal {
 
     async fn from_request_parts(parts: &mut Parts, st: &AppState) -> Result<Self, Self::Rejection> {
         match token_from_headers(&parts.headers) {
-            Some(tok) => match resolve_token(&st.pool, &tok).await? {
-                Some(p) => Ok(p),
-                None => {
-                    if st.cfg.auth_enabled {
-                        Err(AppError::Unauthorized(
-                            "invalid or expired credentials".into(),
-                        ))
-                    } else {
-                        Ok(Principal::system_admin())
+            Some(tok) => {
+                match resolve_token(&st.pool, &tok, st.cfg.session_idle_timeout_minutes).await? {
+                    Some(p) => Ok(p),
+                    None => {
+                        if st.cfg.auth_enabled {
+                            Err(AppError::Unauthorized(
+                                "invalid or expired credentials".into(),
+                            ))
+                        } else {
+                            Ok(Principal::system_admin())
+                        }
                     }
                 }
-            },
+            }
             None => {
                 if st.cfg.auth_enabled {
                     Err(AppError::Unauthorized("authentication required".into()))

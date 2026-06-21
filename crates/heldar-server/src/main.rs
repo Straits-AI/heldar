@@ -283,6 +283,14 @@ async fn main() -> anyhow::Result<()> {
                 services::webrtc_rendezvous::run_ice(st.clone())
             });
         }
+        // Authenticated read-only REST relay for the remote dashboard (ADR 0003 P3, Stage C). Dials a
+        // second outbound channel; parks unless kernel auth is ON and a real user exists (fail-safe).
+        {
+            let st = state.clone();
+            spawn_supervised("webrtc_relay", move || {
+                services::webrtc_rendezvous::run_relay(st.clone())
+            });
+        }
         // Email notifier (the off-by-default `smtp` feature): relays matching events to configured
         // recipients over SMTP. Parks unless HELDAR_SMTP_HOST/_FROM/_RECIPIENTS are set, so it never
         // returns and there is no tight-loop respawn concern (mirrors the webhook engine).
