@@ -167,10 +167,11 @@ trusted viewers. But:
   - **Heldar-hosted** — point `HELDAR_REMOTE_RENDEZVOUS_URL` at the managed `heldar` rendezvous; the
     kernel fetches short-lived TURN from it and refreshes the credentials automatically.
   - Neither set → MediaMTX stays on the STUN baseline (`mediamtx.yml`), i.e. LAN / non-symmetric-NAT only.
-- **Provides (open): an authenticated read-only REST relay for the remote dashboard** (ADR 0003 P3,
-  Stage C). A second dial-out channel (`webrtc_relay`) lets a remote browser drive the kernel's REST API
-  through the rendezvous, under a **two-gate** model that keeps the kernel the sole identity/RBAC
-  authority:
+- **Provides (open): the full `apps/web` dashboard, remotely** (ADR 0003 P3). The dashboard is served from
+  the rendezvous Worker at `/app/?site=<id>`; a second dial-out channel (`webrtc_relay`) + a same-origin
+  **cookie reverse-proxy** forward the kernel's REST + media surface (reads, **writes/config**, recorded
+  playback) to the box, and live video rides a WHEP-proxy (rendezvous + TURN). It runs under a **two-gate**
+  model that keeps the kernel the sole identity/RBAC authority:
   - **Outer gate** — a short-lived, per-user, site-scoped HMAC **relay capability** (the rendezvous mints
     it after a real kernel login; separate `RELAY_CAP_SECRET`) proves the browser may *reach* this box.
   - **Inner gate** — the browser's **real kernel session** is forwarded verbatim; the box replays the
