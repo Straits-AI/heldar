@@ -38,6 +38,11 @@ The core serves the built dashboard at `http://localhost:8000` when `HELDAR_WEB_
 `apps/web/dist` (one binary, one URL). `scripts/run_stack.sh` also runs the Vite dev server at
 `http://localhost:5173` for frontend work.
 
+**Remote access** (from any network, no app, even behind CGNAT): the box dials OUT to a WebRTC
+rendezvous and the full dashboard runs in a browser — live multi-camera, recorded playback, and config —
+with a two-gate auth model where the kernel stays the sole RBAC authority. Opt-in + design:
+[`docs/REMOTE-ACCESS.md`](docs/REMOTE-ACCESS.md).
+
 Onboard a camera (you supply the address and credentials; the RTSP URL is built from the vendor
 template):
 
