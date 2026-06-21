@@ -255,8 +255,8 @@ function RecordingLimitsPanel({
             <SectionLabel>Maximum total size (GB)</SectionLabel>
             <input
               type="number"
-              min="1"
-              step="1"
+              min="0.01"
+              step="0.01"
               value={maxGb}
               onChange={(e) => setMaxGb(e.target.value)}
               className="mt-1.5 w-full rounded-md border border-line bg-canvas px-3 py-2 font-mono text-sm text-fg outline-none focus:border-accent"
