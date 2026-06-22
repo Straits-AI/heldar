@@ -214,9 +214,11 @@ task pending local footage (see deferrals).
   unit-tested; *accuracy* is an evaluation task (Malaysian plate
   shapes/angles, motorcycles, night-IR, rain; fine-grained make/model). Never a hard
   access decision until locally benchmarked.
-- [ ] **Auth on the legacy Stage 0–3 routes** — the `Principal` guard currently
-  protects the Stage 4 entry/admin surface (+ ingest); extending it to cameras /
-  recordings / zones / AI-task management is follow-up hardening.
+- [x] **Auth on the legacy Stage 0–3 routes** — the `Principal` guard now spans the
+  kernel: camera list/read, live view, recordings (segments/timeline/gaps), health,
+  events, and the recording + snapshot schedule lists all assert at least `can_view`, so
+  the whole API requires a session when `HELDAR_AUTH_ENABLED=true` (default off keeps the
+  open LAN appliance).
 
 **Phase 1 items:**
 
