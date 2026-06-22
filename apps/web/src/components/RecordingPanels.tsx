@@ -12,6 +12,7 @@
 // mirror it by gating on `canManage`). Shares the design system primitives from ui.tsx.
 
 import Hls from "hls.js";
+import { hevcDecodeSupported, HEVC_UNSUPPORTED_NOTE } from "../lib/codec";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { api, ApiError } from "../lib/api";
@@ -136,14 +137,21 @@ function ReadOnlyNote() {
 /** Attaches an hls.js instance (or native HLS) to a <video> for VOD playback. */
 function HlsVideo({ src, className }: { src: string; className?: string }) {
   const videoRef = useRef<HTMLVideoElement>(null);
+  const [codecError, setCodecError] = useState(false);
 
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !src) return;
+    setCodecError(false);
     let hls: Hls | null = null;
 
     if (Hls.isSupported()) {
       hls = new Hls();
+      // H.265 recordings decode via MSE on most browsers; on the no-HEVC tail hls.js fatally errors —
+      // show the clear codec note instead of a black frame.
+      hls.on(Hls.Events.ERROR, (_evt, data) => {
+        if (data.fatal && !hevcDecodeSupported()) setCodecError(true);
+      });
       hls.loadSource(src);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -175,6 +183,17 @@ function HlsVideo({ src, className }: { src: string; className?: string }) {
     return undefined;
   }, [src]);
 
+  if (codecError) {
+    return (
+      <div
+        className={`${className ?? ""} flex items-center justify-center bg-canvas p-6 text-center`}
+      >
+        <p className="max-w-md font-mono text-[11px] leading-relaxed text-amber-200">
+          {HEVC_UNSUPPORTED_NOTE}
+        </p>
+      </div>
+    );
+  }
   return <video ref={videoRef} className={className} controls autoPlay playsInline />;
 }
 

@@ -4,6 +4,7 @@ import { api } from "../lib/api";
 import { usePoll } from "../lib/usePoll";
 import type { PlaybackSession } from "../lib/types";
 import { Button, EmptyState, SectionLabel, Spinner, Stat } from "../components/ui";
+import { hevcDecodeSupported, HEVC_UNSUPPORTED_NOTE } from "../lib/codec";
 
 // Multi-camera SYNCHRONIZED playback. Each selected camera gets its own segment-spanning HLS VOD
 // session over the same [from,to] window (so every playlist starts at the same wall-clock instant);
@@ -116,6 +117,11 @@ export function Playback() {
       if (!video) continue;
       if (Hls.isSupported()) {
         const hls = new Hls({ enableWorker: true });
+        // The box records H.265 (HEVC). Most browsers decode it via MSE; on the no-HEVC tail (Firefox,
+        // old devices) hls.js fatally errors buffering it — surface the clear codec note, not a stall.
+        hls.on(Hls.Events.ERROR, (_evt, data) => {
+          if (data.fatal && !hevcDecodeSupported()) setError(HEVC_UNSUPPORTED_NOTE);
+        });
         hls.loadSource(s.playlist_url);
         hls.attachMedia(video);
         created.push(hls);
@@ -199,6 +205,12 @@ export function Playback() {
           stream. Footage is read-locked for the session and released when you leave.
         </p>
       </header>
+
+      {!hevcDecodeSupported() && (
+        <div className="mt-4 rounded-md border border-connecting/40 bg-connecting/10 px-3 py-2 font-mono text-[11px] leading-relaxed text-amber-200">
+          {HEVC_UNSUPPORTED_NOTE}
+        </div>
+      )}
 
       {/* Setup bar */}
       <div className="mt-5 rounded-panel border border-line bg-panel p-4">
