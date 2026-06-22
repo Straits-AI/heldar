@@ -63,8 +63,10 @@ fn normalize_hhmm(s: &str, field: &str) -> AppResult<String> {
 
 async fn list_schedules(
     State(st): State<AppState>,
+    principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<Vec<RecordSchedule>>> {
+    principal.require(principal.can_view(), "list recording schedules")?;
     let _ = load_camera(&st.pool, &id).await?;
     let rows = sqlx::query_as::<_, RecordSchedule>(
         "SELECT * FROM camera_schedules WHERE camera_id = ? ORDER BY created_at ASC",

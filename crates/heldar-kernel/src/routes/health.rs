@@ -3,6 +3,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
 
+use crate::auth::Principal;
 use crate::error::{AppError, AppResult};
 use crate::models::{CameraStatus, Event};
 use crate::state::AppState;
@@ -14,7 +15,11 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/events", get(list_events))
 }
 
-async fn list_status(State(st): State<AppState>) -> AppResult<Json<Vec<CameraStatus>>> {
+async fn list_status(
+    State(st): State<AppState>,
+    principal: Principal,
+) -> AppResult<Json<Vec<CameraStatus>>> {
+    principal.require(principal.can_view(), "view camera health")?;
     let mut rows =
         sqlx::query_as::<_, CameraStatus>("SELECT * FROM camera_status ORDER BY camera_id ASC")
             .fetch_all(&st.pool)
@@ -38,8 +43,10 @@ async fn list_status(State(st): State<AppState>) -> AppResult<Json<Vec<CameraSta
 
 async fn camera_status(
     State(st): State<AppState>,
+    principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<CameraStatus>> {
+    principal.require(principal.can_view(), "view camera health")?;
     let mut row =
         sqlx::query_as::<_, CameraStatus>("SELECT * FROM camera_status WHERE camera_id = ?")
             .bind(&id)
@@ -67,8 +74,10 @@ struct EventQuery {
 
 async fn list_events(
     State(st): State<AppState>,
+    principal: Principal,
     Query(q): Query<EventQuery>,
 ) -> AppResult<Json<Vec<Event>>> {
+    principal.require(principal.can_view(), "view events")?;
     let limit = q.limit.unwrap_or(200).clamp(1, 2000);
     let rows = sqlx::query_as::<_, Event>(
         "SELECT * FROM events
@@ -143,7 +152,9 @@ mod tests {
                 .unwrap();
         }
 
-        let Json(rows) = list_status(State(st.clone())).await.unwrap();
+        let Json(rows) = list_status(State(st.clone()), Principal::system_admin())
+            .await
+            .unwrap();
         let by: std::collections::HashMap<String, String> =
             rows.into_iter().map(|r| (r.camera_id, r.state)).collect();
         assert_eq!(
@@ -156,9 +167,13 @@ mod tests {
         );
 
         // the single-camera endpoint applies the same rule
-        let Json(one) = camera_status(State(st.clone()), Path("cam_off".into()))
-            .await
-            .unwrap();
+        let Json(one) = camera_status(
+            State(st.clone()),
+            Principal::system_admin(),
+            Path("cam_off".into()),
+        )
+        .await
+        .unwrap();
         assert_eq!(one.state, "disabled");
     }
 }

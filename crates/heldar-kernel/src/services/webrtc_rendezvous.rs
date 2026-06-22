@@ -425,18 +425,38 @@ async fn replay_relay_job(
     state: &AppState,
     job: &RelayJob,
 ) -> (u16, HashMap<String, String>, String) {
-    if !relay_allowed(&job.method, &job.path) {
+    // Canonicalize the path exactly as the HTTP client will before authorizing it. `url` resolves
+    // `.`/`..`/`%2e%2e` dot-segments while parsing, so the raw `job.path` the allowlist sees can differ
+    // from what actually goes on the wire. We therefore parse first, then (a) confirm the result still
+    // points at our own loopback origin — `join()` on a `//host`/absolute-URL path could otherwise swap
+    // the host (SSRF) — and (b) run the allowlist on the CANONICAL path, forwarding the parsed URL so
+    // "authorized" is byte-for-byte "sent". Without this, `/api/v1/%2e%2e/%2e%2e/metrics` passes the
+    // raw-string check yet is sent as `/metrics`, escaping the `/api/v1/`+`/media/` pin and the DENY list.
+    let base = format!("http://127.0.0.1:{}", state.cfg.api_port);
+    let parsed = match reqwest::Url::parse(&base).and_then(|b| b.join(&job.path)) {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                400,
+                HashMap::new(),
+                B64.encode(br#"{"error":"bad relay path"}"#),
+            );
+        }
+    };
+    let same_origin = parsed.scheme() == "http"
+        && parsed.host_str() == Some("127.0.0.1")
+        && parsed.port() == Some(state.cfg.api_port);
+    if !same_origin || !relay_allowed(&job.method, parsed.path()) {
         return (
             403,
             HashMap::new(),
             B64.encode(br#"{"error":"relay path not allowed"}"#),
         );
     }
-    let url = format!("http://127.0.0.1:{}{}", state.cfg.api_port, job.path);
     let method = reqwest::Method::from_bytes(job.method.as_bytes()).unwrap_or(reqwest::Method::GET);
     let mut req = state
         .http
-        .request(method, &url)
+        .request(method, parsed)
         .timeout(Duration::from_secs(20));
     for (k, v) in &job.headers {
         if forward_request_header(k) {
@@ -460,6 +480,20 @@ async fn replay_relay_job(
                         headers.insert(k.as_str().to_string(), vs.to_string());
                     }
                 }
+            }
+            // Refuse to buffer an over-large upstream response: a forwarded request for a big media
+            // object (e.g. a full recording fetched without a Range header) would otherwise make each
+            // poller buffer the whole body in memory and could OOM the box. Large media is served with
+            // a Content-Length, so reject before reading; the browser fetches video via Range requests.
+            if resp
+                .content_length()
+                .is_some_and(|len| len > MAX_RELAY_BODY as u64)
+            {
+                return (
+                    413,
+                    HashMap::new(),
+                    B64.encode(br#"{"error":"relay response too large; use range requests"}"#),
+                );
             }
             let body = resp.bytes().await.unwrap_or_default();
             let slice = if body.len() > MAX_RELAY_BODY {
@@ -604,6 +638,44 @@ mod tests {
         assert!(!relay_allowed("GET", "/api/v1/../secrets"));
         assert!(!relay_allowed("GET", "/api/v1//cameras"));
         assert!(!relay_allowed("TRACE", "/api/v1/cameras"));
+    }
+
+    /// Regression for the relay allowlist bypass: the HTTP client normalizes `%2e%2e` to `..` and
+    /// removes dot-segments, so a raw path with no literal ".." can still be SENT as an escaped path.
+    /// `replay_relay_job` defends by canonicalizing via `Url::join` and running the allowlist on the
+    /// canonical path — this pins that the canonical form of the known bypasses is refused.
+    #[test]
+    fn relay_allowlist_runs_on_canonical_path_not_raw() {
+        let canon = |p: &str| {
+            reqwest::Url::parse("http://127.0.0.1:8088")
+                .unwrap()
+                .join(p)
+                .unwrap()
+                .path()
+                .to_string()
+        };
+        // The attack path passes the naive raw-string check (no literal "..") ...
+        assert!(!"/api/v1/%2e%2e/%2e%2e/metrics".contains(".."));
+        // ... but the client canonicalizes it to an off-surface path the allowlist rejects.
+        assert_eq!(canon("/api/v1/%2e%2e/%2e%2e/metrics"), "/metrics");
+        assert!(!relay_allowed(
+            "GET",
+            &canon("/api/v1/%2e%2e/%2e%2e/metrics")
+        ));
+        assert!(!relay_allowed(
+            "GET",
+            &canon("/api/v1/cameras/%2e%2e/relay/poll")
+        ));
+        assert!(!relay_allowed(
+            "POST",
+            &canon("/api/v1/cameras/%2e%2e/%2e%2e/healthz")
+        ));
+        // Legitimate paths still pass after canonicalization.
+        assert!(relay_allowed("GET", &canon("/api/v1/cameras")));
+        assert!(relay_allowed(
+            "GET",
+            &canon("/media/recordings/cam2/seg.mp4")
+        ));
     }
 
     #[test]

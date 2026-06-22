@@ -42,8 +42,10 @@ fn clamp_interval(seconds: i64) -> i64 {
 
 async fn list_schedules(
     State(st): State<AppState>,
+    principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<Vec<SnapshotSchedule>>> {
+    principal.require(principal.can_view(), "list snapshot schedules")?;
     let _ = load_camera(&st.pool, &id).await?;
     let rows = sqlx::query_as::<_, SnapshotSchedule>(
         "SELECT * FROM snapshot_schedules WHERE camera_id = ? ORDER BY created_at ASC",
@@ -203,9 +205,11 @@ impl SnapshotView {
 
 async fn list_snapshots(
     State(st): State<AppState>,
+    principal: Principal,
     Path(id): Path<String>,
     Query(q): Query<SnapshotRangeQuery>,
 ) -> AppResult<Json<Vec<SnapshotView>>> {
+    principal.require(principal.can_view(), "list snapshots")?;
     let _ = load_camera(&st.pool, &id).await?;
     let limit = q.limit.unwrap_or(500).clamp(1, 5000);
     let parse = |s: &Option<String>, field: &str| -> AppResult<Option<DateTime<Utc>>> {
