@@ -111,32 +111,56 @@ Reference table at **1080p @ 4 Mbps** (1 TB = 1000 GB, matching the decimal 10.8
 ## 3. Recording footprint cap in Heldar
 
 Heldar does **not** record blindly until the disk is full. The core
-(`crates/heldar-kernel/src/services/retention.rs`) runs a retention sweeper that enforces two policies
-on every pass.
+(`crates/heldar-kernel/src/services/retention.rs`) runs a retention sweeper that enforces several
+policies on every pass — age, per-camera quota, a global size cap, and a free-disk floor.
 
-### The two retention controls
+### The retention controls
 
 | Control | Where set | Scope | Default |
 | ------- | --------- | ----- | ------- |
 | `retention_hours` | per camera (DB column, settable via the camera API; falls back to `HELDAR_DEFAULT_RETENTION_HOURS`) | one camera | 24 h |
-| `HELDAR_MAX_RECORDINGS_GB` | environment variable | whole install | 20 GB |
+| `storage_quota_bytes` | per camera (DB column, optional) | one camera | unset (no per-camera cap) |
+| `HELDAR_MAX_RECORDINGS_GB` (size cap) | env var, **or runtime override** (see below) | whole install | 20 GB |
+| `HELDAR_MIN_FREE_DISK_GB` (free-disk floor) | env var, **or runtime override** (see below) | recordings filesystem | 5 GB |
 
-`HELDAR_MAX_RECORDINGS_GB` is parsed in `crates/heldar-kernel/src/config.rs` into
-`max_recordings_bytes` (GB × 1024³) and surfaced in the system status endpoint as
-`max_recordings_gb`.
+The free-disk floor is a hard host-protection guard: if the recordings filesystem drops below
+`HELDAR_MIN_FREE_DISK_GB` of free space, the sweeper prunes the oldest unlocked segments until back
+above it (`0` disables the floor). This is what keeps recordings from filling the disk and corrupting
+the system. `HELDAR_MAX_RECORDINGS_GB` / `HELDAR_MIN_FREE_DISK_GB` are parsed in
+`crates/heldar-kernel/src/config.rs` into `max_recordings_bytes` / `min_free_disk_bytes` and surfaced
+in the system status endpoint as `max_recordings_gb`.
+
+### Setting the limits at runtime
+
+The size cap and free-disk floor can be changed **without restarting** the kernel. The env vars set the
+defaults; an operator override stored in the `settings` table (migration `0002_settings`) shadows them,
+and the sweeper picks it up on its next pass.
+
+- `GET /api/v1/system/retention` — the effective limits (any authenticated caller); each value flags
+  whether it is the env default or an override.
+- `PUT /api/v1/system/retention` — set them (admin only): body
+  `{ "max_recordings_gb": <gt 0>, "min_free_disk_gb": <ge 0> }` (omit a field to leave it unchanged;
+  clearing reverts to the env default).
+
+The dashboard exposes this as the **System → Recording limit** panel.
 
 ### How a sweep works
 
 The sweeper runs every `HELDAR_RETENTION_INTERVAL_S` (default 300 s, floor 30 s) and does
-two passes in order:
+four passes in order:
 
 1. **Age-based, per camera.** For each camera, delete unlocked segments whose `end_time` is
    older than that camera's `retention_hours`.
-2. **Global size cap.** If the sum of all segment sizes exceeds `max_recordings_bytes`, delete
+2. **Per-camera quota.** For each camera with a `storage_quota_bytes` set, prune its oldest
+   unlocked segments back under that quota.
+3. **Global size cap.** If the sum of all segment sizes exceeds `max_recordings_bytes`, delete
    the **globally oldest unlocked** segments (ordered by `end_time` ascending, in batches of 20)
    until the total is back under the cap.
+4. **Free-disk floor.** If the recordings filesystem is below `min_free_disk_bytes` of free space,
+   prune the globally oldest unlocked segments until back above the floor (a no-op if the floor
+   exceeds the whole disk).
 
-**Locked (evidence) segments are never deleted by either pass** — they don't count against you
+**Locked (evidence) segments are never deleted by any pass** — they don't count against you
 being able to prune, but they *do* still occupy disk, so a large locked set can keep you above
 the cap with nothing left to prune.
 
@@ -315,4 +339,5 @@ Fill in the blanks for your deployment.
 
 *Config behavior: `crates/heldar-kernel/src/config.rs`,
 `crates/heldar-kernel/src/services/retention.rs`,
-`crates/heldar-kernel/src/routes/system.rs`.*
+`crates/heldar-kernel/src/services/settings.rs` (the runtime overrides, stored by migration
+`0002_settings`), `crates/heldar-kernel/src/routes/system.rs`.*

@@ -182,6 +182,10 @@ trusted viewers. But:
   - **Fail-safe:** the relay **refuses to run unless `HELDAR_AUTH_ENABLED=true` and a real user exists** —
     the open auth-off API is never exposed remotely. Pair with a short `HELDAR_SESSION_TTL_HOURS` +
     `HELDAR_SESSION_IDLE_TIMEOUT_MIN` and `HELDAR_AUTH_COOKIE_SECURE=true`.
+  - **Recorded playback is HEVC/H.265+ pass-through:** the box ships the recorded bitstream untouched and
+    the client's hardware decodes it (Chrome/Edge with HW HEVC, Safari, mobile) — the most efficient path
+    over a thin uplink; the no-HEVC browser tail (Firefox / old devices) gets a clear note instead of a
+    black frame.
 - **Does not provide (the managed tier, kept private):** the **rendezvous** itself — the signaling
   broker + TURN credential minting. That is the `heldar` Cloudflare **Worker + Durable Object**
   (`apps/edge/`, NOT in the open repo). The open kernel only *dials* it; it never sees media (DTLS-SRTP

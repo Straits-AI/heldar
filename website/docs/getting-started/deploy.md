@@ -65,7 +65,8 @@ Auth and RBAC are **opt-in** via `HELDAR_AUTH_ENABLED` (default `false`).
 Sessions use an HttpOnly, SameSite=Strict cookie. Set
 `HELDAR_AUTH_COOKIE_SECURE=true` behind TLS (keep `false` for plain-HTTP LAN or
 overlay access). Tune the session lifetime with `HELDAR_SESSION_TTL_HOURS`
-(default 12).
+(default 12), and optionally expire idle sessions with
+`HELDAR_SESSION_IDLE_TIMEOUT_MIN` (default `0`, i.e. no idle timeout).
 
 Set `HELDAR_AUTH_ENABLED=true` for any multi-user or networked deployment.
 
@@ -84,6 +85,9 @@ Heldar uses SQLite only (WAL journal, embedded migrations). The default URL is
 
 Recordings stay on the local disk and are served from there; nothing is pushed
 to a cloud by default. Evidence-locked segments are never deleted by retention.
+Both limits are also **runtime-tunable without a restart** — from the dashboard
+System page ("Recording limit" panel) or via `GET`/`PUT /api/v1/system/retention`
+(PUT is admin-only); a stored override shadows the env value, which remains the default.
 
 ## CORS
 
@@ -94,5 +98,6 @@ CORS is mostly relevant when a separate frontend or integration calls the API.
 
 ## Operating a deployment
 
-For sizing, commissioning, observability, and remote access, see the
+For sizing, commissioning, observability, and remote access — including bringing
+your own STUN/TURN via `HELDAR_WEBRTC_ICE_SERVERS` — see the
 [Operate](../operate/index.md) hub.

@@ -53,9 +53,15 @@ curl -X POST http://localhost:8000/api/v1/cameras -H 'content-type: application/
 
 curl http://localhost:8000/api/v1/system                     # uptime, camera/segment counts
 curl http://localhost:8000/api/v1/cameras/gate_a/timeline    # recorded ranges
+curl http://localhost:8000/api/v1/system/retention           # recording size cap + free-disk floor
 ```
 
 > Do not brute-force camera credentials. HikVision devices lock out after failed attempts.
+
+> **Bounded recordings.** The retention sweeper keeps recordings from filling the disk: a size cap
+> (`HELDAR_MAX_RECORDINGS_GB`, default 20) and a free-disk floor (`HELDAR_MIN_FREE_DISK_GB`, default 5),
+> evicting oldest-first (evidence-locked clips are never evicted). Both are tunable at runtime via
+> `GET`/`PUT /api/v1/system/retention` (PUT admin-only) and the dashboard's System page — no restart.
 
 Run the reference AI worker against an AI-enabled camera:
 

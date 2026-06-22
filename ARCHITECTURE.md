@@ -422,6 +422,15 @@ policies, in order. **Locked (evidence) segments are never deleted by either.**
    the loop breaks (the cap can be exceeded by locked evidence — by design). A
    `disk_pressure` warning event is logged if anything was pruned.
 
+**Runtime-tunable (no restart).** The size cap (and the free-disk floor added in §14.4) are no longer
+env-only. `GET /api/v1/system/retention` returns the effective limits (flagging each as an override or
+the env default); `PUT /api/v1/system/retention` (admin-only) takes `{max_recordings_gb?, min_free_disk_gb?}`
+and persists overrides to a `settings` key/value table (`migrations/0002_settings.sql`) that **shadow**
+the `HELDAR_MAX_RECORDINGS_GB` / `HELDAR_MIN_FREE_DISK_GB` env defaults. The sweeper reads the effective
+value each pass, so a change takes effect on the next sweep; clearing an override reverts to the env
+default. The PUT is audited (`update_retention_limits`). The dashboard surfaces this as the System →
+Recording limit panel.
+
 The **evidence lock** (`segments.locked`) is the evidence-lock mechanism:
 the column and the retention guards exist, though no Stage 0 API mutates `locked`
 or `incident_id` yet (that arrives with the `lockEvidence` endpoint in a later
@@ -593,6 +602,9 @@ All via `HELDAR_*` env vars (see `.env.example`). Notable defaults:
 | `HELDAR_NOTIFIER_INTERVAL_S` | `15` (min 5) | notifier poll cadence |
 | `HELDAR_API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | bind address |
 | `HELDAR_CORS_ORIGINS` | `http://localhost:5173` | `*`/empty = allow all |
+| `HELDAR_SESSION_TTL_HOURS` / `_IDLE_TIMEOUT_MIN` | `12` / `0` (off) | login-session lifetime / idle timeout (remote access, §21) |
+| `HELDAR_AUTH_COOKIE_SECURE` | `false` | mark the session cookie `Secure` — set `true` for any remote/non-LAN exposure |
+| `HELDAR_REMOTE_RENDEZVOUS_URL` / `_WEBRTC_ICE_SERVERS` | *(unset)* | opt-in remote access (§21): rendezvous URL to dial; bring-your-own STUN/TURN |
 
 > Stage 1 observability/reliability config is documented end-to-end in
 > [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
@@ -606,7 +618,7 @@ All via `HELDAR_*` env vars (see `.env.example`). Notable defaults:
 | **SQLite only** — `db.rs` hard-bails on non-`sqlite` URLs | Single-node edge box; WAL handles the 8–16 camera target | SQLx is DB-agnostic; Postgres path planned (multi-node/cloud coordination) |
 | **Plaintext credentials** in `cameras.password` | Trusted single-tenant deploy; never serialized, always masked | Secret store / encryption (schema comment; security hardening stage) |
 | **Keyframe-aligned clip cuts** (`-c copy`, no re-encode) | Preserves quality and is cheap; precision bounded by GOP | Frame-accurate trimming via optional re-encode in a later playback stage |
-| **No auth on the API** | Local/LAN dev; CORS is the only gate | AuthN/AuthZ + tenant scoping (the `tenants`/`sites` tables already exist) |
+| **No auth on the API** | Local/LAN dev; CORS is the only gate | **Resolved in Stage 4 + security hardening** — RBAC (`auth.rs` `Principal` + capabilities, §17.4) gates the full API when `HELDAR_AUTH_ENABLED=true`; the read routes (cameras, live view, health, events, recordings, schedules) now assert `can_view`. Default `auth_enabled=false` keeps the open LAN appliance; tenant scoping still planned |
 | **Audio dropped** (`-an`) | Video-first VMS; halves edge cases | Audio capture can be re-enabled when needed |
 | **Evidence lock has no mutating API** (`locked`/`incident_id` columns only) | Retention already honors the flag | `lockEvidence(...)` endpoint (Layer 3 playback API) |
 | **No AI / frame sampler / decode pipeline** *(Stage 0 only)* | Stage 0 is the media kernel; clean ingest/record/decode/infer separation already in place | **Resolved in Stage 2** — frame sampler + worker contract shipped (§15); detection/tracking *models* are Stage 3. `events`/`capabilities` schema was pre-shaped for it |
@@ -1413,10 +1425,15 @@ RBAC, and the full CRUD/report API. What is **not** validated is **accuracy**: p
 OCR and vehicle-attribute recognition on **local Malaysian gate footage** — the
 reference worker emits **type + color only** (no make/model
 classifier), and by design attributes raise **review exceptions, never
-auto-rejections**. Two further deliberate deferrals: **directional entry/exit *lines* +
+auto-rejections**. One further deliberate deferral: **directional entry/exit *lines* +
 calibration** (only a per-camera `direction` config *hint* is accepted; no
-line-crossing/homography), and **extending the `Principal` guard to the legacy Stage
-0–3 routes** (today auth gates the Stage 4 + ingest surface).
+line-crossing/homography).
+
+The `Principal` extractor now also guards the legacy Stage 0–3 read routes — camera list/read, live
+view, health/cameras, events, recording segment/timeline/gap listings, and the recording + snapshot
+schedule lists all assert at least `can_view`. With the default `HELDAR_AUTH_ENABLED=false` these still
+resolve to the synthetic admin (open LAN appliance); flip auth on and the **entire** API requires a
+session, not just the Stage 4 + ingest surface.
 
 ---
 
@@ -1818,10 +1835,49 @@ NAT traversal succeeds (ICE/STUN hole-punch, or end-to-end IPv6), and fall back 
 **TURN** relay only in the symmetric-on-both-ends case — a relay that forwards **DTLS-SRTP ciphertext
 it cannot decrypt**. *Media* is MediaMTX's normal **WebRTC (WHEP)** path: the browser viewer pulls
 the camera stream as it would on the LAN, now reachable from anywhere; WHEP media is DTLS-SRTP
-encrypted end-to-end. So **content is private on every path**; only connection *metadata* reaches the
-coordinator, and self-hosting the signaling/TURN service removes even that. The signaling + TURN
-coordinator lives in the **proprietary control plane** (`heldar-control-plane`); the media transport
-itself is the kernel's own WHEP path and ships in the open build.
+encrypted end-to-end. So the **live video** is private on every reachability path — only connection
+*metadata* reaches the coordinator (the dashboard's API + recorded-media traffic is different; see
+_Privacy by path_ below). The signaling + TURN coordinator lives in the **proprietary control plane**
+(`heldar-control-plane`); the media transport itself is the kernel's own WHEP path and ships in the open
+build.
+
+**The remote dashboard (full `apps/web` over the Worker).** Beyond live video, the entire dashboard runs
+remotely through the `apps/edge` Cloudflare **Worker + Durable Object** (the managed signaling tier, ADR
+0003 P3): `/app/*` serves the SPA, and `/api/v1/*` + `/media/*` are reverse-proxied to the box. The box
+does this without an inbound port — a second outbound channel (the Stage C relay,
+`services::webrtc_rendezvous::run_relay`) long-polls the rendezvous for `RelayJob`s (HTTP requests the
+remote browser made, carrying the user's real kernel Bearer) and **replays** them against its own
+loopback kernel (`127.0.0.1:api_port`), so the box kernel runs its normal auth + RBAC and stays the sole
+authority. A standalone `/view` ticket link (Stage A — a per-site or per-camera signed grid) gives
+shareable viewing without a dashboard login.
+
+**Two-gate auth.** A dashboard login mints two HttpOnly cookies signed with deliberately separate keys:
+an outer relay **capability** (`RELAY_CAP_SECRET`, `hc` cookie) that gates *reachability* into the
+Worker, and the real kernel **session** token (`hk` cookie — browser JS never holds it). A viewing
+ticket can never satisfy a capability check, or vice-versa. The Worker brokers reachability; the **box
+kernel remains the sole RBAC authority**, and the relay refuses to run unless `HELDAR_AUTH_ENABLED=true`
+and a real user exists. Session lifetime is bounded by `HELDAR_SESSION_TTL_HOURS` (default 12),
+`HELDAR_SESSION_IDLE_TIMEOUT_MIN` (default 0 = off — set it for remote exposure), and
+`HELDAR_AUTH_COOKIE_SECURE` (`true` for any non-LAN exposure). The relay is defense-in-depth: its
+allowlist pins the surface to `/api/v1/*` + `/media/*` and denies `/api/v1/relay|rendezvous` +
+`/metrics`, but only **after canonicalizing the path** (parsing it through `reqwest::Url::join`, which
+resolves `.`/`..`/`%2e%2e` dot-segments) and re-confirming the resolved URL still targets the loopback
+origin — closing a `%2e%2e` dot-segment SSRF that would otherwise escape the pin. Relayed bodies are
+capped at `MAX_RELAY_BODY` (8 MiB).
+
+**Operator-supplied ICE/TURN.** `HELDAR_WEBRTC_ICE_SERVERS` (a JSON array in MediaMTX `webrtcICEServers2`
+shape) lets an operator program their own STUN/TURN into MediaMTX so the box gathers reachable
+candidates. When it is unset but a rendezvous is configured, the kernel instead fetches short-lived TURN
+credentials from the rendezvous and refreshes them; when neither is set, MediaMTX stays LAN-only.
+
+**Privacy by path.** The *live* WebRTC (WHEP) path stays end-to-end DTLS-SRTP and **never transits the
+Worker** — only SDP/ICE brokering and TURN minting touch it. The **dashboard** path is different: `/app`
+API calls and recorded playback (`/media/*`, via the box's relay) *do* transit the Worker (TLS to
+Cloudflare, then the box's outbound relay). So live video stays off the coordinator, but the dashboard's
+API + recorded media pass through it; self-hosting the signaling/relay tier removes even that. Recorded
+playback is **HEVC/H.265+ pass-through** — the box ships the recorded bitstream untouched and the
+client's hardware decodes it (most efficient: conserve the box's scarce uplink + CPU, spend the client's
+free HW decoder), with a clear note (`apps/web/src/lib/codec.ts`) for the no-HEVC browser tail.
 
 **The optional self-hoster overlay path.** A deployment that prefers not to dial the hosted
 coordinator can instead front the kernel with its **own external overlay** (Tailscale, NetBird,
