@@ -89,6 +89,23 @@ async fn create_task(
         .clamp(160, 3840);
     let enabled = body.enabled.unwrap_or(true);
     let config = SqlxJson(body.config.unwrap_or_else(|| json!({})));
+
+    // Idempotency: a camera has at most one task of a given type per stream profile. If one already
+    // exists, return it instead of silently creating a duplicate — stacked-up identical detection
+    // tasks (e.g. a provisioning script re-POSTing on every restart) waste inference. Change an
+    // existing task via PATCH, not by re-creating it.
+    if let Some(existing) = sqlx::query_as::<_, AiTask>(
+        "SELECT * FROM ai_tasks WHERE camera_id = ? AND task_type = ? AND stream_profile = ?",
+    )
+    .bind(&id)
+    .bind(&body.task_type)
+    .bind(&profile)
+    .fetch_optional(&st.pool)
+    .await?
+    {
+        return Ok((StatusCode::OK, Json(existing)));
+    }
+
     let now = Utc::now();
     let task_id = format!("ai_{}", Uuid::new_v4().simple());
 
@@ -559,5 +576,83 @@ mod tests {
     #[test]
     fn max_ingest_detections_bound_is_stable() {
         assert_eq!(MAX_INGEST_DETECTIONS, 1000);
+    }
+
+    async fn test_state() -> AppState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let cfg = std::sync::Arc::new(crate::config::Config::from_env());
+        AppState {
+            recorder: crate::services::recorder::RecorderManager::new(pool.clone(), cfg.clone()),
+            sampler: crate::services::sampler::SamplerManager::new(pool.clone(), cfg.clone()),
+            mirror: None,
+            consumers: std::sync::Arc::new(Vec::new()),
+            modules: std::sync::Arc::new(Vec::new()),
+            catalog: std::sync::Arc::new(crate::services::registry::CatalogService::new(&cfg)),
+            http: reqwest::Client::new(),
+            started_at: chrono::Utc::now(),
+            pool,
+            cfg,
+        }
+    }
+
+    /// Re-creating the same task type on the same camera+profile returns the existing task (200), never
+    /// a duplicate — but a different stream profile is a distinct task.
+    #[tokio::test]
+    async fn create_ai_task_is_idempotent_per_slot() {
+        let st = test_state().await;
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO cameras (id, name, enabled, created_at, updated_at) VALUES (?,?,?,?,?)",
+        )
+        .bind("cam_x")
+        .bind("cam_x")
+        .bind(1)
+        .bind(now)
+        .bind(now)
+        .execute(&st.pool)
+        .await
+        .unwrap();
+        let body = || AiTaskCreate {
+            task_type: "detection".into(),
+            stream_profile: Some("sub".into()),
+            fps: Some(2.0),
+            width: Some(640),
+            config: None,
+            enabled: Some(true),
+        };
+        let mk = |b| {
+            create_task(
+                State(st.clone()),
+                Path("cam_x".into()),
+                Principal::system_admin(),
+                Json(b),
+            )
+        };
+
+        let (s1, Json(t1)) = mk(body()).await.unwrap();
+        let (s2, Json(t2)) = mk(body()).await.unwrap();
+        assert_eq!(s1, StatusCode::CREATED);
+        assert_eq!(s2, StatusCode::OK, "re-create returns the existing task");
+        assert_eq!(t1.id, t2.id, "no duplicate task created");
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_tasks")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "still exactly one task");
+
+        // a different stream profile is a distinct slot → a new task
+        let mut other = body();
+        other.stream_profile = Some("main".into());
+        let (s3, _) = mk(other).await.unwrap();
+        assert_eq!(
+            s3,
+            StatusCode::CREATED,
+            "a different profile is a separate task"
+        );
     }
 }

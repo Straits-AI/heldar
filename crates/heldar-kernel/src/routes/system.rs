@@ -146,7 +146,7 @@ async fn readyz(State(st): State<AppState>) -> Response {
                 .fetch_one(&st.pool)
                 .await?;
             let recording: i64 =
-                sqlx::query_scalar("SELECT COUNT(*) FROM camera_status WHERE state = 'recording'")
+                sqlx::query_scalar("SELECT COUNT(*) FROM camera_status cs JOIN cameras c ON c.id = cs.camera_id WHERE cs.state = 'recording' AND c.enabled = 1")
                     .fetch_one(&st.pool)
                     .await?;
             Ok::<_, sqlx::Error>((enabled, recording))
@@ -216,7 +216,7 @@ async fn system_info(State(st): State<AppState>) -> AppResult<Json<SystemInfo>> 
         .fetch_one(&st.pool)
         .await?;
     let cameras_recording: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM camera_status WHERE state = 'recording'")
+        sqlx::query_scalar("SELECT COUNT(*) FROM camera_status cs JOIN cameras c ON c.id = cs.camera_id WHERE cs.state = 'recording' AND c.enabled = 1")
             .fetch_one(&st.pool)
             .await?;
     let segments_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM segments")
