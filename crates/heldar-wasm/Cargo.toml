@@ -1,0 +1,25 @@
+[package]
+name = "heldar-wasm"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Heldar sandboxed in-process Wasm plugin host: runs headless DetectionConsumer plugins (wasmi)."
+repository = "https://github.com/Straits-AI/heldar"
+
+[dependencies]
+heldar-kernel = { path = "../heldar-kernel" }
+# Pure-Rust Wasm interpreter — no JIT/Cranelift, light dep tree, fast compile. The plugin host is an
+# OPTIONAL feature on the composing server, so the default appliance binary never links this.
+wasmi = "1.1"
+tokio = { version = "1", features = ["rt", "sync", "time"] }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["serde"] }
+tracing = "0.1"
+async-trait = "0.1"
+
+[dev-dependencies]
+# Compile tiny inline WAT guests in tests (no wasm32 toolchain needed in CI).
+wat = "1"

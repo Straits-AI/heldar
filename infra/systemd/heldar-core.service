@@ -1,0 +1,31 @@
+[Unit]
+Description=Heldar Core — media/DVR recorder + perception kernel
+Documentation=https://github.com/Straits-AI/heldar
+After=network-online.target mediamtx.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Runs as a dedicated non-root user. StateDirectory creates + owns /var/lib/heldar.
+User=heldar
+Group=heldar
+StateDirectory=heldar
+Environment=HELDAR_DATA_DIR=/var/lib/heldar
+Environment=HELDAR_DATABASE_URL=sqlite:///var/lib/heldar/heldar.db
+Environment=HELDAR_API_HOST=0.0.0.0
+# Operator overrides (SMTP, camera creds, etc). Optional — `-` = ignore if absent.
+EnvironmentFile=-/etc/heldar/heldar.env
+ExecStart=/usr/local/bin/heldar-core
+Restart=on-failure
+RestartSec=3
+
+# ---- Hardening (compatible with writing the data dir) ----
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/heldar
+# Do NOT set PrivateNetwork=yes (it isolates the netns and breaks reachability).
+
+[Install]
+WantedBy=multi-user.target

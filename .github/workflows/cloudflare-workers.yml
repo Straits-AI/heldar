@@ -1,0 +1,46 @@
+name: Cloudflare Workers (docs)
+
+on:
+  push:
+    branches: [main]
+
+# Building the docs needs only repo read; deploying to Workers uses a scoped API token.
+permissions:
+  contents: read
+
+# One deploy at a time; let an in-progress run finish.
+concurrency:
+  group: cloudflare-workers
+  cancel-in-progress: false
+
+jobs:
+  build-and-deploy:
+    name: build + deploy (cloudflare workers)
+    # Only the public repo has the Workers site (the private mirror does not deploy).
+    if: github.repository == 'Straits-AI/heldar'
+    runs-on: ubuntu-latest
+    # Expose the token at job level so the deploy step can be guarded on its presence:
+    # the site still builds on every push even when the Cloudflare secrets are absent.
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - run: npm ci
+        working-directory: website
+      - run: npm run build
+        working-directory: website
+      # Assets-only Worker (see website/wrangler.jsonc): `wrangler deploy` uploads ./build.
+      - name: Deploy to Cloudflare Workers
+        if: env.CLOUDFLARE_API_TOKEN != ''
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: website
+          command: deploy

@@ -1,0 +1,54 @@
+# Heldar Core — MediaMTX configuration (live-view gateway + dev RTSP server).
+# Minimal config; unspecified keys use MediaMTX defaults.
+
+logLevel: info
+
+# Control API — Heldar registers camera paths through this. Bound to loopback so only the local
+# kernel can reconfigure the media server (never expose the control plane on the network).
+api: yes
+apiAddress: 127.0.0.1:9997
+
+# RTSP server: ingests published streams (the dev synthetic camera) and proxies cameras.
+rtsp: yes
+rtspAddress: :8554
+
+# HLS output (browser live view). mpegts variant is the most broadly hls.js-compatible.
+hls: yes
+hlsAddress: :8888
+hlsVariant: mpegts
+
+# WebRTC output (lower-latency live view).
+webrtc: yes
+webrtcAddress: :8889
+# ICE servers for WebRTC. STUN is a safe, credential-free baseline (works on the LAN + non-symmetric
+# NAT). For remote viewing through a CGNAT'd box (ADR 0003) the kernel programs these at runtime over the
+# MediaMTX API — operator-provided TURN (HELDAR_WEBRTC_ICE_SERVERS) or short-lived TURN fetched from the
+# rendezvous — so a relay candidate is available for symmetric-NAT traversal.
+webrtcICEServers2:
+  - url: stun:stun.cloudflare.com:3478
+
+rtmp: no
+srt: no
+
+# Authentication: publishing is restricted to the local host — only the kernel's own ffmpeg
+# (camera proxy / live transcode) and the dev synthetic camera publish, all from loopback. This
+# closes the stream-injection surface (a rogue publisher overwriting a camera feed). Reads/playback
+# stay open for now so the LAN dashboard works without tokens; signed read tokens + a cloud relay
+# for off-LAN viewing are added with the auth-split / edge↔cloud work.
+authMethod: internal
+authInternalUsers:
+  - user: any
+    ips: ['127.0.0.1', '::1']
+    permissions:
+      - action: publish
+      - action: api
+      - action: metrics
+      - action: pprof
+  - user: any
+    permissions:
+      - action: read
+      - action: playback
+
+# Heldar adds named camera proxy paths via the API.
+paths:
+  all_others:
