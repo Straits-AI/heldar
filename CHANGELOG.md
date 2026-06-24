@@ -7,11 +7,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-06-24
+
 ### Added
 
+- **Remote access (WebRTC, browser-based)**: a deployment behind CGNAT dials OUT to a signaling + TURN
+  rendezvous, and the **full `apps/web` dashboard** runs remotely (live multi-camera, recorded playback,
+  config) under a two-gate auth model — an outer relay capability + the real kernel session, both
+  HttpOnly cookies, with the box kernel as the sole RBAC authority. A standalone `/view` ticket link
+  gives shareable per-site/per-camera viewing. TURN is operator-tunable via `HELDAR_WEBRTC_ICE_SERVERS`
+  (bring-your-own STUN/TURN), else the rendezvous default. See `docs/REMOTE-ACCESS.md`.
+- **Recording disk-size limit**: the retention sweeper bounds recordings by a size cap
+  (`HELDAR_MAX_RECORDINGS_GB`) and a free-disk floor (`HELDAR_MIN_FREE_DISK_GB`), evicting oldest-first
+  so recordings can't fill the disk. Runtime-tunable without a restart via `GET`/`PUT
+  /api/v1/system/retention` (admin) + a dashboard System-page panel.
+- **HEVC / H.265+ recorded playback**: H.265+ recordings (≈4× smaller than H.264) play natively in-page
+  on HEVC-capable browsers, with a clear note for the no-HEVC tail.
+- **Production hardening** (opt-in; LAN-appliance defaults unchanged):
+  - **Per-account login lockout** (`HELDAR_LOGIN_MAX_FAILURES` / `_LOCKOUT_MIN`): locks an account
+    after N consecutive failed logins; admin clears via `POST /api/v1/users/{id}/unlock`.
+  - **Camera-credential encryption at rest** (`HELDAR_SECRET_KEY`, AES-256-GCM): seals camera passwords;
+    existing plaintext is re-sealed at boot; unset = plaintext (LAN appliance).
+  - **Fail-loud startup guardrails**: an internet-exposed deployment refuses to boot with auth off, and
+    warns — or refuses, under `HELDAR_STRICT_PROD=true` — on a non-`Secure` cookie, no idle timeout, an
+    over-long session TTL, a localhost CORS allowlist, or plaintext credentials.
+  - **Optional Cloudflare Turnstile** on the dashboard login (enforced only when configured).
+  - `docs/PRODUCTION.md` checklist + `.env.production.example`.
 - **Deployment paths**: a Docker dev stack (`docker-compose.yml`), a native systemd appliance engine
   (`infra/systemd/`), and an appliance-image scaffold (`scripts/build-appliance-image.sh`).
 - **`scripts/release.sh`**: one-command release (bump → verify → regenerate open tree → tag → publish).
+
+### Changed
+
+- The `Principal` auth guard now spans the legacy read routes (cameras, live view, health, events,
+  recordings, schedules): with `HELDAR_AUTH_ENABLED=true` the **entire** API requires a session.
+
+### Fixed
+
+- **Relay allowlist SSRF bypass**: the box-side relay canonicalizes the request path before the allowlist
+  check (an encoded `%2e%2e` traversal could otherwise reach an off-surface endpoint), and caps relayed
+  response bodies.
+- Disabled cameras report `disabled` (not a stale `recording`/`error`) in the health table.
+- `POST /api/v1/cameras/{id}/ai-tasks` is idempotent per `(camera, task_type, stream_profile)` — no
+  duplicate detection tasks across restarts.
 
 ## [0.1.8] — 2026-06-19
 
