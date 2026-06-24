@@ -30,6 +30,7 @@ pub fn router() -> Router<AppState> {
             "/api/v1/users/{id}",
             axum::routing::patch(update_user).delete(delete_user),
         )
+        .route("/api/v1/users/{id}/unlock", post(unlock_user))
         .route("/api/v1/api-keys", get(list_api_keys).post(create_api_key))
         .route(
             "/api/v1/api-keys/{id}",
@@ -54,10 +55,38 @@ async fn login(
         .map(|u| u.password_hash.as_str())
         .unwrap_or_else(|| auth::dummy_password_hash());
     let password_ok = auth::verify_password(&body.password, phc);
+
+    let now = Utc::now();
+    let lockout = st.cfg.login_lockout_enabled();
+    let locked = lockout
+        && candidate
+            .as_ref()
+            .and_then(|u| u.locked_until)
+            .is_some_and(|until| until > now);
     let user = match candidate {
+        // A locked account is refused EVEN with the correct password, and its counter is NOT advanced
+        // (a locked-out attacker can't extend the lock). The response stays the uniform 401 — a distinct
+        // "account locked" message would be a lock/enumeration oracle.
+        Some(_) if locked => return Err(AppError::Unauthorized("invalid credentials".into())),
         Some(u) if u.active && password_ok => u,
+        // Failed login for a real, active account: bump the counter and lock at the threshold.
+        Some(u) if lockout && u.active => {
+            register_login_failure(&st.pool, &st.cfg, &u, now).await;
+            return Err(AppError::Unauthorized("invalid credentials".into()));
+        }
         _ => return Err(AppError::Unauthorized("invalid credentials".into())),
     };
+
+    // Success: clear any prior failure/lock state before issuing the session.
+    if lockout && (user.failed_login_count != 0 || user.locked_until.is_some()) {
+        let _ = sqlx::query(
+            "UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE id = ?",
+        )
+        .bind(&user.id)
+        .execute(&st.pool)
+        .await;
+    }
+
     let (token, expires_at) = auth::issue_session(&st.pool, &st.cfg, &user.id).await?;
     let principal = Principal {
         id: user.id.clone(),
@@ -79,6 +108,48 @@ async fn login(
         "user": UserView::from(user),
     }));
     Ok((AppendHeaders([(header::SET_COOKIE, cookie)]), body))
+}
+
+/// Record a failed login for a real, active account; lock it once `login_max_failures` consecutive
+/// failures are reached. Audits the lock transition (once) so a brute-force attempt is visible.
+async fn register_login_failure(
+    pool: &sqlx::SqlitePool,
+    cfg: &crate::config::Config,
+    u: &User,
+    now: chrono::DateTime<Utc>,
+) {
+    let new_count = u.failed_login_count + 1;
+    if new_count >= cfg.login_max_failures {
+        let until = now + chrono::Duration::minutes(cfg.login_lockout_min);
+        let _ =
+            sqlx::query("UPDATE users SET failed_login_count = ?, locked_until = ? WHERE id = ?")
+                .bind(new_count)
+                .bind(until)
+                .bind(&u.id)
+                .execute(pool)
+                .await;
+        let principal = Principal {
+            id: u.id.clone(),
+            name: u.display_name.clone().unwrap_or_else(|| u.username.clone()),
+            role: Role::parse(&u.role).unwrap_or(Role::Viewer),
+            kind: auth::PrincipalKind::User,
+        };
+        auth::audit(
+            pool,
+            &principal,
+            "login_locked",
+            "user",
+            &u.id,
+            json!({ "locked_until": until }),
+        )
+        .await;
+    } else {
+        let _ = sqlx::query("UPDATE users SET failed_login_count = ? WHERE id = ?")
+            .bind(new_count)
+            .bind(&u.id)
+            .execute(pool)
+            .await;
+    }
 }
 
 async fn logout(State(st): State<AppState>, headers: HeaderMap) -> AppResult<impl IntoResponse> {
@@ -208,7 +279,8 @@ async fn update_user(
     let demoting_admin = cur.role == "admin" && (role != "admin" || !active);
     let affected = if demoting_admin {
         sqlx::query(
-            "UPDATE users SET password_hash=?, role=?, display_name=?, active=?, updated_at=? \
+            "UPDATE users SET password_hash=?, role=?, display_name=?, active=?, updated_at=?, \
+             failed_login_count=0, locked_until=NULL \
              WHERE id=? AND EXISTS (SELECT 1 FROM users WHERE role='admin' AND active=1 AND id != ?)",
         )
         .bind(&password_hash)
@@ -223,7 +295,8 @@ async fn update_user(
         .rows_affected()
     } else {
         sqlx::query(
-            "UPDATE users SET password_hash=?, role=?, display_name=?, active=?, updated_at=? WHERE id=?",
+            "UPDATE users SET password_hash=?, role=?, display_name=?, active=?, updated_at=?, \
+             failed_login_count=0, locked_until=NULL WHERE id=?",
         )
         .bind(&password_hash)
         .bind(&role)
@@ -256,6 +329,30 @@ async fn update_user(
         json!({ "role": role, "active": active }),
     )
     .await;
+    let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
+        .bind(&id)
+        .fetch_one(&st.pool)
+        .await?;
+    Ok(Json(UserView::from(user)))
+}
+
+/// Admin-only: clear a user's brute-force lockout (reset the failure counter + unlock immediately),
+/// without otherwise editing the account. Auto-unlock still happens on its own once the window passes.
+async fn unlock_user(
+    State(st): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> AppResult<Json<UserView>> {
+    principal.require(principal.can_admin(), "unlock users")?;
+    let res =
+        sqlx::query("UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE id = ?")
+            .bind(&id)
+            .execute(&st.pool)
+            .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!("user {id} not found")));
+    }
+    auth::audit(&st.pool, &principal, "unlock_user", "user", &id, json!({})).await;
     let user = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
         .bind(&id)
         .fetch_one(&st.pool)
@@ -835,6 +932,179 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(sessions, 1);
+    }
+
+    // ---- Per-account login lockout ----
+
+    async fn test_state_lockout(max_failures: i64, lockout_min: i64) -> AppState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let mut cfg = Config::from_env();
+        cfg.auth_enabled = true;
+        cfg.login_max_failures = max_failures;
+        cfg.login_lockout_min = lockout_min;
+        let cfg = Arc::new(cfg);
+        AppState {
+            recorder: RecorderManager::new(pool.clone(), cfg.clone()),
+            sampler: SamplerManager::new(pool.clone(), cfg.clone()),
+            mirror: None,
+            consumers: Arc::new(Vec::new()),
+            modules: Arc::new(Vec::new()),
+            catalog: Arc::new(crate::services::registry::CatalogService::new(&cfg)),
+            http: reqwest::Client::new(),
+            started_at: chrono::Utc::now(),
+            pool,
+            cfg,
+        }
+    }
+
+    async fn seed_user(st: &AppState, username: &str, password: &str) {
+        let _ = create_user(
+            State(st.clone()),
+            Principal::system_admin(),
+            Json(UserCreate {
+                username: username.into(),
+                password: password.into(),
+                role: Some("manager".into()),
+                display_name: None,
+                active: None,
+            }),
+        )
+        .await
+        .unwrap();
+    }
+
+    async fn try_login(
+        st: &AppState,
+        username: &str,
+        password: &str,
+    ) -> AppResult<impl IntoResponse> {
+        login(
+            State(st.clone()),
+            Json(LoginRequest {
+                username: username.into(),
+                password: password.into(),
+            }),
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn login_locks_after_max_failures_and_rejects_correct_password() {
+        let st = test_state_lockout(3, 15).await;
+        seed_user(&st, "op", "correct-pass").await;
+        for _ in 0..3 {
+            assert!(matches!(
+                try_login(&st, "op", "wrong").await.err().unwrap(),
+                AppError::Unauthorized(_)
+            ));
+        }
+        let (count, locked): (i64, Option<String>) = sqlx::query_as(
+            "SELECT failed_login_count, locked_until FROM users WHERE username='op'",
+        )
+        .fetch_one(&st.pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 3);
+        assert!(
+            locked.is_some(),
+            "account should be locked after 3 failures"
+        );
+
+        // The CORRECT password is now refused, and NO session is created.
+        assert!(matches!(
+            try_login(&st, "op", "correct-pass").await.err().unwrap(),
+            AppError::Unauthorized(_)
+        ));
+        let sessions: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM sessions")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap();
+        assert_eq!(sessions, 0, "a locked account must not get a session");
+    }
+
+    #[tokio::test]
+    async fn successful_login_resets_failure_count() {
+        let st = test_state_lockout(3, 15).await;
+        seed_user(&st, "op", "correct-pass").await;
+        let _ = try_login(&st, "op", "wrong").await;
+        let _ = try_login(&st, "op", "wrong").await; // 2 < threshold 3
+        let resp = try_login(&st, "op", "correct-pass")
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let (count, locked): (i64, Option<String>) = sqlx::query_as(
+            "SELECT failed_login_count, locked_until FROM users WHERE username='op'",
+        )
+        .fetch_one(&st.pool)
+        .await
+        .unwrap();
+        assert_eq!(count, 0);
+        assert!(locked.is_none());
+    }
+
+    #[tokio::test]
+    async fn auto_unlock_after_window() {
+        let st = test_state_lockout(2, 15).await;
+        seed_user(&st, "op", "correct-pass").await;
+        let _ = try_login(&st, "op", "wrong").await;
+        let _ = try_login(&st, "op", "wrong").await;
+        // Simulate the lock window elapsing by backdating locked_until.
+        sqlx::query("UPDATE users SET locked_until = ? WHERE username='op'")
+            .bind(Utc::now() - chrono::Duration::minutes(1))
+            .execute(&st.pool)
+            .await
+            .unwrap();
+        let resp = try_login(&st, "op", "correct-pass")
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn manual_unlock_clears_lock() {
+        let st = test_state_lockout(2, 15).await;
+        seed_user(&st, "op", "correct-pass").await;
+        let _ = try_login(&st, "op", "wrong").await;
+        let _ = try_login(&st, "op", "wrong").await;
+        let uid: String = sqlx::query_scalar("SELECT id FROM users WHERE username='op'")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap();
+        let _ = unlock_user(State(st.clone()), Principal::system_admin(), Path(uid))
+            .await
+            .unwrap();
+        let resp = try_login(&st, "op", "correct-pass")
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn lockout_disabled_when_zero_never_locks() {
+        let st = test_state_lockout(0, 15).await; // disabled
+        seed_user(&st, "op", "correct-pass").await;
+        for _ in 0..10 {
+            let _ = try_login(&st, "op", "wrong").await;
+        }
+        let locked: Option<String> =
+            sqlx::query_scalar("SELECT locked_until FROM users WHERE username='op'")
+                .fetch_one(&st.pool)
+                .await
+                .unwrap();
+        assert!(locked.is_none(), "lockout disabled must never lock");
+        let resp = try_login(&st, "op", "correct-pass")
+            .await
+            .unwrap()
+            .into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
     }
 
     #[tokio::test]

@@ -103,6 +103,17 @@ pub struct Config {
     /// Add `Secure` to the session cookie (require HTTPS). Default false for HTTP LAN/overlay
     /// appliances; set true when the deployment is served over TLS.
     pub auth_cookie_secure: bool,
+    /// Per-account brute-force lockout: lock an account after this many CONSECUTIVE failed logins
+    /// (the per-IP Worker rate limit is complementary). 0 disables account lockout.
+    pub login_max_failures: i64,
+    /// How long a locked account stays locked (minutes); auto-unlocks after the window. 0 disables.
+    pub login_lockout_min: i64,
+    /// Base64-encoded 32-byte master key for encryption-at-rest of sensitive fields (camera
+    /// credentials). Unset = plaintext at rest (LAN appliance). Installed via `services::secrets`.
+    pub secret_key_b64: Option<String>,
+    /// Turn the production guardrails (see `enforce_production_guardrails`) into hard boot failures
+    /// instead of warnings, for an internet-exposed deployment.
+    pub strict_prod: bool,
     /// Optional first-run admin bootstrap (only used when no users exist yet).
     pub bootstrap_admin_user: Option<String>,
     pub bootstrap_admin_password: Option<String>,
@@ -285,6 +296,77 @@ fn cp_tls_from_env() -> Option<CpTlsCfg> {
 }
 
 impl Config {
+    /// Whether per-account brute-force lockout is active (both knobs must be > 0).
+    pub fn login_lockout_enabled(&self) -> bool {
+        self.login_max_failures > 0 && self.login_lockout_min > 0
+    }
+
+    /// Fail-loud guardrails for an internet-exposed deployment. A configured remote rendezvous
+    /// (`HELDAR_REMOTE_RENDEZVOUS_URL`) means the box is reachable from the internet, so an unsafe auth
+    /// posture is a misconfiguration: with auth disabled we **refuse to boot** (the open API must never
+    /// be exposed); otherwise we WARN — or refuse, under `HELDAR_STRICT_PROD=true` — on a non-`Secure`
+    /// cookie, no idle timeout, an over-long session TTL, a localhost CORS allowlist, or plaintext
+    /// camera credentials. A LAN/overlay appliance (no rendezvous) keeps its intentional defaults.
+    pub fn enforce_production_guardrails(&self) -> anyhow::Result<()> {
+        if self.rendezvous_url.is_none() {
+            return Ok(());
+        }
+        if !self.auth_enabled {
+            anyhow::bail!(
+                "remote access is configured (HELDAR_REMOTE_RENDEZVOUS_URL) but HELDAR_AUTH_ENABLED=false \
+                 — refusing to expose the open API to the internet. Set HELDAR_AUTH_ENABLED=true."
+            );
+        }
+        let mut warnings: Vec<String> = Vec::new();
+        if !self.auth_cookie_secure {
+            warnings.push(
+                "HELDAR_AUTH_COOKIE_SECURE=false — set true so the session cookie requires HTTPS"
+                    .into(),
+            );
+        }
+        if self.session_idle_timeout_minutes == 0 {
+            warnings.push(
+                "HELDAR_SESSION_IDLE_TIMEOUT_MIN=0 — set e.g. 30 to expire idle remote sessions"
+                    .into(),
+            );
+        }
+        if self.session_ttl_hours > 12 {
+            warnings.push(format!(
+                "HELDAR_SESSION_TTL_HOURS={} is long for remote access — consider 4 or less",
+                self.session_ttl_hours
+            ));
+        }
+        if self
+            .cors_origins
+            .iter()
+            .any(|o| o.contains("localhost") || o.contains("127.0.0.1"))
+        {
+            warnings.push(
+                "HELDAR_CORS_ORIGINS still allows localhost — lock it to the dashboard origin"
+                    .into(),
+            );
+        }
+        if self.secret_key_b64.is_none() {
+            warnings.push(
+                "HELDAR_SECRET_KEY is unset — camera credentials are stored in plaintext at rest"
+                    .into(),
+            );
+        }
+        if warnings.is_empty() {
+            return Ok(());
+        }
+        for w in &warnings {
+            tracing::warn!("production guardrail: {w}");
+        }
+        if self.strict_prod {
+            anyhow::bail!(
+                "HELDAR_STRICT_PROD=true and {} production guardrail(s) failed (see warnings above)",
+                warnings.len()
+            );
+        }
+        Ok(())
+    }
+
     pub fn from_env() -> Self {
         let data_dir = PathBuf::from(var_or("HELDAR_DATA_DIR", "./data"));
         let recordings_dir = var("HELDAR_RECORDINGS_DIR")
@@ -378,6 +460,10 @@ impl Config {
             session_ttl_hours: parse_or("HELDAR_SESSION_TTL_HOURS", 12),
             session_idle_timeout_minutes: parse_or("HELDAR_SESSION_IDLE_TIMEOUT_MIN", 0),
             auth_cookie_secure: parse_bool("HELDAR_AUTH_COOKIE_SECURE", false),
+            login_max_failures: parse_or("HELDAR_LOGIN_MAX_FAILURES", 5),
+            login_lockout_min: parse_or("HELDAR_LOGIN_LOCKOUT_MIN", 15),
+            secret_key_b64: var("HELDAR_SECRET_KEY"),
+            strict_prod: parse_bool("HELDAR_STRICT_PROD", false),
             bootstrap_admin_user: var("HELDAR_BOOTSTRAP_ADMIN_USER"),
             bootstrap_admin_password: var("HELDAR_BOOTSTRAP_ADMIN_PASSWORD"),
             audit_retention_days: parse_or("HELDAR_AUDIT_RETENTION_DAYS", 365),

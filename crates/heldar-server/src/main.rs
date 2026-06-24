@@ -42,6 +42,10 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     let cfg = Arc::new(Config::from_env());
+    // Install the encryption-at-rest key (HELDAR_SECRET_KEY) process-wide before any camera URL is
+    // built, and run the internet-exposed production guardrails (warn, or refuse under STRICT_PROD).
+    services::secrets::init_key(cfg.secret_key_b64.as_deref()).context("HELDAR_SECRET_KEY")?;
+    cfg.enforce_production_guardrails()?;
     // Fail fast if the media toolchain is missing — recording/clip/snapshot/sampling all need it.
     heldar_kernel::util::check_media_binaries(&cfg).context("media-binary preflight")?;
     for dir in [
@@ -58,6 +62,13 @@ async fn main() -> anyhow::Result<()> {
 
     let pool = db::init_pool(&cfg).await.context("init database pool")?;
     db::run_migrations(&pool).await.context("run migrations")?;
+    // Seal any legacy-plaintext camera credentials when a key is configured (idempotent; no-op without).
+    let resealed = services::secrets::reencrypt_camera_passwords(&pool)
+        .await
+        .context("re-encrypt camera credentials")?;
+    if resealed > 0 {
+        tracing::info!("sealed {resealed} legacy camera credential(s) at rest");
+    }
     // Release any transient segment read-locks left by a crash mid clip/snapshot export.
     db::clear_segment_read_locks(&pool)
         .await

@@ -41,7 +41,8 @@ The core serves the built dashboard at `http://localhost:8000` when `HELDAR_WEB_
 **Remote access** (from any network, no app, even behind CGNAT): the box dials OUT to a WebRTC
 rendezvous and the full dashboard runs in a browser — live multi-camera, recorded playback, and config —
 with a two-gate auth model where the kernel stays the sole RBAC authority. Opt-in + design:
-[`docs/REMOTE-ACCESS.md`](docs/REMOTE-ACCESS.md).
+[`docs/REMOTE-ACCESS.md`](docs/REMOTE-ACCESS.md); hardening for the public internet (auth, TLS, secrets,
+lockout, credential encryption, Turnstile): [`docs/PRODUCTION.md`](docs/PRODUCTION.md).
 
 Onboard a camera (you supply the address and credentials; the RTSP URL is built from the vendor
 template):

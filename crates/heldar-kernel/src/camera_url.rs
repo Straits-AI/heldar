@@ -28,6 +28,21 @@ pub(crate) fn encode_userinfo(s: &str) -> String {
     out
 }
 
+/// The camera password, decrypted via the process key (see [`crate::services::secrets`]). When no key
+/// is configured this is the stored plaintext unchanged. On a decrypt failure (a sealed value with a
+/// wrong/missing key) it logs and returns `None`, so the URL is built without a password — the camera
+/// fails to authenticate rather than being handed ciphertext.
+fn decrypted_password(cam: &Camera) -> Option<String> {
+    let stored = cam.password.as_deref()?;
+    match crate::services::secrets::decrypt_stored(stored) {
+        Ok(p) => Some(p),
+        Err(e) => {
+            tracing::error!(camera = %cam.id, "camera credential decrypt failed: {e}");
+            None
+        }
+    }
+}
+
 /// Build the RTSP URL (with credentials) for the given stream ("main" | "sub").
 /// Honors an explicit per-stream URL override; otherwise builds from the vendor template.
 pub fn stream_url(cam: &Camera, stream: &str) -> Option<String> {
@@ -48,7 +63,8 @@ pub fn stream_url(cam: &Camera, stream: &str) -> Option<String> {
     }
     let port = cam.rtsp_port;
 
-    let creds = match (cam.username.as_deref(), cam.password.as_deref()) {
+    let password = decrypted_password(cam);
+    let creds = match (cam.username.as_deref(), password.as_deref()) {
         (Some(u), Some(p)) if !u.is_empty() => {
             format!("{}:{}@", encode_userinfo(u), encode_userinfo(p))
         }
@@ -99,7 +115,8 @@ pub fn anr_replay_url(cam: &Camera, start: DateTime<Utc>, end: DateTime<Utc>) ->
         return None;
     }
     let port = cam.rtsp_port;
-    let creds = match (cam.username.as_deref(), cam.password.as_deref()) {
+    let password = decrypted_password(cam);
+    let creds = match (cam.username.as_deref(), password.as_deref()) {
         (Some(u), Some(p)) if !u.is_empty() => {
             format!("{}:{}@", encode_userinfo(u), encode_userinfo(p))
         }

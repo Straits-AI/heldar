@@ -537,8 +537,11 @@ unreserved set) and assembled as `rtsp://user:pass@host:port/path`.
 
 ## 9. Credential handling & masking
 
-- **Storage**: `username`/`password` are stored **plaintext** in the `cameras`
-  table (schema comment explicitly flags this as Stage-0-only).
+- **Storage**: `password` is **encrypted at rest** (AES-256-GCM, `services::secrets`) when a master key
+  `HELDAR_SECRET_KEY` (base64 of 32 bytes) is configured; otherwise it is stored plaintext (the LAN
+  appliance default). Sealed values carry an `enc:v1:` prefix; legacy plaintext rows are re-sealed on
+  the next boot, and decryption is transparent at the one chokepoint that builds the RTSP URL
+  (`camera_url`). A sealed value with a wrong/missing key fails loud — ffmpeg is never handed ciphertext.
 - **Never serialized to clients**: the `Camera` row struct is internal;
   `CameraView` (the only camera shape returned by the API) drops `password`
   entirely and exposes `has_password: bool` plus `record_url_masked`.
@@ -616,7 +619,7 @@ All via `HELDAR_*` env vars (see `.env.example`). Notable defaults:
 | Limitation (Stage 0, as built) | Why it's acceptable now | Where it's addressed |
 |---|---|---|
 | **SQLite only** — `db.rs` hard-bails on non-`sqlite` URLs | Single-node edge box; WAL handles the 8–16 camera target | SQLx is DB-agnostic; Postgres path planned (multi-node/cloud coordination) |
-| **Plaintext credentials** in `cameras.password` | Trusted single-tenant deploy; never serialized, always masked | Secret store / encryption (schema comment; security hardening stage) |
+| **Plaintext credentials** in `cameras.password` | Trusted single-tenant deploy; never serialized, always masked | **Addressed (opt-in)** — `HELDAR_SECRET_KEY` enables AES-256-GCM encryption at rest (`services::secrets`, §9); unset keeps plaintext for the LAN appliance. An external secret-store backend is the further step |
 | **Keyframe-aligned clip cuts** (`-c copy`, no re-encode) | Preserves quality and is cheap; precision bounded by GOP | Frame-accurate trimming via optional re-encode in a later playback stage |
 | **No auth on the API** | Local/LAN dev; CORS is the only gate | **Resolved in Stage 4 + security hardening** — RBAC (`auth.rs` `Principal` + capabilities, §17.4) gates the full API when `HELDAR_AUTH_ENABLED=true`; the read routes (cameras, live view, health, events, recordings, schedules) now assert `can_view`. Default `auth_enabled=false` keeps the open LAN appliance; tenant scoping still planned |
 | **Audio dropped** (`-an`) | Video-first VMS; halves edge cases | Audio capture can be re-enabled when needed |
@@ -1350,6 +1353,18 @@ Two credentialed principal kinds — **users** (`vos_…` session tokens) and **
 only their **SHA-256** is stored (a DB leak exposes no usable credential). Passwords
 are **argon2id**; login verifies even unknown/disabled users against a dummy hash so
 latency can't reveal account existence.
+
+**Brute-force lockout** (`migrations/0003`, `users.failed_login_count`/`locked_until`): after
+`HELDAR_LOGIN_MAX_FAILURES` consecutive failures an account is locked for `HELDAR_LOGIN_LOCKOUT_MIN`
+minutes — refused even with the correct password, auto-unlocking when the window passes (or via an
+admin edit / `POST /api/v1/users/{id}/unlock`). The lock check runs *after* the unconditional argon2
+verify (timing-equalizer preserved) and the response stays the uniform 401 (no lock/enumeration oracle).
+This is the per-account complement to the rendezvous Worker's per-IP login rate limit.
+
+**Production guardrails** (`Config::enforce_production_guardrails`, run at boot): when a remote
+rendezvous is configured the kernel refuses to start with `auth_enabled=false`, and warns — or, under
+`HELDAR_STRICT_PROD=true`, refuses — on a non-`Secure` cookie, no idle timeout, an over-long session
+TTL, a localhost CORS allowlist, or plaintext camera credentials. See [`docs/PRODUCTION.md`](docs/PRODUCTION.md).
 
 `Principal` implements `FromRequestParts<AppState>` — it is just a handler argument.
 `token_from_headers` reads `Authorization: Bearer <t>` (or `bearer`) and falls back to

@@ -28,9 +28,9 @@ Uninstalling reverses all three.
 # 1. start the sidecar (defaults to :9123)
 PORT=9123 python3 sidecar.py
 
-# 2. register it with a running Heldar Core (admin bearer token; or with auth off, no header)
+# 2. register it with a running Heldar Core (admin session token or API key; or with auth off, no header)
 curl -sX POST http://localhost:8000/api/v1/modules \
-  -H 'authorization: Bearer <ADMIN_TOKEN>' \
+  -H 'authorization: Bearer <ADMIN_API_KEY>' \
   -H 'content-type: application/json' \
   -d '{
     "id": "hello",

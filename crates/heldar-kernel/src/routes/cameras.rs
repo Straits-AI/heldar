@@ -155,6 +155,13 @@ async fn create_camera(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
+    // Encrypt the camera password at rest when HELDAR_SECRET_KEY is configured (plaintext otherwise).
+    let password = body
+        .password
+        .as_deref()
+        .map(crate::services::secrets::encrypt_for_storage)
+        .transpose()?;
+
     sqlx::query(
         "INSERT INTO cameras
            (id, site_id, name, vendor, model, address, rtsp_port, username, password,
@@ -172,7 +179,7 @@ async fn create_camera(
     .bind(&body.address)
     .bind(rtsp_port)
     .bind(&body.username)
-    .bind(&body.password)
+    .bind(&password)
     .bind(&body.main_stream_url)
     .bind(&body.sub_stream_url)
     .bind(&record_stream)
@@ -243,7 +250,12 @@ async fn update_camera(
     let address = body.address.or(cur.address);
     let rtsp_port = body.rtsp_port.unwrap_or(cur.rtsp_port);
     let username = body.username.or(cur.username);
-    let password = body.password.or(cur.password);
+    // A new password is plaintext from the client → encrypt at rest; otherwise keep the stored value
+    // (already in its at-rest form — do not re-encrypt).
+    let password = match body.password {
+        Some(p) => Some(crate::services::secrets::encrypt_for_storage(&p)?),
+        None => cur.password,
+    };
     let main_stream_url = body.main_stream_url.or(cur.main_stream_url);
     let sub_stream_url = body.sub_stream_url.or(cur.sub_stream_url);
     for url in [main_stream_url.as_deref(), sub_stream_url.as_deref()]

@@ -5,16 +5,18 @@ common case for home/small-site internet: a shared public IPv4, no inbound port-
 useless). This is an **open kernel** capability: every deployment of the Apache-2.0 kernel gets
 private remote viewing out of the box.
 
-The product direction is **WebRTC-primary, browser-based** remote access — see
+Remote access is **WebRTC-primary, browser-based** — see
 [`docs/adr/0003-webrtc-remote-access.md`](adr/0003-webrtc-remote-access.md) for the design of
-record. It is being delivered in phases and is **not all shipped yet** (see _Status & phasing_
-below). For full-L3 reach today, the optional self-hoster **overlay** paths (Recipes A/B) work now.
+record. All phases are **shipped** (P1 live video → P2 universal reach → P3 the full dashboard; see
+_Status & phasing_ below). The optional self-hoster **overlay** paths (Recipes A/B) remain available
+for operators who prefer full-L3 reach over the hosted rendezvous. Hardening a deployment for the
+public internet: [`docs/PRODUCTION.md`](PRODUCTION.md).
 
 ---
 
 ## TL;DR
 
-- **Primary (forthcoming): WebRTC, in the browser.** A viewer opens the dashboard in any browser and
+- **Primary: WebRTC, in the browser.** A viewer opens the dashboard in any browser and
   the box **dials out** — no inbound port, no client install. Universal NAT traversal comes from
   **signaling + TURN hosted in `heldar-control-plane`**; live video rides **MediaMTX / WHEP**
   (`:8889`). Media is **end-to-end encrypted (DTLS-SRTP)**: the rendezvous brokers only SDP/ICE and
@@ -57,7 +59,7 @@ CGNAT camera side + endpoint-independent home/mobile viewer), keeping the relay 
 
 The privacy guarantee holds on **both** the WebRTC and overlay paths:
 
-- **WebRTC (primary, forthcoming): media is end-to-end over DTLS-SRTP.** The control-plane rendezvous
+- **WebRTC (primary): media is end-to-end over DTLS-SRTP.** The control-plane rendezvous
   only brokers the **SDP/ICE handshake + relayed control** — it never terminates the media. When a
   direct peer path can't be punched, TURN relays **encrypted** packets it cannot read. So even on the
   relayed path, no proxy (and not the control-plane) ever sees decrypted video, URLs, or credentials.
@@ -82,16 +84,18 @@ Headscale) removes even that third-party metadata, at the cost of a small VPS to
 
 ## Status & phasing
 
-WebRTC remote access is **forthcoming, delivered in phases** (full plan in
+WebRTC remote access **shipped in three phases, all landed** (full plan in
 [`docs/adr/0003-webrtc-remote-access.md`](adr/0003-webrtc-remote-access.md)):
 
-- **P1 — LAN / WHEP:** sub-second live video in the browser over MediaMTX WHEP (`:8889`) on the LAN.
-- **P2 — universal reach:** the box dials out to **signaling + TURN in `heldar-control-plane`**, so
-  the same browser view works from anywhere behind CGNAT, no inbound port.
-- **P3 — full dashboard:** the complete dashboard (recorded playback, config, events) over the same
-  brokered, end-to-end-encrypted path.
+- **P1 — LAN / WHEP ✅:** sub-second live video in the browser over MediaMTX WHEP (`:8889`) on the LAN.
+- **P2 — universal reach ✅:** the box dials out to **signaling + TURN**, so the same browser view works
+  from anywhere behind CGNAT, no inbound port.
+- **P3 — full dashboard ✅:** the complete dashboard (recorded playback, config, events) over the same
+  brokered, end-to-end-encrypted path, behind the two-gate cookie auth.
 
-Until those land, use the overlay recipes below for full-L3 remote access today.
+The overlay recipes below remain an alternative for operators who want full-L3 reach (a private network
+to the whole host) rather than the browser dashboard. Before exposing a deployment to the public
+internet, work through [`docs/PRODUCTION.md`](PRODUCTION.md) (auth, TLS, secrets, lockout, Turnstile).
 
 ---
 

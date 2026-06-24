@@ -11,6 +11,10 @@ pub struct User {
     pub role: String,
     pub display_name: Option<String>,
     pub active: bool,
+    /// Consecutive failed logins (brute-force lockout). Never serialized (see [`UserView`]).
+    pub failed_login_count: i64,
+    /// Instant before which login is refused; `None` = not locked. Never serialized.
+    pub locked_until: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }

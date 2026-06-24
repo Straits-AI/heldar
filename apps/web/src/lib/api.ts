@@ -433,10 +433,12 @@ export const api = {
     request<ZoneEvent[]>(`/api/v1/cameras/${enc(id)}/zone-events${qs(q)}`),
 
   // ---- Auth + RBAC (Stage 4) ----
-  login: (username: string, password: string) =>
+  login: (username: string, password: string, turnstileToken?: string) =>
     request<LoginResult>("/api/v1/auth/login", {
       method: "POST",
       body: JSON.stringify({ username, password }),
+      // Cloudflare Turnstile token (only when the deployment enables it); the Worker verifies it.
+      headers: turnstileToken ? { "cf-turnstile-response": turnstileToken } : undefined,
     }),
   logout: () => request<void>("/api/v1/auth/logout", { method: "POST" }),
   me: () => request<Principal>("/api/v1/auth/me"),

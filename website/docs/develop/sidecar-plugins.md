@@ -88,7 +88,7 @@ From the dashboard: **Plugins → Install a sidecar plugin**. Or via the API (ad
 
 ```bash
 curl -sX POST http://localhost:8000/api/v1/modules \
-  -H 'authorization: Bearer <ADMIN_TOKEN>' \
+  -H 'authorization: Bearer <ADMIN_API_KEY>' \
   -H 'content-type: application/json' \
   -d @manifest.json
 ```

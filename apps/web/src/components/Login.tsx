@@ -3,17 +3,74 @@
 // Flow: api.login -> server sets the HttpOnly session cookie -> re-fetch the Principal -> hand it to
 // the parent. The token is NOT persisted in JS storage; the cookie carries the session (XSS-safe).
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { api, ApiError, setAuthToken } from "../lib/api";
 import type { Principal } from "../lib/types";
 import { BrandMark, Button, Field, Input, SectionLabel, Spinner } from "./ui";
+
+// Optional Cloudflare Turnstile bot challenge: enabled only when the deployment exposes a site key
+// (the Worker enforces the matching TURNSTILE_SECRET on the login endpoint). Empty = no challenge.
+const TURNSTILE_SITE_KEY = (import.meta.env.VITE_TURNSTILE_SITE_KEY as string | undefined) || "";
+const TURNSTILE_SCRIPT = "https://challenges.cloudflare.com/turnstile/v0/api.js";
+
+type TurnstileApi = {
+  render: (
+    el: HTMLElement,
+    opts: {
+      sitekey: string;
+      callback: (token: string) => void;
+      "expired-callback"?: () => void;
+      "error-callback"?: () => void;
+    },
+  ) => string;
+  remove: (id: string) => void;
+};
+function turnstileApi(): TurnstileApi | undefined {
+  return (window as unknown as { turnstile?: TurnstileApi }).turnstile;
+}
 
 export function Login({ onSuccess }: { onSuccess: (principal: Principal) => void }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
+  const widgetRef = useRef<HTMLDivElement>(null);
+
+  // Load the Turnstile script (once) and render the widget when a site key is configured.
+  useEffect(() => {
+    if (!TURNSTILE_SITE_KEY) return;
+    let widgetId: string | undefined;
+    let cancelled = false;
+    const renderWidget = () => {
+      const ts = turnstileApi();
+      if (!ts || cancelled || !widgetRef.current) return;
+      widgetId = ts.render(widgetRef.current, {
+        sitekey: TURNSTILE_SITE_KEY,
+        callback: (t) => setTurnstileToken(t),
+        "expired-callback": () => setTurnstileToken(null),
+        "error-callback": () => setTurnstileToken(null),
+      });
+    };
+    if (turnstileApi()) {
+      renderWidget();
+    } else {
+      let script = document.querySelector<HTMLScriptElement>(`script[src="${TURNSTILE_SCRIPT}"]`);
+      if (!script) {
+        script = document.createElement("script");
+        script.src = TURNSTILE_SCRIPT;
+        script.async = true;
+        script.defer = true;
+        document.head.appendChild(script);
+      }
+      script.addEventListener("load", renderWidget);
+    }
+    return () => {
+      cancelled = true;
+      if (widgetId) turnstileApi()?.remove(widgetId);
+    };
+  }, []);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -22,10 +79,14 @@ export function Login({ onSuccess }: { onSuccess: (principal: Principal) => void
       setError("Username and password are required.");
       return;
     }
+    if (TURNSTILE_SITE_KEY && !turnstileToken) {
+      setError("Please complete the verification challenge.");
+      return;
+    }
     setSubmitting(true);
     setError(null);
     try {
-      const result = await api.login(username.trim(), password);
+      const result = await api.login(username.trim(), password, turnstileToken ?? undefined);
       setAuthToken(result.token);
       const principal = await api.me();
       onSuccess(principal);
@@ -115,6 +176,8 @@ export function Login({ onSuccess }: { onSuccess: (principal: Principal) => void
               <span className="break-words">{error}</span>
             </div>
           )}
+
+          {TURNSTILE_SITE_KEY && <div ref={widgetRef} className="flex justify-center" />}
 
           <Button type="submit" variant="primary" disabled={submitting} className="w-full">
             {submitting ? (
