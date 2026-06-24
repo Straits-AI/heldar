@@ -13,7 +13,7 @@ client products as separate proprietary crates. See [LICENSING.md](./LICENSING.m
 
 ## Documentation
 
-Full documentation lives at **https://straits-ai.github.io/heldar/**. It covers the quickstart,
+Full documentation lives at **https://heldar.swmengappdev.workers.dev/docs/**. It covers the quickstart,
 deployment, the architecture and its public seams, the open-core boundary, and the guides for
 building your own app or AI worker against the kernel.
 
@@ -71,7 +71,7 @@ cd apps/ai && python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 HELDAR_API=http://localhost:8000 .venv/bin/python worker.py
 ```
 
-See the [Quickstart](https://straits-ai.github.io/heldar/docs/getting-started/quickstart) for
+See the [Quickstart](https://heldar.swmengappdev.workers.dev/docs/getting-started/quickstart) for
 enabling detection tasks, drawing zones, and configuring alerting.
 
 ### Default ports

@@ -16,8 +16,9 @@ const config: Config = {
 
   // Production URL: served from Cloudflare Workers (Static Assets) at the root of
   // the Worker's domain (the *.workers.dev subdomain or a custom domain). No path
-  // prefix, so baseUrl is "/". Set this to your final custom domain.
-  url: 'https://docs.heldar.ai',
+  // prefix, so baseUrl is "/". Change this to a custom domain once one is wired
+  // (see docs/operate/hosting-the-docs.md).
+  url: 'https://heldar.swmengappdev.workers.dev',
   baseUrl: '/',
 
   // Source repo metadata (used for editUrl and links).
