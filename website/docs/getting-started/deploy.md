@@ -68,7 +68,23 @@ overlay access). Tune the session lifetime with `HELDAR_SESSION_TTL_HOURS`
 (default 12), and optionally expire idle sessions with
 `HELDAR_SESSION_IDLE_TIMEOUT_MIN` (default `0`, i.e. no idle timeout).
 
+Brute-force lockout is on by default: an account is locked after
+`HELDAR_LOGIN_MAX_FAILURES` (5) consecutive failed logins for
+`HELDAR_LOGIN_LOCKOUT_MIN` (15) minutes — refused even with the correct password,
+auto-unlocking when the window passes (an admin can clear it sooner via
+`POST /api/v1/users/{id}/unlock`).
+
 Set `HELDAR_AUTH_ENABLED=true` for any multi-user or networked deployment.
+
+:::tip Internet-exposed? Harden it first.
+For a deployment reachable from the public internet, the kernel **fails loud** on an
+unsafe configuration — it refuses to boot with auth off behind a rendezvous, and
+warns (or refuses, under `HELDAR_STRICT_PROD=true`) on a non-`Secure` cookie, no idle
+timeout, or plaintext camera credentials. Work through the
+[Production hardening checklist](https://github.com/Straits-AI/heldar/blob/main/docs/PRODUCTION.md)
+— auth, TLS, camera-credential encryption (`HELDAR_SECRET_KEY`), and an optional
+Cloudflare Turnstile login challenge — before going live.
+:::
 
 ## Storage and the data dir
 
@@ -88,6 +104,12 @@ to a cloud by default. Evidence-locked segments are never deleted by retention.
 Both limits are also **runtime-tunable without a restart** — from the dashboard
 System page ("Recording limit" panel) or via `GET`/`PUT /api/v1/system/retention`
 (PUT is admin-only); a stored override shadows the env value, which remains the default.
+
+Camera credentials live in this SQLite DB. Set `HELDAR_SECRET_KEY` (base64 of 32
+bytes, e.g. `openssl rand -base64 32`) to encrypt them at rest with AES-256-GCM;
+unset keeps plaintext for a trusted LAN appliance. Existing plaintext credentials are
+sealed on the next boot — see the
+[Production hardening guide](https://github.com/Straits-AI/heldar/blob/main/docs/PRODUCTION.md).
 
 ## CORS
 

@@ -30,6 +30,11 @@ Each link below opens the in-repo guide on GitHub:
   - browser-based remote viewing over WebRTC, with NAT traversal handled by a
   signaling + TURN relay and the media stream end-to-end encrypted, plus an
   optional self-hosted network overlay for reaching a site behind CGNAT.
+- [Production hardening](https://github.com/Straits-AI/heldar/blob/main/docs/PRODUCTION.md)
+  - the security checklist for an internet-exposed deployment: required auth + TLS
+  cookie, per-account login lockout, camera-credential encryption at rest, the
+  fail-loud startup guardrails, and the rendezvous Worker secrets (including the
+  optional Cloudflare Turnstile login challenge).
 - [Sizing](https://github.com/Straits-AI/heldar/blob/main/docs/sizing.md)
   - capacity planning for cameras, storage, and the AI frame budget.
 - [Commissioning](https://github.com/Straits-AI/heldar/blob/main/docs/commissioning-checklist.md)
