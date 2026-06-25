@@ -37,16 +37,7 @@ kernel plus whichever apps a client needs (single-tenant per deployment). See
 
 ## Architecture at a glance
 
-```mermaid
-flowchart TB
-    cam(["Cameras"]) -- RTSP --> kernel
-    ai(["AI worker · apps/ai"]) -- "POST /ai/events" --> kernel
-    kernel["heldar-kernel · Apache-2.0<br/>media + DVR · perception ingest + sampler · zones<br/>auth / RBAC · observability · retention · SDK seams"]
-    kernel --> entry["heldar-entry · access control"]
-    kernel --> movement["heldar-movement · ReID / breach"]
-    kernel --> search["heldar-search · semantic search"]
-    kernel --> verticals["Proprietary verticals<br/>private crates · depend on the open kernel"]
-```
+![Heldar open-core architecture](/img/diagrams/architecture.svg)
 
 The kernel is the **only** component that talks to cameras. The 24/7 recorder
 keeps the compressed stream decode-free; a budgeted sampler is the only thing
