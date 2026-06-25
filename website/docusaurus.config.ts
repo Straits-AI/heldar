@@ -53,10 +53,14 @@ const config: Config = {
   ],
 
   markdown: {
+    // Render ```mermaid fences as diagrams (architecture/flow diagrams; replaces ASCII art).
+    mermaid: true,
     hooks: {
       onBrokenMarkdownLinks: 'warn',
     },
   },
+
+  themes: ['@docusaurus/theme-mermaid'],
 
   // Even if you don't use internationalization, you can use this field to set
   // useful metadata like html lang.

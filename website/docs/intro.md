@@ -37,22 +37,15 @@ kernel plus whichever apps a client needs (single-tenant per deployment). See
 
 ## Architecture at a glance
 
-```text
-                    +-----------------------------------------------+
-   cameras --RTSP-->|  heldar-kernel  (Apache-2.0)                  |
-                    |  media/DVR . perception ingest + sampler .    |
-                    |  zone engine . auth/RBAC . observability .    |
-                    |  retention . the DetectionConsumer + worker   |
-                    |  SDK seams                                    |
-                    +----------------+--------------+---------------+
-   AI worker --/ai/events--> (perception)           | composed by heldar-server
-   (apps/ai, HTTP client)                           |
-                    +--------------------------------+---------------+
-   OPEN generic apps (Apache-2.0)        PROPRIETARY verticals       |
-   heldar-entry    (access control)      separate private crates     |
-   heldar-movement (ReID / breach)       (depend on the open crates) |
-   heldar-search   (semantic search)                                 |
-                    +------------------------------------------------+
+```mermaid
+flowchart TB
+    cam(["Cameras"]) -- RTSP --> kernel
+    ai(["AI worker · apps/ai"]) -- "POST /ai/events" --> kernel
+    kernel["heldar-kernel · Apache-2.0<br/>media + DVR · perception ingest + sampler · zones<br/>auth / RBAC · observability · retention · SDK seams"]
+    kernel --> entry["heldar-entry · access control"]
+    kernel --> movement["heldar-movement · ReID / breach"]
+    kernel --> search["heldar-search · semantic search"]
+    kernel --> verticals["Proprietary verticals<br/>private crates · depend on the open kernel"]
 ```
 
 The kernel is the **only** component that talks to cameras. The 24/7 recorder

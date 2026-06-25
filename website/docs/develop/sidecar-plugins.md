@@ -29,16 +29,14 @@ When you install a sidecar, Heldar does three reversible things:
 
 Uninstalling reverses all three: the key is revoked, the subscription deleted, the route removed.
 
-```
-  ┌────────────┐   webhook (signed events)    ┌─────────────────┐
-  │            │ ───────────────────────────▶ │                 │
-  │  Heldar    │   GET /heldar/health (probe)  │  your sidecar   │
-  │  Core      │ ───────────────────────────▶ │  (any language) │
-  │            │                               │                 │
-  │  /m/{id}/* │ ◀──reverse-proxy── UI + API ─ │  :9123          │
-  └────────────┘                               └─────────────────┘
-        ▲   kernel API (Bearer <minted key>)          │
-        └─────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    core["Heldar Core<br/>/m/{id}/*"]
+    sidecar["your sidecar · any language<br/>:9123"]
+    core -- "webhook · signed events" --> sidecar
+    core -- "GET /heldar/health · probe" --> sidecar
+    sidecar -- "reverse-proxy: UI + API" --> core
+    sidecar -- "kernel API · Bearer minted key" --> core
 ```
 
 ## The four endpoints
