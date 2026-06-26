@@ -31,21 +31,39 @@ pub fn init_key(secret_key_b64: Option<&str>) -> Result<()> {
     let key = match secret_key_b64.map(str::trim).filter(|s| !s.is_empty()) {
         None => None,
         Some(b64) => {
-            let bytes = B64
-                .decode(b64)
-                .context("HELDAR_SECRET_KEY must be valid base64")?;
-            let key: [u8; 32] = bytes.as_slice().try_into().map_err(|_| {
-                anyhow!(
-                    "HELDAR_SECRET_KEY must decode to 32 bytes (got {})",
-                    bytes.len()
-                )
-            })?;
+            let key = decode_key(b64)?;
+            if key_is_weak(&key) {
+                tracing::warn!(
+                    "HELDAR_SECRET_KEY looks low-entropy (few distinct bytes) — generate it with \
+                     `openssl rand -base64 32`, not a hand-picked passphrase"
+                );
+            }
             Some(key)
         }
     };
     // First set wins; ignore a redundant re-init with the same intent (e.g. tests).
     let _ = KEY.set(key);
     Ok(())
+}
+
+/// Decode a base64 `HELDAR_SECRET_KEY`-style value into a 32-byte key (errors unless it decodes to
+/// exactly 32 bytes). Shared by [`init_key`] and the `rekey-secrets` admin path.
+pub fn decode_key(b64: &str) -> Result<[u8; 32]> {
+    let bytes = B64
+        .decode(b64.trim())
+        .context("secret key must be valid base64")?;
+    bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| anyhow!("secret key must decode to 32 bytes (got {})", bytes.len()))
+}
+
+/// Heuristic for an obviously low-entropy master key (a base64'd passphrase, a padded or repeated
+/// value). A real 32-byte random key has close to 32 distinct bytes; well under half is a red flag.
+/// Advisory only — we warn, never refuse, since the operator may have a deliberate reason.
+fn key_is_weak(key: &[u8; 32]) -> bool {
+    let distinct = key.iter().collect::<std::collections::BTreeSet<_>>().len();
+    distinct < 16
 }
 
 fn process_key() -> Option<&'static [u8; 32]> {
@@ -218,5 +236,12 @@ mod tests {
             encrypt(Some(&k), "x").unwrap(),
             "fresh nonce per encryption"
         );
+    }
+
+    #[test]
+    fn weak_key_is_flagged_strong_key_is_not() {
+        assert!(key_is_weak(&[0u8; 32]), "all-zero key");
+        assert!(key_is_weak(&[7u8; 32]), "single repeated byte");
+        assert!(!key_is_weak(&key()), "0..32 has 32 distinct bytes");
     }
 }

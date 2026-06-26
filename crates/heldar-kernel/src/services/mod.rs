@@ -1,3 +1,4 @@
+pub mod admin;
 pub mod anr;
 pub mod backup;
 pub mod camera_config;

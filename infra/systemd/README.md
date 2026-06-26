@@ -48,6 +48,14 @@ MediaMTX/WHEP) — see `docs/REMOTE-ACCESS.md` — and needs no special capabili
 hosters who prefer a private overlay can run a Tailscale/NetBird/wg daemon alongside Heldar; `heldar-core`
 only *observes* that interface (overlay awareness) and never manages it.
 
+## Backups
+
+`heldar-db-backup.timer` (+ `.service`) takes a daily online snapshot of the metadata DB via
+`heldar-core backup-db` into `/var/lib/heldar/backups`, keeping the 14 newest. Enable it with
+`systemctl enable --now heldar-db-backup.timer` (the flashable image enables it by default). The DB holds
+users, the audit trail, camera config, and sealed credentials — only video is otherwise backed up — so
+copy the snapshots offsite and store `HELDAR_SECRET_KEY` separately. See `docs/PRODUCTION.md`.
+
 ## Building a flashable image
 
 The units above make Heldar a native service; turning that into a bootable DVR OS is a packaging step.

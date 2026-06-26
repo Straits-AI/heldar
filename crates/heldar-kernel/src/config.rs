@@ -148,6 +148,10 @@ pub struct Config {
     /// Maximum total source footprint (sum of segment sizes) for a single archive export; a larger
     /// selection is rejected (HTTP 400).
     pub archive_max_bytes: u64,
+    /// Cap on the cumulative size of `archive_dir` (all retained exports). A new export is rejected
+    /// (HTTP 400) when it would push the directory over this, so accumulated exports can't fill the
+    /// recordings filesystem and drive the retention sweeper into evicting live recordings.
+    pub archive_dir_max_bytes: u64,
     /// How long archive exports + finished backup-job rows are kept before retention prunes them.
     pub archive_retention_hours: i64,
     // ---- ONVIF (kernel platform feature; Profile S MVP) ----
@@ -301,70 +305,61 @@ impl Config {
         self.login_max_failures > 0 && self.login_lockout_min > 0
     }
 
-    /// Fail-loud guardrails for an internet-exposed deployment. A configured remote rendezvous
-    /// (`HELDAR_REMOTE_RENDEZVOUS_URL`) means the box is reachable from the internet, so an unsafe auth
-    /// posture is a misconfiguration: with auth disabled we **refuse to boot** (the open API must never
-    /// be exposed); otherwise we WARN — or refuse, under `HELDAR_STRICT_PROD=true` — on a non-`Secure`
-    /// cookie, no idle timeout, an over-long session TTL, a localhost CORS allowlist, or plaintext
-    /// camera credentials. A LAN/overlay appliance (no rendezvous) keeps its intentional defaults.
+    /// Whether the box is reachable from outside the trusted LAN by ANY configured path — the WebRTC
+    /// rendezvous (`HELDAR_REMOTE_RENDEZVOUS_URL`), an overlay network (`HELDAR_OVERLAY_ENABLED`:
+    /// Tailscale/NetBird/WireGuard), or self-registration to the control plane (`HELDAR_CP_URL` +
+    /// `HELDAR_PUBLIC_BASE_URL`). The production guardrails key on this, not on the rendezvous alone,
+    /// so an overlay/control-plane deployment can't slip past the auth-off boot refusal with LAN
+    /// defaults.
+    pub fn internet_exposed(&self) -> bool {
+        is_internet_exposed(
+            self.rendezvous_url.is_some(),
+            self.overlay_enabled,
+            self.cp_url.is_some() && self.public_base_url.is_some(),
+        )
+    }
+
+    /// Fail-loud guardrails for an internet-exposed deployment. When the box is reachable from outside
+    /// the LAN (see [`Config::internet_exposed`]) an unsafe auth posture is a misconfiguration: with
+    /// auth disabled we **refuse to boot** (the open API must never be exposed); otherwise we WARN —
+    /// or refuse, under `HELDAR_STRICT_PROD=true` — on a non-`Secure` cookie, no idle timeout, an
+    /// over-long session TTL, a localhost or wildcard CORS allowlist, plaintext camera credentials, or
+    /// an empty dial-out bearer. A LAN-only appliance keeps its intentional defaults.
     pub fn enforce_production_guardrails(&self) -> anyhow::Result<()> {
-        if self.rendezvous_url.is_none() {
-            return Ok(());
+        let state = GuardrailState {
+            exposed: self.internet_exposed(),
+            rendezvous: self.rendezvous_url.is_some(),
+            auth_enabled: self.auth_enabled,
+            auth_cookie_secure: self.auth_cookie_secure,
+            session_idle_timeout_minutes: self.session_idle_timeout_minutes,
+            session_ttl_hours: self.session_ttl_hours,
+            cors_has_localhost: self
+                .cors_origins
+                .iter()
+                .any(|o| o.contains("localhost") || o.contains("127.0.0.1")),
+            cors_has_wildcard: self.cors_origins.iter().any(|o| o.trim() == "*"),
+            secret_key_set: self.secret_key_b64.is_some(),
+            cp_token_empty: self.cp_token.trim().is_empty(),
+            strict_prod: self.strict_prod,
+        };
+        match evaluate_production_guardrails(&state) {
+            GuardrailOutcome::Refuse(msg) => anyhow::bail!(msg),
+            GuardrailOutcome::Pass(warnings) => {
+                for w in &warnings {
+                    tracing::warn!("production guardrail: {w}");
+                }
+                Ok(())
+            }
+            GuardrailOutcome::StrictRefuse(warnings) => {
+                for w in &warnings {
+                    tracing::warn!("production guardrail: {w}");
+                }
+                anyhow::bail!(
+                    "HELDAR_STRICT_PROD=true and {} production guardrail(s) failed (see warnings above)",
+                    warnings.len()
+                )
+            }
         }
-        if !self.auth_enabled {
-            anyhow::bail!(
-                "remote access is configured (HELDAR_REMOTE_RENDEZVOUS_URL) but HELDAR_AUTH_ENABLED=false \
-                 — refusing to expose the open API to the internet. Set HELDAR_AUTH_ENABLED=true."
-            );
-        }
-        let mut warnings: Vec<String> = Vec::new();
-        if !self.auth_cookie_secure {
-            warnings.push(
-                "HELDAR_AUTH_COOKIE_SECURE=false — set true so the session cookie requires HTTPS"
-                    .into(),
-            );
-        }
-        if self.session_idle_timeout_minutes == 0 {
-            warnings.push(
-                "HELDAR_SESSION_IDLE_TIMEOUT_MIN=0 — set e.g. 30 to expire idle remote sessions"
-                    .into(),
-            );
-        }
-        if self.session_ttl_hours > 12 {
-            warnings.push(format!(
-                "HELDAR_SESSION_TTL_HOURS={} is long for remote access — consider 4 or less",
-                self.session_ttl_hours
-            ));
-        }
-        if self
-            .cors_origins
-            .iter()
-            .any(|o| o.contains("localhost") || o.contains("127.0.0.1"))
-        {
-            warnings.push(
-                "HELDAR_CORS_ORIGINS still allows localhost — lock it to the dashboard origin"
-                    .into(),
-            );
-        }
-        if self.secret_key_b64.is_none() {
-            warnings.push(
-                "HELDAR_SECRET_KEY is unset — camera credentials are stored in plaintext at rest"
-                    .into(),
-            );
-        }
-        if warnings.is_empty() {
-            return Ok(());
-        }
-        for w in &warnings {
-            tracing::warn!("production guardrail: {w}");
-        }
-        if self.strict_prod {
-            anyhow::bail!(
-                "HELDAR_STRICT_PROD=true and {} production guardrail(s) failed (see warnings above)",
-                warnings.len()
-            );
-        }
-        Ok(())
     }
 
     pub fn from_env() -> Self {
@@ -478,6 +473,7 @@ impl Config {
                 .max(1),
             archive_dir,
             archive_max_bytes: parse_or("HELDAR_ARCHIVE_MAX_BYTES", 10_737_418_240u64),
+            archive_dir_max_bytes: parse_or("HELDAR_ARCHIVE_DIR_MAX_BYTES", 53_687_091_200u64),
             archive_retention_hours: parse_or("HELDAR_ARCHIVE_RETENTION_HOURS", 48),
             onvif_discovery_timeout_ms: parse_or("HELDAR_ONVIF_DISCOVERY_TIMEOUT_MS", 2000),
             onvif_request_timeout_ms: parse_or("HELDAR_ONVIF_REQUEST_TIMEOUT_MS", 5000),
@@ -548,5 +544,227 @@ impl Config {
     /// Directory where a camera's sampled AI frames are written.
     pub fn camera_frames_dir(&self, camera_id: &str) -> PathBuf {
         self.frames_dir.join(camera_id)
+    }
+}
+
+/// Whether the box is reachable from outside the trusted LAN by any path. Pure (free function) so the
+/// exposure decision is unit-tested directly, independent of the full `Config`/environment.
+fn is_internet_exposed(rendezvous: bool, overlay: bool, control_plane_registered: bool) -> bool {
+    rendezvous || overlay || control_plane_registered
+}
+
+/// The subset of config the production guardrails reason about, extracted so the decision is a pure,
+/// fully unit-testable function (no environment, no full `Config`).
+#[derive(Debug, Clone)]
+struct GuardrailState {
+    exposed: bool,
+    rendezvous: bool,
+    auth_enabled: bool,
+    auth_cookie_secure: bool,
+    session_idle_timeout_minutes: i64,
+    session_ttl_hours: i64,
+    cors_has_localhost: bool,
+    cors_has_wildcard: bool,
+    secret_key_set: bool,
+    cp_token_empty: bool,
+    strict_prod: bool,
+}
+
+/// Outcome of evaluating the guardrails. `Refuse` is an unconditional boot failure (auth off while
+/// exposed); `StrictRefuse` carries soft warnings that became fatal under strict mode; `Pass` carries
+/// soft warnings to log before booting.
+#[derive(Debug)]
+enum GuardrailOutcome {
+    Pass(Vec<String>),
+    Refuse(String),
+    StrictRefuse(Vec<String>),
+}
+
+/// Pure guardrail decision. Not exposed → always pass. Exposed + auth off → hard refuse. Exposed +
+/// auth on → collect soft warnings; refuse only under strict mode.
+fn evaluate_production_guardrails(s: &GuardrailState) -> GuardrailOutcome {
+    if !s.exposed {
+        return GuardrailOutcome::Pass(Vec::new());
+    }
+    if !s.auth_enabled {
+        return GuardrailOutcome::Refuse(
+            "remote access is configured (rendezvous, overlay, or control-plane registration) but \
+             HELDAR_AUTH_ENABLED=false — refusing to expose the open API. Set HELDAR_AUTH_ENABLED=true."
+                .into(),
+        );
+    }
+    let mut warnings: Vec<String> = Vec::new();
+    if !s.auth_cookie_secure {
+        warnings.push(
+            "HELDAR_AUTH_COOKIE_SECURE=false — set true so the session cookie requires HTTPS"
+                .into(),
+        );
+    }
+    if s.session_idle_timeout_minutes == 0 {
+        warnings.push(
+            "HELDAR_SESSION_IDLE_TIMEOUT_MIN=0 — set e.g. 30 to expire idle remote sessions".into(),
+        );
+    }
+    if s.session_ttl_hours > 12 {
+        warnings.push(format!(
+            "HELDAR_SESSION_TTL_HOURS={} is long for remote access — consider 4 or less",
+            s.session_ttl_hours
+        ));
+    }
+    if s.cors_has_localhost {
+        warnings.push(
+            "HELDAR_CORS_ORIGINS still allows localhost — lock it to the dashboard origin".into(),
+        );
+    }
+    if s.cors_has_wildcard {
+        warnings.push(
+            "HELDAR_CORS_ORIGINS contains '*' (wildcard) — lock it to the dashboard origin(s)"
+                .into(),
+        );
+    }
+    if !s.secret_key_set {
+        warnings.push(
+            "HELDAR_SECRET_KEY is unset — camera credentials are stored in plaintext at rest"
+                .into(),
+        );
+    }
+    if s.rendezvous && s.cp_token_empty {
+        warnings.push(
+            "HELDAR_CP_TOKEN is empty while a rendezvous is configured — the box cannot authenticate \
+             its dial-out and will not serve remote video"
+                .into(),
+        );
+    }
+    if warnings.is_empty() {
+        return GuardrailOutcome::Pass(warnings);
+    }
+    if s.strict_prod {
+        return GuardrailOutcome::StrictRefuse(warnings);
+    }
+    GuardrailOutcome::Pass(warnings)
+}
+
+#[cfg(test)]
+mod guardrail_tests {
+    use super::*;
+
+    /// A clean, internet-exposed (via rendezvous) box: auth on, secure cookie, sane session, locked
+    /// CORS, key set, dial-out bearer present. Each test perturbs one field.
+    fn exposed_clean() -> GuardrailState {
+        GuardrailState {
+            exposed: true,
+            rendezvous: true,
+            auth_enabled: true,
+            auth_cookie_secure: true,
+            session_idle_timeout_minutes: 30,
+            session_ttl_hours: 4,
+            cors_has_localhost: false,
+            cors_has_wildcard: false,
+            secret_key_set: true,
+            cp_token_empty: false,
+            strict_prod: false,
+        }
+    }
+
+    #[test]
+    fn exposure_predicate_covers_every_path() {
+        assert!(!is_internet_exposed(false, false, false), "LAN-only");
+        assert!(is_internet_exposed(true, false, false), "rendezvous");
+        assert!(is_internet_exposed(false, true, false), "overlay");
+        assert!(is_internet_exposed(false, false, true), "control plane");
+    }
+
+    #[test]
+    fn lan_only_always_passes_even_with_auth_off() {
+        let s = GuardrailState {
+            exposed: false,
+            auth_enabled: false,
+            auth_cookie_secure: false,
+            ..exposed_clean()
+        };
+        assert!(
+            matches!(evaluate_production_guardrails(&s), GuardrailOutcome::Pass(w) if w.is_empty())
+        );
+    }
+
+    #[test]
+    fn exposed_with_auth_off_refuses() {
+        let s = GuardrailState {
+            auth_enabled: false,
+            ..exposed_clean()
+        };
+        assert!(matches!(
+            evaluate_production_guardrails(&s),
+            GuardrailOutcome::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn overlay_exposed_with_auth_off_refuses() {
+        // The overlay/control-plane path (no rendezvous) must still trip the hard refusal — the bug
+        // this fix closes.
+        let s = GuardrailState {
+            rendezvous: false,
+            auth_enabled: false,
+            ..exposed_clean()
+        };
+        assert!(matches!(
+            evaluate_production_guardrails(&s),
+            GuardrailOutcome::Refuse(_)
+        ));
+    }
+
+    #[test]
+    fn exposed_and_clean_passes_with_no_warnings() {
+        assert!(matches!(
+            evaluate_production_guardrails(&exposed_clean()),
+            GuardrailOutcome::Pass(w) if w.is_empty()
+        ));
+    }
+
+    #[test]
+    fn soft_violation_warns_but_boots() {
+        let s = GuardrailState {
+            auth_cookie_secure: false,
+            ..exposed_clean()
+        };
+        assert!(
+            matches!(evaluate_production_guardrails(&s), GuardrailOutcome::Pass(w) if !w.is_empty())
+        );
+    }
+
+    #[test]
+    fn strict_mode_turns_soft_violation_into_refusal() {
+        let s = GuardrailState {
+            auth_cookie_secure: false,
+            strict_prod: true,
+            ..exposed_clean()
+        };
+        assert!(matches!(
+            evaluate_production_guardrails(&s),
+            GuardrailOutcome::StrictRefuse(_)
+        ));
+    }
+
+    #[test]
+    fn wildcard_cors_is_flagged() {
+        let s = GuardrailState {
+            cors_has_wildcard: true,
+            ..exposed_clean()
+        };
+        assert!(
+            matches!(evaluate_production_guardrails(&s), GuardrailOutcome::Pass(w) if w.iter().any(|x| x.contains("'*'")))
+        );
+    }
+
+    #[test]
+    fn empty_cp_token_with_rendezvous_is_flagged() {
+        let s = GuardrailState {
+            cp_token_empty: true,
+            ..exposed_clean()
+        };
+        assert!(
+            matches!(evaluate_production_guardrails(&s), GuardrailOutcome::Pass(w) if w.iter().any(|x| x.contains("HELDAR_CP_TOKEN")))
+        );
     }
 }

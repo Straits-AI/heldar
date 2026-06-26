@@ -45,6 +45,8 @@ install -D -m644 "$ROOT/infra/mediamtx/mediamtx.yml"        "$STAGE/etc/heldar/m
 install -D -m600 "$ROOT/infra/systemd/heldar.env.example"  "$STAGE/etc/heldar/heldar.env"
 install -D -m644 "$ROOT/infra/systemd/heldar-core.service" "$STAGE/etc/systemd/system/heldar-core.service"
 install -D -m644 "$ROOT/infra/systemd/mediamtx.service"    "$STAGE/etc/systemd/system/mediamtx.service"
+install -D -m644 "$ROOT/infra/systemd/heldar-db-backup.service" "$STAGE/etc/systemd/system/heldar-db-backup.service"
+install -D -m644 "$ROOT/infra/systemd/heldar-db-backup.timer"   "$STAGE/etc/systemd/system/heldar-db-backup.timer"
 
 # ---- 3. Build the rootfs: base packages + runtime deps + overlay + first-boot setup ----
 say "mmdebstrap $SUITE/$ARCH → $ROOTFS_TAR"
@@ -58,9 +60,21 @@ mmdebstrap \
     chroot "$1" useradd -r -s /usr/sbin/nologin heldar || true
     install -d -o heldar -g heldar "$1/var/lib/heldar"
     # enable services at boot
-    chroot "$1" systemctl enable heldar-core.service mediamtx.service
+    chroot "$1" systemctl enable heldar-core.service mediamtx.service heldar-db-backup.timer
     # a basic hostname/login so the image is usable (override for your fleet)
     echo heldar > "$1/etc/hostname"
+    # First-boot security banner (shown on every console/SSH login): this image ships LAN defaults
+    # (auth OFF, API on 0.0.0.0) by design, so force a conscious decision before it touches a wider net.
+    cat > "$1/etc/motd" <<MOTD
+============================================================
+ Heldar appliance — LAN DEFAULTS (NOT hardened)
+ Auth is OFF and the API listens on 0.0.0.0 by design, for a
+ trusted local network. Before exposing this box beyond a
+ trusted segment: set HELDAR_AUTH_ENABLED=true (plus the rest
+ of /etc/heldar/heldar.env) and put it behind a firewall.
+ See docs/PRODUCTION.md.
+============================================================
+MOTD
   ' \
   --setup-hook='cp -a '"$STAGE"'/. "$1/"' \
   "$SUITE" "$ROOTFS_TAR"
@@ -68,6 +82,10 @@ mmdebstrap \
 say "DONE"
 cat <<EOF
 Rootfs: $ROOTFS_TAR
+
+SECURITY: this image ships LAN defaults (auth OFF, API on 0.0.0.0). Before attaching the flashed box
+to anything but a trusted segment, set HELDAR_AUTH_ENABLED=true in /etc/heldar/heldar.env and firewall
+it (see docs/PRODUCTION.md).
 
 Test it (no flashing) with systemd-nspawn:
   sudo mkdir -p /tmp/heldar-rootfs && sudo tar -C /tmp/heldar-rootfs -xf "$ROOTFS_TAR"

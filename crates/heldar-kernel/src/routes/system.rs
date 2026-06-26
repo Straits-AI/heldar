@@ -58,8 +58,12 @@ async fn effective_limits(st: &AppState) -> RetentionLimits {
     }
 }
 
-/// Current recording disk limits (effective values). Any authenticated caller may read.
-async fn get_retention(State(st): State<AppState>) -> AppResult<Json<RetentionLimits>> {
+/// Current recording disk limits (effective values). Any authenticated viewer may read.
+async fn get_retention(
+    State(st): State<AppState>,
+    principal: Principal,
+) -> AppResult<Json<RetentionLimits>> {
+    principal.require(principal.can_view(), "view recording limits")?;
     Ok(Json(effective_limits(&st).await))
 }
 
@@ -211,7 +215,11 @@ struct SystemInfo {
     live_transcode_engine: String,
 }
 
-async fn system_info(State(st): State<AppState>) -> AppResult<Json<SystemInfo>> {
+async fn system_info(
+    State(st): State<AppState>,
+    principal: Principal,
+) -> AppResult<Json<SystemInfo>> {
+    principal.require(principal.can_view(), "view system info")?;
     let cameras_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cameras")
         .fetch_one(&st.pool)
         .await?;

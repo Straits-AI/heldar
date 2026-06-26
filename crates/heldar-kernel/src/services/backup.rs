@@ -364,6 +364,22 @@ async fn update_progress(state: &AppState, job_id: &str, copied: u64, bytes: u64
 
 // ---- On-demand archive export ----
 
+/// Sum of regular-file sizes directly under `dir` (non-recursive — exports are flat `.zip` files).
+/// Best-effort: an unreadable directory or entry contributes 0 rather than failing the export.
+async fn dir_size_bytes(dir: &std::path::Path) -> u64 {
+    let mut total = 0u64;
+    if let Ok(mut rd) = tokio::fs::read_dir(dir).await {
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            if let Ok(md) = entry.metadata().await {
+                if md.is_file() {
+                    total = total.saturating_add(md.len());
+                }
+            }
+        }
+    }
+    total
+}
+
 /// Build a `.zip` of the selected segments and record it as an `on_demand_archive` job. Enforces the
 /// archive size cap on the source footprint; runs inline (bounded by the job timeout) so the returned
 /// job already carries `output_url`.
@@ -394,9 +410,43 @@ pub async fn create_archive(
         )));
     }
 
+    // Bound on-demand exports with the same semaphore as the scheduler, so a burst of export requests
+    // can't run unbounded ffmpeg/zip jobs in parallel and starve recording. Binding the Arc keeps the
+    // permit alive for the whole build.
+    let sem = job_semaphore(&state.cfg);
+    let _permit = sem
+        .acquire()
+        .await
+        .map_err(|_| AppError::Other(anyhow::anyhow!("export queue is shutting down")))?;
+
     tokio::fs::create_dir_all(&state.cfg.archive_dir)
         .await
         .map_err(|e| AppError::Other(e.into()))?;
+
+    // Free-disk precondition: the .zip lands under archive_dir on the recordings filesystem, so refuse
+    // an export that could fill it (which would drive the retention sweeper into evicting recordings).
+    const DISK_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB margin above the footprint estimate
+    if let Some(stats) =
+        crate::services::storage::disk_stats_async(state.cfg.archive_dir.clone()).await
+    {
+        let needed = total_bytes as u64 + DISK_HEADROOM_BYTES;
+        if stats.free_bytes < needed {
+            return Err(AppError::BadRequest(format!(
+                "not enough free disk for this export: need ~{needed} bytes, {} free",
+                stats.free_bytes
+            )));
+        }
+    }
+
+    // Cumulative archive-directory cap: keep accumulated exports bounded so they never fill the disk.
+    let archive_used = dir_size_bytes(&state.cfg.archive_dir).await;
+    if archive_used.saturating_add(total_bytes as u64) > state.cfg.archive_dir_max_bytes {
+        return Err(AppError::BadRequest(format!(
+            "archive directory is at {archive_used} bytes; this export would exceed the {} byte cap \
+             (HELDAR_ARCHIVE_DIR_MAX_BYTES) — delete old exports first",
+            state.cfg.archive_dir_max_bytes
+        )));
+    }
 
     let job_id = format!("bkj_{}", Uuid::new_v4().simple());
     let now = Utc::now();

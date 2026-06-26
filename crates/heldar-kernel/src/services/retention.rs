@@ -73,12 +73,121 @@ async fn unlink_snapshot(path: &str) -> bool {
 
 pub async fn run(pool: SqlitePool, cfg: Arc<Config>) {
     let mut tick = tokio::time::interval(Duration::from_secs(cfg.retention_interval_s.max(30)));
+    // Orphan reclamation walks the recordings tree, so run it on a slower (~hourly) cadence than the
+    // row-based sweep, not on every tick.
+    let orphan_every = (3600u64 / cfg.retention_interval_s.max(30)).max(1);
+    let mut sweeps: u64 = 0;
     loop {
         tick.tick().await;
         if let Err(e) = sweep(&pool, &cfg).await {
             tracing::error!(error = %e, "retention: sweep failed");
         }
+        if sweeps % orphan_every == 0 {
+            if let Err(e) = reclaim_orphans(&pool, &cfg).await {
+                tracing::warn!(error = %e, "retention: orphan reclamation failed");
+            }
+        }
+        sweeps = sweeps.wrapping_add(1);
     }
+}
+
+/// Reclaim orphaned recording files — `.mp4` segments on disk under `recordings_dir/<camera>/` with no
+/// row in `segments.path`. These escape the row-based retention tiers, so left alone they accumulate
+/// and push the disk-free floor into evicting *tracked* recordings. Conservative by design: a file is
+/// eligible only when it is older than `ORPHAN_MIN_AGE` (well past the indexer's settle window), so an
+/// in-flight or just-finished-but-not-yet-indexed segment is never touched. Emits a `recording_orphans`
+/// divergence event whenever any are reclaimed.
+async fn reclaim_orphans(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
+    /// Minimum file age before an unindexed segment is treated as a true orphan rather than in-flight.
+    const ORPHAN_MIN_AGE: Duration = Duration::from_secs(3600);
+
+    // Exact path strings as the indexer stores them (`ent.path().to_string_lossy()`), so on-disk paths
+    // built the same way below compare correctly.
+    let known: std::collections::HashSet<String> =
+        sqlx::query_scalar::<_, String>("SELECT path FROM segments")
+            .fetch_all(pool)
+            .await?
+            .into_iter()
+            .collect();
+
+    let cams: Vec<(String,)> = sqlx::query_as("SELECT id FROM cameras")
+        .fetch_all(pool)
+        .await?;
+    let now = std::time::SystemTime::now();
+    let mut count = 0u64;
+    let mut bytes = 0u64;
+    for (cam_id,) in cams {
+        let dir = cfg.camera_recordings_dir(&cam_id);
+        let mut rd = match tokio::fs::read_dir(&dir).await {
+            Ok(rd) => rd,
+            Err(_) => continue, // no directory yet for this camera
+        };
+        while let Ok(Some(ent)) = rd.next_entry().await {
+            let path = ent.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("mp4") {
+                continue;
+            }
+            let path_str = path.to_string_lossy().to_string();
+            if known.contains(&path_str) {
+                continue; // tracked by a segment row — cheap skip before stat
+            }
+            let md = match ent.metadata().await {
+                Ok(md) if md.is_file() => md,
+                _ => continue,
+            };
+            let age = md.modified().ok().and_then(|m| now.duration_since(m).ok());
+            if !orphan_is_reclaimable(&path_str, &known, age, ORPHAN_MIN_AGE) {
+                continue;
+            }
+            // Re-check membership immediately before deleting: a segment row inserted between the
+            // snapshot above and now must keep its file (closes the snapshot-then-walk race). On a
+            // query error, assume tracked (fail safe) and skip.
+            let still_orphan: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM segments WHERE path = ?")
+                    .bind(&path_str)
+                    .fetch_one(pool)
+                    .await
+                    .unwrap_or(1);
+            if still_orphan != 0 {
+                continue;
+            }
+            let sz = md.len();
+            if unlink_segment(&path_str).await {
+                count += 1;
+                bytes = bytes.saturating_add(sz);
+            }
+        }
+    }
+
+    if count > 0 {
+        tracing::warn!(
+            orphans = count,
+            bytes,
+            "retention: reclaimed orphaned recording files (on disk but not indexed)"
+        );
+        let _ = repo::log_event(
+            pool,
+            None,
+            "recording_orphans",
+            "warning",
+            json!({ "reclaimed": count, "bytes": bytes }),
+        )
+        .await;
+    }
+    Ok(())
+}
+
+/// Whether an on-disk recording file is a reclaimable orphan: not tracked by any segment row AND older
+/// than `min_age` (so an in-flight or just-finished-but-not-yet-indexed file is never eligible). `age`
+/// is the file's age, or `None` when its mtime could not be read — treated as NOT reclaimable, so an
+/// unreadable timestamp fails safe (we keep the file).
+fn orphan_is_reclaimable(
+    path: &str,
+    known: &std::collections::HashSet<String>,
+    age: Option<Duration>,
+    min_age: Duration,
+) -> bool {
+    !known.contains(path) && age.map(|a| a >= min_age).unwrap_or(false)
 }
 
 async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
@@ -353,12 +462,25 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         Some(mut prev) => {
             let mut guard = 0;
             let mut futile = false;
+            // Scale each prune batch to the remaining deficit (bounded) so a large fill recovers in a
+            // few passes instead of 20 segments at a time. The free-space re-check after each batch
+            // keeps over-prune to roughly one batch of the oldest segments.
+            let avg_seg: i64 = sqlx::query_scalar(
+                "SELECT CAST(COALESCE(AVG(size_bytes), 0) AS INTEGER) FROM segments WHERE locked = 0 AND evidence_locked = 0",
+            )
+            .fetch_one(pool)
+            .await
+            .unwrap_or(0);
+            let avg_seg = (avg_seg.max(1)) as u64;
             while prev.free_bytes < floor && guard < 200 {
                 guard += 1;
                 let before = prev.free_bytes;
+                let deficit = floor.saturating_sub(before);
+                let want = (deficit / avg_seg).clamp(20, 256) as i64;
                 let batch: Vec<(String, String)> = sqlx::query_as(
-                    "SELECT id, path FROM segments WHERE locked = 0 AND evidence_locked = 0 ORDER BY end_time ASC LIMIT 20",
+                    "SELECT id, path FROM segments WHERE locked = 0 AND evidence_locked = 0 ORDER BY end_time ASC LIMIT ?",
                 )
+                .bind(want)
                 .fetch_all(pool)
                 .await?;
                 if batch.is_empty() {
@@ -741,6 +863,38 @@ mod tests {
         tokio::fs::write(&p, b"x").await.unwrap();
         assert!(unlink_snapshot(p.to_str().unwrap()).await);
         assert!(!p.exists());
+    }
+
+    #[test]
+    fn orphan_is_reclaimable_only_old_and_untracked() {
+        // The data-loss-safety predicate behind reclaim_orphans: only a file that is BOTH untracked
+        // (no segment row) AND older than the age guard may be deleted.
+        let mut known = std::collections::HashSet::new();
+        known.insert("/rec/cam/tracked.mp4".to_string());
+        let min = Duration::from_secs(3600);
+        let old = Some(Duration::from_secs(7200)); // 2h
+        let recent = Some(Duration::from_secs(60)); // in-flight / just finished
+
+        assert!(
+            !orphan_is_reclaimable("/rec/cam/tracked.mp4", &known, old, min),
+            "a tracked file is never reclaimed, even when old"
+        );
+        assert!(
+            !orphan_is_reclaimable("/rec/cam/inflight.mp4", &known, recent, min),
+            "an untracked but recent file is spared (not yet indexed)"
+        );
+        assert!(
+            orphan_is_reclaimable("/rec/cam/orphan.mp4", &known, old, min),
+            "untracked + old is the only reclaimable case"
+        );
+        assert!(
+            !orphan_is_reclaimable("/rec/cam/nomtime.mp4", &known, None, min),
+            "an unreadable mtime fails safe (kept)"
+        );
+        assert!(
+            orphan_is_reclaimable("/rec/cam/edge.mp4", &known, Some(min), min),
+            "exactly at the threshold is old enough"
+        );
     }
 
     // ----- sweep: age retention -----------------------------------------

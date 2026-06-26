@@ -2,7 +2,11 @@
 Description=Heldar Core — media/DVR recorder + perception kernel
 Documentation=https://github.com/Straits-AI/heldar
 After=network-online.target mediamtx.service
-Wants=network-online.target
+# Pull in mediamtx (not just order after it) so enabling heldar-core starts the media server too.
+Wants=network-online.target mediamtx.service
+# Bound restart storms: if it fails >5 times in 60s, stop and surface the failure instead of looping.
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=simple

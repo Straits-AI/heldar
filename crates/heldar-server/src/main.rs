@@ -42,6 +42,11 @@ async fn main() -> anyhow::Result<()> {
     init_tracing();
 
     let cfg = Arc::new(Config::from_env());
+    // One-shot admin subcommands run a maintenance task and exit, bypassing the server boot (and its
+    // process-wide key install + guardrails, which they manage themselves).
+    if let Some(cmd) = std::env::args().nth(1) {
+        return run_subcommand(&cmd, &cfg).await;
+    }
     // Install the encryption-at-rest key (HELDAR_SECRET_KEY) process-wide before any camera URL is
     // built, and run the internet-exposed production guardrails (warn, or refuse under STRICT_PROD).
     services::secrets::init_key(cfg.secret_key_b64.as_deref()).context("HELDAR_SECRET_KEY")?;
@@ -394,6 +399,61 @@ async fn main() -> anyhow::Result<()> {
         .context("server error")?;
 
     Ok(())
+}
+
+/// One-shot admin subcommands (run then exit, bypassing the server boot). Usage:
+///   `heldar-core backup-db <dest>`  — online snapshot of the metadata DB (SQLite `VACUUM INTO`)
+///   `heldar-core rekey-secrets`     — re-seal camera creds from `HELDAR_SECRET_KEY_OLD` to `HELDAR_SECRET_KEY`
+async fn run_subcommand(cmd: &str, cfg: &Config) -> anyhow::Result<()> {
+    match cmd {
+        "backup-db" => {
+            let dest = std::env::args()
+                .nth(2)
+                .context("usage: heldar-core backup-db <destination-path>")?;
+            let pool = db::init_pool(cfg).await.context("open database")?;
+            let bytes = services::admin::backup_db(&pool, &dest).await?;
+            pool.close().await;
+            println!("backup-db: wrote {dest} ({bytes} bytes)");
+            Ok(())
+        }
+        "rekey-secrets" => {
+            let new_b64 = cfg
+                .secret_key_b64
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .context("HELDAR_SECRET_KEY (the new key) must be set")?;
+            let old_raw = std::env::var("HELDAR_SECRET_KEY_OLD").unwrap_or_default();
+            let old_b64 = old_raw.trim();
+            if old_b64.is_empty() {
+                anyhow::bail!(
+                    "HELDAR_SECRET_KEY_OLD (the key the DB is currently sealed with) must be set"
+                );
+            }
+            let new_key = services::secrets::decode_key(new_b64).context("HELDAR_SECRET_KEY")?;
+            let old_key =
+                services::secrets::decode_key(old_b64).context("HELDAR_SECRET_KEY_OLD")?;
+            if new_key == old_key {
+                anyhow::bail!("HELDAR_SECRET_KEY_OLD == HELDAR_SECRET_KEY — nothing to rotate");
+            }
+            let pool = db::init_pool(cfg).await.context("open database")?;
+            let n = services::admin::rekey_camera_secrets(&pool, &old_key, &new_key).await?;
+            pool.close().await;
+            println!("rekey-secrets: re-sealed {n} camera credential(s) under the new key");
+            Ok(())
+        }
+        "help" | "--help" | "-h" => {
+            println!(
+                "heldar-core — Heldar composing server\n\n\
+                 Usage:\n  \
+                 heldar-core                    run the server (default)\n  \
+                 heldar-core backup-db <dest>   online snapshot of the metadata DB (SQLite VACUUM INTO)\n  \
+                 heldar-core rekey-secrets      re-seal camera credentials (HELDAR_SECRET_KEY_OLD -> HELDAR_SECRET_KEY)"
+            );
+            Ok(())
+        }
+        other => anyhow::bail!("unknown subcommand '{other}' — try `heldar-core help`"),
+    }
 }
 
 /// Auth guard for the recorded-media plane. When auth is enabled, requires a valid principal (resolved
