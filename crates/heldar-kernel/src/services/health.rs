@@ -193,6 +193,11 @@ async fn check_mdstat(pool: &SqlitePool) {
 
 /// Parse `/proc/mdstat` and return the names of arrays with a down member. An array's per-disk state
 /// map is a bracketed token of only `U`/`_` on the status line (e.g. `[U_]`); any `_` means degraded.
+///
+/// The only non-test caller is `check_mdstat`, which is `#[cfg(target_os = "linux")]`; on other
+/// targets this (and `line_has_down_member`) is exercised solely by the unit tests, so allow it to
+/// be unused there rather than gating the cross-platform parser tests behind the OS.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn mdstat_degraded(contents: &str) -> Vec<String> {
     let mut degraded = Vec::new();
     let mut current: Option<String> = None;
@@ -213,6 +218,7 @@ fn mdstat_degraded(contents: &str) -> Vec<String> {
 }
 
 /// Whether a status line carries a `[U.._..]` map (only `U`/`_`) with at least one down (`_`) member.
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 fn line_has_down_member(line: &str) -> bool {
     let mut rest = line;
     while let Some(open) = rest.find('[') {
