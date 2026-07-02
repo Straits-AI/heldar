@@ -12,6 +12,14 @@ Heldar is built to run as **one binary at one URL**. The composing server
 media, the metrics/health endpoints, and the built dashboard from a single
 process.
 
+Three ways to run it, in order of effort:
+
+- **Docker (pull & run):** `docker compose -f deploy/compose.yml up -d` — or the
+  [quickstart one-liner](quickstart#fastest-docker-one-liner). Prebuilt open images, no toolchain.
+- **Native binary** — build from source and run it (this page).
+- **Flashed appliance** — a native-systemd OS image for a dedicated DVR box (no Docker on the
+  appliance; see `infra/systemd/` in the repo).
+
 ## One binary, one URL
 
 Build the dashboard, then point the server at it with `HELDAR_WEB_DIR`:

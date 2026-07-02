@@ -9,6 +9,19 @@ sidebar_position: 1
 
 Bring up Heldar locally, onboard a real camera, and run the reference AI worker.
 
+## Fastest: Docker one-liner
+
+If you have Docker, skip the build entirely — pull the prebuilt open images and start the stack:
+
+```bash
+curl -fsSL https://heldar.swmengappdev.workers.dev/install.sh | sh
+```
+
+It writes `~/heldar/{compose.yml,mediamtx.yml,.env}` and starts MediaMTX + core + web; the dashboard
+is then at `http://localhost:8080`. (Already cloned the repo? `docker compose -f deploy/compose.yml up -d`
+does the same.) Add the reference AI worker with `docker compose --profile ai up -d`, update with
+`docker compose pull`. To build from source instead, continue below.
+
 ## Prerequisites
 
 - **Rust** (via `rustup`) - the project tracks latest stable.
