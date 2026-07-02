@@ -1,5 +1,10 @@
 # Heldar reference AI worker.
-# Light image — the worker only needs requests + pillow + numpy (no GPU/model).
+# Light image — CORE deps only (requests + pillow + numpy): runs every motion-type task; model-type
+# tasks (YOLO/ANPR) are imported lazily by worker.py and are deliberately NOT baked in — torch/opencv
+# are ~2 GB per architecture, which bloats the image and overflows a CI runner's disk on a
+# multi-arch build. To run YOLO in a container, derive your own image:
+#   FROM ghcr.io/straits-ai/heldar-ai
+#   RUN pip install --no-cache-dir "ultralytics>=8.3" "lap>=0.5"
 FROM python:3.13-slim
 
 # Keep Python lean and logs unbuffered (so they stream out of the container).
@@ -10,8 +15,8 @@ ENV PYTHONUNBUFFERED=1 \
 WORKDIR /app
 
 # Install deps first for better layer caching.
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements-core.txt .
+RUN pip install --no-cache-dir -r requirements-core.txt
 
 COPY worker.py .
 

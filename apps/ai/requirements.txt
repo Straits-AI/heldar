@@ -1,9 +1,11 @@
-# Heldar reference AI worker.
+# Heldar reference AI worker — FULL local install (core + the optional model stack).
 #
-# Core runtime (always required) — intentionally light: HTTP + frame decode.
-requests>=2.32
-pillow>=10.4
-numpy>=1.26
+# Core runtime (always required) — intentionally light: HTTP + frame decode. It lives in
+# requirements-core.txt so the container image (apps/ai/Dockerfile) can install ONLY the core and
+# stay small + multi-arch buildable (torch/opencv are ~2 GB per architecture — enough to overflow a
+# CI runner's disk); worker.py imports the model stack lazily, so the core-only image runs every
+# motion-type task and cleanly reports model-type tasks as unavailable.
+-r requirements-core.txt
 
 # Stage 3 real model: Ultralytics YOLOv8 + ByteTrack (used by YoloAnalyzer for
 # the "detection"/"yolo" task types). This pulls in torch/torchvision/opencv,
