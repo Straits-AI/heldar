@@ -1,0 +1,80 @@
+name: Docker (open images)
+
+# Build + push the OPEN multi-arch images (kernel + generic apps only — NO proprietary vertical) to
+# the PUBLIC ghcr packages. Runs ONLY in the generated public repo `Straits-AI/heldar` — a no-op in the
+# private monorepo (which builds the full images via docker.yml). The images are OPEN by construction:
+# this workflow builds the public tree, from which prepare-open-repo.sh has already removed the vertical
+# crate and its manifest entries.
+#
+# NOTE (one-time, after the first successful push): flip the new ghcr packages
+# `heldar-core` / `heldar-web` / `heldar-ai` to Public visibility in the org's package settings so
+# `docker compose up` can pull them without auth.
+#
+# Triggers:
+#   * push a version tag   ->  build + push
+#   * manual dispatch      ->  build only, unless push=true
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      push:
+        description: "Push to ghcr (false = build only)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-open-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  images:
+    if: github.repository == 'Straits-AI/heldar'
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: heldar-core
+            context: .
+            dockerfile: Dockerfile
+          - name: heldar-web
+            context: ./apps/web
+            dockerfile: ./apps/web/Dockerfile
+          - name: heldar-ai
+            context: ./apps/ai
+            dockerfile: ./apps/ai/Dockerfile
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to ghcr
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/straits-ai/${{ matrix.name }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=raw,value=latest,enable=${{ github.event_name == 'push' }}
+            type=raw,value=dev,enable=${{ github.event_name == 'workflow_dispatch' }}
+      - name: Build + push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name == 'push' || inputs.push }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

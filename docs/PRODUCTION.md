@@ -9,6 +9,11 @@ Heldar ships two postures from the same binary:
   permissive LAN defaults are now a liability, so you harden by **configuration** — the code does not
   change behaviour, you opt in. Start from [`.env.production.example`](../.env.production.example).
 
+**Docker:** `deploy/compose.prod.yml` bundles the kernel knobs below (auth on, `Secure` cookie, strict
+mode, short sessions) on top of the private full image — `docker compose -f deploy/compose.yml -f
+deploy/compose.prod.yml up -d` after `docker login ghcr.io`. Put `HELDAR_SECRET_KEY` +
+`HELDAR_CORS_ORIGINS` in `.env`. A flashed DVR/appliance uses native systemd instead (not Docker).
+
 The kernel **fails loud** to stop you shipping an unsafe internet deployment. It treats the box as
 internet-exposed when **any** remote path is configured — the WebRTC rendezvous
 (`HELDAR_REMOTE_RENDEZVOUS_URL`), an overlay network (`HELDAR_OVERLAY_ENABLED`), or control-plane

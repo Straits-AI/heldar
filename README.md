@@ -23,6 +23,22 @@ and the operator/integrator guides in [`docs/`](./docs).
 
 ## Quickstart
 
+**Fastest — Docker (pull & run):**
+
+```bash
+curl -fsSL https://heldar.swmengappdev.workers.dev/install.sh | sh
+# already have the repo? just:  docker compose -f deploy/compose.yml up -d
+```
+
+Pulls the prebuilt **OPEN** images (kernel + generic apps) and starts MediaMTX + core + web — the
+dashboard is then at `http://localhost:8080`. Add the reference AI worker with `--profile ai`; update
+with `docker compose pull`. Production (private full image, auth, secrets, TLS) uses the overlay
+`docker compose -f deploy/compose.yml -f deploy/compose.prod.yml up -d` — see
+[`docs/PRODUCTION.md`](docs/PRODUCTION.md). For a flashed DVR/appliance, use the native-systemd image
+instead (`make appliance-image`, [`infra/systemd/`](infra/systemd/)).
+
+**Build from source:**
+
 **Prerequisites:** Rust (via `rustup`), FFmpeg + ffprobe on `PATH`, `curl`. Node.js for the
 dashboard; Python 3 for the AI worker.
 
