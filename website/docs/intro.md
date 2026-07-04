@@ -49,7 +49,12 @@ detections into domain events.
 
 - [Quickstart](./getting-started/quickstart.md) - build, run, add a camera, and
   run the AI worker.
-- [Deploy](./getting-started/deploy.md) - one binary, one URL.
+- [Deploy](./getting-started/deploy.md) - one binary, one URL (Docker one-liner,
+  native binary, or a flashed appliance).
+- [Remote Access](./getting-started/remote-access.md) - view a site from anywhere
+  in a browser, over WebRTC, even behind CGNAT.
+- [Using the Dashboard](./getting-started/dashboard.md) - a tour of the web UI:
+  live view, playback, zones, incidents, and the System page.
 - [Architecture](./concepts/architecture.md) - the kernel and its four public
   seams.
 - [Open-core](./concepts/open-core.md) - what is open versus proprietary.

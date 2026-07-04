@@ -13,7 +13,12 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Getting Started',
       collapsed: false,
-      items: ['getting-started/quickstart', 'getting-started/deploy'],
+      items: [
+        'getting-started/quickstart',
+        'getting-started/deploy',
+        'getting-started/remote-access',
+        'getting-started/dashboard',
+      ],
     },
     {
       type: 'category',
