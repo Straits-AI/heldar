@@ -29,6 +29,7 @@ const sidebars: SidebarsConfig = {
       type: 'category',
       label: 'Develop',
       items: [
+        'develop/module-system',
         'develop/build-a-module',
         'develop/sidecar-plugins',
         'develop/wasm-plugins',
