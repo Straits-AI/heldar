@@ -371,10 +371,11 @@ const RELAY_POLLERS: usize = 4;
 /// Cap on a relayed request/response body (defensive; Stage C is small JSON + the odd snapshot).
 const MAX_RELAY_BODY: usize = 8 * 1024 * 1024;
 
-/// What the box will replay for the remote dashboard (Stage B): the full REST + media surface, all HTTP
-/// methods. The kernel's own auth + RBAC (run on the forwarded per-user Bearer) is the real authorization
-/// gate; this allowlist is defense in depth — it pins the surface to `/api/v1/*` + `/media/*`, blocks
-/// path traversal/smuggling, and never relays the Worker-internal/metrics surfaces.
+/// What the box will replay for the remote dashboard (Stage B): the full REST + media surface plus the
+/// sidecar-plugin reverse-proxy (`/m/{id}/*`), all HTTP methods. The kernel's own auth + RBAC (run on the
+/// forwarded per-user Bearer) is the real authorization gate; this allowlist is defense in depth — it pins
+/// the surface to `/api/v1/*`, `/media/*`, and `/m/*`, blocks path traversal/smuggling, and never relays
+/// the Worker-internal/metrics surfaces.
 fn relay_allowed(method: &str, path: &str) -> bool {
     if !path.starts_with('/') || path.contains("..") || path.contains("//") || path.contains('@') {
         return false;
@@ -386,7 +387,10 @@ fn relay_allowed(method: &str, path: &str) -> bool {
     {
         return false;
     }
-    if !(path.starts_with("/api/v1/") || path.starts_with("/media/")) {
+    // `/m/{id}/*` is the kernel's reverse-proxy to a registered sidecar plugin; relaying it lets sidecar
+    // UIs load over the remote dashboard. The kernel forwards to the sidecar with the sidecar's own minted
+    // key (never the user's), and the traversal guards above still apply.
+    if !(path.starts_with("/api/v1/") || path.starts_with("/media/") || path.starts_with("/m/")) {
         return false;
     }
     matches!(method, "GET" | "HEAD" | "POST" | "PUT" | "PATCH" | "DELETE")
@@ -630,6 +634,10 @@ mod tests {
         assert!(relay_allowed("DELETE", "/api/v1/cameras/cam2"));
         assert!(relay_allowed("GET", "/media/recordings/x.mp4"));
         assert!(relay_allowed("POST", "/api/v1/auth/login"));
+        // sidecar-plugin reverse-proxy surface, so plugin UIs load over the remote dashboard
+        assert!(relay_allowed("GET", "/m/my-plugin/"));
+        assert!(relay_allowed("GET", "/m/my-plugin/assets/app.js"));
+        assert!(relay_allowed("POST", "/m/my-plugin/api/action"));
         // off-surface, Worker-internal, metrics, traversal, smuggling are refused
         assert!(!relay_allowed("GET", "/healthz"));
         assert!(!relay_allowed("GET", "/api/v1/relay/poll"));
@@ -637,6 +645,7 @@ mod tests {
         assert!(!relay_allowed("GET", "/metrics"));
         assert!(!relay_allowed("GET", "/api/v1/../secrets"));
         assert!(!relay_allowed("GET", "/api/v1//cameras"));
+        assert!(!relay_allowed("GET", "/m/p/../secrets"));
         assert!(!relay_allowed("TRACE", "/api/v1/cameras"));
     }
 
