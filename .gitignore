@@ -19,6 +19,7 @@ __pycache__/
 # Node / web
 node_modules/
 apps/web/dist/
+apps/web/dist-modules/
 apps/web/.vite/
 
 # Runtime data (recordings, clips, snapshots, db) — never commit footage
@@ -54,3 +55,4 @@ infra/mediamtx/*.tar.gz
 
 # Playwright MCP scratch (screenshots/console logs)
 .playwright-mcp/
+.superpowers/

@@ -19,4 +19,31 @@ export default defineConfig({
       "/healthz": { target: CORE, changeOrigin: true },
     },
   },
+  build: {
+    rollupOptions: {
+      output: {
+        // Pin React into stable named chunks so the import map in index.html can reference
+        // /assets/react.js and /assets/react-router.js at known, unhashed paths.
+        // Vite 8 / Rolldown requires manualChunks to be a function (not an object).
+        manualChunks(id) {
+          if (id.includes("node_modules/react-router")) return "react-router";
+          if (
+            id.includes("node_modules/react/") ||
+            id.includes("node_modules/react-dom/") ||
+            id.includes("node_modules/scheduler/")
+          )
+            return "react";
+        },
+        // Give the pinned chunks stable, hash-free names so the import map can reference them
+        // without knowing the build hash. Only the react / react-router chunks lose the hash;
+        // all others keep normal hashed names for cache-busting.
+        chunkFileNames(chunkInfo) {
+          if (chunkInfo.name === "react" || chunkInfo.name === "react-router") {
+            return `assets/${chunkInfo.name}.js`;
+          }
+          return "assets/[name]-[hash].js";
+        },
+      },
+    },
+  },
 });

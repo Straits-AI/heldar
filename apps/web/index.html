@@ -19,6 +19,32 @@
     />
 
     <title>Heldar Core</title>
+
+    <!--
+      Runtime import map: resolves bare react / react-dom / react-router-dom specifiers for
+      dynamically-loaded module bundles so every module shares one React instance.
+
+      FALLBACK path (Vite 8 / Rolldown blocker): Rolldown wraps all chunks in an internal module
+      system — the react.js chunk does NOT export { useState, useEffect, … } as standard named ES
+      exports, so pointing the import map directly at the shell chunk fails. Instead we point each
+      specifier at a thin shim (public/modules/*-shim.js) that re-exports from window globals set
+      by main.tsx before any module bundle loads.
+
+      The map is injected at runtime so the base path (/ on appliance, /app/ on remote dashboard)
+      is handled correctly without a rebuild.
+    -->
+    <script>
+      const b = document.querySelector('base')?.getAttribute('href') || '/';
+      const map = { imports: {
+        "react":              b + "modules/react-shim.js",
+        "react-dom":          b + "modules/react-dom-shim.js",
+        "react-dom/client":   b + "modules/react-dom-client-shim.js",
+        "react/jsx-runtime":  b + "modules/react-jsx-runtime-shim.js",
+        "react-router-dom":   b + "modules/react-router-dom-shim.js"
+      }};
+      const s = document.createElement('script'); s.type = 'importmap'; s.textContent = JSON.stringify(map);
+      document.currentScript.after(s);
+    </script>
   </head>
   <body>
     <div id="root"></div>

@@ -1,5 +1,7 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Link, Route, Routes } from "react-router-dom";
+// POC: runtime-loaded module bundle (spike, Task 1). Removed in Task 2.
+const PocModule = lazy(() => import(/* @vite-ignore */ `${import.meta.env.BASE_URL}modules/search/index.js`));
 import { AppShell } from "./components/AppShell";
 import Login from "./components/Login";
 import { Button, Spinner } from "./components/ui";
@@ -64,6 +66,9 @@ function AppRoutes() {
         <Route path="/plugins" element={<Plugins />} />
         <Route path="/system" element={<System />} />
         <Route path="/cameras/:id" element={<CameraDetail />} />
+
+        {/* POC: runtime module loader (Task 1 spike — removed in Task 2) */}
+        <Route path="/poc-module" element={<PocModule />} />
 
         {/* Modules — dynamic from GET /api/v1/modules. Compiled modules render their bundled page;
             imported sidecars (mount=iframe) render a micro-frontend proxied at /m/{id}/. */}
@@ -135,12 +140,29 @@ function AuthGate({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   return (
-    <AuthGate>
-      <ModulesProvider>
-        <AppShell>
-          <AppRoutes />
-        </AppShell>
-      </ModulesProvider>
-    </AuthGate>
+    // POC: /poc-module is intercepted before AuthGate so the spike renders without a live backend.
+    // This wrapper is removed in Task 2.
+    <Routes>
+      <Route
+        path="/poc-module"
+        element={
+          <Suspense fallback={<RouteLoading />}>
+            <PocModule />
+          </Suspense>
+        }
+      />
+      <Route
+        path="*"
+        element={
+          <AuthGate>
+            <ModulesProvider>
+              <AppShell>
+                <AppRoutes />
+              </AppShell>
+            </ModulesProvider>
+          </AuthGate>
+        }
+      />
+    </Routes>
   );
 }
