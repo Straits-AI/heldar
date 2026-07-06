@@ -5,10 +5,14 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
-import { api, ApiError, setAuthToken } from "../lib/api";
-import { usePoll } from "../lib/usePoll";
-import { Login } from "../components/Login";
+// A runtime module imports the shell surface from @heldar/shell (shared at runtime via the import map),
+// never from ../lib or ../components — so this file has no dependency on the shell's internal layout.
 import {
+  api,
+  ApiError,
+  setAuthToken,
+  usePoll,
+  Login,
   Button,
   EmptyState,
   Field,
@@ -20,8 +24,10 @@ import {
   Stat,
   StatusPill,
   cx,
-} from "../components/ui";
-import { formatClock, localInputToIso, timeAgo } from "../lib/format";
+  formatClock,
+  localInputToIso,
+  timeAgo,
+} from "@heldar/shell";
 import type {
   ApiKeyCreated,
   AuthStatus,
@@ -37,7 +43,7 @@ import type {
   WatchKind,
   WatchlistCreate,
   WorkflowStatus,
-} from "../lib/types";
+} from "@heldar/shell";
 
 /* ====================================================================== */
 /* Palettes — map domain enums onto the SOC signal colors.                */

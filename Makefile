@@ -44,6 +44,8 @@ web-dev:             ## Run the dashboard dev server (proxies to :8000)
 module-bundles:      ## Build the runtime module UI bundles + embed each in its crate (run after editing a module UI)
 	cd apps/web && MODULE_ID=search MODULE_ENTRY=src/modules/search/entry.tsx npx vite build -c vite.module.config.ts
 	cp apps/web/dist-modules/search/index.js crates/heldar-search/ui/search.js
+	cd apps/web && MODULE_ID=entry MODULE_ENTRY=src/modules/entry/entry.tsx npx vite build -c vite.module.config.ts
+	cp apps/web/dist-modules/entry/index.js crates/heldar-entry/ui/entry.js
 
 clean:               ## Remove Rust build output
 	cargo clean

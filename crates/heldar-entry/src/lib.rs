@@ -30,4 +30,6 @@ pub fn manifest() -> heldar_kernel::modules::ModuleManifest {
         "ANPR authorization, vehicle/visitor registry, guard confirm/reject, entry reports.",
         vec![NavEntry::new("/entry", "Entry", "entry")],
     )
+    // The UI is a runtime-loaded bundle this crate serves (see routes.rs), not compiled into the shell.
+    .with_runtime_ui("/api/v1/modules/entry/ui/index.js")
 }

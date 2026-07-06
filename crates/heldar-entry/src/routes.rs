@@ -5,6 +5,7 @@
 
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Duration, Utc};
@@ -24,6 +25,7 @@ use heldar_kernel::state::AppState;
 
 pub fn router() -> Router<AppState> {
     Router::new()
+        .route("/api/v1/modules/entry/ui/index.js", get(serve_ui))
         .route("/api/v1/vehicles", get(list_vehicles).post(create_vehicle))
         .route(
             "/api/v1/vehicles/{id}",
@@ -50,6 +52,26 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/reports/entry-log", get(report_entry_log))
         .route("/api/v1/reports/exceptions", get(report_exceptions))
         .route("/api/v1/audit", get(list_audit))
+}
+
+/// The built entry module UI bundle, embedded at compile time (regenerate with `make module-bundles`
+/// after editing `apps/web/src/modules/entry`). It imports React + the shell SDK (`@heldar/shell`) as
+/// bare specifiers the dashboard's import map resolves — so this crate ships only the module's own code.
+const ENTRY_UI_BUNDLE: &str = include_str!("../ui/entry.js");
+
+/// Serve the runtime-loaded entry module UI (the dashboard imports it via `ModuleHost`). Any
+/// authenticated viewer may load it — it is inert frontend code; the data it fetches is separately
+/// gated by the kernel's RBAC.
+async fn serve_ui(principal: Principal) -> AppResult<axum::response::Response> {
+    principal.require(principal.can_view(), "load the entry module UI")?;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/javascript; charset=utf-8",
+        )],
+        ENTRY_UI_BUNDLE,
+    )
+        .into_response())
 }
 
 const OWNER_TYPES: [&str; 5] = ["student", "staff", "resident", "contractor", "visitor"];

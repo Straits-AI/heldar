@@ -15,7 +15,8 @@ import type { ComponentType, ReactNode } from "react";
 import { api } from "./lib/api";
 import { usePoll } from "./lib/usePoll";
 import type { ModuleManifest } from "./lib/types";
-import { Entry } from "./pages/Entry";
+// entry's page is runtime-loaded (heldar-entry serves its bundle at /api/v1/modules/entry/ui) — it is
+// no longer compiled into the shell. Its nav glyph (MODULE_ICONS below) stays for the rail.
 import { Movement } from "./pages/Movement";
 import { Bakery } from "./pages/Bakery"; // @module:bakery
 // search's page is runtime-loaded (heldar-search serves its bundle at /api/v1/modules/search/ui) — it is
@@ -137,7 +138,6 @@ export function moduleIcon(key: string): (p: IconProps) => ReactNode {
  * are iframe-mounted via `ModuleFrame` (the kernel reverse-proxies /m/{id}/ to the sidecar).
  */
 export const MODULE_PAGES: Record<string, ComponentType> = {
-  entry: Entry,
   movement: Movement,
   bakery: Bakery, // @module:bakery
 };
