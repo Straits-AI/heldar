@@ -1,6 +1,6 @@
 # Heldar — developer commands (Cargo workspace).
 
-.PHONY: build release check fmt test kernel setup-mediamtx dev synth validate web-install web-dev clean
+.PHONY: build release check fmt test kernel setup-mediamtx dev synth validate web-install web-dev module-bundles clean
 
 build:               ## Build the workspace (debug)
 	cargo build --workspace
@@ -40,6 +40,10 @@ web-install:         ## Install dashboard dependencies
 
 web-dev:             ## Run the dashboard dev server (proxies to :8000)
 	cd apps/web && npm run dev
+
+module-bundles:      ## Build the runtime module UI bundles + embed each in its crate (run after editing a module UI)
+	cd apps/web && MODULE_ID=search MODULE_ENTRY=src/modules/search/entry.tsx npx vite build -c vite.module.config.ts
+	cp apps/web/dist-modules/search/index.js crates/heldar-search/ui/search.js
 
 clean:               ## Remove Rust build output
 	cargo clean

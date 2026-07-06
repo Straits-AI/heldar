@@ -5,7 +5,8 @@
 use std::sync::Arc;
 
 use axum::extract::{Extension, State};
-use axum::routing::post;
+use axum::response::IntoResponse;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
 use serde::Deserialize;
@@ -24,7 +25,28 @@ pub fn router(cfg: Arc<SearchConfig>) -> Router<AppState> {
         .route("/api/v1/search/events", post(search_events))
         .route("/api/v1/search/nl", post(search_nl))
         .route("/api/v1/search/plan", post(plan_only))
+        .route("/api/v1/modules/search/ui/index.js", get(serve_ui))
         .layer(Extension(cfg))
+}
+
+/// The built search module UI bundle, embedded at compile time (regenerate with `make module-bundles`
+/// after editing `apps/web/src/modules/search`). It imports React + the shell SDK (`@heldar/shell`) as
+/// bare specifiers the dashboard's import map resolves — so this crate ships only the module's own code.
+const SEARCH_UI_BUNDLE: &str = include_str!("../ui/search.js");
+
+/// Serve the runtime-loaded search module UI (the dashboard imports it via `ModuleHost`). Any
+/// authenticated viewer may load it — it is inert frontend code; the data it fetches is separately
+/// gated by the kernel's RBAC.
+async fn serve_ui(principal: Principal) -> AppResult<axum::response::Response> {
+    principal.require(principal.can_view(), "load the search module UI")?;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/javascript; charset=utf-8",
+        )],
+        SEARCH_UI_BUNDLE,
+    )
+        .into_response())
 }
 
 async fn cameras(pool: &sqlx::SqlitePool) -> Vec<(String, String)> {

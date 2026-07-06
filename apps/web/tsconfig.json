@@ -19,7 +19,11 @@
     "noFallthroughCasesInSwitch": true,
     "skipLibCheck": true,
 
-    "types": ["vite/client"]
+    "types": ["vite/client"],
+
+    "paths": {
+      "@heldar/shell": ["./src/sdk.ts"]
+    }
   },
   "include": ["src", "vite.config.ts"]
 }

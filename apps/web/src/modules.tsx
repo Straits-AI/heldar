@@ -17,8 +17,9 @@ import { usePoll } from "./lib/usePoll";
 import type { ModuleManifest } from "./lib/types";
 import { Entry } from "./pages/Entry";
 import { Movement } from "./pages/Movement";
-import { Search } from "./pages/Search";
 import { Bakery } from "./pages/Bakery"; // @module:bakery
+// search's page is runtime-loaded (heldar-search serves its bundle at /api/v1/modules/search/ui) — it is
+// no longer compiled into the shell. Its nav glyph (MODULE_ICONS below) stays for the rail.
 
 type IconProps = { className?: string };
 
@@ -138,7 +139,6 @@ export function moduleIcon(key: string): (p: IconProps) => ReactNode {
 export const MODULE_PAGES: Record<string, ComponentType> = {
   entry: Entry,
   movement: Movement,
-  search: Search,
   bakery: Bakery, // @module:bakery
 };
 

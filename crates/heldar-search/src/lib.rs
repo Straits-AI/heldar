@@ -40,4 +40,6 @@ pub fn manifest() -> heldar_kernel::modules::ModuleManifest {
         "Natural-language + structured query over stored event facts, with a traceable proof layer.",
         vec![NavEntry::new("/search", "Search", "search")],
     )
+    // The UI is a runtime-loaded bundle this crate serves (see routes.rs), not compiled into the shell.
+    .with_runtime_ui("/api/v1/modules/search/ui/index.js")
 }
