@@ -53,9 +53,13 @@ pub struct ModuleManifest {
     pub description: String,
     /// Nav entries this module contributes (usually one).
     pub nav: Vec<NavEntry>,
-    /// How the dashboard renders the module's content. Compiled modules use a `bundled` page; runtime
-    /// sidecar plugins are `iframe`-mounted at `/m/{id}/` (the kernel reverse-proxies to the sidecar).
+    /// How the dashboard renders the module's content: a `bundled` page (compiled), a `runtime` UI
+    /// bundle imported from `ui_url`, an `iframe` to `/m/{id}/` (sidecar reverse-proxy), or `headless`.
     pub mount: MountKind,
+    /// For `mount: runtime`, the URL of the module's UI bundle — an ES module the dashboard imports at
+    /// runtime and mounts (native React, shared with the shell). `None` for other mounts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ui_url: Option<String>,
     /// Reachability of a sidecar's base URL (`unknown`/`healthy`/`unreachable`); `None` for compiled.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub health: Option<String>,
@@ -67,6 +71,9 @@ pub struct ModuleManifest {
 pub enum MountKind {
     /// A page component shipped in the dashboard bundle, keyed by module id (compiled modules).
     Bundled,
+    /// A UI bundle imported at runtime from the manifest's `ui_url` (native React, shared with the
+    /// shell). The module serves its own bundle (in-process modules via their `Router` seam).
+    Runtime,
     /// An iframe to `/m/{id}/`, which the kernel reverse-proxies to the sidecar (imported modules).
     Iframe,
     /// No UI — a headless compute plugin (e.g. a sandboxed Wasm DetectionConsumer). Contributes no nav
@@ -94,8 +101,17 @@ impl ModuleManifest {
             description: description.to_string(),
             nav,
             mount: MountKind::Bundled,
+            ui_url: None,
             health: None,
         }
+    }
+
+    /// Mark this compiled module as runtime-UI: the dashboard imports its bundle from `ui_url` at
+    /// runtime (native React, shared with the shell) instead of a page baked into the dashboard bundle.
+    pub fn with_runtime_ui(mut self, ui_url: &str) -> Self {
+        self.mount = MountKind::Runtime;
+        self.ui_url = Some(ui_url.to_string());
+        self
     }
 }
 
@@ -174,6 +190,7 @@ impl ModuleRegistration {
             description: self.description.clone(),
             nav: self.nav.0.clone(),
             mount: MountKind::Iframe,
+            ui_url: None,
             health: Some(self.health.clone()),
         }
     }
@@ -227,4 +244,35 @@ pub struct ModuleRegistered {
     pub api_key: String,
     /// The HMAC-SHA256 secret (returned ONCE) the kernel signs the sidecar's webhook deliveries with.
     pub webhook_secret: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_manifest_serializes_mount_and_ui_url() {
+        let m = ModuleManifest::new(
+            "search",
+            "Search",
+            "0.1.0",
+            "Heldar",
+            ModuleKind::Core,
+            "desc",
+            vec![NavEntry::new("/search", "Search", "search")],
+        )
+        .with_runtime_ui("/api/v1/modules/search/ui/index.js");
+        assert_eq!(m.mount, MountKind::Runtime);
+        let j = serde_json::to_value(&m).unwrap();
+        assert_eq!(j["mount"], "runtime");
+        assert_eq!(j["ui_url"], "/api/v1/modules/search/ui/index.js");
+    }
+
+    #[test]
+    fn bundled_manifest_omits_ui_url() {
+        let m = ModuleManifest::new("x", "X", "0.1.0", "Heldar", ModuleKind::Core, "d", vec![]);
+        assert_eq!(m.mount, MountKind::Bundled);
+        let j = serde_json::to_value(&m).unwrap();
+        assert!(j.get("ui_url").is_none(), "ui_url is skipped when None");
+    }
 }

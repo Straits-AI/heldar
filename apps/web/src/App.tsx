@@ -73,6 +73,8 @@ function AppRoutes() {
             const Page = MODULE_PAGES[m.id];
             const element = Page ? (
               <Page />
+            ) : m.mount === "runtime" && m.ui_url ? (
+              <ModuleHost url={m.ui_url} title={m.name} />
             ) : m.mount === "iframe" ? (
               <ModuleFrame id={m.id} title={m.name} />
             ) : null;

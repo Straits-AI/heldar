@@ -412,9 +412,10 @@ export interface EventTypeInfo {
 /** Provenance of a loaded module; drives store shelving + nav badging. Matches the kernel enum. */
 export type ModuleKind = "core" | "proprietary" | "community" | "imported";
 
-/** How the dashboard renders a module's content: a bundled page, an iframe to /m/{id}/, or headless
- *  (no UI — a compute plugin like a sandboxed Wasm DetectionConsumer). */
-export type ModuleMount = "bundled" | "iframe" | "headless";
+/** How the dashboard renders a module's content: a bundled page, a `runtime` UI bundle imported from
+ *  `ui_url`, an iframe to /m/{id}/, or headless (no UI — a compute plugin like a sandboxed Wasm
+ *  DetectionConsumer). */
+export type ModuleMount = "bundled" | "runtime" | "iframe" | "headless";
 
 /** A nav destination a module contributes. `icon` is a key the dashboard maps to a glyph. */
 export interface ModuleNavEntry {
@@ -433,6 +434,8 @@ export interface ModuleManifest {
   description: string;
   nav: ModuleNavEntry[];
   mount: ModuleMount;
+  /** For `mount: "runtime"`, the URL of the module's UI bundle the dashboard imports + mounts. */
+  ui_url?: string;
   /** Reachability of a sidecar plugin (`unknown`/`healthy`/`unreachable`); absent for compiled. */
   health?: string;
 }

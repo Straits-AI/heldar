@@ -500,6 +500,7 @@ fn load_one(
             .unwrap_or_else(|| "Sandboxed Wasm detection plugin.".into()),
         nav: Vec::<NavEntry>::new(), // headless: no route
         mount: MountKind::Headless,
+        ui_url: None,
         health: Some("loaded".into()),
     };
     let consumer = Arc::new(WasmConsumer {
