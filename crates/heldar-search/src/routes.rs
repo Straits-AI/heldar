@@ -40,10 +40,15 @@ const SEARCH_UI_BUNDLE: &str = include_str!("../ui/search.js");
 async fn serve_ui(principal: Principal) -> AppResult<axum::response::Response> {
     principal.require(principal.can_view(), "load the search module UI")?;
     Ok((
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/javascript; charset=utf-8",
-        )],
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/javascript; charset=utf-8",
+            ),
+            // Stable URL; the bundle changes only on redeploy — revalidate so a kernel rebuild never
+            // serves a stale module UI from the browser's heuristic cache.
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+        ],
         SEARCH_UI_BUNDLE,
     )
         .into_response())

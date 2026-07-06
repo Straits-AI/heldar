@@ -13,6 +13,11 @@
 // --- API client + auth ---
 export { api, ApiError, setAuthToken } from "./lib/api";
 
+// --- API primitives (for a module to call its OWN backend endpoints) ---
+// `request` is the shell's authenticated fetch; `qs` builds a query string. A module that owns its own
+// routes (e.g. a proprietary vertical) uses these instead of adding methods to the shell's `api`.
+export { request, qs } from "./lib/api";
+
 // --- data-fetching hook ---
 export { usePoll } from "./lib/usePoll";
 

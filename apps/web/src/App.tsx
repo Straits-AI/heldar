@@ -138,27 +138,12 @@ function AuthGate({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   return (
-    // Smoke route: renders a runtime-loaded module via ModuleHost before AuthGate, so the loader can be
-    // exercised without a live backend. Removed in Task 4 once real modules route through the manifest.
-    <Routes>
-      <Route
-        path="/poc-module"
-        element={
-          <ModuleHost url={`${import.meta.env.BASE_URL}modules/search/index.js`} title="search" />
-        }
-      />
-      <Route
-        path="*"
-        element={
-          <AuthGate>
-            <ModulesProvider>
-              <AppShell>
-                <AppRoutes />
-              </AppShell>
-            </ModulesProvider>
-          </AuthGate>
-        }
-      />
-    </Routes>
+    <AuthGate>
+      <ModulesProvider>
+        <AppShell>
+          <AppRoutes />
+        </AppShell>
+      </ModulesProvider>
+    </AuthGate>
   );
 }

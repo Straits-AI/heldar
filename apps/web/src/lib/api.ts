@@ -138,7 +138,9 @@ export function getAuthToken(): string | null {
   return authToken;
 }
 
-function qs(params: object = {}): string {
+// Exported as an `@heldar/shell` SDK primitive so a runtime-loaded module can build its own query
+// strings the same way the shell does (used together with `request` for a module's own endpoints).
+export function qs(params: object = {}): string {
   const sp = new URLSearchParams();
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== null && value !== "") {
@@ -151,7 +153,10 @@ function qs(params: object = {}): string {
 
 const REQUEST_TIMEOUT_MS = 30000;
 
-async function request<T>(
+// Exported as an `@heldar/shell` SDK primitive: the shell's authenticated fetch (session cookie / bearer
+// token, timeout, uniform ApiError). A runtime-loaded module uses this to call its own backend endpoints
+// without re-implementing auth/error handling — see the module SDK barrel in `src/sdk.ts`.
+export async function request<T>(
   path: string,
   init?: RequestInit,
   timeoutMs: number = REQUEST_TIMEOUT_MS,

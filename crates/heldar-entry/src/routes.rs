@@ -65,10 +65,15 @@ const ENTRY_UI_BUNDLE: &str = include_str!("../ui/entry.js");
 async fn serve_ui(principal: Principal) -> AppResult<axum::response::Response> {
     principal.require(principal.can_view(), "load the entry module UI")?;
     Ok((
-        [(
-            axum::http::header::CONTENT_TYPE,
-            "text/javascript; charset=utf-8",
-        )],
+        [
+            (
+                axum::http::header::CONTENT_TYPE,
+                "text/javascript; charset=utf-8",
+            ),
+            // Stable URL; the bundle changes only on redeploy — revalidate so a kernel rebuild never
+            // serves a stale module UI from the browser's heuristic cache.
+            (axum::http::header::CACHE_CONTROL, "no-cache"),
+        ],
         ENTRY_UI_BUNDLE,
     )
         .into_response())

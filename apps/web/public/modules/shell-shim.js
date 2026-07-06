@@ -16,6 +16,9 @@ export const {
   api,
   ApiError,
   setAuthToken,
+  // API primitives (a module calls its own endpoints with these)
+  request,
+  qs,
   // data-fetching hook
   usePoll,
   // design system (ui kit)
