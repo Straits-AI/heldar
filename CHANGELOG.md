@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Runtime-loaded module frontends**: every dashboard module UI (entry / movement / search + the
+  proprietary bakery vertical) now loads at **runtime** as a native-React ES bundle served by its own
+  crate at `/api/v1/modules/{id}/ui` and mounted by `ModuleHost`, instead of being compiled into the
+  dashboard. Modules share the shell's React + a shell SDK (`@heldar/shell` — api client, auth, ui kit,
+  formatters) via an import map, so bundles stay tiny (~10–50 KB). This makes the dashboard SPA
+  byte-identical for the open and full builds: the **`heldar-web-full` image is removed** (one
+  `heldar-web` serves both), and the open-repo generator's per-file frontend stripping collapses to
+  deleting a single self-contained `apps/web/src/modules/<vertical>` directory. Module UIs ride the
+  existing remote-access relay (`/api/v1/*`) unchanged. See `website/docs/develop/module-system.md`.
+
 ## [0.2.0] — 2026-06-24
 
 ### Added

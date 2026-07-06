@@ -47,7 +47,7 @@ Because the UI is mounted at `/m/{id}/`, make its asset and API requests **relat
 
 ## The manifest
 
-You register by presenting a manifest. The same shape describes a compiled module (which returns it
+You register by presenting a manifest. The same shape describes an in-process module (which returns it
 from code); a sidecar sends it to `POST /api/v1/modules`:
 
 ```json
