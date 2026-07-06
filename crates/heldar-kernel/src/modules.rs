@@ -69,10 +69,14 @@ pub struct ModuleManifest {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum MountKind {
-    /// A page component shipped in the dashboard bundle, keyed by module id (compiled modules).
+    /// Legacy: a page component compiled into the dashboard bundle, keyed by module id. UNUSED — the
+    /// dashboard no longer bundles any module page, so no shipped module reports this and the dashboard
+    /// renders no route for it. Retained only as the `new()` default until a manifest calls
+    /// `with_runtime_ui` / `with_iframe`. Prefer `Runtime`.
     Bundled,
     /// A UI bundle imported at runtime from the manifest's `ui_url` (native React, shared with the
-    /// shell). The module serves its own bundle (in-process modules via their `Router` seam).
+    /// shell). The module serves its own bundle (in-process modules via their `Router` seam). This is
+    /// how every first-party in-process module (entry/movement/search/verticals) ships its UI.
     Runtime,
     /// An iframe to `/m/{id}/`, which the kernel reverse-proxies to the sidecar (imported modules).
     Iframe,
@@ -82,7 +86,8 @@ pub enum MountKind {
 }
 
 impl ModuleManifest {
-    /// Convenience builder for a single-nav-entry compiled (bundled) module.
+    /// Convenience builder for a single-nav-entry in-process module. Defaults to `mount: Bundled` with
+    /// no UI; call `with_runtime_ui` to point the dashboard at the module's runtime-loaded bundle.
     pub fn new(
         id: &str,
         name: &str,
@@ -106,7 +111,7 @@ impl ModuleManifest {
         }
     }
 
-    /// Mark this compiled module as runtime-UI: the dashboard imports its bundle from `ui_url` at
+    /// Mark this in-process module as runtime-UI: the dashboard imports its bundle from `ui_url` at
     /// runtime (native React, shared with the shell) instead of a page baked into the dashboard bundle.
     pub fn with_runtime_ui(mut self, ui_url: &str) -> Self {
         self.mount = MountKind::Runtime;

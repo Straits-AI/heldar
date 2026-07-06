@@ -19,15 +19,15 @@ to build one**, and you pick by how deeply you integrate and what language you w
   Process/container-isolated, least-privilege. This is the path for third-party and self-made plugins,
   and what the **Plugins** page installs.
 
-The rest of this page is the compiled-in path. An app adds tables, routes, and perception logic
+The rest of this page is the in-process path. An app adds tables, routes, and perception logic
 without the kernel ever knowing it exists. You depend on `heldar-kernel`; a composing binary links
-you in.
+you in. (Its dashboard page is still shipped separately as a runtime-loaded bundle — see step 6.)
 
 Throughout, the worked reference is the open access-control app,
 [`heldar-entry`](https://github.com/Straits-AI/heldar/tree/main/crates/heldar-entry).
-It is a real, compiling example of every step below. A compiled-in app also declares a
+It is a real, compiling example of every step below. An in-process app also declares a
 `manifest()` so it shows up in the dashboard nav (see the sidecar guide's "Manifest" section — the
-shape is the same; compiled modules just return it from code instead of registering it at runtime).
+shape is the same; in-process modules just return it from code instead of registering it at runtime).
 
 ## The mental model
 
@@ -242,6 +242,28 @@ That is the whole integration. The consumer vector is fanned out to by the kerne
 ingest path without naming any consumer; the router merge is invisible to the
 kernel router; the schema is your own; and `spawn_supervised` gives a panicking
 loop a 5-second respawn.
+
+## 6. Ship a dashboard UI (runtime-loaded)
+
+Your module's dashboard page is **not** compiled into the SPA — it is a runtime-loaded ES bundle your
+crate serves, so the dashboard image stays module-agnostic (one `heldar-web` for open and full). See
+[Module System → Runtime-loaded module UIs](./module-system.md#runtime-loaded-module-uis) for the why.
+The steps, mirroring `heldar-entry`/`search`:
+
+1. **Author the page** under `apps/web/src/modules/{id}/` (`page.tsx` + a `entry.tsx` that
+   `export default`s it). Import React normally, and import the shell surface — api client, auth, ui kit,
+   formatters — from **`@heldar/shell`** (never from `../lib/*`); it resolves to the shell's shared
+   instances at runtime. A module that owns backend routes calls them with `request` + `qs` from the SDK.
+2. **Point the manifest at it:** add `.with_runtime_ui("/api/v1/modules/{id}/ui/index.js")` to your
+   `manifest()` builder chain.
+3. **Serve the built bundle** from your crate's router: `const UI: &str = include_str!("../ui/{id}.js");`
+   and a viewer-gated `serve_ui` handler on `GET /api/v1/modules/{id}/ui/index.js` (copy it from
+   `heldar-search/src/routes.rs`, including the `Cache-Control: no-cache` header).
+4. **Build + embed** with `make module-bundles` (Vite builds the library bundle treating `react` +
+   `@heldar/shell` as externals, then copies it into your crate's `ui/`). Re-run it after any UI edit.
+
+Headless modules (no page) simply skip this — omit `ui_url` and the store lists them with a compute
+treatment and no Open affordance.
 
 ## The kernel has no dependency on your crate
 
