@@ -2,26 +2,18 @@
 //
 // Phase A of the plugin platform: the dashboard renders its module nav + routes from
 // GET /api/v1/modules (the manifests the Core binary links) instead of a hardcoded list, so only
-// LOADED modules appear. This file holds the two build-time halves a compiled module still needs in
-// the SPA bundle — its page component and its nav glyph — keyed by the manifest `id` / `icon`. A
-// later phase replaces these static pages with mounted micro-frontends; unknown icon keys already
-// fall back to a generic glyph so imported plugins render today.
-//
-// Proprietary modules (e.g. bakery) are tagged `@module:bakery` so the open-repo prep script strips
-// their page import + registry entries; the open build simply never reports that module.
+// LOADED modules appear. This file holds the nav glyphs keyed by the manifest `icon` field. All
+// module page components are now runtime-loaded (each crate serves its own bundle); MODULE_PAGES is
+// empty and kept as a placeholder until a later task removes it. Unknown icon keys fall back to
+// GenericModuleIcon so imported plugins render today.
 
 import { createContext, useContext } from "react";
 import type { ComponentType, ReactNode } from "react";
 import { api } from "./lib/api";
 import { usePoll } from "./lib/usePoll";
 import type { ModuleManifest } from "./lib/types";
-// entry's page is runtime-loaded (heldar-entry serves its bundle at /api/v1/modules/entry/ui) — it is
-// no longer compiled into the shell. Its nav glyph (MODULE_ICONS below) stays for the rail.
-// movement's page is runtime-loaded (heldar-movement serves its bundle at /api/v1/modules/movement/ui) — it is
-// no longer compiled into the shell. Its nav glyph (MODULE_ICONS below) stays for the rail.
-import { Bakery } from "./pages/Bakery"; // @module:bakery
-// search's page is runtime-loaded (heldar-search serves its bundle at /api/v1/modules/search/ui) — it is
-// no longer compiled into the shell. Its nav glyph (MODULE_ICONS below) stays for the rail.
+// All module pages are runtime-loaded — each crate serves its own bundle at
+// /api/v1/modules/{id}/ui. Nav glyphs (MODULE_ICONS below) stay for the rail.
 
 type IconProps = { className?: string };
 
@@ -82,26 +74,6 @@ function SearchIcon({ className }: IconProps) {
   );
 }
 
-function BakeryIcon({ className }: IconProps) {
-  // @module:bakery
-  return (
-    <svg
-      viewBox="0 0 20 20"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.6"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      className={className}
-    >
-      <path d="M3 17V8.5a1.5 1.5 0 0 1 1.5-1.5h11A1.5 1.5 0 0 1 17 8.5V17" />
-      <path d="M2 17h16" />
-      <path d="M6.5 7V5.5M10 7V5M13.5 7V5.5" />
-      <path d="M6 11h8M6 13.5h8" opacity="0.85" />
-    </svg>
-  );
-}
-
 /** Fallback glyph for modules with no bundled icon (e.g. third-party/imported plugins). */
 function GenericModuleIcon({ className }: IconProps) {
   return (
@@ -126,7 +98,6 @@ const MODULE_ICONS: Record<string, (p: IconProps) => ReactNode> = {
   entry: EntryIcon,
   movement: MovementIcon,
   search: SearchIcon,
-  bakery: BakeryIcon, // @module:bakery
 };
 
 /** Resolve a manifest nav `icon` key to a glyph; unknown keys get the generic module glyph. */
@@ -135,12 +106,11 @@ export function moduleIcon(key: string): (p: IconProps) => ReactNode {
 }
 
 /**
- * Page component for each compiled (bundled) module `id`. Runtime sidecar plugins are NOT here — they
- * are iframe-mounted via `ModuleFrame` (the kernel reverse-proxies /m/{id}/ to the sidecar).
+ * Page components for compiled (bundled) modules. All modules are now runtime-loaded — this object
+ * is intentionally empty and kept as a placeholder until a later task removes it entirely.
+ * Runtime sidecar plugins are iframe-mounted via `ModuleFrame` (the kernel reverse-proxies /m/{id}/).
  */
-export const MODULE_PAGES: Record<string, ComponentType> = {
-  bakery: Bakery, // @module:bakery
-};
+export const MODULE_PAGES: Record<string, ComponentType> = {};
 
 /**
  * Micro-frontend mount for an imported sidecar plugin: a full-bleed iframe to `/m/{id}/`, which the

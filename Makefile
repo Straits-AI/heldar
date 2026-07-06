@@ -48,6 +48,8 @@ module-bundles:      ## Build the runtime module UI bundles + embed each in its 
 	cp apps/web/dist-modules/entry/index.js crates/heldar-entry/ui/entry.js
 	cd apps/web && MODULE_ID=movement MODULE_ENTRY=src/modules/movement/entry.tsx npx vite build -c vite.module.config.ts
 	cp apps/web/dist-modules/movement/index.js crates/heldar-movement/ui/movement.js
+	cd apps/web && MODULE_ID=bakery MODULE_ENTRY=src/modules/bakery/entry.tsx npx vite build -c vite.module.config.ts
+	cp apps/web/dist-modules/bakery/index.js crates/heldar-bakery/ui/bakery.js
 
 clean:               ## Remove Rust build output
 	cargo clean

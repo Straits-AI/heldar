@@ -1018,46 +1018,6 @@ export interface ExceptionReport {
   events: EntryEvent[];
 }
 
-// ---- Stage 5: BakerySense (anonymous retail analytics) ----
-
-export interface BakeryObservation {
-  id: string;
-  site_id?: string | null;
-  camera_id: string;
-  zone_id: string;
-  zone_kind?: string | null;
-  metric: string;
-  bucket_start: string;
-  value: number;
-  sample_count: number;
-  updated_at: string;
-}
-
-export interface BakeryInsight {
-  metric: string;
-  observation: string;
-  value?: number;
-  evidence: Record<string, unknown>;
-  interpretation: string;
-  suggested_experiment: string;
-  confidence: "low" | "medium" | "high";
-  uncertainty: string;
-}
-
-export interface BakeryReport {
-  id: string;
-  site_id?: string | null;
-  report_date: string;
-  scope: string;
-  insights: BakeryInsight[];
-  generated_at: string;
-}
-
-export interface BakerySummary {
-  date: string;
-  metrics: Record<string, { sum?: number; avg?: number; samples: number }>;
-}
-
 // ---- Stage 6: Movement intelligence (ReID candidates, trails, breaches) ----
 
 export interface CameraLink {
