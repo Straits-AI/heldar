@@ -2,18 +2,19 @@
 //
 // Phase A of the plugin platform: the dashboard renders its module nav + routes from
 // GET /api/v1/modules (the manifests the Core binary links) instead of a hardcoded list, so only
-// LOADED modules appear. This file holds the nav glyphs keyed by the manifest `icon` field. All
-// module page components are now runtime-loaded (each crate serves its own bundle); MODULE_PAGES is
-// empty and kept as a placeholder until a later task removes it. Unknown icon keys fall back to
-// GenericModuleIcon so imported plugins render today.
+// LOADED modules appear. Module page components are NOT compiled into the shell — every module UI is
+// loaded at runtime (each crate serves its own bundle at /api/v1/modules/{id}/ui, mounted by
+// `ModuleHost`; sidecars are iframe-mounted via `ModuleFrame`). This file holds only the nav glyphs
+// keyed by the manifest `icon` field; unknown keys fall back to GenericModuleIcon.
 
 import { createContext, useContext } from "react";
-import type { ComponentType, ReactNode } from "react";
+import type { ReactNode } from "react";
 import { api } from "./lib/api";
 import { usePoll } from "./lib/usePoll";
 import type { ModuleManifest } from "./lib/types";
 // All module pages are runtime-loaded — each crate serves its own bundle at
-// /api/v1/modules/{id}/ui. Nav glyphs (MODULE_ICONS below) stay for the rail.
+// /api/v1/modules/{id}/ui, mounted by `ModuleHost` from the manifest `ui_url`. Nav glyphs
+// (MODULE_ICONS below) stay in the shell for the rail; unknown keys fall back to a generic glyph.
 
 type IconProps = { className?: string };
 
@@ -104,13 +105,6 @@ const MODULE_ICONS: Record<string, (p: IconProps) => ReactNode> = {
 export function moduleIcon(key: string): (p: IconProps) => ReactNode {
   return MODULE_ICONS[key] ?? GenericModuleIcon;
 }
-
-/**
- * Page components for compiled (bundled) modules. All modules are now runtime-loaded — this object
- * is intentionally empty and kept as a placeholder until a later task removes it entirely.
- * Runtime sidecar plugins are iframe-mounted via `ModuleFrame` (the kernel reverse-proxies /m/{id}/).
- */
-export const MODULE_PAGES: Record<string, ComponentType> = {};
 
 /**
  * Micro-frontend mount for an imported sidecar plugin: a full-bleed iframe to `/m/{id}/`, which the

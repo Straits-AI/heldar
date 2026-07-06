@@ -3,10 +3,12 @@
 #   docker login ghcr.io                                        # private full images
 #   docker compose -f compose.yml -f compose.prod.yml up -d
 #
-# Swaps in the FULL (private) images (kernel + generic apps + proprietary verticals) and turns on the
-# hardened auth posture. Put HELDAR_SECRET_KEY (openssl rand -base64 32) and HELDAR_CORS_ORIGINS in .env.
-# If this box is reachable from the internet, also set the remote-access vars (see docs/PRODUCTION.md);
-# the kernel then refuses to boot with auth off.
+# Swaps in the FULL (private) `heldar-core-full` image (kernel + generic apps + proprietary verticals)
+# and turns on the hardened auth posture. The dashboard is NOT overridden here — every module UI is
+# runtime-loaded, so the `heldar-web` image from compose.yml is byte-identical for open + full and serves
+# the proprietary module UIs (the `heldar-core-full` kernel ships their bundles). Put HELDAR_SECRET_KEY
+# (openssl rand -base64 32) and HELDAR_CORS_ORIGINS in .env. If this box is reachable from the internet,
+# also set the remote-access vars (see docs/PRODUCTION.md); the kernel then refuses to boot with auth off.
 name: heldar
 
 services:
@@ -19,6 +21,3 @@ services:
       HELDAR_SESSION_TTL_HOURS: "4"
       HELDAR_SESSION_IDLE_TIMEOUT_MIN: "30"
       # HELDAR_SECRET_KEY + HELDAR_CORS_ORIGINS come from .env (secrets never live in a committed file).
-
-  web:
-    image: ghcr.io/straits-ai/heldar-web-full:${HELDAR_VERSION:-latest}

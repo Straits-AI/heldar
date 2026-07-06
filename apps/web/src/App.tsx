@@ -5,7 +5,7 @@ import Login from "./components/Login";
 import { Button, Spinner } from "./components/ui";
 import { api } from "./lib/api";
 import type { Principal } from "./lib/types";
-import { MODULE_PAGES, ModuleFrame, ModulesProvider, useModules } from "./modules";
+import { ModuleFrame, ModulesProvider, useModules } from "./modules";
 import { ModuleHost } from "./modules/ModuleHost";
 
 // Route-level code-splitting: each page is its own chunk, loaded on demand instead of
@@ -66,18 +66,17 @@ function AppRoutes() {
         <Route path="/system" element={<System />} />
         <Route path="/cameras/:id" element={<CameraDetail />} />
 
-        {/* Modules — dynamic from GET /api/v1/modules. Compiled modules render their bundled page;
-            imported sidecars (mount=iframe) render a micro-frontend proxied at /m/{id}/. */}
+        {/* Modules — dynamic from GET /api/v1/modules. In-process modules load their UI at runtime
+            (mount=runtime → ModuleHost imports the bundle from `ui_url`); imported sidecars
+            (mount=iframe) render a micro-frontend proxied at /m/{id}/. */}
         {modules.flatMap((m) =>
           m.nav.map((n) => {
-            const Page = MODULE_PAGES[m.id];
-            const element = Page ? (
-              <Page />
-            ) : m.mount === "runtime" && m.ui_url ? (
-              <ModuleHost url={m.ui_url} title={m.name} />
-            ) : m.mount === "iframe" ? (
-              <ModuleFrame id={m.id} title={m.name} />
-            ) : null;
+            const element =
+              m.mount === "runtime" && m.ui_url ? (
+                <ModuleHost url={m.ui_url} title={m.name} />
+              ) : m.mount === "iframe" ? (
+                <ModuleFrame id={m.id} title={m.name} />
+              ) : null;
             return element ? <Route key={n.path} path={n.path} element={element} /> : null;
           }),
         )}

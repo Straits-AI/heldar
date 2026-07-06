@@ -82,7 +82,7 @@ const SIGNAL_LABELS: Record<string, string> = {
 type NameFor = (id?: string | null) => string;
 
 /* ====================================================================== */
-/* Small shared bits (mirrors Entry.tsx / Bakery.tsx).                    */
+/* Small shared bits (mirrors the entry module's page).                   */
 /* ====================================================================== */
 
 function Th({ children, className }: { children?: ReactNode; className?: string }) {
