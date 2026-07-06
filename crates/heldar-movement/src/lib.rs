@@ -39,4 +39,6 @@ pub fn manifest() -> heldar_kernel::modules::ModuleManifest {
         "Cross-camera ReID candidates, journey trails, and red-zone breach alerts (audited).",
         vec![NavEntry::new("/movement", "Movement", "movement")],
     )
+    // The UI is a runtime-loaded bundle this crate serves (see routes.rs), not compiled into the shell.
+    .with_runtime_ui("/api/v1/modules/movement/ui/index.js")
 }

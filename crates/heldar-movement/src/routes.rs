@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use axum::extract::{Extension, Path, Query, State};
 use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::Utc;
@@ -23,6 +24,7 @@ use crate::models::{BreachAlert, CameraLink, CameraLinkCreate, MovementCandidate
 
 pub fn router(cfg: Arc<MovementConfig>) -> Router<AppState> {
     Router::new()
+        .route("/api/v1/modules/movement/ui/index.js", get(serve_ui))
         .route("/api/v1/movement/run", post(trigger_run))
         .route("/api/v1/movement/links", get(list_links).post(create_link))
         .route(
@@ -47,6 +49,26 @@ pub fn router(cfg: Arc<MovementConfig>) -> Router<AppState> {
         .route("/api/v1/movement/search/plate/{plate}", get(search_plate))
         .route("/api/v1/movement/search/person", get(search_person))
         .layer(Extension(cfg))
+}
+
+/// The built movement module UI bundle, embedded at compile time (regenerate with `make module-bundles`
+/// after editing `apps/web/src/modules/movement`). It imports React + the shell SDK (`@heldar/shell`) as
+/// bare specifiers the dashboard's import map resolves — so this crate ships only the module's own code.
+const MOVEMENT_UI_BUNDLE: &str = include_str!("../ui/movement.js");
+
+/// Serve the runtime-loaded movement module UI (the dashboard imports it via `ModuleHost`). Any
+/// authenticated viewer may load it — it is inert frontend code; the data it fetches is separately
+/// gated by the kernel's RBAC.
+async fn serve_ui(principal: Principal) -> AppResult<axum::response::Response> {
+    principal.require(principal.can_view(), "load the movement module UI")?;
+    Ok((
+        [(
+            axum::http::header::CONTENT_TYPE,
+            "text/javascript; charset=utf-8",
+        )],
+        MOVEMENT_UI_BUNDLE,
+    )
+        .into_response())
 }
 
 /// Run the ReID proposer + breach sweep once (ops / testing); both also run on a timer.
