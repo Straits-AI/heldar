@@ -1,13 +1,12 @@
 import { lazy, Suspense, useEffect, useState } from "react";
 import { Link, Route, Routes } from "react-router-dom";
-// POC: runtime-loaded module bundle (spike, Task 1). Removed in Task 2.
-const PocModule = lazy(() => import(/* @vite-ignore */ `${import.meta.env.BASE_URL}modules/search/index.js`));
 import { AppShell } from "./components/AppShell";
 import Login from "./components/Login";
 import { Button, Spinner } from "./components/ui";
 import { api } from "./lib/api";
 import type { Principal } from "./lib/types";
 import { MODULE_PAGES, ModuleFrame, ModulesProvider, useModules } from "./modules";
+import { ModuleHost } from "./modules/ModuleHost";
 
 // Route-level code-splitting: each page is its own chunk, loaded on demand instead of
 // being bundled into the entry chunk. Pages are mapped via their named export because
@@ -66,9 +65,6 @@ function AppRoutes() {
         <Route path="/plugins" element={<Plugins />} />
         <Route path="/system" element={<System />} />
         <Route path="/cameras/:id" element={<CameraDetail />} />
-
-        {/* POC: runtime module loader (Task 1 spike — removed in Task 2) */}
-        <Route path="/poc-module" element={<PocModule />} />
 
         {/* Modules — dynamic from GET /api/v1/modules. Compiled modules render their bundled page;
             imported sidecars (mount=iframe) render a micro-frontend proxied at /m/{id}/. */}
@@ -140,15 +136,13 @@ function AuthGate({ children }: { children: React.ReactNode }) {
 
 export default function App() {
   return (
-    // POC: /poc-module is intercepted before AuthGate so the spike renders without a live backend.
-    // This wrapper is removed in Task 2.
+    // Smoke route: renders a runtime-loaded module via ModuleHost before AuthGate, so the loader can be
+    // exercised without a live backend. Removed in Task 4 once real modules route through the manifest.
     <Routes>
       <Route
         path="/poc-module"
         element={
-          <Suspense fallback={<RouteLoading />}>
-            <PocModule />
-          </Suspense>
+          <ModuleHost url={`${import.meta.env.BASE_URL}modules/search/index.js`} title="search" />
         }
       />
       <Route
