@@ -40,7 +40,8 @@
         "react-dom":          b + "modules/react-dom-shim.js",
         "react-dom/client":   b + "modules/react-dom-client-shim.js",
         "react/jsx-runtime":  b + "modules/react-jsx-runtime-shim.js",
-        "react-router-dom":   b + "modules/react-router-dom-shim.js"
+        "react-router-dom":   b + "modules/react-router-dom-shim.js",
+        "@heldar/shell":      b + "modules/shell-shim.js"
       }};
       const s = document.createElement('script'); s.type = 'importmap'; s.textContent = JSON.stringify(map);
       document.currentScript.after(s);
