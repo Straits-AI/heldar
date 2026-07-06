@@ -16,8 +16,8 @@ loaded. A catalog comes from two kinds of source:
   proprietary and community shelves are populated, without baking anything into the binary.
 
 Installing a sidecar entry funnels through the [sidecar register flow](./sidecar-plugins.md); the
-catalog only does discovery. Compiled modules show as *Included* / *Contact* — they are build-time, not
-runtime-installable.
+catalog only does discovery. In-process modules show as *Included* / *Contact* — they are kernel-linked
+at build time, not runtime-installable.
 
 ## Catalog format (`heldar-catalog/v1`)
 

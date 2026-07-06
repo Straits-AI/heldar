@@ -195,9 +195,11 @@ impl CatalogService {
         modules: &[ModuleManifest],
         registrations: &[ModuleRegistration],
     ) -> RegistryView {
+        // In-process (kernel-linked) modules — the ones this binary actually links, so a `builtin`
+        // catalog entry resolves to `Included` rather than `NotInBuild`. See `is_in_build`.
         let compiled_ids: HashSet<&str> = modules
             .iter()
-            .filter(|m| m.mount == MountKind::Bundled)
+            .filter(|m| is_in_build(m.mount))
             .map(|m| m.id.as_str())
             .collect();
         let installed: std::collections::HashMap<&str, &str> = registrations
@@ -337,6 +339,16 @@ impl CatalogService {
     }
 }
 
+/// Whether an in-process module manifest counts as "linked into this build" — so a matching `builtin`
+/// catalog entry shows `Included` (not `NotInBuild`) in the store. Covers every in-process UI module:
+/// the current `Runtime` kind (UI loaded at runtime from `ui_url`) and the vestigial legacy `Bundled`
+/// default. Excludes `Iframe` (sidecars are *installed*, not linked) and `Headless` (surfaced separately
+/// as `Loaded`). NOTE: before runtime-loaded UIs this keyed on `Bundled` alone; every first-party module
+/// now ships `Runtime`, so `Bundled`-only would mark them all `NotInBuild` — see the test below.
+fn is_in_build(mount: MountKind) -> bool {
+    matches!(mount, MountKind::Bundled | MountKind::Runtime)
+}
+
 /// Compute an entry's shelf + state + render it.
 fn make_view(
     entry: CatalogEntry,
@@ -454,10 +466,34 @@ pub async fn run(svc: std::sync::Arc<CatalogService>) {
 
 #[cfg(test)]
 mod tests {
-    use super::validate_registry_url;
+    use super::{is_in_build, validate_registry_url};
+    use crate::modules::MountKind;
 
     fn rejected(url: &str) -> bool {
         validate_registry_url(url, false).is_err()
+    }
+
+    #[test]
+    fn in_build_covers_runtime_and_bundled_not_sidecar_or_headless() {
+        // Regression: every first-party in-process module now ships mount: Runtime (its UI is
+        // runtime-loaded). If the store's in-build check keyed on Bundled alone, all of them would show
+        // as "not in this build". Runtime AND the legacy Bundled default must count as linked.
+        assert!(
+            is_in_build(MountKind::Runtime),
+            "runtime-UI modules are linked in"
+        );
+        assert!(
+            is_in_build(MountKind::Bundled),
+            "legacy default still counts"
+        );
+        assert!(
+            !is_in_build(MountKind::Iframe),
+            "sidecars are installed, not linked"
+        );
+        assert!(
+            !is_in_build(MountKind::Headless),
+            "headless is surfaced as Loaded"
+        );
     }
 
     #[test]

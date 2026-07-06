@@ -95,13 +95,19 @@ function GenericModuleIcon({ className }: IconProps) {
   );
 }
 
+// Bespoke nav glyphs for the built-in OPEN modules, keyed by the manifest `icon`. A proprietary module
+// (e.g. bakery) is intentionally NOT listed here: its glyph must not live in the shell, or the string
+// would leak into the OPEN dashboard source (the open-repo gate greps apps/web/src for it). Such modules
+// fall back to the generic glyph today — same as an imported third-party plugin. TODO: let a module ship
+// its own bespoke nav glyph via a manifest-carried inline SVG so bakery/third-party plugins aren't
+// limited to the generic fallback.
 const MODULE_ICONS: Record<string, (p: IconProps) => ReactNode> = {
   entry: EntryIcon,
   movement: MovementIcon,
   search: SearchIcon,
 };
 
-/** Resolve a manifest nav `icon` key to a glyph; unknown keys get the generic module glyph. */
+/** Resolve a manifest nav `icon` key to a glyph; unknown/proprietary keys get the generic module glyph. */
 export function moduleIcon(key: string): (p: IconProps) => ReactNode {
   return MODULE_ICONS[key] ?? GenericModuleIcon;
 }
