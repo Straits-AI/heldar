@@ -62,7 +62,12 @@ const config: Config = {
   // useful metadata like html lang.
   i18n: {
     defaultLocale: 'en',
-    locales: ['en'],
+    locales: ['en', 'zh-Hans', 'es'],
+    localeConfigs: {
+      en: {label: 'English'},
+      'zh-Hans': {label: '中文（简体）', htmlLang: 'zh-CN'},
+      es: {label: 'Español', htmlLang: 'es'},
+    },
   },
 
   presets: [
@@ -101,6 +106,10 @@ const config: Config = {
           sidebarId: 'docsSidebar',
           position: 'left',
           label: 'Docs',
+        },
+        {
+          type: 'localeDropdown',
+          position: 'right',
         },
         {
           href: 'https://github.com/Straits-AI/heldar',
