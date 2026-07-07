@@ -1,0 +1,281 @@
+/**
+ * Heldar — global theme.
+ *
+ * Mirrors the dashboard's "operations console / SOC" brand so the landing page,
+ * docs, and app read as ONE product: near-black surfaces, signal-amber accent
+ * (Heimdall's gold), and the Archivo / Hanken Grotesk / JetBrains Mono type
+ * system. Dark is the primary, polished look (default); a sane light theme is
+ * kept for users who force it. Fonts are loaded via headTags in the config.
+ */
+
+/* ============================================================
+   Typography (both themes)
+   ============================================================ */
+:root {
+  --ifm-font-family-base: 'Hanken Grotesk', ui-sans-serif, system-ui, -apple-system,
+    'Segoe UI', sans-serif;
+  --ifm-heading-font-family: 'Archivo', var(--ifm-font-family-base);
+  --ifm-font-family-monospace: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo,
+    Consolas, monospace;
+
+  --ifm-heading-font-weight: 700;
+  --ifm-font-weight-bold: 700;
+  --ifm-code-font-size: 92%;
+  --ifm-line-height-base: 1.65;
+
+  /* Heldar brand tokens (raw, for components that want exact values). */
+  --heldar-canvas: #09090b;
+  --heldar-panel: #121316;
+  --heldar-panel-2: #16181c;
+  --heldar-raised: #1c1f24;
+  --heldar-line: #26282e;
+  --heldar-fg: #f4f4f5;
+  --heldar-fg-secondary: #a1a1aa;
+  --heldar-fg-muted: #71717a;
+  --heldar-accent: #f59e0b;
+  --heldar-accent-soft: #fbbf24;
+  --heldar-accent-deep: #b45309;
+  --heldar-accent-ink: #1a1206;
+  --heldar-rec: #10b981;
+  --heldar-danger: #ef4444;
+}
+
+/* ============================================================
+   Light theme — sane, but not the primary look.
+   Anchored on the deep amber so links/buttons stay readable on white.
+   ============================================================ */
+:root {
+  --ifm-color-primary: #b45309;
+  --ifm-color-primary-dark: #a24b08;
+  --ifm-color-primary-darker: #994708;
+  --ifm-color-primary-darkest: #7e3a06;
+  --ifm-color-primary-light: #c65c0a;
+  --ifm-color-primary-lighter: #cf600a;
+  --ifm-color-primary-lightest: #e06a0c;
+
+  --docusaurus-highlighted-code-line-bg: rgba(245, 158, 11, 0.12);
+}
+
+/* ============================================================
+   Dark theme — the primary, polished Heldar look.
+   ============================================================ */
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  /* Signal-amber primary ramp, built around #f59e0b. */
+  --ifm-color-primary: #f59e0b;
+  --ifm-color-primary-dark: #dd8e09;
+  --ifm-color-primary-darker: #d18709;
+  --ifm-color-primary-darkest: #a96d07;
+  --ifm-color-primary-light: #f6a824;
+  --ifm-color-primary-lighter: #f8b133;
+  --ifm-color-primary-lightest: #fbbf24;
+
+  /* Surfaces — near-black canvas up to raised panels. */
+  --ifm-background-color: #09090b;
+  --ifm-background-surface-color: #121316;
+
+  /* Text. */
+  --ifm-color-content: #f4f4f5;
+  --ifm-color-content-secondary: #a1a1aa;
+  --ifm-heading-color: #f4f4f5;
+  --ifm-font-color-base: #f4f4f5;
+
+  /* Emphasis scale remapped to the SOC surface/ink tokens so docs prose,
+     borders, and the landing page's color-mix surfaces all stay on-brand. */
+  --ifm-color-emphasis-0: #09090b;
+  --ifm-color-emphasis-100: #121316;
+  --ifm-color-emphasis-200: #1c1f24;
+  --ifm-color-emphasis-300: #26282e;
+  --ifm-color-emphasis-400: #3f3f46;
+  --ifm-color-emphasis-500: #52525b;
+  --ifm-color-emphasis-600: #71717a;
+  --ifm-color-emphasis-700: #a1a1aa;
+  --ifm-color-emphasis-800: #d4d4d8;
+  --ifm-color-emphasis-900: #f4f4f5;
+
+  /* Chrome: navbar, footer, cards, sidebar, dividers. */
+  --ifm-navbar-background-color: rgba(9, 9, 11, 0.72);
+  --ifm-navbar-link-color: #a1a1aa;
+  --ifm-navbar-link-hover-color: #f59e0b;
+  --ifm-footer-background-color: #0b0b0e;
+  --ifm-footer-color: #a1a1aa;
+  --ifm-footer-link-color: #a1a1aa;
+  --ifm-footer-title-color: #f4f4f5;
+  --ifm-card-background-color: #121316;
+
+  --ifm-toc-border-color: #26282e;
+  --ifm-table-border-color: #26282e;
+  --ifm-hr-background-color: #26282e;
+  --ifm-color-gray-700: #a1a1aa;
+
+  /* Sidebar / menu. */
+  --ifm-menu-color: #a1a1aa;
+  --ifm-menu-color-active: #f59e0b;
+  --ifm-menu-color-background-active: rgba(245, 158, 11, 0.1);
+  --ifm-menu-color-background-hover: rgba(245, 158, 11, 0.07);
+
+  /* Code. */
+  --ifm-code-background: #16181c;
+  --prism-background-color: #16181c;
+  --docusaurus-highlighted-code-line-bg: rgba(245, 158, 11, 0.16);
+
+  /* Blockquotes. */
+  --ifm-blockquote-color: #a1a1aa;
+  --ifm-blockquote-border-color: #f59e0b;
+}
+
+/* ============================================================
+   Headings — Archivo, tight tracking, slightly heavier.
+   ============================================================ */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+.navbar__title,
+.footer__title {
+  font-family: var(--ifm-heading-font-family);
+  letter-spacing: -0.01em;
+}
+
+/* ============================================================
+   Navbar — translucent near-black with a blurred backdrop and a
+   single hairline bottom border. No heavy drop shadow.
+   ============================================================ */
+[data-theme='dark'] .navbar {
+  -webkit-backdrop-filter: saturate(140%) blur(12px);
+  backdrop-filter: saturate(140%) blur(12px);
+  border-bottom: 1px solid var(--heldar-line);
+  box-shadow: none;
+}
+
+.navbar__title {
+  font-weight: 800;
+  letter-spacing: 0.02em;
+}
+
+[data-theme='dark'] .navbar__link:hover,
+[data-theme='dark'] .navbar__link--active {
+  color: var(--ifm-color-primary);
+}
+
+/* GitHub icon link in the navbar. */
+.navbar__items--right > .navbar__item.navbar__link[href*='github']::before,
+.header-github-link:hover {
+  opacity: 0.85;
+}
+
+/* ============================================================
+   Sidebar / TOC — quiet, hairline divider, amber active state.
+   ============================================================ */
+[data-theme='dark'] .menu {
+  background: var(--ifm-background-color);
+}
+
+[data-theme='dark'] .menu__link--active:not(.menu__link--sublist) {
+  color: var(--ifm-color-primary);
+  background: var(--ifm-menu-color-background-active);
+}
+
+[data-theme='dark'] .theme-doc-sidebar-container {
+  border-right: 1px solid var(--heldar-line);
+}
+
+[data-theme='dark'] .table-of-contents__link--active,
+[data-theme='dark'] .table-of-contents__link:hover {
+  color: var(--ifm-color-primary);
+}
+
+/* ============================================================
+   Links — amber, with a subtle hover.
+   ============================================================ */
+[data-theme='dark'] a {
+  color: var(--ifm-color-primary);
+}
+[data-theme='dark'] a:hover {
+  color: var(--ifm-color-primary-lightest);
+}
+
+/* ============================================================
+   Buttons — amber fill carries dark "ink" text for contrast,
+   matching the dashboard's .btn-primary.
+   ============================================================ */
+.button.button--primary {
+  --ifm-button-color: var(--heldar-accent-ink);
+  color: var(--heldar-accent-ink);
+  font-weight: 600;
+  border: none;
+}
+.button.button--primary:hover {
+  background-color: var(--ifm-color-primary-lightest);
+  color: var(--heldar-accent-ink);
+}
+
+[data-theme='dark'] .button.button--secondary {
+  background-color: var(--heldar-raised);
+  border: 1px solid var(--heldar-line);
+  color: var(--heldar-fg);
+}
+[data-theme='dark'] .button.button--secondary:hover {
+  background-color: #23262c;
+  border-color: #34373e;
+  color: var(--heldar-fg);
+}
+
+/* ============================================================
+   Code — dark panels with a hairline border.
+   ============================================================ */
+[data-theme='dark'] code {
+  background-color: var(--ifm-code-background);
+  border: 1px solid var(--heldar-line);
+  border-radius: 5px;
+}
+[data-theme='dark'] .theme-code-block,
+[data-theme='dark'] pre[class*='language-'],
+[data-theme='dark'] div[class*='codeBlockContainer'] {
+  border: 1px solid var(--heldar-line);
+}
+[data-theme='dark'] .theme-code-block code,
+[data-theme='dark'] pre code {
+  background: transparent;
+  border: none;
+}
+
+/* Cards / admonitions pick up the panel surface. */
+[data-theme='dark'] .card {
+  border: 1px solid var(--heldar-line);
+}
+
+/* ============================================================
+   Selection + scrollbars — mirror the dashboard.
+   ============================================================ */
+[data-theme='dark'] ::selection {
+  background: rgba(245, 158, 11, 0.28);
+  color: #fff;
+}
+
+[data-theme='dark'] * {
+  scrollbar-width: thin;
+  scrollbar-color: #2f323a transparent;
+}
+[data-theme='dark'] *::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+[data-theme='dark'] *::-webkit-scrollbar-thumb {
+  background: #2f323a;
+  border: 2px solid transparent;
+  background-clip: padding-box;
+  border-radius: 6px;
+}
+[data-theme='dark'] *::-webkit-scrollbar-thumb:hover {
+  background: #3a3e47;
+  background-clip: padding-box;
+}
+
+/* Amber focus rings for keyboard users. */
+[data-theme='dark'] :focus-visible {
+  outline-color: rgba(245, 158, 11, 0.85);
+}

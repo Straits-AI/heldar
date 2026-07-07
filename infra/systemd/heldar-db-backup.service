@@ -1,0 +1,22 @@
+[Unit]
+Description=Heldar — online snapshot of the metadata DB (SQLite VACUUM INTO)
+Documentation=https://github.com/Straits-AI/heldar
+After=heldar-core.service
+
+[Service]
+Type=oneshot
+User=heldar
+Group=heldar
+# Same store the server uses, so backup-db reads the live DB. Override via /etc/heldar/heldar.env.
+Environment=HELDAR_DATA_DIR=/var/lib/heldar
+Environment=HELDAR_DATABASE_URL=sqlite:///var/lib/heldar/heldar.db
+EnvironmentFile=-/etc/heldar/heldar.env
+# Timestamp each snapshot (backup-db refuses to overwrite) and keep the 14 newest. `%%` escapes `%`.
+ExecStart=/bin/sh -c 'd=/var/lib/heldar/backups; mkdir -p "$d"; /usr/local/bin/heldar-core backup-db "$d/heldar-$(date +%%Y%%m%%d-%%H%%M%%S).db" && ls -1t "$d"/heldar-*.db | tail -n +15 | xargs -r rm -f'
+
+# ---- Hardening (mirrors heldar-core.service; needs write access to the data dir) ----
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/heldar

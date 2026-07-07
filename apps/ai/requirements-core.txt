@@ -1,0 +1,7 @@
+# Heldar reference AI worker — core runtime (always required, intentionally light: HTTP + frame
+# decode). This is what the container image installs; the heavy optional model stacks (YOLO, OCR)
+# live in requirements.txt, which includes this file. worker.py imports them lazily, so a core-only
+# install runs every motion-type task and cleanly reports model-type tasks as unavailable.
+requests>=2.32
+pillow>=10.4
+numpy>=1.26

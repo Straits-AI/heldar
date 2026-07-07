@@ -1,0 +1,37 @@
+{
+  "format": "heldar-catalog/v1",
+  "name": "Example Registry",
+  "issued_at": "2026-06-16T00:00:00Z",
+  "entries": [
+    {
+      "id": "weather-overlay",
+      "name": "Weather Overlay",
+      "publisher": "Acme Plugins",
+      "kind": "community",
+      "summary": "A demo third-party sidecar that overlays local weather on the wall.",
+      "description": "Illustrates a community catalog entry: a sidecar plugin published by a third party and listed in a signed remote registry. Install registers it at the base URL you run it on.",
+      "icon": "module",
+      "homepage": "https://example.com/weather-overlay",
+      "categories": ["overlay", "example"],
+      "install": {
+        "type": "sidecar",
+        "image": "ghcr.io/acme/weather-overlay:1.0.0",
+        "default_base_url": "http://127.0.0.1:9300",
+        "subscribes": ["*"],
+        "role": "viewer"
+      }
+    },
+    {
+      "id": "advanced-analytics",
+      "name": "Advanced Analytics",
+      "publisher": "Acme Plugins",
+      "kind": "proprietary",
+      "summary": "A demo commercial add-on (compiled module) shown as a Contact CTA.",
+      "description": "Illustrates a proprietary catalog entry: a compiled module that is not runtime-installable. The store shows availability + a contact link rather than an install button.",
+      "icon": "module",
+      "homepage": "https://example.com/advanced-analytics",
+      "categories": ["analytics"],
+      "install": { "type": "builtin", "availability": "commercial", "contact": "sales@example.com" }
+    }
+  ]
+}

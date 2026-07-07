@@ -1,0 +1,405 @@
+/**
+ * Heldar marketing landing page — scoped CSS module.
+ *
+ * Elevated to the SOC brand: a near-black hero with a faint hairline grid, a
+ * soft radial amber glow, and a single spectral Bifrost accent reserved for the
+ * hero. Cards use panel surfaces with hairline borders and a subtle hover lift.
+ * Colors derive from the Infima theme tokens (set in custom.css) so the page
+ * stays cohesive in both dark (default) and light.
+ */
+
+/* ---------- Shared ---------- */
+
+.eyebrow {
+  display: inline-block;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ifm-color-primary);
+  margin-bottom: 1.1rem;
+}
+
+.microLabel {
+  display: inline-block;
+  font-family: var(--ifm-font-family-monospace);
+  font-size: 0.72rem;
+  font-weight: 500;
+  letter-spacing: 0.1em;
+  color: var(--ifm-color-primary);
+  margin-bottom: 0.85rem;
+}
+
+.section {
+  padding: 5.5rem 0;
+}
+
+.sectionAlt {
+  background: var(--ifm-color-emphasis-100);
+  border-top: 1px solid var(--ifm-color-emphasis-300);
+  border-bottom: 1px solid var(--ifm-color-emphasis-300);
+}
+
+.sectionHead {
+  max-width: 720px;
+  margin: 0 auto 3rem;
+  text-align: center;
+}
+
+.sectionTitle {
+  font-size: clamp(1.7rem, 1rem + 2.2vw, 2.5rem);
+  letter-spacing: -0.02em;
+  margin-bottom: 0.75rem;
+}
+
+.sectionLede {
+  font-size: 1.1rem;
+  line-height: 1.6;
+  color: var(--ifm-color-content-secondary);
+  margin: 0;
+}
+
+/* ---------- Hero ---------- */
+
+.hero {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  padding: 7rem 0 6rem;
+  text-align: center;
+  background: var(--ifm-background-color);
+  border-bottom: 1px solid var(--ifm-color-emphasis-300);
+}
+
+/* Faint hairline grid — the control-room substrate. Fades out toward the
+   edges so the type stays the focus. */
+.heroGrid {
+  position: absolute;
+  inset: 0;
+  z-index: -2;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 46px 46px;
+  -webkit-mask-image: radial-gradient(120% 90% at 50% 35%, #000 30%, transparent 78%);
+  mask-image: radial-gradient(120% 90% at 50% 35%, #000 30%, transparent 78%);
+}
+
+/* Soft radial amber glow behind the wordmark. */
+.heroGlow {
+  position: absolute;
+  top: -38%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(960px, 130%);
+  height: 760px;
+  z-index: -1;
+  pointer-events: none;
+  background: radial-gradient(
+      closest-side,
+      rgba(245, 158, 11, 0.22),
+      transparent 72%
+    ),
+    radial-gradient(closest-side, rgba(251, 191, 36, 0.12), transparent 70%);
+  background-position: 42% 32%, 64% 46%;
+  background-repeat: no-repeat;
+  background-size: 62% 82%, 52% 70%;
+  filter: blur(14px);
+}
+
+/* Single spectral Bifrost rule along the hero's bottom edge — Heimdall's
+   bridge, reserved for the hero only. */
+.heroBifrost {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 1px;
+  z-index: 1;
+  pointer-events: none;
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(245, 158, 11, 0.55) 18%,
+    rgba(167, 139, 250, 0.45) 62%,
+    rgba(45, 212, 191, 0.4) 88%,
+    transparent 100%
+  );
+}
+
+.heroInner {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: 880px;
+}
+
+.heroTitle {
+  font-size: clamp(3.25rem, 1.8rem + 6vw, 5.5rem);
+  font-weight: 800;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  margin: 0 0 0.85rem;
+  color: var(--ifm-heading-color);
+  text-shadow: 0 0 36px rgba(245, 158, 11, 0.22);
+}
+
+.heroTagline {
+  font-size: clamp(1.25rem, 1rem + 1vw, 1.7rem);
+  font-weight: 600;
+  color: var(--ifm-heading-color);
+  margin: 0 0 1.25rem;
+}
+
+.heroSubtitle {
+  font-size: 1.15rem;
+  line-height: 1.65;
+  color: var(--ifm-color-content-secondary);
+  max-width: 640px;
+  margin: 0 0 2.4rem;
+}
+
+.heroCtas {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  justify-content: center;
+}
+
+.ctaPrimary {
+  font-weight: 600;
+  box-shadow: 0 0 0 1px rgba(245, 158, 11, 0.45), 0 0 22px -4px rgba(245, 158, 11, 0.4);
+}
+
+.ctaSecondary {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-weight: 600;
+}
+
+.ctaIcon {
+  width: 1.15rem;
+  height: 1.15rem;
+}
+
+/* ---------- Value pillars ---------- */
+
+.pillarGrid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1.25rem;
+}
+
+.pillar {
+  padding: 1.75rem 1.5rem;
+  border: 1px solid var(--ifm-color-emphasis-300);
+  border-radius: 14px;
+  background: var(--ifm-background-surface-color);
+  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.pillar:hover {
+  border-color: rgba(245, 158, 11, 0.45);
+  transform: translateY(-3px);
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.05) inset,
+    0 16px 36px -22px rgba(0, 0, 0, 0.85);
+}
+
+.pillarIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 48px;
+  height: 48px;
+  border-radius: 12px;
+  margin-bottom: 1.1rem;
+  color: var(--ifm-color-primary);
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.22);
+}
+
+.pillarIcon svg {
+  width: 26px;
+  height: 26px;
+}
+
+.pillarTitle {
+  font-size: 1.2rem;
+  letter-spacing: -0.01em;
+  margin-bottom: 0.5rem;
+}
+
+.pillarText {
+  font-size: 0.98rem;
+  line-height: 1.6;
+  color: var(--ifm-color-content-secondary);
+  margin: 0;
+}
+
+/* ---------- Feature grid ---------- */
+
+.featureGrid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 1.1rem;
+}
+
+.featureCard {
+  padding: 1.5rem 1.4rem;
+  border: 1px solid var(--ifm-color-emphasis-300);
+  border-radius: 12px;
+  background: var(--ifm-background-surface-color);
+  transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.featureCard:hover {
+  border-color: rgba(245, 158, 11, 0.4);
+  transform: translateY(-2px);
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.04) inset,
+    0 14px 30px -22px rgba(0, 0, 0, 0.85);
+}
+
+.featureIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  margin-bottom: 0.9rem;
+  color: var(--ifm-color-primary);
+  background: rgba(245, 158, 11, 0.1);
+  border: 1px solid rgba(245, 158, 11, 0.2);
+}
+
+.featureIcon svg {
+  width: 22px;
+  height: 22px;
+}
+
+.featureTitle {
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+  margin-bottom: 0.4rem;
+}
+
+.featureText {
+  font-size: 0.92rem;
+  line-height: 1.55;
+  color: var(--ifm-color-content-secondary);
+  margin: 0;
+}
+
+/* ---------- Developer strip ---------- */
+
+.devStrip {
+  padding: 5.5rem 0;
+  background: var(--ifm-background-color);
+}
+
+.devInner {
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2.5rem;
+  padding: 2.75rem;
+  border: 1px solid var(--ifm-color-emphasis-300);
+  border-radius: 18px;
+  background: linear-gradient(
+    135deg,
+    rgba(245, 158, 11, 0.07),
+    var(--ifm-background-surface-color) 60%
+  );
+  box-shadow: 0 1px 0 0 rgba(255, 255, 255, 0.04) inset,
+    0 24px 60px -40px rgba(0, 0, 0, 0.9);
+}
+
+.devCopy {
+  position: relative;
+  z-index: 1;
+  max-width: 620px;
+}
+
+.devTitle {
+  font-size: clamp(1.6rem, 1.2rem + 1.5vw, 2.2rem);
+  letter-spacing: -0.02em;
+  margin-bottom: 0.6rem;
+}
+
+.devText {
+  font-size: 1.05rem;
+  line-height: 1.65;
+  color: var(--ifm-color-content-secondary);
+  margin: 0;
+}
+
+.devActions {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.85rem;
+  flex-shrink: 0;
+}
+
+.devLink {
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+/* ---------- Responsive ---------- */
+
+@media (max-width: 996px) {
+  .pillarGrid,
+  .featureGrid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .devInner {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .devActions {
+    flex-direction: row;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 600px) {
+  .hero {
+    padding: 4.5rem 0 4rem;
+  }
+
+  .section,
+  .devStrip {
+    padding: 3.75rem 0;
+  }
+
+  .pillarGrid,
+  .featureGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .heroCtas {
+    width: 100%;
+  }
+
+  .heroCtas a {
+    flex: 1 1 auto;
+    justify-content: center;
+  }
+
+  .devInner {
+    padding: 1.75rem;
+  }
+}

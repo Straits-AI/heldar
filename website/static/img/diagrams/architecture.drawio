@@ -1,0 +1,37 @@
+<mxfile host="app.diagrams.net" type="device">
+  <diagram name="Heldar open-core architecture" id="heldar-arch">
+    <mxGraphModel dx="680" dy="372" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="680" pageHeight="372" math="0" shadow="1">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="cam" value="&lt;b&gt;Cameras&lt;/b&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f4f4f5;strokeColor=#a1a1aa;fontColor=#3f3f46;fontSize=13;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="110" y="26" width="170" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="ai" value="&lt;b&gt;AI worker&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot; color=&quot;#71717a&quot;&gt;apps/ai · HTTP client&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#f4f4f5;strokeColor=#a1a1aa;fontColor=#3f3f46;fontSize=13;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="400" y="26" width="170" height="44" as="geometry" />
+        </mxCell>
+        <mxCell id="kernel" value="&lt;b&gt;heldar-kernel · Apache-2.0&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px&quot; color=&quot;#92400e&quot;&gt;media + DVR · perception ingest + sampler · zones&lt;br&gt;auth / RBAC · observability · retention · SDK seams&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fde68a;strokeColor=#d97706;strokeWidth=2;fontColor=#78350f;fontSize=15;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="70" y="140" width="540" height="86" as="geometry" />
+        </mxCell>
+        <mxCell id="entry" value="&lt;b&gt;heldar-entry&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot; color=&quot;#b45309&quot;&gt;access control&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#f59e0b;fontColor=#92400e;fontSize=12;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="44" y="286" width="152" height="64" as="geometry" />
+        </mxCell>
+        <mxCell id="movement" value="&lt;b&gt;heldar-movement&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot; color=&quot;#b45309&quot;&gt;ReID / breach&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#f59e0b;fontColor=#92400e;fontSize=12;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="209" y="286" width="152" height="64" as="geometry" />
+        </mxCell>
+        <mxCell id="search" value="&lt;b&gt;heldar-search&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px&quot; color=&quot;#b45309&quot;&gt;semantic search&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fef3c7;strokeColor=#f59e0b;fontColor=#92400e;fontSize=12;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="374" y="286" width="152" height="64" as="geometry" />
+        </mxCell>
+        <mxCell id="vert" value="&lt;b&gt;Proprietary verticals&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:9px&quot; color=&quot;#78716c&quot;&gt;private crates&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#fafaf9;strokeColor=#b45309;dashed=1;fontColor=#57534e;fontSize=12;shadow=1;" vertex="1" parent="1">
+          <mxGeometry x="539" y="286" width="132" height="64" as="geometry" />
+        </mxCell>
+        <mxCell id="e1" value="RTSP" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#78716c;endArrow=block;fontColor=#44403c;fontSize=11;" edge="1" parent="1" source="cam" target="kernel"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e2" value="/ai/events" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#78716c;endArrow=block;fontColor=#44403c;fontSize=11;" edge="1" parent="1" source="ai" target="kernel"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e3" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#78716c;endArrow=block;" edge="1" parent="1" source="kernel" target="entry"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e4" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#78716c;endArrow=block;" edge="1" parent="1" source="kernel" target="movement"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e5" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#78716c;endArrow=block;" edge="1" parent="1" source="kernel" target="search"><mxGeometry relative="1" as="geometry" /></mxCell>
+        <mxCell id="e6" style="edgeStyle=orthogonalEdgeStyle;rounded=0;html=1;strokeColor=#78716c;endArrow=block;dashed=1;" edge="1" parent="1" source="kernel" target="vert"><mxGeometry relative="1" as="geometry" /></mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

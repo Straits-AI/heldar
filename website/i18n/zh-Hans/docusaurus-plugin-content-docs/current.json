@@ -1,0 +1,22 @@
+{
+  "version.label": {
+    "message": "Next",
+    "description": "The label for version current"
+  },
+  "sidebar.docsSidebar.category.Getting Started": {
+    "message": "快速入门",
+    "description": "The label for category 'Getting Started' in sidebar 'docsSidebar'"
+  },
+  "sidebar.docsSidebar.category.Concepts": {
+    "message": "核心概念",
+    "description": "The label for category 'Concepts' in sidebar 'docsSidebar'"
+  },
+  "sidebar.docsSidebar.category.Develop": {
+    "message": "开发指南",
+    "description": "The label for category 'Develop' in sidebar 'docsSidebar'"
+  },
+  "sidebar.docsSidebar.category.Operate": {
+    "message": "运维操作",
+    "description": "The label for category 'Operate' in sidebar 'docsSidebar'"
+  }
+}
