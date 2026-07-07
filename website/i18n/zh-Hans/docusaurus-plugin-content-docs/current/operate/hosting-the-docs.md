@@ -68,3 +68,9 @@ npm run build && wrangler dev   # serves the built site on http://localhost:8787
 Domains & Routes -> Add -> Custom Domain**，添加你的域名（例如
 `docs.heldar.ai`）。Cloudflare 会自动申请证书。由于 Worker 从域名根路径提供服务，无需修改 `baseUrl`，保持 `/` 即可。
 （将 `website/docusaurus.config.ts` 中的 `url` 设置为该域名，以生成正确的规范链接和站点地图 URL。）
+
+## 国际化（i18n）
+
+本站点为多语言站点：**英文为源语言**（`website/docs/`），完整译文位于 `website/i18n/<locale>/` 下——目前包括中文（`zh-Hans`）和西班牙文（`es`）。导航栏的语言切换器可让读者切换语言。`npm run build` 会将所有语言输出到同一目录树（`build/`、`build/zh-Hans/`、`build/es/`），由同一个 Worker 提供服务，因此译文**无需**额外配置即可部署。任何未翻译的页面都会自动回退到英文。
+
+**添加语言：** 在仓库根目录运行 `scripts/i18n-scaffold-locale.sh <locale>`（例如 `fr`、`ja`、`pt-BR`），然后按其打印的步骤操作——在 `docusaurus.config.ts` 中将该语言加入 `i18n.locales` 与 `localeConfigs`，添加 `README.<locale>.md`，并翻译生成的 `i18n/<locale>/**` 文件。译者指引（保真规则 + 目录结构）位于 `website/i18n/TRANSLATING.md`。

@@ -74,3 +74,16 @@ Domains & Routes -> Add -> Custom Domain**, and add your domain (for example
 the Worker serves at the domain root, no `baseUrl` change is needed - it stays `/`.
 (Set `url` in `website/docusaurus.config.ts` to that domain for correct canonical
 and sitemap URLs.)
+
+## Internationalization (i18n)
+
+The site is multilingual: **English is the source** (`website/docs/`), with full translations under
+`website/i18n/<locale>/` — currently Chinese (`zh-Hans`) and Spanish (`es`). A navbar language switcher
+lets readers change locale. `npm run build` emits every locale into one output tree (`build/`,
+`build/zh-Hans/`, `build/es/`) that the same Worker serves, so translations deploy with **no** extra
+configuration. Any untranslated page falls back to English automatically.
+
+**Add a language:** run `scripts/i18n-scaffold-locale.sh <locale>` (e.g. `fr`, `ja`, `pt-BR`) from the
+repo root, then follow its printed steps — add the locale to `i18n.locales` + `localeConfigs` in
+`docusaurus.config.ts`, add a `README.<locale>.md`, and translate the generated `i18n/<locale>/**` files.
+The translator brief (fidelity rules + layout) is in `website/i18n/TRANSLATING.md`.

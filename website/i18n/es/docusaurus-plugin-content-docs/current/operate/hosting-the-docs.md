@@ -75,3 +75,9 @@ Domains & Routes -> Add -> Custom Domain**, y agrega tu dominio (por ejemplo
 que el Worker sirve en la raíz del dominio, no se necesita cambiar `baseUrl` - permanece como `/`.
 (Establece `url` en `website/docusaurus.config.ts` a ese dominio para URLs canónicas
 y de mapa del sitio correctas.)
+
+## Internacionalización (i18n)
+
+El sitio es multilingüe: **el inglés es la fuente** (`website/docs/`), con traducciones completas bajo `website/i18n/<locale>/` — actualmente chino (`zh-Hans`) y español (`es`). Un selector de idioma en la barra de navegación permite a los lectores cambiar de idioma. `npm run build` emite todos los idiomas en un único árbol de salida (`build/`, `build/zh-Hans/`, `build/es/`) que sirve el mismo Worker, por lo que las traducciones se despliegan **sin** configuración adicional. Cualquier página sin traducir recurre automáticamente al inglés.
+
+**Añadir un idioma:** ejecuta `scripts/i18n-scaffold-locale.sh <locale>` (p. ej. `fr`, `ja`, `pt-BR`) desde la raíz del repositorio, luego sigue los pasos que imprime — añade el idioma a `i18n.locales` + `localeConfigs` en `docusaurus.config.ts`, añade un `README.<locale>.md`, y traduce los archivos generados `i18n/<locale>/**`. La guía del traductor (reglas de fidelidad + estructura) está en `website/i18n/TRANSLATING.md`.
