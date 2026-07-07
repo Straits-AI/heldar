@@ -1,3 +1,5 @@
+**English** · [简体中文](README.zh-Hans.md) · [Español](README.es.md)
+
 # Heldar Core
 
 Heldar is a visual event-intelligence operating system for physical spaces. It turns camera streams
