@@ -40,7 +40,7 @@
     "description": "The blog post button label to navigate to the older/next post"
   },
   "theme.colorToggle.ariaLabel.mode.system": {
-    "message": "system mode",
+    "message": "modo del sistema",
     "description": "The name for the system color mode"
   },
   "theme.colorToggle.ariaLabel.mode.light": {
@@ -175,7 +175,7 @@
     "description": "The ARIA label to collapse the sidebar category"
   },
   "theme.IconExternalLink.ariaLabel": {
-    "message": "(opens in new tab)",
+    "message": "(se abre en una pestaña nueva)",
     "description": "The ARIA label for the external link icon"
   },
   "theme.NavBar.navAriaLabel": {
@@ -255,11 +255,11 @@
     "description": "The ARIA label for hamburger menu button of mobile navigation"
   },
   "theme.navbar.mobileDropdown.collapseButton.expandAriaLabel": {
-    "message": "Expand the dropdown",
+    "message": "Expandir el menú desplegable",
     "description": "The ARIA label of the button to expand the mobile dropdown navbar item"
   },
   "theme.navbar.mobileDropdown.collapseButton.collapseAriaLabel": {
-    "message": "Collapse the dropdown",
+    "message": "Colapsar el menú desplegable",
     "description": "The ARIA label of the button to collapse the mobile dropdown navbar item"
   },
   "theme.docs.sidebar.expandButtonTitle": {
@@ -283,15 +283,15 @@
     "description": "The title of the page for a blog author"
   },
   "theme.blog.authorsList.pageTitle": {
-    "message": "Authors",
+    "message": "Autores",
     "description": "The title of the authors page"
   },
   "theme.blog.authorsList.viewAll": {
-    "message": "View All Authors",
+    "message": "Ver todos los autores",
     "description": "The label of the link targeting the blog authors page"
   },
   "theme.blog.author.noPosts": {
-    "message": "This author has not written any posts yet.",
+    "message": "Este autor todavía no ha escrito ninguna publicación.",
     "description": "The text for authors with 0 blog post"
   },
   "theme.contentVisibility.unlistedBanner.title": {
@@ -303,11 +303,11 @@
     "description": "The unlisted content banner message"
   },
   "theme.contentVisibility.draftBanner.title": {
-    "message": "Draft page",
+    "message": "Página en borrador",
     "description": "The draft content banner title"
   },
   "theme.contentVisibility.draftBanner.message": {
-    "message": "This page is a draft. It will only be visible in dev and be excluded from the production build.",
+    "message": "Esta página está en borrador. Solo será visible en el entorno de desarrollo y quedará excluida de la compilación de producción.",
     "description": "The draft content banner message"
   },
   "theme.docs.DocCard.categoryDescription.plurals": {
@@ -327,123 +327,123 @@
     "description": "The title of the tag list page"
   },
   "home.pillar.kernel.title": {
-    "message": "Own the kernel"
+    "message": "Domina el kernel"
   },
   "home.pillar.kernel.text": {
-    "message": "Heldar owns its own media kernel: camera registry, RTSP ingest, recording, timeline, and live view. You own the metadata model and the event engine, not a slot in someone else’s VMS."
+    "message": "Heldar posee su propio kernel multimedia: registro de cámaras, ingesta RTSP, grabación, línea de tiempo y vista en vivo. Tú eres dueño del modelo de metadatos y del motor de eventos, no de un espacio en el VMS de otro."
   },
   "home.pillar.perception.title": {
-    "message": "AI perception built in"
+    "message": "Percepción de IA integrada"
   },
   "home.pillar.perception.text": {
-    "message": "Detection, tracking, and zones out of the box, with ANPR access control, cross-camera movement, and semantic search as first-class consumers of the event stream."
+    "message": "Detección, seguimiento y zonas listos desde el primer momento, con control de acceso ANPR, movimiento entre cámaras y búsqueda semántica como consumidores de primera clase del flujo de eventos."
   },
   "home.pillar.open.title": {
-    "message": "Open-core and extensible"
+    "message": "Open-core y extensible"
   },
   "home.pillar.open.text": {
-    "message": "An Apache-2.0 kernel you can read, run, and extend. Write your own module against the DetectionConsumer seam and compose it into the deployment you need."
+    "message": "Un kernel Apache-2.0 que puedes leer, ejecutar y extender. Escribe tu propio módulo contra la interfaz DetectionConsumer y componlo en el despliegue que necesitas."
   },
   "home.pillar.hardware.title": {
-    "message": "Your hardware, your data"
+    "message": "Tu hardware, tus datos"
   },
   "home.pillar.hardware.text": {
-    "message": "Runs on-prem on your own boxes. Browser-based WebRTC remote access keeps operators connected with the video end-to-end encrypted — only signaling and relay are hosted, never your footage."
+    "message": "Se ejecuta on-premise en tus propios servidores. El acceso remoto basado en WebRTC mantiene a los operadores conectados con el video cifrado de extremo a extremo: solo la señalización y el relay están alojados, nunca tus grabaciones."
   },
   "home.feature.recording.title": {
-    "message": "Recording and DVR"
+    "message": "Grabación y DVR"
   },
   "home.feature.recording.text": {
-    "message": "FIFO retention, evidence-lock, HLS playback, plus backup and archive of the footage that matters."
+    "message": "Retención FIFO, bloqueo de evidencia, reproducción HLS, más copia de seguridad y archivo del material que importa."
   },
   "home.feature.detection.title": {
-    "message": "Detection and zones"
+    "message": "Detección y zonas"
   },
   "home.feature.detection.text": {
-    "message": "Tracked detections feed a polygon zone engine that raises enter, exit, and dwell events with evidence frames."
+    "message": "Las detecciones rastreadas alimentan un motor de zonas poligonales que genera eventos de entrada, salida y permanencia con fotogramas de evidencia."
   },
   "home.feature.anpr.title": {
-    "message": "Access control and ANPR"
+    "message": "Control de acceso y ANPR"
   },
   "home.feature.anpr.text": {
-    "message": "Per-frame plate reads consolidated by temporal voting into entry and exit events, resolved against a registry."
+    "message": "Lecturas de matrículas por fotograma consolidadas mediante votación temporal en eventos de entrada y salida, resueltos contra un registro."
   },
   "home.feature.movement.title": {
-    "message": "Movement and ReID"
+    "message": "Movimiento y ReID"
   },
   "home.feature.movement.text": {
-    "message": "Cross-camera correlation over an operator-defined topology graph, where every link is a candidate a human confirms."
+    "message": "Correlación entre cámaras sobre un grafo de topología definido por el operador, donde cada enlace es un candidato que un humano confirma."
   },
   "home.feature.search.title": {
-    "message": "Semantic search"
+    "message": "Búsqueda semántica"
   },
   "home.feature.search.text": {
-    "message": "Natural-language questions become deterministic query plans over your stored event facts. Works fully offline."
+    "message": "Las preguntas en lenguaje natural se convierten en planes de consulta deterministas sobre los hechos de eventos almacenados. Funciona completamente sin conexión."
   },
   "home.feature.alert.title": {
-    "message": "Alerting and webhooks"
+    "message": "Alertas y webhooks"
   },
   "home.feature.alert.text": {
-    "message": "Warning and critical events delivered to your endpoint at-least-once, decoupled from the recording path."
+    "message": "Eventos de aviso y críticos entregados a tu endpoint al menos una vez, desacoplados del camino de grabación."
   },
   "home.feature.camera.title": {
-    "message": "Camera configuration"
+    "message": "Configuración de cámaras"
   },
   "home.feature.camera.text": {
-    "message": "Onboard and manage cameras over ONVIF and ISAPI directly from the dashboard, with credentials kept server-side."
+    "message": "Incorpora y gestiona cámaras mediante ONVIF e ISAPI directamente desde el panel, con credenciales almacenadas en el servidor."
   },
   "home.feature.deploy.title": {
-    "message": "One-binary deploy"
+    "message": "Despliegue de un solo binario"
   },
   "home.feature.deploy.text": {
-    "message": "A single Rust binary serves the API and the bundled dashboard. One process, one URL, your hardware."
+    "message": "Un único binario de Rust sirve la API y el panel integrado. Un proceso, una URL, tu hardware."
   },
   "home.hero.eyebrow": {
-    "message": "Open-core visual-event intelligence"
+    "message": "Inteligencia de eventos visuales open-core"
   },
   "home.hero.tagline": {
-    "message": "Open visual-event intelligence for physical spaces."
+    "message": "Inteligencia de eventos visuales abierta para espacios físicos."
   },
   "home.hero.subtitle": {
-    "message": "Heldar turns camera streams into structured events, workflows, and operational intelligence. Open-core, it runs on your hardware with no cloud lock-in."
+    "message": "Heldar convierte los flujos de cámara en eventos estructurados, flujos de trabajo e inteligencia operacional. Open-core, se ejecuta en tu hardware sin dependencia de la nube."
   },
   "home.hero.cta.start": {
-    "message": "Get started"
+    "message": "Empezar"
   },
   "home.hero.cta.github": {
-    "message": "View on GitHub"
+    "message": "Ver en GitHub"
   },
   "home.pillars.label": {
-    "message": "// Why Heldar"
+    "message": "// Por qué Heldar"
   },
   "home.pillars.title": {
-    "message": "A platform you own, end to end"
+    "message": "Una plataforma que posees de extremo a extremo"
   },
   "home.features.label": {
-    "message": "// Capabilities"
+    "message": "// Capacidades"
   },
   "home.features.title": {
-    "message": "One platform, from packets to answers"
+    "message": "Una plataforma, de paquetes a respuestas"
   },
   "home.features.lede": {
-    "message": "The kernel records and indexes 24/7, perception layers on as a consumer, and apps read the same event stream. Every capability below ships in the same codebase."
+    "message": "El kernel graba e indexa 24/7, las capas de percepción se añaden como consumidores, y las apps leen el mismo flujo de eventos. Cada capacidad incluida aquí se entrega en el mismo código base."
   },
   "home.dev.eyebrow": {
-    "message": "For developers"
+    "message": "Para desarrolladores"
   },
   "home.dev.title": {
-    "message": "Build on the open kernel"
+    "message": "Construye sobre el kernel abierto"
   },
   "home.dev.text": {
-    "message": "Heldar is a platform, not a black box. The kernel is Apache-2.0, the seams are documented, and the reference apps show you the patterns. Write a perception worker or a new app against the DetectionConsumer seam and ship it on your own terms."
+    "message": "Heldar es una plataforma, no una caja negra. El kernel es Apache-2.0, las interfaces están documentadas y las apps de referencia muestran los patrones. Escribe un worker de percepción o una nueva app contra la interfaz DetectionConsumer y publícala en tus propios términos."
   },
   "home.dev.cta.module": {
-    "message": "Build a module"
+    "message": "Construir un módulo"
   },
   "home.dev.cta.aiworker": {
-    "message": "Write an AI worker"
+    "message": "Escribir un AI worker"
   },
   "home.meta.description": {
-    "message": "Open visual-event intelligence for physical spaces. Heldar turns camera streams into structured events, workflows, and operational intelligence. Open-core, runs on your hardware."
+    "message": "Inteligencia de eventos visuales abierta para espacios físicos. Heldar convierte los flujos de cámara en eventos estructurados, flujos de trabajo e inteligencia operacional. Open-core, se ejecuta en tu hardware."
   }
 }

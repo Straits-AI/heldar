@@ -4,19 +4,19 @@
     "description": "The label for version current"
   },
   "sidebar.docsSidebar.category.Getting Started": {
-    "message": "Getting Started",
+    "message": "Primeros pasos",
     "description": "The label for category 'Getting Started' in sidebar 'docsSidebar'"
   },
   "sidebar.docsSidebar.category.Concepts": {
-    "message": "Concepts",
+    "message": "Conceptos",
     "description": "The label for category 'Concepts' in sidebar 'docsSidebar'"
   },
   "sidebar.docsSidebar.category.Develop": {
-    "message": "Develop",
+    "message": "Desarrollar",
     "description": "The label for category 'Develop' in sidebar 'docsSidebar'"
   },
   "sidebar.docsSidebar.category.Operate": {
-    "message": "Operate",
+    "message": "Operar",
     "description": "The label for category 'Operate' in sidebar 'docsSidebar'"
   }
 }

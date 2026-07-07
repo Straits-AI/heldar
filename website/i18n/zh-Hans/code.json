@@ -44,7 +44,7 @@
     "description": "The label of the link targeting the tag list page"
   },
   "theme.colorToggle.ariaLabel.mode.system": {
-    "message": "system mode",
+    "message": "系统模式",
     "description": "The name for the system color mode"
   },
   "theme.colorToggle.ariaLabel.mode.light": {
@@ -175,7 +175,7 @@
     "description": "The ARIA label to collapse the sidebar category"
   },
   "theme.IconExternalLink.ariaLabel": {
-    "message": "(opens in new tab)",
+    "message": "（在新标签页中打开）",
     "description": "The ARIA label for the external link icon"
   },
   "theme.NavBar.navAriaLabel": {
@@ -255,11 +255,11 @@
     "description": "The label of the back button to return to main menu, inside the mobile navbar sidebar secondary menu (notably used to display the docs sidebar)"
   },
   "theme.navbar.mobileDropdown.collapseButton.expandAriaLabel": {
-    "message": "Expand the dropdown",
+    "message": "展开下拉菜单",
     "description": "The ARIA label of the button to expand the mobile dropdown navbar item"
   },
   "theme.navbar.mobileDropdown.collapseButton.collapseAriaLabel": {
-    "message": "Collapse the dropdown",
+    "message": "收起下拉菜单",
     "description": "The ARIA label of the button to collapse the mobile dropdown navbar item"
   },
   "theme.docs.sidebar.expandButtonTitle": {
@@ -327,123 +327,123 @@
     "description": "The title of the tag list page"
   },
   "home.pillar.kernel.title": {
-    "message": "Own the kernel"
+    "message": "自主掌控内核"
   },
   "home.pillar.kernel.text": {
-    "message": "Heldar owns its own media kernel: camera registry, RTSP ingest, recording, timeline, and live view. You own the metadata model and the event engine, not a slot in someone else’s VMS."
+    "message": "Heldar 拥有自己的媒体内核：摄像头注册表、RTSP 接入、录像、时间轴与实时预览。您掌控元数据模型和事件引擎，而非在他人的 VMS 中占据一席之地。"
   },
   "home.pillar.perception.title": {
-    "message": "AI perception built in"
+    "message": "内置 AI 感知"
   },
   "home.pillar.perception.text": {
-    "message": "Detection, tracking, and zones out of the box, with ANPR access control, cross-camera movement, and semantic search as first-class consumers of the event stream."
+    "message": "开箱即用的目标检测、追踪与区域划定，以及作为事件流一级消费者的 ANPR 门禁、跨摄像头移动分析和语义搜索。"
   },
   "home.pillar.open.title": {
-    "message": "Open-core and extensible"
+    "message": "开放核心，可扩展"
   },
   "home.pillar.open.text": {
-    "message": "An Apache-2.0 kernel you can read, run, and extend. Write your own module against the DetectionConsumer seam and compose it into the deployment you need."
+    "message": "Apache-2.0 授权的内核，可自由阅读、运行和扩展。基于 DetectionConsumer 接缝编写自己的模块，并将其组合进所需的部署方案。"
   },
   "home.pillar.hardware.title": {
-    "message": "Your hardware, your data"
+    "message": "您的硬件，您的数据"
   },
   "home.pillar.hardware.text": {
-    "message": "Runs on-prem on your own boxes. Browser-based WebRTC remote access keeps operators connected with the video end-to-end encrypted — only signaling and relay are hosted, never your footage."
+    "message": "在您自己的设备上本地部署运行。基于浏览器的 WebRTC 远程访问使操作人员端到端加密连接视频——仅信令与中继由云端托管，您的视频素材始终不离开本地。"
   },
   "home.feature.recording.title": {
-    "message": "Recording and DVR"
+    "message": "录像与 DVR"
   },
   "home.feature.recording.text": {
-    "message": "FIFO retention, evidence-lock, HLS playback, plus backup and archive of the footage that matters."
+    "message": "FIFO 保留策略、证据锁定、HLS 回放，以及重要素材的备份与归档。"
   },
   "home.feature.detection.title": {
-    "message": "Detection and zones"
+    "message": "检测与区域"
   },
   "home.feature.detection.text": {
-    "message": "Tracked detections feed a polygon zone engine that raises enter, exit, and dwell events with evidence frames."
+    "message": "追踪到的检测结果输入多边形区域引擎，触发带有证据帧的进入、离开和驻留事件。"
   },
   "home.feature.anpr.title": {
-    "message": "Access control and ANPR"
+    "message": "门禁控制与 ANPR"
   },
   "home.feature.anpr.text": {
-    "message": "Per-frame plate reads consolidated by temporal voting into entry and exit events, resolved against a registry."
+    "message": "逐帧车牌读取经时序投票合并为进出事件，并与注册表进行比对解析。"
   },
   "home.feature.movement.title": {
-    "message": "Movement and ReID"
+    "message": "移动分析与 ReID"
   },
   "home.feature.movement.text": {
-    "message": "Cross-camera correlation over an operator-defined topology graph, where every link is a candidate a human confirms."
+    "message": "基于操作员定义的拓扑图进行跨摄像头关联，每条链接均为待人工确认的候选结果。"
   },
   "home.feature.search.title": {
-    "message": "Semantic search"
+    "message": "语义搜索"
   },
   "home.feature.search.text": {
-    "message": "Natural-language questions become deterministic query plans over your stored event facts. Works fully offline."
+    "message": "自然语言问题转化为针对已存储事件数据的确定性查询计划，完全离线可用。"
   },
   "home.feature.alert.title": {
-    "message": "Alerting and webhooks"
+    "message": "告警与 Webhook"
   },
   "home.feature.alert.text": {
-    "message": "Warning and critical events delivered to your endpoint at-least-once, decoupled from the recording path."
+    "message": "警告和关键事件至少一次送达您的端点，与录像路径解耦。"
   },
   "home.feature.camera.title": {
-    "message": "Camera configuration"
+    "message": "摄像头配置"
   },
   "home.feature.camera.text": {
-    "message": "Onboard and manage cameras over ONVIF and ISAPI directly from the dashboard, with credentials kept server-side."
+    "message": "直接在仪表盘上通过 ONVIF 和 ISAPI 接入并管理摄像头，凭据保存在服务器端。"
   },
   "home.feature.deploy.title": {
-    "message": "One-binary deploy"
+    "message": "单二进制部署"
   },
   "home.feature.deploy.text": {
-    "message": "A single Rust binary serves the API and the bundled dashboard. One process, one URL, your hardware."
+    "message": "单个 Rust 二进制文件同时提供 API 和捆绑仪表盘服务。一个进程、一个 URL、您的硬件。"
   },
   "home.hero.eyebrow": {
-    "message": "Open-core visual-event intelligence"
+    "message": "开放核心视觉事件智能"
   },
   "home.hero.tagline": {
-    "message": "Open visual-event intelligence for physical spaces."
+    "message": "面向物理空间的开放视觉事件智能。"
   },
   "home.hero.subtitle": {
-    "message": "Heldar turns camera streams into structured events, workflows, and operational intelligence. Open-core, it runs on your hardware with no cloud lock-in."
+    "message": "Heldar 将摄像头视频流转化为结构化事件、工作流和运营智能。开放核心，运行于您的硬件之上，无云端锁定。"
   },
   "home.hero.cta.start": {
-    "message": "Get started"
+    "message": "快速上手"
   },
   "home.hero.cta.github": {
-    "message": "View on GitHub"
+    "message": "在 GitHub 上查看"
   },
   "home.pillars.label": {
-    "message": "// Why Heldar"
+    "message": "// 为什么选择 Heldar"
   },
   "home.pillars.title": {
-    "message": "A platform you own, end to end"
+    "message": "端到端由您掌控的平台"
   },
   "home.features.label": {
-    "message": "// Capabilities"
+    "message": "// 功能能力"
   },
   "home.features.title": {
-    "message": "One platform, from packets to answers"
+    "message": "一个平台，从数据包到答案"
   },
   "home.features.lede": {
-    "message": "The kernel records and indexes 24/7, perception layers on as a consumer, and apps read the same event stream. Every capability below ships in the same codebase."
+    "message": "内核全天候录像并建立索引，感知层作为消费者叠加其上，各应用读取同一事件流。以下所有功能均在同一代码库中交付。"
   },
   "home.dev.eyebrow": {
-    "message": "For developers"
+    "message": "面向开发者"
   },
   "home.dev.title": {
-    "message": "Build on the open kernel"
+    "message": "基于开放内核构建"
   },
   "home.dev.text": {
-    "message": "Heldar is a platform, not a black box. The kernel is Apache-2.0, the seams are documented, and the reference apps show you the patterns. Write a perception worker or a new app against the DetectionConsumer seam and ship it on your own terms."
+    "message": "Heldar 是一个平台，而非黑盒。内核采用 Apache-2.0 授权，接缝均有文档说明，参考应用展示了最佳实践模式。基于 DetectionConsumer 接缝编写感知 Worker 或新应用，按您自己的方式交付。"
   },
   "home.dev.cta.module": {
-    "message": "Build a module"
+    "message": "构建模块"
   },
   "home.dev.cta.aiworker": {
-    "message": "Write an AI worker"
+    "message": "编写 AI Worker"
   },
   "home.meta.description": {
-    "message": "Open visual-event intelligence for physical spaces. Heldar turns camera streams into structured events, workflows, and operational intelligence. Open-core, runs on your hardware."
+    "message": "面向物理空间的开放视觉事件智能。Heldar 将摄像头视频流转化为结构化事件、工作流和运营智能。开放核心，运行于您的硬件之上。"
   }
 }
