@@ -325,5 +325,125 @@
   "theme.tags.tagsPageTitle": {
     "message": "标签",
     "description": "The title of the tag list page"
+  },
+  "home.pillar.kernel.title": {
+    "message": "Own the kernel"
+  },
+  "home.pillar.kernel.text": {
+    "message": "Heldar owns its own media kernel: camera registry, RTSP ingest, recording, timeline, and live view. You own the metadata model and the event engine, not a slot in someone else’s VMS."
+  },
+  "home.pillar.perception.title": {
+    "message": "AI perception built in"
+  },
+  "home.pillar.perception.text": {
+    "message": "Detection, tracking, and zones out of the box, with ANPR access control, cross-camera movement, and semantic search as first-class consumers of the event stream."
+  },
+  "home.pillar.open.title": {
+    "message": "Open-core and extensible"
+  },
+  "home.pillar.open.text": {
+    "message": "An Apache-2.0 kernel you can read, run, and extend. Write your own module against the DetectionConsumer seam and compose it into the deployment you need."
+  },
+  "home.pillar.hardware.title": {
+    "message": "Your hardware, your data"
+  },
+  "home.pillar.hardware.text": {
+    "message": "Runs on-prem on your own boxes. Browser-based WebRTC remote access keeps operators connected with the video end-to-end encrypted — only signaling and relay are hosted, never your footage."
+  },
+  "home.feature.recording.title": {
+    "message": "Recording and DVR"
+  },
+  "home.feature.recording.text": {
+    "message": "FIFO retention, evidence-lock, HLS playback, plus backup and archive of the footage that matters."
+  },
+  "home.feature.detection.title": {
+    "message": "Detection and zones"
+  },
+  "home.feature.detection.text": {
+    "message": "Tracked detections feed a polygon zone engine that raises enter, exit, and dwell events with evidence frames."
+  },
+  "home.feature.anpr.title": {
+    "message": "Access control and ANPR"
+  },
+  "home.feature.anpr.text": {
+    "message": "Per-frame plate reads consolidated by temporal voting into entry and exit events, resolved against a registry."
+  },
+  "home.feature.movement.title": {
+    "message": "Movement and ReID"
+  },
+  "home.feature.movement.text": {
+    "message": "Cross-camera correlation over an operator-defined topology graph, where every link is a candidate a human confirms."
+  },
+  "home.feature.search.title": {
+    "message": "Semantic search"
+  },
+  "home.feature.search.text": {
+    "message": "Natural-language questions become deterministic query plans over your stored event facts. Works fully offline."
+  },
+  "home.feature.alert.title": {
+    "message": "Alerting and webhooks"
+  },
+  "home.feature.alert.text": {
+    "message": "Warning and critical events delivered to your endpoint at-least-once, decoupled from the recording path."
+  },
+  "home.feature.camera.title": {
+    "message": "Camera configuration"
+  },
+  "home.feature.camera.text": {
+    "message": "Onboard and manage cameras over ONVIF and ISAPI directly from the dashboard, with credentials kept server-side."
+  },
+  "home.feature.deploy.title": {
+    "message": "One-binary deploy"
+  },
+  "home.feature.deploy.text": {
+    "message": "A single Rust binary serves the API and the bundled dashboard. One process, one URL, your hardware."
+  },
+  "home.hero.eyebrow": {
+    "message": "Open-core visual-event intelligence"
+  },
+  "home.hero.tagline": {
+    "message": "Open visual-event intelligence for physical spaces."
+  },
+  "home.hero.subtitle": {
+    "message": "Heldar turns camera streams into structured events, workflows, and operational intelligence. Open-core, it runs on your hardware with no cloud lock-in."
+  },
+  "home.hero.cta.start": {
+    "message": "Get started"
+  },
+  "home.hero.cta.github": {
+    "message": "View on GitHub"
+  },
+  "home.pillars.label": {
+    "message": "// Why Heldar"
+  },
+  "home.pillars.title": {
+    "message": "A platform you own, end to end"
+  },
+  "home.features.label": {
+    "message": "// Capabilities"
+  },
+  "home.features.title": {
+    "message": "One platform, from packets to answers"
+  },
+  "home.features.lede": {
+    "message": "The kernel records and indexes 24/7, perception layers on as a consumer, and apps read the same event stream. Every capability below ships in the same codebase."
+  },
+  "home.dev.eyebrow": {
+    "message": "For developers"
+  },
+  "home.dev.title": {
+    "message": "Build on the open kernel"
+  },
+  "home.dev.text": {
+    "message": "Heldar is a platform, not a black box. The kernel is Apache-2.0, the seams are documented, and the reference apps show you the patterns. Write a perception worker or a new app against the DetectionConsumer seam and ship it on your own terms."
+  },
+  "home.dev.cta.module": {
+    "message": "Build a module"
+  },
+  "home.dev.cta.aiworker": {
+    "message": "Write an AI worker"
+  },
+  "home.meta.description": {
+    "message": "Open visual-event intelligence for physical spaces. Heldar turns camera streams into structured events, workflows, and operational intelligence. Open-core, runs on your hardware."
   }
 }

@@ -4,6 +4,7 @@ import Link from '@docusaurus/Link';
 import useDocusaurusContext from '@docusaurus/useDocusaurusContext';
 import Layout from '@theme/Layout';
 import Heading from '@theme/Heading';
+import Translate, {translate} from '@docusaurus/Translate';
 
 import styles from './index.module.css';
 
@@ -142,66 +143,150 @@ const icons = {
 const pillars = [
   {
     icon: icons.kernel,
-    title: 'Own the kernel',
-    text: 'Heldar owns its own media kernel: camera registry, RTSP ingest, recording, timeline, and live view. You own the metadata model and the event engine, not a slot in someone else’s VMS.',
+    title: translate({
+      id: 'home.pillar.kernel.title',
+      message: 'Own the kernel',
+    }),
+    text: translate({
+      id: 'home.pillar.kernel.text',
+      message:
+        'Heldar owns its own media kernel: camera registry, RTSP ingest, recording, timeline, and live view. You own the metadata model and the event engine, not a slot in someone else’s VMS.',
+    }),
   },
   {
     icon: icons.perception,
-    title: 'AI perception built in',
-    text: 'Detection, tracking, and zones out of the box, with ANPR access control, cross-camera movement, and semantic search as first-class consumers of the event stream.',
+    title: translate({
+      id: 'home.pillar.perception.title',
+      message: 'AI perception built in',
+    }),
+    text: translate({
+      id: 'home.pillar.perception.text',
+      message:
+        'Detection, tracking, and zones out of the box, with ANPR access control, cross-camera movement, and semantic search as first-class consumers of the event stream.',
+    }),
   },
   {
     icon: icons.open,
-    title: 'Open-core and extensible',
-    text: 'An Apache-2.0 kernel you can read, run, and extend. Write your own module against the DetectionConsumer seam and compose it into the deployment you need.',
+    title: translate({
+      id: 'home.pillar.open.title',
+      message: 'Open-core and extensible',
+    }),
+    text: translate({
+      id: 'home.pillar.open.text',
+      message:
+        'An Apache-2.0 kernel you can read, run, and extend. Write your own module against the DetectionConsumer seam and compose it into the deployment you need.',
+    }),
   },
   {
     icon: icons.hardware,
-    title: 'Your hardware, your data',
-    text: 'Runs on-prem on your own boxes. Browser-based WebRTC remote access keeps operators connected with the video end-to-end encrypted — only signaling and relay are hosted, never your footage.',
+    title: translate({
+      id: 'home.pillar.hardware.title',
+      message: 'Your hardware, your data',
+    }),
+    text: translate({
+      id: 'home.pillar.hardware.text',
+      message:
+        'Runs on-prem on your own boxes. Browser-based WebRTC remote access keeps operators connected with the video end-to-end encrypted — only signaling and relay are hosted, never your footage.',
+    }),
   },
 ];
 
 const features = [
   {
     icon: icons.recording,
-    title: 'Recording and DVR',
-    text: 'FIFO retention, evidence-lock, HLS playback, plus backup and archive of the footage that matters.',
+    title: translate({
+      id: 'home.feature.recording.title',
+      message: 'Recording and DVR',
+    }),
+    text: translate({
+      id: 'home.feature.recording.text',
+      message:
+        'FIFO retention, evidence-lock, HLS playback, plus backup and archive of the footage that matters.',
+    }),
   },
   {
     icon: icons.detection,
-    title: 'Detection and zones',
-    text: 'Tracked detections feed a polygon zone engine that raises enter, exit, and dwell events with evidence frames.',
+    title: translate({
+      id: 'home.feature.detection.title',
+      message: 'Detection and zones',
+    }),
+    text: translate({
+      id: 'home.feature.detection.text',
+      message:
+        'Tracked detections feed a polygon zone engine that raises enter, exit, and dwell events with evidence frames.',
+    }),
   },
   {
     icon: icons.anpr,
-    title: 'Access control and ANPR',
-    text: 'Per-frame plate reads consolidated by temporal voting into entry and exit events, resolved against a registry.',
+    title: translate({
+      id: 'home.feature.anpr.title',
+      message: 'Access control and ANPR',
+    }),
+    text: translate({
+      id: 'home.feature.anpr.text',
+      message:
+        'Per-frame plate reads consolidated by temporal voting into entry and exit events, resolved against a registry.',
+    }),
   },
   {
     icon: icons.movement,
-    title: 'Movement and ReID',
-    text: 'Cross-camera correlation over an operator-defined topology graph, where every link is a candidate a human confirms.',
+    title: translate({
+      id: 'home.feature.movement.title',
+      message: 'Movement and ReID',
+    }),
+    text: translate({
+      id: 'home.feature.movement.text',
+      message:
+        'Cross-camera correlation over an operator-defined topology graph, where every link is a candidate a human confirms.',
+    }),
   },
   {
     icon: icons.search,
-    title: 'Semantic search',
-    text: 'Natural-language questions become deterministic query plans over your stored event facts. Works fully offline.',
+    title: translate({
+      id: 'home.feature.search.title',
+      message: 'Semantic search',
+    }),
+    text: translate({
+      id: 'home.feature.search.text',
+      message:
+        'Natural-language questions become deterministic query plans over your stored event facts. Works fully offline.',
+    }),
   },
   {
     icon: icons.alert,
-    title: 'Alerting and webhooks',
-    text: 'Warning and critical events delivered to your endpoint at-least-once, decoupled from the recording path.',
+    title: translate({
+      id: 'home.feature.alert.title',
+      message: 'Alerting and webhooks',
+    }),
+    text: translate({
+      id: 'home.feature.alert.text',
+      message:
+        'Warning and critical events delivered to your endpoint at-least-once, decoupled from the recording path.',
+    }),
   },
   {
     icon: icons.camera,
-    title: 'Camera configuration',
-    text: 'Onboard and manage cameras over ONVIF and ISAPI directly from the dashboard, with credentials kept server-side.',
+    title: translate({
+      id: 'home.feature.camera.title',
+      message: 'Camera configuration',
+    }),
+    text: translate({
+      id: 'home.feature.camera.text',
+      message:
+        'Onboard and manage cameras over ONVIF and ISAPI directly from the dashboard, with credentials kept server-side.',
+    }),
   },
   {
     icon: icons.deploy,
-    title: 'One-binary deploy',
-    text: 'A single Rust binary serves the API and the bundled dashboard. One process, one URL, your hardware.',
+    title: translate({
+      id: 'home.feature.deploy.title',
+      message: 'One-binary deploy',
+    }),
+    text: translate({
+      id: 'home.feature.deploy.text',
+      message:
+        'A single Rust binary serves the API and the bundled dashboard. One process, one URL, your hardware.',
+    }),
   },
 ];
 
@@ -213,26 +298,32 @@ function Hero() {
       <div className={styles.heroGlow} aria-hidden="true" />
       <div className={styles.heroBifrost} aria-hidden="true" />
       <div className={clsx('container', styles.heroInner)}>
-        <span className={styles.eyebrow}>Open-core visual-event intelligence</span>
+        <span className={styles.eyebrow}>
+          <Translate id="home.hero.eyebrow">Open-core visual-event intelligence</Translate>
+        </span>
         <Heading as="h1" className={styles.heroTitle}>
           {siteConfig.title}
         </Heading>
-        <p className={styles.heroTagline}>Open visual-event intelligence for physical spaces.</p>
+        <p className={styles.heroTagline}>
+          <Translate id="home.hero.tagline">Open visual-event intelligence for physical spaces.</Translate>
+        </p>
         <p className={styles.heroSubtitle}>
-          Heldar turns camera streams into structured events, workflows, and operational
-          intelligence. Open-core, it runs on your hardware with no cloud lock-in.
+          <Translate id="home.hero.subtitle">
+            Heldar turns camera streams into structured events, workflows, and operational
+            intelligence. Open-core, it runs on your hardware with no cloud lock-in.
+          </Translate>
         </p>
         <div className={styles.heroCtas}>
           <Link
             className={clsx('button button--primary button--lg', styles.ctaPrimary)}
             to="/docs/getting-started/quickstart">
-            Get started
+            <Translate id="home.hero.cta.start">Get started</Translate>
           </Link>
           <Link
             className={clsx('button button--secondary button--lg', styles.ctaSecondary)}
             href="https://github.com/Straits-AI/heldar">
             <icons.github className={styles.ctaIcon} />
-            View on GitHub
+            <Translate id="home.hero.cta.github">View on GitHub</Translate>
           </Link>
         </div>
       </div>
@@ -245,9 +336,11 @@ function Pillars() {
     <section className={styles.section}>
       <div className="container">
         <div className={styles.sectionHead}>
-          <span className={styles.microLabel}>// Why Heldar</span>
+          <span className={styles.microLabel}>
+            <Translate id="home.pillars.label">{'// Why Heldar'}</Translate>
+          </span>
           <Heading as="h2" className={styles.sectionTitle}>
-            A platform you own, end to end
+            <Translate id="home.pillars.title">A platform you own, end to end</Translate>
           </Heading>
         </div>
         <div className={styles.pillarGrid}>
@@ -273,13 +366,17 @@ function FeatureGrid() {
     <section className={clsx(styles.section, styles.sectionAlt)}>
       <div className="container">
         <div className={styles.sectionHead}>
-          <span className={styles.microLabel}>// Capabilities</span>
+          <span className={styles.microLabel}>
+            <Translate id="home.features.label">{'// Capabilities'}</Translate>
+          </span>
           <Heading as="h2" className={styles.sectionTitle}>
-            One platform, from packets to answers
+            <Translate id="home.features.title">One platform, from packets to answers</Translate>
           </Heading>
           <p className={styles.sectionLede}>
-            The kernel records and indexes 24/7, perception layers on as a consumer, and apps
-            read the same event stream. Every capability below ships in the same codebase.
+            <Translate id="home.features.lede">
+              The kernel records and indexes 24/7, perception layers on as a consumer, and apps
+              read the same event stream. Every capability below ships in the same codebase.
+            </Translate>
           </p>
         </div>
         <div className={styles.featureGrid}>
@@ -306,24 +403,28 @@ function DeveloperStrip() {
       <div className="container">
         <div className={styles.devInner}>
           <div className={styles.devCopy}>
-            <span className={styles.eyebrow}>For developers</span>
+            <span className={styles.eyebrow}>
+              <Translate id="home.dev.eyebrow">For developers</Translate>
+            </span>
             <Heading as="h2" className={styles.devTitle}>
-              Build on the open kernel
+              <Translate id="home.dev.title">Build on the open kernel</Translate>
             </Heading>
             <p className={styles.devText}>
-              Heldar is a platform, not a black box. The kernel is Apache-2.0, the seams are
-              documented, and the reference apps show you the patterns. Write a perception worker
-              or a new app against the DetectionConsumer seam and ship it on your own terms.
+              <Translate id="home.dev.text">
+                Heldar is a platform, not a black box. The kernel is Apache-2.0, the seams are
+                documented, and the reference apps show you the patterns. Write a perception worker
+                or a new app against the DetectionConsumer seam and ship it on your own terms.
+              </Translate>
             </p>
           </div>
           <div className={styles.devActions}>
             <Link
               className={clsx('button button--primary button--lg', styles.ctaPrimary)}
               to="/docs/develop/build-a-module">
-              Build a module
+              <Translate id="home.dev.cta.module">Build a module</Translate>
             </Link>
             <Link className={styles.devLink} to="/docs/develop/ai-worker">
-              Write an AI worker
+              <Translate id="home.dev.cta.aiworker">Write an AI worker</Translate>
             </Link>
           </div>
         </div>
@@ -337,7 +438,11 @@ export default function Home(): ReactNode {
   return (
     <Layout
       title={siteConfig.title}
-      description="Open visual-event intelligence for physical spaces. Heldar turns camera streams into structured events, workflows, and operational intelligence. Open-core, runs on your hardware.">
+      description={translate({
+        id: 'home.meta.description',
+        message:
+          'Open visual-event intelligence for physical spaces. Heldar turns camera streams into structured events, workflows, and operational intelligence. Open-core, runs on your hardware.',
+      })}>
       <Hero />
       <main>
         <Pillars />
