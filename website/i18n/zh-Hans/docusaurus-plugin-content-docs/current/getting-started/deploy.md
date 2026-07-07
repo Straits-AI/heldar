@@ -97,7 +97,7 @@ Heldar 仅使用 SQLite（WAL 日志，内置迁移）。默认 URL 为
 
 `HELDAR_CORS_ORIGINS` 控制跨域访问。空值或 `*` 允许所有来源；否则限制为已配置的列表（默认允许 Vite 开发服务器）。在单二进制部署中，仪表盘与 API 同源，因此 CORS 主要在独立前端或集成服务调用 API 时才相关。
 
-## 运维部署
+## 部署运维
 
 有关规模调整、调试、可观测性和远程访问 — 包括通过 `HELDAR_WEBRTC_ICE_SERVERS` 接入自定义 STUN/TURN — 请参见
 [运维](../operate/index.md) 中心。

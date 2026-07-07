@@ -48,7 +48,7 @@ pub trait DetectionConsumer: Send + Sync {
 
 每个应用以绝对路径 `/api/v1/...` 暴露其自身的 Axum `Router<AppState>`。组合服务器将这些路由与内核路由合并；内核路由对它们一无所知。应用处理器通过 `AppState` 访问共享的 SQLite 连接池、内核配置以及录像机/采样器/HTTP 客户端。
 
-### 3. 自安装模式
+### 3. 自安装 Schema
 
 每个应用拥有自己的表，并在启动时对共享连接池幂等地应用其模式（每次部署单租户）。内核不定义领域表。其模式是运行一个 `schema::init(pool)`，该函数对包含若干 `CREATE TABLE IF NOT EXISTS` 语句的 `schema.sql` 文件执行 `include_str!`。
 

@@ -16,7 +16,7 @@ reintentos.
 Esta es la maquinaria de integración **genérica** que vive en el kernel abierto.
 Los verticales se construyen sobre el mismo sustrato — declaran sus propios tipos de evento de dominio
 y exponen sus propios endpoints REST — sin que el kernel sepa que existen
-(véase [Verticales sobre el mismo sustrato](#verticals-on-the-same-substrate)).
+(véase [Verticales sobre el mismo sustrato](#verticales-sobre-el-mismo-sustrato)).
 
 Todas las rutas a continuación viven bajo `/api/v1`. Gestionar suscripciones requiere el
 rol `manager` (o `admin`); las lecturas requieren cualquier principal autenticado. Cuando

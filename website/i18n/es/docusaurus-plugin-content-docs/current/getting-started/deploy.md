@@ -109,7 +109,7 @@ Heldar usa únicamente SQLite (journal WAL, migraciones integradas). La URL por 
 Las grabaciones permanecen en el disco local y se sirven desde ahí; por defecto nada se sube
 a la nube. Los segmentos bloqueados como evidencia nunca son eliminados por la retención.
 Ambos límites también son **configurables en tiempo de ejecución sin reiniciar** — desde la página
-Sistema del panel de control (panel "Recording limit") o mediante `GET`/`PUT /api/v1/system/retention`
+Sistema del panel de control (panel "Límite de grabación") o mediante `GET`/`PUT /api/v1/system/retention`
 (PUT es solo para administradores); un valor almacenado tiene prioridad sobre el valor del entorno, que sigue siendo el predeterminado.
 
 Las credenciales de las cámaras residen en esta BD SQLite. Establece `HELDAR_SECRET_KEY` (base64 de 32
