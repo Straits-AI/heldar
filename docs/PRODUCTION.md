@@ -26,10 +26,12 @@ or an empty dial-out bearer (`HELDAR_CP_TOKEN`) while a rendezvous is configured
 
 Each tagged release attaches static `heldar-core` binaries (x86_64 + aarch64). To upgrade a box in place:
 
-    ARCH=$(uname -m)                 # x86_64 or aarch64
+    REPO=Straits-AI/heldar                 # open build (self-hosters)
+    # REPO=Straits-AI/heldar-proprietary   # full/licensed build
+    ARCH=$(uname -m)                       # x86_64 or aarch64
     V=vX.Y.Z
-    curl -fsSLO "https://github.com/Straits-AI/heldar-proprietary/releases/download/$V/heldar-core-$V-$ARCH-linux-musl"        # full build (private repo)
-    curl -fsSLO "https://github.com/Straits-AI/heldar-proprietary/releases/download/$V/heldar-core-$V-$ARCH-linux-musl.sha256"
+    curl -fsSLO "https://github.com/$REPO/releases/download/$V/heldar-core-$V-$ARCH-linux-musl"
+    curl -fsSLO "https://github.com/$REPO/releases/download/$V/heldar-core-$V-$ARCH-linux-musl.sha256"
     sha256sum -c "heldar-core-$V-$ARCH-linux-musl.sha256"
     bash /home/soh/heldar-live/stop.sh
     install -m 0755 "heldar-core-$V-$ARCH-linux-musl" /usr/local/bin/heldar-core   # the path your start.sh / systemd ExecStart= launches — check the unit file with: systemctl cat heldar-core

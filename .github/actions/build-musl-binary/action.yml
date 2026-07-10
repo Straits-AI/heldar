@@ -27,15 +27,21 @@ runs:
         key: musl-${{ inputs.target }}
     - name: Build (static musl)
       shell: bash
-      run: cross build --release --locked --target ${{ inputs.target }} -p heldar-server
+      env:
+        TARGET: ${{ inputs.target }}
+      run: cross build --release --locked --target "$TARGET" -p heldar-server
     - name: Package + checksum
       id: package
       shell: bash
+      env:
+        TARGET: ${{ inputs.target }}
+        VERSION: ${{ inputs.version }}
+        ARCH: ${{ inputs.arch-label }}
       run: |
         set -euo pipefail
-        bin="target/${{ inputs.target }}/release/heldar-core"
+        bin="target/$TARGET/release/heldar-core"
         test -f "$bin" || { echo "::error::binary not found: $bin"; exit 1; }
-        asset="heldar-core-${{ inputs.version }}-${{ inputs.arch-label }}-linux-musl"
+        asset="heldar-core-$VERSION-$ARCH-linux-musl"
         cp "$bin" "$asset"
         sha256sum "$asset" > "$asset.sha256"
         echo "asset=$asset" >> "$GITHUB_OUTPUT"
