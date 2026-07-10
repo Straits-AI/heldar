@@ -20,13 +20,21 @@ pub async fn init_pool(cfg: &Config) -> anyhow::Result<SqlitePool> {
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(15))
-        .foreign_keys(true);
+        .foreign_keys(true)
+        .pragma("auto_vacuum", "incremental");
 
     let pool = SqlitePoolOptions::new()
         .max_connections(cfg.db_max_connections)
         .acquire_timeout(Duration::from_secs(20))
         .connect_with(opts)
         .await?;
+
+    // One-time: convert a pre-existing non-incremental DB so incremental_vacuum can reclaim pages
+    // (new DBs are already incremental via the connect pragma above). Best-effort; logs + retries.
+    if let Err(e) = crate::services::db_maintenance::ensure_incremental_autovacuum(&pool, cfg).await
+    {
+        tracing::warn!(error = %e, "db: auto_vacuum conversion check failed; continuing");
+    }
 
     Ok(pool)
 }

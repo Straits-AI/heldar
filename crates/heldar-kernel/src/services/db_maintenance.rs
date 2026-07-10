@@ -127,6 +127,57 @@ pub async fn enforce_db_cap(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<D
     })
 }
 
+/// Ensure the DB uses `auto_vacuum=INCREMENTAL` so `incremental_vacuum` can reclaim pages.
+/// New DBs are born INCREMENTAL (via the connect pragma in `db::init_pool`); an existing DB in
+/// mode NONE(0)/FULL(1) is converted with a one-time `VACUUM`. The VACUUM needs temp space ≈ the DB
+/// size, so it is SKIPPED (and retried next boot) when free disk < db_size × 1.1. Returns whether a
+/// conversion VACUUM ran.
+pub async fn ensure_incremental_autovacuum(
+    pool: &SqlitePool,
+    cfg: &Config,
+) -> anyhow::Result<bool> {
+    let mode: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
+        .fetch_one(pool)
+        .await
+        .context("PRAGMA auto_vacuum")?;
+    if mode == 2 {
+        return Ok(false); // already INCREMENTAL
+    }
+    let size = db_size_bytes(pool).await?;
+    // Guard: a full VACUUM rewrites the DB and needs ~size of scratch space.
+    match crate::services::storage::disk_stats_async(cfg.data_dir.clone()).await {
+        Some(stats) => {
+            let need = (size as f64 * 1.1) as u64;
+            if stats.free_bytes < need {
+                tracing::warn!(
+                    free = stats.free_bytes, need,
+                    "db retention: skipping auto_vacuum conversion (insufficient free disk); will retry next boot"
+                );
+                return Ok(false);
+            }
+        }
+        None => {
+            tracing::warn!(
+                "db retention: could not stat disk before auto_vacuum conversion; skipping"
+            );
+            return Ok(false);
+        }
+    }
+    sqlx::query("PRAGMA auto_vacuum=INCREMENTAL")
+        .execute(pool)
+        .await
+        .context("set auto_vacuum")?;
+    sqlx::query("VACUUM")
+        .execute(pool)
+        .await
+        .context("VACUUM (auto_vacuum conversion)")?;
+    tracing::info!(
+        prior_mode = mode,
+        "db retention: converted DB to auto_vacuum=INCREMENTAL (one-time)"
+    );
+    Ok(true)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -262,5 +313,47 @@ mod tests {
             rep.detections_deleted > 0,
             "settings override should force pruning"
         );
+    }
+
+    #[tokio::test]
+    async fn conversion_sets_incremental_on_a_plain_db() {
+        // A file-based temp DB created WITHOUT the incremental pragma starts in mode 0 (NONE).
+        // We use a file DB (not memory) because VACUUM behaves correctly with file-backed DBs.
+        let dir =
+            std::env::temp_dir().join(format!("heldar-autovacuum-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("test.db");
+        let url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        // Create a minimal table so the DB is non-trivial.
+        sqlx::query("CREATE TABLE detections (id TEXT PRIMARY KEY, created_at TEXT, blob TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mode0: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_ne!(mode0, 2, "starts non-incremental");
+        // Point data_dir at a temp dir with plenty of free space so the disk guard passes.
+        let mut cfg = Config::from_env();
+        cfg.data_dir = std::env::temp_dir();
+        let converted = ensure_incremental_autovacuum(&pool, &cfg).await.unwrap();
+        let mode1: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert!(converted, "should have run a conversion VACUUM");
+        assert_eq!(mode1, 2, "now INCREMENTAL");
+        // Calling again must be a no-op (already mode 2).
+        let converted2 = ensure_incremental_autovacuum(&pool, &cfg).await.unwrap();
+        assert!(!converted2, "already INCREMENTAL — should skip");
+        drop(pool);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
