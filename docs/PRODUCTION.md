@@ -22,6 +22,22 @@ off**. It warns (or, under `HELDAR_STRICT_PROD=true`, refuses) on a non-`Secure`
 an over-long session TTL, a localhost **or wildcard (`*`)** CORS allowlist, plaintext camera credentials,
 or an empty dial-out bearer (`HELDAR_CP_TOKEN`) while a rendezvous is configured.
 
+### Upgrading a box (prebuilt binary)
+
+Each tagged release attaches static `heldar-core` binaries (x86_64 + aarch64). To upgrade a box in place:
+
+    ARCH=$(uname -m)                 # x86_64 or aarch64
+    V=vX.Y.Z
+    curl -fsSLO "https://github.com/Straits-AI/heldar-proprietary/releases/download/$V/heldar-core-$V-$ARCH-linux-musl"        # full build (private repo)
+    curl -fsSLO "https://github.com/Straits-AI/heldar-proprietary/releases/download/$V/heldar-core-$V-$ARCH-linux-musl.sha256"
+    sha256sum -c "heldar-core-$V-$ARCH-linux-musl.sha256"
+    bash /home/soh/heldar-live/stop.sh
+    install -m 0755 "heldar-core-$V-$ARCH-linux-musl" /home/soh/cctv/target/debug/heldar-core   # or your BIN path
+    bash /home/soh/heldar-live/start.sh
+
+The static musl binary needs only the `ffmpeg` CLI present (it links no ffmpeg libraries). Open-core
+self-hosters pull the equivalent asset from the public `Straits-AI/heldar` releases.
+
 ## Kernel checklist
 
 | Control | Var | LAN default | Production | Why |
