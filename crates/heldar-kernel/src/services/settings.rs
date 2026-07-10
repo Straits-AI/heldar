@@ -9,6 +9,8 @@ use sqlx::SqlitePool;
 pub const RECORDING_MAX_BYTES: &str = "recording_max_bytes";
 /// Free-disk floor on the recordings filesystem, in bytes (overrides `HELDAR_MIN_FREE_DISK_GB`).
 pub const RECORDING_MIN_FREE_BYTES: &str = "recording_min_free_bytes";
+/// Operator override (bytes) for the metadata-DB size cap; env default is `HELDAR_MAX_DB_GB`.
+pub const DB_MAX_BYTES: &str = "db_max_bytes";
 
 /// Read an integer setting, or `None` if unset / unparseable.
 pub async fn get_i64(pool: &SqlitePool, key: &str) -> Option<i64> {

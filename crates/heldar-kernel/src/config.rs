@@ -61,6 +61,10 @@ pub struct Config {
     /// Hard floor on free disk space; when free space drops below this, oldest unlocked segments
     /// are pruned regardless of age/size policy (protects the host from a full disk).
     pub min_free_disk_bytes: u64,
+    /// Hard cap on the metadata DB file size (`heldar.db`). When the DB exceeds this, the retention
+    /// sweep sheds the oldest `detections` (events/audit are protected) and incrementally vacuums.
+    /// A generous backstop above normal time-retention usage; non-positive disables the cap.
+    pub max_db_bytes: u64,
     /// How often the alert notifier polls for new events to deliver.
     pub notifier_interval_s: u64,
     /// Master switch for AI frame sampling (Stage 2). Cameras still need an enabled AI task.
@@ -402,6 +406,7 @@ impl Config {
 
         let max_recordings_gb: f64 = parse_or("HELDAR_MAX_RECORDINGS_GB", 20.0);
         let min_free_disk_gb: f64 = parse_or("HELDAR_MIN_FREE_DISK_GB", 5.0);
+        let max_db_gb: f64 = parse_or("HELDAR_MAX_DB_GB", 4.0);
         let default_camera_quota_gb: f64 = parse_or("HELDAR_DEFAULT_CAMERA_QUOTA_GB", 0.0);
 
         Config {
@@ -439,6 +444,7 @@ impl Config {
             cors_origins,
             max_recordings_bytes: (max_recordings_gb * 1024.0 * 1024.0 * 1024.0) as u64,
             min_free_disk_bytes: (min_free_disk_gb * 1024.0 * 1024.0 * 1024.0) as u64,
+            max_db_bytes: (max_db_gb * 1024.0 * 1024.0 * 1024.0) as u64,
             notifier_interval_s: parse_or("HELDAR_NOTIFIER_INTERVAL_S", 15),
             ai_enabled: parse_bool("HELDAR_AI_ENABLED", true),
             ai_max_total_fps: parse_or("HELDAR_AI_MAX_TOTAL_FPS", 40.0),
