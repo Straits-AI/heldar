@@ -1,0 +1,41 @@
+name: Build static musl heldar-core
+description: Cross-compile heldar-core for a musl target, then name it and checksum it.
+inputs:
+  target:
+    description: Rust target triple (e.g. x86_64-unknown-linux-musl)
+    required: true
+  arch-label:
+    description: Human arch label for the asset name (e.g. x86_64)
+    required: true
+  version:
+    description: Release tag (e.g. v0.2.0)
+    required: true
+outputs:
+  asset:
+    description: Path to the named binary asset
+    value: ${{ steps.package.outputs.asset }}
+runs:
+  using: composite
+  steps:
+    - name: Install cross
+      uses: taiki-e/install-action@v2
+      with:
+        tool: cross
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        key: musl-${{ inputs.target }}
+    - name: Build (static musl)
+      shell: bash
+      run: cross build --release --locked --target ${{ inputs.target }} -p heldar-server
+    - name: Package + checksum
+      id: package
+      shell: bash
+      run: |
+        set -euo pipefail
+        bin="target/${{ inputs.target }}/release/heldar-core"
+        test -f "$bin" || { echo "::error::binary not found: $bin"; exit 1; }
+        asset="heldar-core-${{ inputs.version }}-${{ inputs.arch-label }}-linux-musl"
+        cp "$bin" "$asset"
+        sha256sum "$asset" > "$asset.sha256"
+        echo "asset=$asset" >> "$GITHUB_OUTPUT"
