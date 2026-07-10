@@ -708,7 +708,7 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
         }
     }
 
-    // 10) Metadata-DB size cap: after the row-retention deletes above have freed pages, checkpoint
+    // 11) Metadata-DB size cap: after the row-retention deletes above have freed pages, checkpoint
     //     the WAL, reclaim, and if the DB file is still over its cap shed the oldest detections
     //     (events/audit are protected). Self-bounds heldar.db the way step 3 bounds recordings.
     match crate::services::db_maintenance::enforce_db_cap(pool, cfg).await {
