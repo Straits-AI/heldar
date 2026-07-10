@@ -4,6 +4,7 @@ pub mod backup;
 pub mod camera_config;
 pub mod clip;
 pub mod consumer;
+pub mod db_maintenance;
 pub mod discovery;
 #[cfg(feature = "smtp")]
 pub mod email;
