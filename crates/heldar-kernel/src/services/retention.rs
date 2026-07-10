@@ -707,6 +707,31 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
             );
         }
     }
+
+    // 10) Metadata-DB size cap: after the row-retention deletes above have freed pages, checkpoint
+    //     the WAL, reclaim, and if the DB file is still over its cap shed the oldest detections
+    //     (events/audit are protected). Self-bounds heldar.db the way step 3 bounds recordings.
+    match crate::services::db_maintenance::enforce_db_cap(pool, cfg).await {
+        Ok(rep) if rep.detections_deleted > 0 => {
+            tracing::info!(
+                deleted = rep.detections_deleted,
+                bytes = rep.final_bytes,
+                over_cap = rep.over_cap,
+                "retention: db size-cap prune"
+            );
+            let _ = repo::log_event(
+                pool,
+                None,
+                "db_retention",
+                if rep.over_cap { "warning" } else { "info" },
+                json!({ "detections_deleted": rep.detections_deleted, "db_bytes": rep.final_bytes, "over_cap": rep.over_cap }),
+            )
+            .await;
+        }
+        Ok(_) => {}
+        Err(e) => tracing::error!(error = %e, "retention: db size-cap step failed"),
+    }
+
     Ok(())
 }
 
@@ -1183,5 +1208,90 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(kept, 1, "the recent detection must be retained");
+    }
+
+    // ----- sweep: DB size-cap (step 10) ------------------------------------
+
+    /// Verify that step 10 sheds oldest detections when the DB is over its cap, without
+    /// touching protected tables (audit_log used here as the canary — no FK constraints).
+    ///
+    /// Key isolation choices:
+    ///   - detection_retention_hours = 1_000_000  → step 5 age-prune deletes nothing (rows are recent)
+    ///   - max_db_bytes = 1 MB                    → tiny cap so step 10 fires
+    ///   - In-memory SQLite (auto_vacuum=NONE): incremental_vacuum is a no-op, so enforce_db_cap's
+    ///     no-progress guard stops after the first batch — but 2500 rows < 5000 batch size, so the
+    ///     whole set is deleted in one shot and the count assertion holds.
+    #[tokio::test]
+    async fn sweep_db_cap_sheds_detections_keeps_events() {
+        let pool = mem_pool().await;
+        let mut cfg = test_cfg();
+
+        // Step 5 age-prune must be inert (rows are recent).
+        cfg.detection_retention_hours = 1_000_000;
+        // Tiny cap so step 10 fires.
+        cfg.max_db_bytes = 1024 * 1024; // 1 MB
+
+        // FK target for detections; huge camera retention so segment steps are inert.
+        insert_camera(&pool, "cam1", 100_000, None).await;
+
+        let now = Utc::now();
+
+        // Seed ~2500 recent detections, each with a ~2 KB attributes blob.
+        // 2500 rows × ~2 KB ≈ 5 MB of payload, well above the 1 MB cap.
+        for i in 0_u32..2500 {
+            sqlx::query(
+                "INSERT INTO detections \
+                 (id, camera_id, task_type, timestamp, attributes, created_at) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+            )
+            .bind(format!("d{i:06}"))
+            .bind("cam1")
+            .bind("detection")
+            .bind(now)
+            .bind("x".repeat(2000))
+            .bind(now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Seed the protected table (audit_log has no FKs; step 10 never touches it).
+        for i in 0_u32..5 {
+            sqlx::query(
+                "INSERT INTO audit_log (id, actor, action, detail, created_at) \
+                 VALUES (?, 'system', 'test', '{}', ?)",
+            )
+            .bind(format!("al{i:04}"))
+            .bind(now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let audit_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(audit_before, 5);
+
+        sweep(&pool, &cfg).await.unwrap();
+
+        let det_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM detections")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let audit_after: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM audit_log")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+        assert!(
+            det_after < 2500,
+            "step 10 should have pruned detections (got {det_after})"
+        );
+        assert_eq!(
+            audit_after, audit_before,
+            "audit_log must be untouched by the DB size-cap step"
+        );
     }
 }
