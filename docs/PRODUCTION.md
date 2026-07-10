@@ -32,7 +32,7 @@ Each tagged release attaches static `heldar-core` binaries (x86_64 + aarch64). T
     curl -fsSLO "https://github.com/Straits-AI/heldar-proprietary/releases/download/$V/heldar-core-$V-$ARCH-linux-musl.sha256"
     sha256sum -c "heldar-core-$V-$ARCH-linux-musl.sha256"
     bash /home/soh/heldar-live/stop.sh
-    install -m 0755 "heldar-core-$V-$ARCH-linux-musl" /home/soh/cctv/target/debug/heldar-core   # or your BIN path
+    install -m 0755 "heldar-core-$V-$ARCH-linux-musl" /usr/local/bin/heldar-core   # the path your start.sh / systemd ExecStart= launches — check the unit file with: systemctl cat heldar-core
     bash /home/soh/heldar-live/start.sh
 
 The static musl binary needs only the `ffmpeg` CLI present (it links no ffmpeg libraries). Open-core
