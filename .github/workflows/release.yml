@@ -79,3 +79,35 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes
+
+  binaries:
+    name: open musl binaries
+    needs: publish
+    if: github.repository == 'Straits-AI/heldar' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            arch: x86_64
+          - target: aarch64-unknown-linux-musl
+            arch: aarch64
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        id: build
+        uses: ./.github/actions/build-musl-binary
+        with:
+          target: ${{ matrix.target }}
+          arch-label: ${{ matrix.arch }}
+          version: ${{ github.ref_name }}
+      - name: Upload to the Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          ASSET: ${{ steps.build.outputs.asset }}
+        shell: bash
+        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
