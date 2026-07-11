@@ -316,6 +316,169 @@ function RecordingLimitsPanel({
   );
 }
 
+/* --------------------- metadata-DB limit panel ---------------------- */
+
+function DatabasePanel({ canAdmin }: { canAdmin: boolean }) {
+  const status = usePoll(() => api.getDbStatus(), 15000);
+  const [editing, setEditing] = useState(false);
+  const [maxGb, setMaxGb] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [converting, setConverting] = useState(false);
+  const [convertMsg, setConvertMsg] = useState<string | null>(null);
+  const data = status.data;
+
+  function startEdit() {
+    setMaxGb(data ? String(Math.round(data.max_db_gb * 10) / 10) : "");
+    setError(null);
+    setEditing(true);
+  }
+  async function save() {
+    const gb = parseFloat(maxGb);
+    if (!Number.isFinite(gb) || gb <= 0) {
+      setError("Enter a size in GB greater than 0.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      await api.setDbLimit({ max_db_gb: gb });
+      await status.refresh();
+      setEditing(false);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+  async function convert() {
+    setConverting(true);
+    setConvertMsg(null);
+    setError(null);
+    try {
+      const res = await api.convertDb();
+      setConvertMsg(
+        res.status === "already-incremental"
+          ? "Already incremental — nothing to convert."
+          : "Conversion started — space is reclaimed on the next retention sweep.",
+      );
+      await status.refresh();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setConverting(false);
+    }
+  }
+
+  const usedPct =
+    data && data.max_db_bytes > 0 ? Math.min(100, (data.db_bytes / data.max_db_bytes) * 100) : null;
+  const barColor =
+    usedPct != null && usedPct > 90 ? "#ef4444" : usedPct != null && usedPct > 75 ? "#fbbf24" : "#f59e0b";
+
+  return (
+    <Panel
+      title="Database limit"
+      subtitle="Cap on the metadata DB (heldar.db) — oldest detections are shed to stay under it"
+      actions={
+        canAdmin && !editing && data ? (
+          <Button size="sm" onClick={startEdit}>
+            Edit
+          </Button>
+        ) : undefined
+      }
+    >
+      {!data ? (
+        <PanelStatus loading={status.loading} error={status.error} label="database status" />
+      ) : editing ? (
+        <div className="space-y-3">
+          <label className="block">
+            <SectionLabel>Maximum size (GB)</SectionLabel>
+            <input
+              type="number"
+              min="0.01"
+              step="0.01"
+              value={maxGb}
+              onChange={(e) => setMaxGb(e.target.value)}
+              className="mt-1.5 w-full rounded-md border border-line bg-canvas px-3 py-2 font-mono text-sm text-fg outline-none focus:border-accent"
+              autoFocus
+            />
+          </label>
+          {error && (
+            <div className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-[11px] text-red-300">
+              {error}
+            </div>
+          )}
+          <div className="flex gap-2">
+            <Button size="sm" variant="primary" disabled={saving} onClick={() => void save()}>
+              {saving ? <Spinner size={13} /> : "Save"}
+            </Button>
+            <Button size="sm" disabled={saving} onClick={() => setEditing(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="flex items-end justify-between gap-4">
+            <div>
+              <SectionLabel>Maximum size</SectionLabel>
+              <div className="mt-1 font-mono text-3xl font-semibold tabular-nums text-fg">
+                {Math.round(data.max_db_gb)}
+                <span className="ml-1 text-sm text-fg-muted">GB</span>
+              </div>
+            </div>
+            <div className="text-right font-mono text-[11px] leading-relaxed text-fg-muted">
+              <div>{data.max_overridden ? "operator-set" : "default (env)"}</div>
+              <div className="mt-0.5">current {formatBytes(data.db_bytes)}</div>
+            </div>
+          </div>
+          {usedPct != null && (
+            <div>
+              <div className="h-2.5 w-full overflow-hidden rounded-full bg-line">
+                <div
+                  className="h-full rounded-full transition-[width] duration-500"
+                  style={{ width: `${usedPct}%`, backgroundColor: barColor }}
+                />
+              </div>
+              <div className="mt-1 font-mono text-[11px] text-fg-muted">
+                {formatBytes(data.db_bytes)} of {Math.round(data.max_db_gb)} GB used (
+                {usedPct.toFixed(0)}%)
+              </div>
+            </div>
+          )}
+          <div className="border-t border-line pt-3">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-2">
+                <StatusLed state={data.incremental ? "recording" : "connecting"} />
+                <span className="truncate font-mono text-[11px] text-fg-secondary">
+                  {data.incremental
+                    ? "Incremental — reclaims freed space"
+                    : "Not converted — the cap can't shrink the file"}
+                </span>
+              </div>
+              {canAdmin && !data.incremental && (
+                <Button size="sm" disabled={converting} onClick={() => void convert()}>
+                  {converting ? <Spinner size={13} /> : "Convert / reclaim"}
+                </Button>
+              )}
+            </div>
+            {convertMsg && <p className="mt-2 font-mono text-[11px] text-fg-muted">{convertMsg}</p>}
+          </div>
+          {error && (
+            <div className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-[11px] text-red-300">
+              {error}
+            </div>
+          )}
+          <p className="font-mono text-[11px] leading-relaxed text-fg-muted">
+            When the database exceeds this, the retention sweeper deletes the oldest detections first
+            (events &amp; audit are kept), so it can&apos;t grow without bound.
+          </p>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 /* ------------------------- camera health table ------------------------ */
 
 function Th({ children, className }: { children?: ReactNode; className?: string }) {
@@ -777,6 +940,7 @@ export function System() {
             canAdmin={principal?.role === "admin"}
             recordingsBytes={system.data?.recordings_bytes ?? null}
           />
+          <DatabasePanel canAdmin={principal?.role === "admin"} />
           <HealthPanel
             statuses={health.data}
             cameras={cameras.data}

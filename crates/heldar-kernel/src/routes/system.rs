@@ -1,7 +1,7 @@
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -23,6 +23,8 @@ pub fn router() -> Router<AppState> {
             "/api/v1/system/retention",
             get(get_retention).put(put_retention),
         )
+        .route("/api/v1/system/db", get(get_db_status).put(put_db_limit))
+        .route("/api/v1/system/db/convert", post(post_db_convert))
 }
 
 const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -119,6 +121,119 @@ async fn put_retention(
     )
     .await;
     Ok(Json(effective_limits(&st).await))
+}
+
+/// Metadata-DB (`heldar.db`) status + size cap. `incremental` = the DB is in `auto_vacuum=INCREMENTAL`
+/// mode, in which the size cap can reclaim freed space back to the OS. `max_overridden` flags an
+/// operator override (settings table) vs the env default.
+#[derive(Debug, Serialize)]
+struct DbStatus {
+    db_bytes: i64,
+    max_db_gb: f64,
+    max_db_bytes: i64,
+    max_overridden: bool,
+    incremental: bool,
+}
+
+async fn db_status(st: &AppState) -> AppResult<DbStatus> {
+    let max_override = settings::get_i64(&st.pool, settings::DB_MAX_BYTES)
+        .await
+        .filter(|&v| v > 0);
+    let max = max_override.unwrap_or(st.cfg.max_db_bytes as i64);
+    let db_bytes = crate::services::db_maintenance::db_size_bytes(&st.pool).await? as i64;
+    let mode = crate::services::db_maintenance::auto_vacuum_mode(&st.pool).await?;
+    Ok(DbStatus {
+        db_bytes,
+        max_db_gb: max as f64 / BYTES_PER_GB,
+        max_db_bytes: max,
+        max_overridden: max_override.is_some(),
+        incremental: mode == 2,
+    })
+}
+
+/// Current metadata-DB size + cap + conversion status. Any authenticated viewer may read.
+async fn get_db_status(
+    State(st): State<AppState>,
+    principal: Principal,
+) -> AppResult<Json<DbStatus>> {
+    principal.require(principal.can_view(), "view database status")?;
+    Ok(Json(db_status(&st).await?))
+}
+
+#[derive(Debug, Deserialize)]
+struct DbLimitUpdate {
+    /// New metadata-DB size cap in GB (> 0). Omit to leave unchanged.
+    max_db_gb: Option<f64>,
+}
+
+/// Set the metadata-DB size cap at runtime (admin only) — the retention sweeper picks it up on its
+/// next pass, no restart. Stored in the settings table; clearing it reverts to the env default.
+async fn put_db_limit(
+    State(st): State<AppState>,
+    principal: Principal,
+    Json(body): Json<DbLimitUpdate>,
+) -> AppResult<Json<DbStatus>> {
+    principal.require(principal.can_admin(), "change database size cap")?;
+    if let Some(gb) = body.max_db_gb {
+        if !gb.is_finite() || gb <= 0.0 {
+            return Err(AppError::BadRequest(
+                "`max_db_gb` must be greater than 0".into(),
+            ));
+        }
+        settings::set_i64(&st.pool, settings::DB_MAX_BYTES, (gb * BYTES_PER_GB) as i64).await?;
+    }
+    crate::auth::audit(
+        &st.pool,
+        &principal,
+        "update_db_limit",
+        "settings",
+        "database",
+        json!({ "max_db_gb": body.max_db_gb }),
+    )
+    .await;
+    Ok(Json(db_status(&st).await?))
+}
+
+#[derive(Debug, Serialize)]
+struct DbConvertResult {
+    /// "already-incremental" (no-op) or "started" (a background conversion was kicked off).
+    status: &'static str,
+}
+
+/// Trigger the one-time `auto_vacuum=INCREMENTAL` conversion online (admin only). A no-op if the DB is
+/// already incremental; otherwise spawns the conversion in the BACKGROUND (it holds a write lock for
+/// its duration) and returns immediately — the UI polls `GET /api/v1/system/db` until `incremental`
+/// flips true. Best-effort + disk-gated + convergence-checked (see `ensure_incremental_autovacuum`).
+async fn post_db_convert(
+    State(st): State<AppState>,
+    principal: Principal,
+) -> AppResult<Json<DbConvertResult>> {
+    principal.require(principal.can_admin(), "convert database auto_vacuum")?;
+    if crate::services::db_maintenance::auto_vacuum_mode(&st.pool).await? == 2 {
+        return Ok(Json(DbConvertResult {
+            status: "already-incremental",
+        }));
+    }
+    let (pool, cfg) = (st.pool.clone(), st.cfg.clone());
+    tokio::spawn(async move {
+        match crate::services::db_maintenance::ensure_incremental_autovacuum(&pool, &cfg).await {
+            Ok(true) => tracing::info!("db: UI-triggered auto_vacuum conversion complete"),
+            Ok(false) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "db: UI-triggered auto_vacuum conversion failed")
+            }
+        }
+    });
+    crate::auth::audit(
+        &st.pool,
+        &principal,
+        "convert_db_autovacuum",
+        "settings",
+        "database",
+        json!({}),
+    )
+    .await;
+    Ok(Json(DbConvertResult { status: "started" }))
 }
 
 /// Liveness: the process is up.

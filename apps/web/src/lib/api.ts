@@ -77,6 +77,9 @@ import type {
   SnapshotScheduleUpdate,
   RetentionLimits,
   RetentionUpdate,
+  DbStatus,
+  DbLimitUpdate,
+  DbConvertResult,
   SnapshotView,
   StreamProfile,
   SystemInfo,
@@ -337,6 +340,17 @@ export const api = {
     request<RetentionLimits>("/api/v1/system/retention", {
       method: "PUT",
       body: JSON.stringify(body),
+    }),
+  getDbStatus: () => request<DbStatus>("/api/v1/system/db"),
+  setDbLimit: (body: DbLimitUpdate) =>
+    request<DbStatus>("/api/v1/system/db", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  convertDb: () =>
+    request<DbConvertResult>("/api/v1/system/db/convert", {
+      method: "POST",
+      body: "{}",
     }),
 
   // ---- Modules (drives the dashboard nav rail + routes; only loaded modules appear) ----

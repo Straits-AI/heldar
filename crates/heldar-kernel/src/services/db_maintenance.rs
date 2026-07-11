@@ -22,6 +22,15 @@ pub async fn db_size_bytes(pool: &SqlitePool) -> anyhow::Result<u64> {
     Ok((page_count.max(0) as u64) * (page_size.max(0) as u64))
 }
 
+/// Read the DB's current `auto_vacuum` mode: 0 = NONE, 1 = FULL, 2 = INCREMENTAL. Mode 2 is the one
+/// in which `incremental_vacuum` can reclaim freed pages back to the OS (see the size cap).
+pub async fn auto_vacuum_mode(pool: &SqlitePool) -> anyhow::Result<i64> {
+    sqlx::query_scalar("PRAGMA auto_vacuum")
+        .fetch_one(pool)
+        .await
+        .context("PRAGMA auto_vacuum")
+}
+
 /// Fold the WAL back into the main DB and truncate the `-wal` file, bounding its on-disk size.
 pub async fn checkpoint_wal(pool: &SqlitePool) -> anyhow::Result<()> {
     // Returns a row (busy, log, checkpointed); we don't need it, just run it.
@@ -599,5 +608,19 @@ mod tests {
         assert_ne!(mode, 2, "DB not converted when disk can't be statted");
         drop(pool);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn auto_vacuum_mode_reflects_pragma() {
+        // test_pool() is created with auto_vacuum=INCREMENTAL -> mode 2.
+        let pool = test_pool().await;
+        assert_eq!(auto_vacuum_mode(&pool).await.unwrap(), 2);
+        // A fresh :memory: DB with no pragma is mode 0 (NONE).
+        let plain = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        assert_eq!(auto_vacuum_mode(&plain).await.unwrap(), 0);
     }
 }

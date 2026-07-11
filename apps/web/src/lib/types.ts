@@ -334,6 +334,22 @@ export interface RetentionUpdate {
   min_free_disk_gb?: number;
 }
 
+/** Metadata-DB (heldar.db) status + size cap. `incremental` = auto_vacuum=INCREMENTAL (the cap can
+ *  reclaim freed space); `max_overridden` flags an operator override vs the env default. */
+export interface DbStatus {
+  db_bytes: number;
+  max_db_gb: number;
+  max_db_bytes: number;
+  max_overridden: boolean;
+  incremental: boolean;
+}
+export interface DbLimitUpdate {
+  max_db_gb?: number;
+}
+export interface DbConvertResult {
+  status: string; // "already-incremental" | "started"
+}
+
 // ---- Webhook subscriptions (the generic event-delivery substrate; supersedes single-URL alerting) ----
 
 /** A webhook subscription (GET /api/v1/webhooks). The signing `secret` is never returned; only
