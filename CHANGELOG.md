@@ -18,7 +18,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   args and the credential/injection-safety guarantee (the stream URL stays a single argv element). Backup
   copy execution is now covered by a real filesystem round-trip: `copy_local`'s fs loop was extracted to a
   testable `copy_segments_to_dir` (byte-identical copy, vanished-source skip) and `dir_size_bytes` is
-  pinned. (Full ffmpeg-child-lifecycle coverage still needs a fake-ffmpeg harness — tracked follow-up.)
+  pinned. The ffmpeg-child lifecycle is now covered too: two integration tests drive `run_supervise`
+  against a fake ffmpeg (a missing binary → `camera_status.state='error'`; `false` as a crashing child →
+  `reconnect_count` bump + a `camera_offline` event), closing the last recorder gap.
 
 ### Added
 

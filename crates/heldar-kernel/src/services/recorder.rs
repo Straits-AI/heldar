@@ -1007,4 +1007,148 @@ mod tests {
         );
         assert!(!args.iter().any(|a| a == "-an"));
     }
+
+    // ---- supervision LIFECYCLE (drives run_supervise with a fake ffmpeg; the plumbing the pure -----
+    // ---- decision-logic tests above don't cover: spawn -> status write, crash -> reconnect bookkeeping)
+
+    async fn mem_pool_migrated() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        pool
+    }
+
+    /// A hikvision camera with an address so `record_url` is Some (the loop spawns ffmpeg). The
+    /// address is TEST-NET-1 (192.0.2.0/24, RFC5737) and unreachable — but the fake ffmpeg never
+    /// connects, so that doesn't matter. Other columns default (enabled/record_enabled=1, continuous).
+    async fn insert_recordable_camera(pool: &SqlitePool, id: &str) {
+        sqlx::query(
+            "INSERT INTO cameras (id, name, vendor, address, created_at, updated_at)
+             VALUES (?, ?, 'hikvision', '192.0.2.10', ?, ?)",
+        )
+        .bind(id)
+        .bind(format!("Cam {id}"))
+        .bind(Utc::now())
+        .bind(Utc::now())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn tmp_recordings_dir(tag: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("heldar-rec-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    /// Poll `f` until it returns true or ~4s elapses (deterministic events happen in ms; the budget is
+    /// generous slack, and assertions are monotonic so a re-spawn between polls can't flake them).
+    async fn poll_until<F, Fut>(mut f: F) -> bool
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        for _ in 0..160 {
+            if f().await {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        false
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_supervise_records_error_state_when_ffmpeg_is_missing() {
+        let pool = mem_pool_migrated().await;
+        insert_recordable_camera(&pool, "cam_err").await;
+        let mut cfg = Config::from_env();
+        cfg.ffmpeg_bin = "/nonexistent/heldar-ffmpeg-should-not-exist".into();
+        cfg.recordings_dir = tmp_recordings_dir("err");
+        let mgr = RecorderManager::new(pool.clone(), std::sync::Arc::new(cfg));
+
+        mgr.spawn("cam_err".to_string()).await;
+        // A failed spawn must land camera_status.state='error' (not panic the task, not leave it blank).
+        let p = pool.clone();
+        let reached_error = poll_until(|| {
+            let p = p.clone();
+            async move {
+                sqlx::query_scalar::<_, String>(
+                    "SELECT state FROM camera_status WHERE camera_id = 'cam_err'",
+                )
+                .fetch_optional(&p)
+                .await
+                .ok()
+                .flatten()
+                .as_deref()
+                    == Some("error")
+            }
+        })
+        .await;
+        mgr.stop("cam_err").await;
+
+        assert!(
+            reached_error,
+            "a missing ffmpeg must set camera_status.state='error'"
+        );
+        let err: Option<String> =
+            sqlx::query_scalar("SELECT last_error FROM camera_status WHERE camera_id = 'cam_err'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            err.unwrap_or_default().contains("spawn ffmpeg failed"),
+            "last_error should explain the spawn failure"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn run_supervise_bumps_reconnect_and_logs_offline_on_child_crash() {
+        let pool = mem_pool_migrated().await;
+        insert_recordable_camera(&pool, "cam_crash").await;
+        let mut cfg = Config::from_env();
+        // `false` spawns (via PATH) and exits non-zero immediately — a crashing ffmpeg child.
+        cfg.ffmpeg_bin = "false".into();
+        cfg.recordings_dir = tmp_recordings_dir("crash");
+        let mgr = RecorderManager::new(pool.clone(), std::sync::Arc::new(cfg));
+
+        mgr.spawn("cam_crash".to_string()).await;
+        // On the child exiting, the supervisor bumps reconnect_count (state 'offline') and logs a
+        // 'camera_offline' event — the observability an operator relies on to see a flapping camera.
+        let p = pool.clone();
+        let reconnected = poll_until(|| {
+            let p = p.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT reconnect_count FROM camera_status WHERE camera_id = 'cam_crash'",
+                )
+                .fetch_optional(&p)
+                .await
+                .ok()
+                .flatten()
+                .unwrap_or(0)
+                    >= 1
+            }
+        })
+        .await;
+        mgr.stop("cam_crash").await;
+
+        assert!(
+            reconnected,
+            "a crashing ffmpeg child must bump reconnect_count"
+        );
+        let offline_events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events WHERE camera_id = 'cam_crash' AND event_type = 'camera_offline'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            offline_events >= 1,
+            "a crash must log a camera_offline event"
+        );
+    }
 }
