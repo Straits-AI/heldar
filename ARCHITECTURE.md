@@ -164,11 +164,16 @@ sampler) is deliberately out of scope for Stage 0.
 
 1. Load `.env` (dotenvy), init tracing (`HELDAR_LOG`, default `info,heldar_core=debug`).
 2. Build `Config::from_env`; `create_dir_all` for data/recordings/clips/snapshots dirs.
-3. Open SQLite pool (`db::init_pool`), run embedded migrations (`db::run_migrations`).
+3. Open SQLite pool (`db::init_pool`), run embedded migrations (`db::run_migrations`). `init_pool` no
+   longer runs the one-time `auto_vacuum=INCREMENTAL` conversion for a pre-existing DB — that now runs
+   as a background task after boot (step 6), so this step never blocks on a multi-minute `VACUUM`.
 4. Construct `RecorderManager` and shared `reqwest::Client` (10s timeout).
 5. `recorder.start_all()` — spawn one supervisor task per recordable camera.
 6. Launch the indexer, health monitor, retention sweeper, and alert notifier as
-   **supervised** background loops (`spawn_supervised` — respawn on return/panic, §14).
+   **supervised** background loops (`spawn_supervised` — respawn on return/panic, §14). Also fires a
+   one-shot (non-supervised) `tokio::spawn` for the legacy-DB `auto_vacuum=INCREMENTAL` conversion,
+   flag-gated by `HELDAR_DB_AUTOVACUUM_CONVERT` (default `true`) — best-effort, disk-gated, idempotent;
+   see §13 and `docs/PRODUCTION.md`.
 7. Build the Axum router: API routes + three `ServeDir` mounts (`/media/recordings`,
    `/media/clips`, `/media/snapshots`) + `TraceLayer` + CORS.
 8. Bind `api_host:api_port` (default `0.0.0.0:8000`) and serve with graceful shutdown
@@ -601,6 +606,8 @@ All via `HELDAR_*` env vars (see `.env.example`). Notable defaults:
 | `HELDAR_INDEXER_INTERVAL_S` / `HEALTH_INTERVAL_S` / `RETENTION_INTERVAL_S` | `10` / `15` / `300` | loop cadences |
 | `HELDAR_MAX_RECORDINGS_GB` | `20` | global size cap (soft footprint budget) |
 | `HELDAR_MIN_FREE_DISK_GB` | `5` | disk-free floor (hard host-protection floor) |
+| `HELDAR_MAX_DB_GB` | `4` | metadata-DB (`heldar.db`) size cap; sheds oldest `detections` above this |
+| `HELDAR_DB_AUTOVACUUM_CONVERT` | `true` | one-time background `auto_vacuum=INCREMENTAL` conversion for a pre-existing DB (§13); `false` = skip, run `convert-autovacuum` manually |
 | `HELDAR_ALERT_WEBHOOK_URL` | *(unset)* | alert webhook; unset disables the notifier |
 | `HELDAR_NOTIFIER_INTERVAL_S` | `15` (min 5) | notifier poll cadence |
 | `HELDAR_API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | bind address |
@@ -648,6 +655,10 @@ All via `HELDAR_*` env vars (see `.env.example`). Notable defaults:
    ├─ spawn_supervised retention::run (every ~300s) age + size-cap + free-floor purge (skip locked)
    ├─ spawn_supervised notifier::run  (every ~15s)  POST warning/critical events → webhook
    │     (each spawn_supervised wrapper respawns its task 5s after any return/panic)
+   │
+   ├─ tokio::spawn maybe_convert_autovacuum (once, if HELDAR_DB_AUTOVACUUM_CONVERT=true; default true)
+   │     legacy-DB one-time auto_vacuum=INCREMENTAL conversion — NOT supervised (no respawn); the
+   │     server binds/serves throughout, writes stall only while its VACUUM runs
    │
    └─ axum::serve(...)                          HTTP API + /metrics + /healthz + /readyz + /media
          on SIGINT/SIGTERM → recorder.shutdown() → kill every ffmpeg child

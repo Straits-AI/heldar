@@ -81,6 +81,8 @@ curl http://localhost:8000/api/v1/system/retention           # recording size ca
 > (`HELDAR_MAX_RECORDINGS_GB`, default 20) and a free-disk floor (`HELDAR_MIN_FREE_DISK_GB`, default 5),
 > evicting oldest-first (evidence-locked clips are never evicted). Both are tunable at runtime via
 > `GET`/`PUT /api/v1/system/retention` (PUT admin-only) and the dashboard's System page — no restart.
+> The metadata DB is also bounded (`HELDAR_MAX_DB_GB`, default 4), and a pre-existing DB self-converts to
+> `auto_vacuum=INCREMENTAL` in the background on first upgrade (`HELDAR_DB_AUTOVACUUM_CONVERT=true`).
 
 Run the reference AI worker against an AI-enabled camera:
 

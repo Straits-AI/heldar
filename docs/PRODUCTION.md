@@ -127,6 +127,26 @@ looks too short. Generate each secret with `openssl rand -base64 32`.
   **If you lose the key with no `HELDAR_SECRET_KEY_OLD` to recover from, you must re-enter every camera
   password.** Keep the key in a password manager or secret store, not only on the box.
 
+- **Converting a legacy DB to `auto_vacuum=INCREMENTAL`.** A `heldar.db` created before the storage
+  size-cap feature starts in `auto_vacuum` mode `NONE`, so the size cap (`HELDAR_MAX_DB_GB`, default `4`)
+  can't shrink the file even after rows are pruned. Heldar converts it once, automatically, in the
+  **background** after boot (`HELDAR_DB_AUTOVACUUM_CONVERT`, default `true`) — the server binds and
+  serves reads/`/healthz` immediately regardless of DB size or conversion state. The conversion is a full
+  `VACUUM`: it holds a write lock for its duration (reads stay up; writes stall until it finishes), so on
+  a large legacy DB you may prefer to run it during a maintenance window instead:
+
+  ```
+  HELDAR_DB_AUTOVACUUM_CONVERT=false   # skip the automatic background attempt
+  # stop the server
+  heldar-core convert-autovacuum       # forces the conversion synchronously (server stopped)
+  # start the server
+  ```
+
+  Once a conversion completes, the size cap begins reclaiming space on the next retention sweep — not
+  necessarily instantly, since pre-existing pool connections pick up the converted mode within a sweep or
+  on the next restart. **If you set the flag `false` and never run the CLI, a legacy DB stays unconverted
+  and the size cap cannot shrink the file.**
+
 ## Further hardening (not yet built in)
 
 These are deliberately out of the current scope — track them for higher-assurance deployments:
