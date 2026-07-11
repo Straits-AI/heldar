@@ -29,13 +29,6 @@ pub async fn init_pool(cfg: &Config) -> anyhow::Result<SqlitePool> {
         .connect_with(opts)
         .await?;
 
-    // One-time: convert a pre-existing non-incremental DB so incremental_vacuum can reclaim pages
-    // (new DBs are already incremental via the connect pragma above). Best-effort; logs + retries.
-    if let Err(e) = crate::services::db_maintenance::ensure_incremental_autovacuum(&pool, cfg).await
-    {
-        tracing::warn!(error = %e, "db: auto_vacuum conversion check failed; continuing");
-    }
-
     Ok(pool)
 }
 
@@ -109,5 +102,55 @@ mod tests {
             errors, 0,
             "concurrent writers must not surface SQLITE_BUSY under WAL + busy_timeout ({errors} failed)"
         );
+    }
+
+    /// init_pool must NOT convert a pre-existing DB's auto_vacuum mode (the conversion moved to a
+    /// background task). A mode-0 file DB stays mode 0 after init_pool — guards against re-adding the
+    /// boot-blocking VACUUM.
+    #[tokio::test]
+    async fn init_pool_does_not_convert_autovacuum() {
+        let dir =
+            std::env::temp_dir().join(format!("heldar-initpool-noconv-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("t.db");
+        // Create a mode-0 DB WITHOUT the incremental connect pragma, with a table so it is non-trivial.
+        {
+            let url = format!("sqlite://{}?mode=rwc", db_path.display());
+            let seed = SqlitePoolOptions::new()
+                .max_connections(1)
+                .connect(&url)
+                .await
+                .unwrap();
+            sqlx::query("CREATE TABLE t (id INTEGER PRIMARY KEY)")
+                .execute(&seed)
+                .await
+                .unwrap();
+            let m: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
+                .fetch_one(&seed)
+                .await
+                .unwrap();
+            assert_ne!(m, 2, "seed DB is non-incremental");
+            seed.close().await;
+        }
+        let mut cfg = Config::from_env();
+        cfg.database_url = format!("sqlite://{}", db_path.display());
+        // Point data_dir at a directory that actually exists so the disk-space gate inside
+        // ensure_incremental_autovacuum (statvfs on cfg.data_dir) can resolve instead of silently
+        // skipping the conversion for an unrelated reason (default `./data` doesn't exist under the
+        // test cwd) — otherwise this test would pass "by accident" without exercising init_pool.
+        cfg.data_dir = dir.clone();
+        // Pin the pool to a single connection so the read-back below deterministically lands on the
+        // same physical connection init_pool used — otherwise which connection serves the final
+        // PRAGMA is pool-implementation-dependent and the assertion would be flaky either way.
+        cfg.db_max_connections = 1;
+        let pool = init_pool(&cfg).await.unwrap();
+        let mode: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(mode, 0, "init_pool performed no conversion VACUUM");
+        drop(pool);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
