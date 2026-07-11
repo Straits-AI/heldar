@@ -436,6 +436,13 @@ value each pass, so a change takes effect on the next sweep; clearing an overrid
 default. The PUT is audited (`update_retention_limits`). The dashboard surfaces this as the System →
 Recording limit panel.
 
+The **metadata-DB size cap** is runtime-tunable the same way: `GET /api/v1/system/db` returns the DB
+size, the effective cap, and whether the DB is in `auto_vacuum=INCREMENTAL` mode; `PUT /api/v1/system/db`
+(admin, audited `update_db_limit`) sets `{max_db_gb?}`, shadowing `HELDAR_MAX_DB_GB`. `POST /api/v1/system/db/convert`
+(admin, audited `convert_db_autovacuum`) triggers the one-time `auto_vacuum` conversion online — it
+returns immediately and runs the VACUUM in the background. The dashboard surfaces all of this as the
+System → Database limit panel (view/edit the cap + a one-click "Convert / reclaim" action).
+
 The **evidence lock** (`segments.locked`) is the evidence-lock mechanism:
 the column and the retention guards exist, though no Stage 0 API mutates `locked`
 or `incident_id` yet (that arrives with the `lockEvidence` endpoint in a later

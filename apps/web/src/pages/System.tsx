@@ -328,6 +328,12 @@ function DatabasePanel({ canAdmin }: { canAdmin: boolean }) {
   const [convertMsg, setConvertMsg] = useState<string | null>(null);
   const data = status.data;
 
+  // Once the conversion actually lands (auto_vacuum flips to INCREMENTAL via the 15s poll), drop the
+  // transient "started" note so it doesn't sit stale next to the "Incremental" status.
+  useEffect(() => {
+    if (data?.incremental) setConvertMsg(null);
+  }, [data?.incremental]);
+
   function startEdit() {
     setMaxGb(data ? String(Math.round(data.max_db_gb * 10) / 10) : "");
     setError(null);
@@ -429,7 +435,9 @@ function DatabasePanel({ canAdmin }: { canAdmin: boolean }) {
             </div>
             <div className="text-right font-mono text-[11px] leading-relaxed text-fg-muted">
               <div>{data.max_overridden ? "operator-set" : "default (env)"}</div>
-              <div className="mt-0.5">current {formatBytes(data.db_bytes)}</div>
+              <div className="mt-0.5">
+                {formatBytes(Math.max(0, data.max_db_bytes - data.db_bytes))} free
+              </div>
             </div>
           </div>
           {usedPct != null && (

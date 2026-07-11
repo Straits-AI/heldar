@@ -147,6 +147,11 @@ looks too short. Generate each secret with `openssl rand -base64 32`.
   on the next restart. **If you set the flag `false` and never run the CLI, a legacy DB stays unconverted
   and the size cap cannot shrink the file.**
 
+  You can also run the conversion **online from the dashboard** (System → Database limit → "Convert /
+  reclaim", admin-only) — the same background conversion as the automatic path, no restart. Set the DB
+  cap there too. The `convert-autovacuum` CLI remains the zero-contention path when you want the server
+  stopped.
+
 ## Further hardening (not yet built in)
 
 These are deliberately out of the current scope — track them for higher-assurance deployments:
