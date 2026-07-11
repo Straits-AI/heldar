@@ -236,23 +236,87 @@ struct WorkerTask {
 }
 
 /// Worker discovery: every enabled AI task on an enabled camera, with the frame URL to pull.
+/// A worker whose `last_seen` is older than this is treated as gone and its tasks reassigned. Workers
+/// must poll `/ai/tasks` more often than this (the default poll interval is 10s), so a live worker is
+/// never dropped between polls; a crashed one is reclaimed within the TTL.
+const WORKER_LIVENESS_TTL_SECS: i64 = 60;
+
+#[derive(Debug, Deserialize)]
+struct TasksQuery {
+    /// Stable identity of the polling worker process. When present, the kernel shards the task set so
+    /// multiple workers on one node split the load; when absent (a single/legacy worker) it returns all.
+    worker_id: Option<String>,
+}
+
+/// Which of `total` stably-ordered tasks belong to `me`, given the stably-ordered `live` worker set.
+/// Modulo sharding (task `i` → `live[i % n]`): balanced (each worker gets ~total/n) and stable
+/// (reassigns only when the worker SET changes). Defensive: returns ALL indices when `live` is empty or
+/// `me` is absent, so a worker never silently gets nothing due to a race — worst case it redoes tasks,
+/// which the outbox `frame_id` idempotency dedups.
+fn worker_shard(total: usize, live: &[String], me: &str) -> Vec<usize> {
+    let n = live.len();
+    match live.iter().position(|w| w == me) {
+        Some(idx) if n > 0 => (0..total).filter(|i| i % n == idx).collect(),
+        _ => (0..total).collect(),
+    }
+}
+
 async fn list_all_tasks(
     State(st): State<AppState>,
+    Query(q): Query<TasksQuery>,
     principal: crate::auth::Principal,
 ) -> AppResult<Json<Vec<WorkerTask>>> {
     // Authentication floor: when auth is enabled this rejects anonymous callers (the worker sends an
     // integration API key). When auth is disabled the principal is the synthetic system admin.
     principal.require(principal.can_view(), "discover AI tasks")?;
+    // Stable order (by id) so every worker sees the same task sequence and the modulo shard agrees.
     let tasks = sqlx::query_as::<_, AiTask>(
         "SELECT t.* FROM ai_tasks t JOIN cameras c ON c.id = t.camera_id
          WHERE t.enabled = 1 AND c.enabled = 1
-         ORDER BY t.camera_id ASC",
+         ORDER BY t.id ASC",
     )
     .fetch_all(&st.pool)
     .await?;
+
+    // Multi-worker sharding: an identified worker heartbeats itself, stale workers are pruned, and this
+    // worker gets only its slice of the tasks. No worker_id → return everything (backward-compatible in
+    // both directions: an old worker gets all tasks; a new worker against an old kernel is unaffected).
+    let keep: Vec<usize> = match q
+        .worker_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|w| !w.is_empty())
+    {
+        None => (0..tasks.len()).collect(),
+        Some(worker_id) => {
+            let now = Utc::now();
+            let _ = sqlx::query(
+                "INSERT INTO ai_workers (worker_id, last_seen) VALUES (?, ?)
+                 ON CONFLICT(worker_id) DO UPDATE SET last_seen = excluded.last_seen",
+            )
+            .bind(worker_id)
+            .bind(now)
+            .execute(&st.pool)
+            .await;
+            let _ = sqlx::query("DELETE FROM ai_workers WHERE last_seen < ?")
+                .bind(now - chrono::Duration::seconds(WORKER_LIVENESS_TTL_SECS))
+                .execute(&st.pool)
+                .await;
+            let live: Vec<String> =
+                sqlx::query_scalar("SELECT worker_id FROM ai_workers ORDER BY worker_id ASC")
+                    .fetch_all(&st.pool)
+                    .await
+                    .unwrap_or_default();
+            worker_shard(tasks.len(), &live, worker_id)
+        }
+    };
+
+    let keep: std::collections::HashSet<usize> = keep.into_iter().collect();
     let out = tasks
         .into_iter()
-        .map(|t| WorkerTask {
+        .enumerate()
+        .filter(|(i, _)| keep.contains(i))
+        .map(|(_, t)| WorkerTask {
             frame_url: format!(
                 "/api/v1/cameras/{}/frame?profile={}",
                 t.camera_id, t.stream_profile
@@ -654,5 +718,50 @@ mod tests {
             StatusCode::CREATED,
             "a different profile is a separate task"
         );
+    }
+
+    // ---- worker sharding (multi-worker task split) ----------------------------------------------
+
+    #[test]
+    fn worker_shard_partitions_tasks_disjointly_and_balanced() {
+        let live: Vec<String> = vec!["a".into(), "b".into(), "c".into()];
+        let total = 10;
+        let mut union: Vec<usize> = Vec::new();
+        let mut sizes = Vec::new();
+        for w in &live {
+            let mine = worker_shard(total, &live, w);
+            // disjoint from what's already claimed
+            for i in &mine {
+                assert!(!union.contains(i), "task {i} claimed by two workers");
+            }
+            sizes.push(mine.len());
+            union.extend(mine);
+        }
+        union.sort_unstable();
+        assert_eq!(
+            union,
+            (0..total).collect::<Vec<_>>(),
+            "every task is covered exactly once"
+        );
+        // Balanced: 10 tasks over 3 workers -> sizes {4,3,3}, differ by at most 1.
+        assert_eq!(
+            *sizes.iter().max().unwrap() - *sizes.iter().min().unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn worker_shard_single_worker_gets_all() {
+        let live: Vec<String> = vec!["solo".into()];
+        assert_eq!(worker_shard(5, &live, "solo"), vec![0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn worker_shard_absent_worker_defensively_gets_all() {
+        // A worker that raced a prune out of the live set gets ALL tasks (redo, deduped) rather than
+        // silently nothing — and an empty live set likewise.
+        let live: Vec<String> = vec!["a".into(), "b".into()];
+        assert_eq!(worker_shard(3, &live, "ghost"), vec![0, 1, 2]);
+        assert_eq!(worker_shard(3, &[], "a"), vec![0, 1, 2]);
     }
 }

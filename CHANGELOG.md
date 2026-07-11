@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **AI worker task sharding (multi-worker per node).** A single node ran one worker; two workers both
+  pulled every task from `/ai/tasks` and redid the same inference (N× GPU for 1× throughput). Workers now
+  send a stable `?worker_id=` (the reference `worker.py` defaults to `<hostname>:<pid>`, override with
+  `HELDAR_AI_WORKER_ID`), which doubles as a liveness heartbeat (`ai_workers` table, migration `0004`); the
+  kernel returns only that worker's deterministic modulo shard of the tasks, so launching N workers on one
+  host splits the load. A worker that stops polling for >60s is dropped and its tasks reassigned. Fully
+  backward-compatible: omit `worker_id` (a single/legacy worker) and you get the whole list; a new worker
+  against an old kernel is unaffected. Rebalance overlap is deduped by the outbox `frame_id`.
 - **Cross-app read seam (contract views).** App crates used to read each other's SQLite tables via raw
   SQL on the shared pool with no compiler-visible dependency, so a column rename in the producer silently
   broke a distant consumer at runtime. Now the owning app publishes a stable `*_read` SQL view

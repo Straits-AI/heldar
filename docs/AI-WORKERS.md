@@ -259,6 +259,18 @@ picks up newly enabled/disabled tasks. Note `fps` here is the task's *requested*
 rate; the *effective* sampled rate after budgeting is reported by
 `/api/v1/ai/samplers` (§5.4).
 
+**Sharding across multiple workers on one node.** Pass a stable
+`?worker_id=<id>` and the kernel returns only **this worker's slice** of the tasks
+(a deterministic modulo shard over the live worker set), so N workers split the load
+instead of every worker redoing every task and burning N× GPU for 1× throughput. The
+poll doubles as a liveness heartbeat; a worker that stops polling for >60s is dropped
+and its tasks reassigned to the survivors on their next poll. **Omit `worker_id` and
+you get the whole list** — a single worker needs nothing. The reference worker
+(`apps/ai/worker.py`) sends `worker_id` by default (`<hostname>:<pid>`, override with
+`HELDAR_AI_WORKER_ID`), so launching two worker processes on one host splits the
+tasks automatically. (Idempotency still holds during a rebalance: a task briefly
+analyzed by two workers is deduped by the outbox `frame_id`.)
+
 ### 5.2 Pull a frame — `GET /api/v1/cameras/{id}/frame`
 
 Serves the latest sampled JPEG for a camera (the worker's input). The worker pulls

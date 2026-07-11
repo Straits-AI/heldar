@@ -59,6 +59,7 @@ import logging
 import os
 import random
 import signal
+import socket
 import sys
 import threading
 import time
@@ -66,6 +67,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote
 
 import numpy as np
 import requests
@@ -91,6 +93,15 @@ class Settings:
     log_level: str
     log_format: str
     api_key: Optional[str]
+    # Stable identity of this worker process. Sent to /ai/tasks so the kernel can SHARD the task set
+    # across multiple workers on one node (each analyzes only its slice) instead of every worker redoing
+    # every task. Defaults to "<hostname>:<pid>", so two workers on one host get distinct ids and split
+    # the load automatically; a single worker gets the whole set.
+    worker_id: str
+
+
+def _default_worker_id() -> str:
+    return f"{socket.gethostname()}:{os.getpid()}"
 
 
 def _env(key: str, default: str) -> str:
@@ -155,6 +166,12 @@ def parse_settings(argv: Optional[List[str]] = None) -> Settings:
         help="API key (integration role) sent as X-API-Key when Core auth is enabled "
         "(env HELDAR_API_KEY). Optional when Core runs with auth disabled.",
     )
+    parser.add_argument(
+        "--worker-id",
+        default=_env("HELDAR_AI_WORKER_ID", _default_worker_id()),
+        help="Stable worker identity for task sharding across multiple workers on one node "
+        "(env HELDAR_AI_WORKER_ID; default <hostname>:<pid>).",
+    )
     ns = parser.parse_args(argv)
     return Settings(
         api=ns.api.rstrip("/"),
@@ -168,6 +185,7 @@ def parse_settings(argv: Optional[List[str]] = None) -> Settings:
         log_level=ns.log_level.upper(),
         log_format=ns.log_format,
         api_key=ns.api_key.strip() or None,
+        worker_id=ns.worker_id.strip() or _default_worker_id(),
     )
 
 
@@ -1081,7 +1099,9 @@ class CoreClient:
             self._sleep(delay)
 
     def fetch_tasks(self) -> List[Task]:
-        url = f"{self.s.api}/api/v1/ai/tasks"
+        # Send worker_id so the kernel shards the task set across co-located workers (and treats this
+        # poll as our liveness heartbeat). A single worker gets the whole set; N workers split it.
+        url = f"{self.s.api}/api/v1/ai/tasks?worker_id={quote(self.s.worker_id, safe='')}"
         resp = self._request("GET", url)
         if resp is None:  # only None when allow_404, which we didn't set
             raise WorkerHTTPError(None, "unexpected empty response from _request", url)
