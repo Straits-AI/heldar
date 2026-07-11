@@ -65,6 +65,9 @@ pub struct Config {
     /// sweep sheds the oldest `detections` (events/audit are protected) and incrementally vacuums.
     /// A generous backstop above normal time-retention usage; non-positive disables the cap.
     pub max_db_bytes: u64,
+    /// When true (default), a pre-existing DB is converted to auto_vacuum=INCREMENTAL by a
+    /// one-time BACKGROUND task after boot. Set false to skip it (run `convert-autovacuum` manually).
+    pub db_autovacuum_convert: bool,
     /// How often the alert notifier polls for new events to deliver.
     pub notifier_interval_s: u64,
     /// Master switch for AI frame sampling (Stage 2). Cameras still need an enabled AI task.
@@ -445,6 +448,7 @@ impl Config {
             max_recordings_bytes: (max_recordings_gb * 1024.0 * 1024.0 * 1024.0) as u64,
             min_free_disk_bytes: (min_free_disk_gb * 1024.0 * 1024.0 * 1024.0) as u64,
             max_db_bytes: (max_db_gb * 1024.0 * 1024.0 * 1024.0) as u64,
+            db_autovacuum_convert: parse_bool("HELDAR_DB_AUTOVACUUM_CONVERT", true),
             notifier_interval_s: parse_or("HELDAR_NOTIFIER_INTERVAL_S", 15),
             ai_enabled: parse_bool("HELDAR_AI_ENABLED", true),
             ai_max_total_fps: parse_or("HELDAR_AI_MAX_TOTAL_FPS", 40.0),

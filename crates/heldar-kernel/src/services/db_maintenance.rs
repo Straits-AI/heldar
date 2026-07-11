@@ -200,6 +200,18 @@ pub async fn ensure_incremental_autovacuum(
     Ok(true)
 }
 
+/// The automatic (flag-gated) entry point for the one-time auto_vacuum conversion, run as a
+/// background task after the server is serving. Returns whether a conversion VACUUM ran. Disabled
+/// (returns Ok(false), no-op) when `HELDAR_DB_AUTOVACUUM_CONVERT=false`. The heavy work and all
+/// disk/convergence guards live in `ensure_incremental_autovacuum`, which the `convert-autovacuum`
+/// CLI calls directly to FORCE a conversion regardless of this flag.
+pub async fn maybe_convert_autovacuum(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<bool> {
+    if !cfg.db_autovacuum_convert {
+        return Ok(false);
+    }
+    ensure_incremental_autovacuum(pool, cfg).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -431,6 +443,70 @@ mod tests {
             "converged to INCREMENTAL on a multi-connection pool"
         );
         drop(pool2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn maybe_convert_skips_when_flag_disabled() {
+        // Flag OFF: the wrapper returns Ok(false) at the gate, before any PRAGMA/VACUUM, leaving mode 0.
+        let dir =
+            std::env::temp_dir().join(format!("heldar-autovacuum-off-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("test.db");
+        let url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE detections (id TEXT PRIMARY KEY, created_at TEXT, blob TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut cfg = Config::from_env();
+        cfg.data_dir = std::env::temp_dir();
+        cfg.db_autovacuum_convert = false;
+        let ran = maybe_convert_autovacuum(&pool, &cfg).await.unwrap();
+        assert!(!ran, "flag disabled → no conversion");
+        let mode: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_ne!(mode, 2, "mode unchanged when flag disabled");
+        drop(pool);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn maybe_convert_runs_when_flag_enabled_and_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!("heldar-autovacuum-on-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("test.db");
+        let url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE detections (id TEXT PRIMARY KEY, created_at TEXT, blob TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut cfg = Config::from_env();
+        cfg.data_dir = std::env::temp_dir();
+        cfg.db_autovacuum_convert = true;
+        let ran = maybe_convert_autovacuum(&pool, &cfg).await.unwrap();
+        assert!(ran, "flag enabled + mode 0 → converts");
+        let mode: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(mode, 2, "converted to INCREMENTAL");
+        let again = maybe_convert_autovacuum(&pool, &cfg).await.unwrap();
+        assert!(!again, "already INCREMENTAL → idempotent no-op");
+        drop(pool);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
