@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Versioned app-schema migrations.** The composed apps (entry / movement / search + the proprietary
+  bakery vertical) previously self-installed a single `CREATE TABLE IF NOT EXISTS` blob with no
+  versioning, so a shipped schema change silently no-opped on an already-booted box. They now use the
+  kernel's new `db::run_app_migrations` — numbered, append-only migrations under
+  `crates/heldar-<app>/migrations/NNNN_*.sql`, applied + recorded atomically and tracked per-component
+  in a shared `_heldar_app_migrations` table (so apps don't collide with the kernel's `sqlx::migrate!`
+  or each other on the one SQLite database). A checksum guard rejects editing an already-applied
+  migration. `0001_init` is the original idempotent blob, so existing boxes upgrade with no data loss.
+  To evolve a schema: add `migrations/NNNN_*.sql` + a line to that app's `MIGRATIONS` array.
+
 ### Security
 
 - **Shared SSRF egress guard** (`heldar-kernel::net_guard`): every server-initiated outbound HTTP

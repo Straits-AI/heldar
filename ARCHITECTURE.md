@@ -1636,10 +1636,11 @@ the breach engine **does not re-notify** — it adds the **worked, deduped, subj
 incident** (open → acknowledged → resolved, with `resolved_by`/`resolved_at`). Real-time
 push stays with the kernel; accountability + triage live here.
 
-### 19.5 Data model (`schema.sql`)
+### 19.5 Data model (`migrations/NNNN_*.sql`)
 
-`schema::init(&pool)` applies three tables idempotently against the **shared kernel pool**
-at boot — owned by the app crate, **correlation/candidate data only, no legal-identity
+`schema::init(&pool)` applies the app's **versioned, append-only migrations** (via the kernel's
+`db::run_app_migrations`, tracked per-component in `_heldar_app_migrations`) against the **shared
+kernel pool** at boot — owned by the app crate, **correlation/candidate data only, no legal-identity
 records**. **`camera_links`** (directed adjacency, §19.3); **`movement_candidates`**
 (`subject_type`, `anchor`=plate/`''`, `from_*`/`to_*` appearance refs, `score`, `signals`
 JSON, `status` pending/confirmed/rejected, `reviewed_by`/`reviewed_at`;
