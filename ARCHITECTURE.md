@@ -13,6 +13,10 @@ retention floor, recording-gap reporting, observed fps/bitrate, a `/readyz`
 readiness probe, and supervised background tasks. It is documented in §14 below and,
 for operators, in [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
 
+> The values behind the choices below — self-bounding storage, non-blocking boot, the UI/env settings
+> boundary, LAN-defaults-with-opt-in-hardening, open-core discipline — are written up in
+> [`docs/DESIGN-PRINCIPLES.md`](docs/DESIGN-PRINCIPLES.md).
+
 **Stage 2 (AI frame sampler) has also shipped** — a budgeted sub-stream frame
 sampler (the only component that decodes in the 24/7 path), an `ai_tasks` /
 `detections` data model, and a pull-based **worker contract** (discover tasks →

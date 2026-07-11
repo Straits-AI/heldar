@@ -20,6 +20,7 @@ deployment, the architecture and its public seams, the open-core boundary, and t
 building your own app or AI worker against the kernel.
 
 In-repo references: [ARCHITECTURE.md](./ARCHITECTURE.md) (the kernel seams and every stage's design),
+[DESIGN-PRINCIPLES.md](./docs/DESIGN-PRINCIPLES.md) (the values behind the design),
 [ROADMAP.md](./ROADMAP.md) (stage status), [LICENSING.md](./LICENSING.md) (the open-core boundary),
 and the operator/integrator guides in [`docs/`](./docs).
 
