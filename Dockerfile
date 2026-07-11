@@ -14,8 +14,11 @@ RUN cargo build --release --bin heldar-core ${FEATURES:+--features "$FEATURES"}
 FROM debian:bookworm-slim
 ARG FEATURES=""
 # ffmpeg: recorder/clip/snapshot/sampler. curl: container HEALTHCHECK. ca-certificates: outbound TLS.
+# tzdata is required for `chrono::Local` (recording-schedule windows are evaluated in the server's
+# local timezone). Without it, and with TZ unset, Local silently resolves to UTC, so "HH:MM local"
+# schedules record at the wrong wall-clock time. Set `-e TZ=Area/City` at run time to your timezone.
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl \
+    && apt-get install -y --no-install-recommends ffmpeg ca-certificates curl tzdata \
     && rm -rf /var/lib/apt/lists/*
 # Run as a non-root user (container hardening / Pod Security). Fixed UID so a bind-mounted /data can
 # be chowned to it by the operator; a named volume is initialized with these perms automatically.

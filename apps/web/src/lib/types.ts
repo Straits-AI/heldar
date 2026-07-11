@@ -193,12 +193,15 @@ export interface PlaybackSession {
 
 export interface LiveUrls {
   name: string;
-  /** HLS .m3u8 playlist — play with hls.js. */
+  /** HLS .m3u8 playlist — play with hls.js. Already carries `?token=` when auth-gated. */
   hls_url: string;
   webrtc_url: string;
   rtsp_url: string;
   /** STUN/TURN ICE servers for the WebRTC path (P2 remote access). Absent/empty = LAN/host-only. */
   ice_servers?: RTCIceServer[];
+  /** Short-lived MediaMTX read token. The player appends it after the WHEP suffix and onto every HLS
+   *  request (hls.js drops the playlist query on relative segment URLs otherwise). */
+  token?: string;
 }
 
 export interface CameraStatus {

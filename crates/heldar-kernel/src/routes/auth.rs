@@ -118,16 +118,29 @@ async fn register_login_failure(
     u: &User,
     now: chrono::DateTime<Utc>,
 ) {
-    let new_count = u.failed_login_count + 1;
-    if new_count >= cfg.login_max_failures {
-        let until = now + chrono::Duration::minutes(cfg.login_lockout_min);
-        let _ =
-            sqlx::query("UPDATE users SET failed_login_count = ?, locked_until = ? WHERE id = ?")
-                .bind(new_count)
-                .bind(until)
-                .bind(&u.id)
-                .execute(pool)
-                .await;
+    let until = now + chrono::Duration::minutes(cfg.login_lockout_min);
+    // Atomic increment + threshold lock in ONE statement. The previous read-modify-write bumped a
+    // count read from a row SELECTed at the start of the request, so N concurrent failed logins all
+    // read the same stale value and all wrote value+1 — a lost update that let a parallelized attacker
+    // make far more than `login_max_failures` guesses before the lock engaged. Incrementing in-place
+    // (and applying the lock in the same UPDATE) makes each concurrent failure advance the counter by
+    // one under SQLite's serialized writer. `RETURNING` gives us the post-increment count so we audit
+    // the lock transition exactly once (the request whose increment first reaches the threshold).
+    let new_count: Option<i64> = sqlx::query_scalar(
+        "UPDATE users
+            SET failed_login_count = failed_login_count + 1,
+                locked_until = CASE WHEN failed_login_count + 1 >= ? THEN ? ELSE locked_until END
+          WHERE id = ?
+        RETURNING failed_login_count",
+    )
+    .bind(cfg.login_max_failures)
+    .bind(until)
+    .bind(&u.id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten();
+    if new_count == Some(cfg.login_max_failures) {
         let principal = Principal {
             id: u.id.clone(),
             name: u.display_name.clone().unwrap_or_else(|| u.username.clone()),
@@ -143,12 +156,6 @@ async fn register_login_failure(
             json!({ "locked_until": until }),
         )
         .await;
-    } else {
-        let _ = sqlx::query("UPDATE users SET failed_login_count = ? WHERE id = ?")
-            .bind(new_count)
-            .bind(&u.id)
-            .execute(pool)
-            .await;
     }
 }
 
@@ -263,6 +270,7 @@ async fn update_user(
     }
     let active = body.active.unwrap_or(cur.active);
     let display_name = body.display_name.or(cur.display_name);
+    let password_changed = body.password.is_some();
     let password_hash = match body.password {
         Some(p) if p.len() >= MIN_PASSWORD_LEN => auth::hash_password(&p)?,
         Some(_) => {
@@ -313,8 +321,12 @@ async fn update_user(
             "cannot demote or disable the last active admin".into(),
         ));
     }
-    // Revoke sessions if the account was disabled.
-    if !active {
+    // Revoke sessions when the account is disabled OR its password was reset. A password reset is the
+    // standard remediation for a compromised account, so it must invalidate live sessions —
+    // `resolve_token` re-checks role/active on every request but NOT the password, so without this a
+    // stolen bearer token / session cookie would keep authenticating for the full session TTL even
+    // after the admin changed the password to lock the attacker out.
+    if !active || password_changed {
         let _ = sqlx::query("DELETE FROM sessions WHERE user_id = ?")
             .bind(&id)
             .execute(&st.pool)

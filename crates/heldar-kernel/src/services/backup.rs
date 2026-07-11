@@ -9,6 +9,10 @@
 //!   - `local` destinations copy via std fs into `{dest path}/{camera_id}/` (NAS mounts, no rclone).
 //!   - `sftp` / `ftp` / `s3` destinations shell out to rclone (`HELDAR_RCLONE_BIN`). When rclone is not
 //!     installed the job is marked `error` with a clear message — the build/tests never require it.
+//!     Destination secrets (S3 keys, SFTP/FTP password) are passed to the rclone child via
+//!     backend-specific ENV vars (`RCLONE_S3_SECRET_ACCESS_KEY`, `RCLONE_SFTP_PASS`, …), never as argv,
+//!     so they don't leak through the world-readable `/proc/<pid>/cmdline`; the password obscure step
+//!     likewise feeds the plaintext on stdin (`rclone obscure -`).
 //!
 //! On-demand archive export ([`create_archive`]) builds a `.zip` of the selected segments via
 //! `/usr/bin/zip` into `HELDAR_ARCHIVE_DIR/{job_id}.zip` (served at `/media/archives`), enforcing
@@ -319,7 +323,7 @@ async fn copy_rclone(
              (remote sftp/ftp/s3 backup requires it; local/NAS destinations do not)"
         );
     }
-    let (remote, base, secrets) = build_remote(bin, &dest.kind, &dest.config.0).await?;
+    let (remote, base, secrets, env) = build_remote(bin, &dest.kind, &dest.config.0).await?;
     let mut copied = 0u64;
     let mut bytes = 0u64;
     for seg in segments {
@@ -330,6 +334,8 @@ async fn copy_rclone(
             .arg(&seg.path)
             .arg(&target)
             .arg("--no-traverse")
+            // Credentials are supplied per-child via env (not argv) so they never hit /proc/<pid>/cmdline.
+            .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -677,7 +683,7 @@ async fn test_rclone(state: &AppState, dest: &BackupDestination) -> anyhow::Resu
              (remote sftp/ftp/s3 backup requires it)"
         );
     }
-    let (remote, base, secrets) = build_remote(bin, &dest.kind, &dest.config.0).await?;
+    let (remote, base, secrets, env) = build_remote(bin, &dest.kind, &dest.config.0).await?;
     let target = format!("{remote}{base}");
     let out = tokio::time::timeout(
         Duration::from_secs(30),
@@ -685,6 +691,8 @@ async fn test_rclone(state: &AppState, dest: &BackupDestination) -> anyhow::Resu
             .arg("lsd")
             .arg(&target)
             .args(["--max-depth", "1"])
+            // Credentials per-child via env, not argv (see build_remote / copy_rclone).
+            .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
@@ -748,13 +756,20 @@ async fn binary_available(bin: &str) -> bool {
 }
 
 /// Build an rclone on-the-fly connection-string remote (no persisted config) for a destination kind.
-/// Returns (remote_prefix_ending_in_colon, base_path, secrets_to_scrub_from_logs).
+/// Returns `(remote_prefix_ending_in_colon, base_path, secrets_to_scrub_from_logs, env)`.
+///
+/// Credentials are returned as `env` (RCLONE_<BACKEND>_<OPTION> pairs), NOT baked into the connection
+/// string — so they never appear in the rclone child's argv (`/proc/<pid>/cmdline`, `ps`, world-
+/// readable). The caller sets `env` on the specific copyto/lsd child via `Command::env`. rclone's
+/// option precedence fills the omitted secret from the backend env var (`RCLONE_S3_SECRET_ACCESS_KEY`,
+/// `RCLONE_SFTP_PASS`, …); the option is simply absent from the string, so there is no ambiguity.
 async fn build_remote(
     bin: &str,
     kind: &str,
     config: &Value,
-) -> anyhow::Result<(String, String, Vec<String>)> {
+) -> anyhow::Result<(String, String, Vec<String>, Vec<(String, String)>)> {
     let mut secrets: Vec<String> = Vec::new();
+    let mut env: Vec<(String, String)> = Vec::new();
     match kind {
         "sftp" | "ftp" => {
             let host = cfg_str(config, "host");
@@ -776,15 +791,18 @@ async fn build_remote(
                 parts.push(format!("user={user}"));
             }
             if !pass.is_empty() {
+                // rclone wants the password obscured; pass it via env (RCLONE_SFTP_PASS/RCLONE_FTP_PASS)
+                // rather than in the connection string so it isn't in argv.
                 let obscured = rclone_obscure(bin, &pass).await?;
                 secrets.push(obscured.clone());
                 secrets.push(pass.clone());
-                parts.push(format!("pass={obscured}"));
+                env.push((format!("RCLONE_{}_PASS", kind.to_uppercase()), obscured));
             }
             Ok((
                 format!("{}:", parts.join(",")),
                 cfg_str(config, "path"),
                 secrets,
+                env,
             ))
         }
         "s3" => {
@@ -797,12 +815,17 @@ async fn build_remote(
             let endpoint = cfg_str(config, "endpoint");
             let region = cfg_str(config, "region");
             let mut parts = vec![":s3".to_string(), "provider=Other".to_string()];
+            // Both keys travel via env, not the connection string (the access key id is also sensitive).
             if !access_key.is_empty() {
-                parts.push(format!("access_key_id={access_key}"));
+                env.push(("RCLONE_S3_ACCESS_KEY_ID".to_string(), access_key.clone()));
+                secrets.push(access_key.clone());
             }
             if !secret_key.is_empty() {
+                env.push((
+                    "RCLONE_S3_SECRET_ACCESS_KEY".to_string(),
+                    secret_key.clone(),
+                ));
                 secrets.push(secret_key.clone());
-                parts.push(format!("secret_access_key={secret_key}"));
             }
             if !endpoint.is_empty() {
                 parts.push(format!("endpoint={endpoint}"));
@@ -811,24 +834,38 @@ async fn build_remote(
                 parts.push(format!("region={region}"));
             }
             let base = join_path("", &[&bucket, &cfg_str(config, "prefix")]);
-            Ok((format!("{}:", parts.join(",")), base, secrets))
+            Ok((format!("{}:", parts.join(",")), base, secrets, env))
         }
         other => anyhow::bail!("kind `{other}` does not use rclone"),
     }
 }
 
-/// Obscure a plaintext password into rclone's at-rest form (only invoked when rclone is present).
+/// Obscure a plaintext password into rclone's at-rest form (only invoked when rclone is present). The
+/// plaintext is fed on STDIN (`rclone obscure -`), never as an argv arg — otherwise it would leak via
+/// the world-readable `/proc/<pid>/cmdline` for the lifetime of this short-lived child.
 async fn rclone_obscure(bin: &str, pass: &str) -> anyhow::Result<String> {
-    let out = Command::new(bin)
+    use tokio::io::AsyncWriteExt;
+    let mut child = Command::new(bin)
         .arg("obscure")
-        .arg(pass)
-        .stdin(Stdio::null())
+        .arg("-")
+        .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true)
-        .output()
-        .await
+        .spawn()
         .map_err(|e| anyhow::anyhow!("spawning rclone obscure: {e}"))?;
+    // `rclone obscure -` reads the first line of stdin as the password.
+    if let Some(mut stdin) = child.stdin.take() {
+        stdin
+            .write_all(pass.as_bytes())
+            .await
+            .map_err(|e| anyhow::anyhow!("writing password to rclone obscure: {e}"))?;
+        drop(stdin); // close stdin so rclone sees EOF
+    }
+    let out = child
+        .wait_with_output()
+        .await
+        .map_err(|e| anyhow::anyhow!("running rclone obscure: {e}"))?;
     if !out.status.success() {
         anyhow::bail!(
             "rclone obscure failed: {}",

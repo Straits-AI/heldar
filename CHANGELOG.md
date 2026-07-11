@@ -7,6 +7,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Shared SSRF egress guard** (`heldar-kernel::net_guard`): every server-initiated outbound HTTP
+  request now goes through one guard instead of only the plugin-registry fetcher having one. It rejects
+  the cloud-metadata/link-local range (`169.254.169.254`, `fe80::/10`) and the unspecified/broadcast
+  addresses on every deployment, gates loopback + RFC1918/ULA behind a per-sink `EgressPolicy`
+  (LAN-appliance sinks keep reaching cameras / the local MediaMTX / localhost sidecars), and disables
+  HTTP redirect-following (the bypass that let a public host `302` the box to an internal URL). Wired
+  into webhook create/update + delivery, ONVIF probe `device_url`, and sidecar `base_url`; the registry
+  fetcher was refactored onto the same guard. Closes the authenticated SSRF / metadata-oracle findings
+  on those sinks. Camera ISAPI/ONVIF and the sidecar reverse-proxy share the redirect-disabled client.
+- **Control-plane authorization.** The fleet API previously had NO application-layer authz (mTLS was the
+  only gate; plain-HTTP default was fully open). It now supports an operator bearer token
+  (`HELDAR_CP_ADMIN_TOKEN`): when set, every operator-facing route (dashboard JSON + node/event/alert
+  listings + all alert-rule/route CRUD) requires `Authorization: Bearer <token>` (constant-time compared);
+  the node-facing register route keeps its mTLS-CN gate. Unset = open (LAN/overlay default, unchanged —
+  hardening is opt-in, so the daemon warns rather than refusing to boot). The embedded NOC dashboard
+  prompts for the token and sends it. Alert-route SSRF was also closed (public-https-only validation +
+  redirect-disabled client, `heldar-control-plane::net_guard`) and 500s no longer leak raw error strings.
+- **MediaMTX per-user video gating.** The browser streams directly from MediaMTX, so the kernel's
+  `can_view` was bypassable. MediaMTX now uses HTTP external-auth against a kernel endpoint
+  (`/internal/mediamtx-auth`): reads require a short-lived, path-scoped, kernel-minted HMAC token (minted
+  in `/liveview`, carried on the WHEP URL and every HLS request via a custom hls.js loader) when kernel
+  auth is enabled, and fall back to a LAN/private/overlay source-IP check when auth is disabled (so a
+  port-forwarded box still doesn't serve the internet). Publishing stays loopback-only. WebRTC/WHEP (the
+  primary path) authorizes once and streams indefinitely; the token endpoint + mint are unit-tested.
+  _Needs live end-to-end verification against a running MediaMTX before release (the HLS-segment-token
+  loader and the auth callback can't be exercised in CI); the auth-ON HLS **fallback** re-auths per
+  segment, so a session outliving the token TTL falls back to WebRTC or a `/liveview` refresh, and Safari
+  native-HLS-only is a known degraded corner._
+- **FFmpeg argument injection** via camera fields closed: `validate_stream_url` now rejects whitespace/
+  control characters (the camera stream URL is interpolated into the MediaMTX `runOnDemand` command
+  string), the `address` field is validated the same way, and `anr_replay_url_template` is held to the
+  stream-URL scheme allow-list (blocks `file:`/`gopher:` → `ffmpeg -i`).
+- **Encryption-at-rest is fully wired.** Enabling `HELDAR_SECRET_KEY` previously *broke* all camera
+  config/ONVIF/PTZ (the sealed `enc:v1:…` blob was sent as the auth password) and discovery-onboarded
+  cameras stored their password in plaintext. ISAPI, ONVIF probe + PTZ, the ONVIF-persisted stream URL,
+  and discovery auto-add now seal/unseal camera credentials consistently.
+- **Auth lifecycle**: a password reset now revokes the user's active sessions (a stolen session no longer
+  survives the remediation); the login-lockout counter is an atomic SQL increment (a parallelized
+  attacker can no longer exceed `login_max_failures` via a lost-update race). `/metrics` and
+  `/api/v1/site` now require an authenticated principal (open in LAN mode, gated when auth is on).
+- **Exposure detection**: `HELDAR_INTERNET_EXPOSED=true` lets an operator declare exposure for the
+  reverse-proxy / port-forward / public-cloud-bind cases the automatic remote-path detection can't see,
+  so the auth-off boot refusal + hardening guardrails still fire.
+- **Sidecar reverse-proxy** now forwards the authenticated caller's identity + role (`X-Heldar-User`/
+  `-Role`/`-Principal-Kind`, with client-supplied `x-heldar-*` stripped to prevent spoofing) so a plugin
+  can enforce its own authorization across the proxy boundary.
+- **Backup credentials no longer leak via argv.** rclone destination secrets (S3 access/secret keys,
+  SFTP/FTP password) are passed to the rclone child via backend env vars (`RCLONE_S3_SECRET_ACCESS_KEY`,
+  `RCLONE_SFTP_PASS`, …) instead of the on-the-fly connection string, so they no longer appear in the
+  world-readable `/proc/<pid>/cmdline`; the password-obscure step now feeds the plaintext on stdin
+  (`rclone obscure -`) rather than as an arg. _Needs a live backup test against S3/SFTP to confirm the
+  on-the-fly `:s3:` remote honors `RCLONE_S3_*`._
+
+### Fixed
+
+- **Self-bounding storage — closed the leaks.** `consumer_fanout` is now pruned by retention (it grew
+  forever and defeated the DB size cap, which only sheds `detections`); exported clips and the mirror
+  (dual-DVR) directory are reclaimed by mtime; unresolved movement `breach_alerts` (plate PII) age out at
+  the retention ceiling. Clip/mirror reclamation runs *before* the disk-free floor so the floor no longer
+  evicts real recordings to make room for un-reclaimable clips.
+- **Retention no longer stalls ingest**: the high-rate table prunes (detections/outbox/consumer_fanout/
+  events/webhook_deliveries) delete in bounded 5k-row batches (yielding between them) instead of one
+  unbounded DELETE that held SQLite's single writer for the whole backlog.
+- **Segment read-lock is now a reference count**, not a boolean — two overlapping clip/playback holders
+  no longer release each other's lock, so retention can't delete footage mid-export.
+- **Forensic search no longer claims completeness when truncated**: when a source hits its fetch cap the
+  result is flagged `truncated` and the proof layer reports the count as a floor (`"At least N…"`, partial
+  confidence) instead of an authoritative complete total.
+- **Recording schedules**: reject a zero-length window (`time_start == time_end`) and an empty `days` set
+  (both silently never recorded). tzdata is shipped in the Docker/appliance images and the effective local
+  timezone is logged at boot, so `chrono::Local` schedules no longer silently fire in UTC.
+- **Snapshot scheduler** advances `last_fired_at` on capture failure, so a persistently failing camera
+  retries at the configured interval instead of hot-retrying every watcher tick.
+- **Dashboard**: a plugin catalog's `homepage` URL is scheme-validated before rendering into an `href`
+  (blocks `javascript:`/`data:` click-through); the AI task-type hint no longer advertises a `tracking`
+  analyzer that doesn't exist.
+
 ### Changed
 
 - **Runtime-loaded module frontends**: every dashboard module UI (entry / movement / search + the

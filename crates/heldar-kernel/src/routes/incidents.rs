@@ -146,8 +146,9 @@ async fn tag_incident(
 
 async fn list_incidents(
     State(st): State<AppState>,
-    _principal: Principal,
+    principal: Principal,
 ) -> AppResult<Json<Vec<IncidentSummary>>> {
+    principal.require(principal.can_view(), "list incidents")?;
     let rows = sqlx::query_as::<_, IncidentSummary>(
         "SELECT incident_id,
                 COUNT(*) AS segment_count,
@@ -172,8 +173,9 @@ const INCIDENT_SEGMENTS_CAP: i64 = 5000;
 async fn incident_segments(
     State(st): State<AppState>,
     Path(incident_id): Path<String>,
-    _principal: Principal,
+    principal: Principal,
 ) -> AppResult<Json<Vec<SegmentView>>> {
+    principal.require(principal.can_view(), "read incident segments")?;
     let segments = sqlx::query_as::<_, Segment>(
         "SELECT * FROM segments WHERE incident_id = ? ORDER BY start_time ASC LIMIT ?",
     )

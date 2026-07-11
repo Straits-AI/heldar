@@ -412,6 +412,7 @@ export function CameraDetail() {
                 webrtcUrl={live?.webrtc_url}
                 iceServers={live?.ice_servers}
                 hlsUrl={live?.hls_url}
+                liveToken={live?.token}
                 poster={api.snapshotUrl(id)}
                 name={cam?.name ?? id}
                 state={headerState}

@@ -48,21 +48,24 @@ fn validate_id(id: &str) -> AppResult<()> {
     Ok(())
 }
 
-/// Validate + normalize the sidecar origin (http/https, no trailing slash, no path/query).
+/// Validate + normalize the sidecar origin (http/https, no trailing slash, no path/query). A sidecar
+/// legitimately runs on loopback or the LAN, so LAN targets are permitted; the shared egress guard
+/// still rejects the cloud-metadata/link-local range so a registered sidecar's `base_url` — which
+/// drives an unattended health probe, webhook deliveries, and the `can_view` reverse-proxy — can't be
+/// pointed at the metadata endpoint.
 fn normalize_base_url(url: &str) -> AppResult<String> {
     let u = url.trim().trim_end_matches('/');
-    if !(u.starts_with("http://") || u.starts_with("https://")) {
-        return Err(AppError::BadRequest(
-            "`base_url` must be an http(s) URL".into(),
-        ));
-    }
-    // Reject an obviously malformed origin (scheme with no host).
+    // Reject an obviously malformed origin (scheme with no host) with a targeted message before the
+    // egress guard's generic parse error.
     let after_scheme = u.split_once("://").map(|(_, rest)| rest).unwrap_or("");
     if after_scheme.is_empty() || after_scheme.starts_with('/') {
         return Err(AppError::BadRequest(
             "`base_url` must include a host".into(),
         ));
     }
+    crate::net_guard::validate_egress_url(u, &crate::net_guard::EgressPolicy::LAN).map_err(
+        |e| AppError::BadRequest(format!("`base_url` is not a valid sidecar origin: {e}")),
+    )?;
     Ok(u.to_string())
 }
 
@@ -229,10 +232,7 @@ pub async fn get_registered(pool: &SqlitePool, id: &str) -> AppResult<Option<Mod
 /// Background loop: probe each registered sidecar's `/heldar/health` and record reachability so the
 /// dashboard can badge healthy/unreachable plugins. Never returns (supervised).
 pub async fn run(pool: SqlitePool) {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap_or_default();
+    let client = crate::net_guard::egress_client(Duration::from_secs(5));
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     loop {
         tick.tick().await;

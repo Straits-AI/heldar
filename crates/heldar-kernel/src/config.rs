@@ -19,6 +19,10 @@ pub struct Config {
     pub mediamtx_hls_base: String,
     pub mediamtx_rtsp_base: String,
     pub mediamtx_webrtc_base: String,
+    /// TTL (seconds) of a minted live-view/playback read token (`HELDAR_LIVEVIEW_TOKEN_TTL_SECS`).
+    /// Must comfortably outlast a viewing session's reconnects; the dashboard re-fetches `/liveview`
+    /// (re-minting) whenever it reopens a stream. Only enforced when kernel auth is enabled.
+    pub live_token_ttl_secs: i64,
     /// Max SQLite pool connections. Tunable per deployment: more absorbs bursts of concurrent
     /// requests (WAL serves reads concurrently; writes still serialize), at the cost of memory.
     pub db_max_connections: u32,
@@ -121,6 +125,12 @@ pub struct Config {
     /// Turn the production guardrails (see `enforce_production_guardrails`) into hard boot failures
     /// instead of warnings, for an internet-exposed deployment.
     pub strict_prod: bool,
+    /// Operator's explicit declaration that this box is reachable from outside the trusted LAN
+    /// (`HELDAR_INTERNET_EXPOSED=true`). The automatic detection ([`Config::internet_exposed`]) only
+    /// knows about the opt-in remote paths (rendezvous / overlay / control-plane) — it CANNOT see a
+    /// reverse proxy, a port-forward, or a public-cloud bind. Operators using those must set this so
+    /// the auth-off boot refusal + hardening guardrails still fire. Default false (LAN appliance).
+    pub exposed_declared: bool,
     /// Optional first-run admin bootstrap (only used when no users exist yet).
     pub bootstrap_admin_user: Option<String>,
     pub bootstrap_admin_password: Option<String>,
@@ -323,6 +333,7 @@ impl Config {
             self.rendezvous_url.is_some(),
             self.overlay_enabled,
             self.cp_url.is_some() && self.public_base_url.is_some(),
+            self.exposed_declared,
         )
     }
 
@@ -426,6 +437,7 @@ impl Config {
             mediamtx_hls_base: var_or("HELDAR_MEDIAMTX_HLS_BASE", "http://127.0.0.1:8888"),
             mediamtx_rtsp_base: var_or("HELDAR_MEDIAMTX_RTSP_BASE", "rtsp://127.0.0.1:8554"),
             mediamtx_webrtc_base: var_or("HELDAR_MEDIAMTX_WEBRTC_BASE", "http://127.0.0.1:8889"),
+            live_token_ttl_secs: parse_or("HELDAR_LIVEVIEW_TOKEN_TTL_SECS", 3600),
             db_max_connections: parse_or::<u32>("HELDAR_DB_MAX_CONNECTIONS", 16).clamp(2, 256),
             recorder_enabled: parse_bool("HELDAR_RECORDER_ENABLED", true),
             mirror_recordings_dir: var("HELDAR_MIRROR_RECORDINGS_DIR").map(PathBuf::from),
@@ -469,6 +481,7 @@ impl Config {
             login_lockout_min: parse_or("HELDAR_LOGIN_LOCKOUT_MIN", 15),
             secret_key_b64: var("HELDAR_SECRET_KEY"),
             strict_prod: parse_bool("HELDAR_STRICT_PROD", false),
+            exposed_declared: parse_bool("HELDAR_INTERNET_EXPOSED", false),
             bootstrap_admin_user: var("HELDAR_BOOTSTRAP_ADMIN_USER"),
             bootstrap_admin_password: var("HELDAR_BOOTSTRAP_ADMIN_PASSWORD"),
             audit_retention_days: parse_or("HELDAR_AUDIT_RETENTION_DAYS", 365),
@@ -558,9 +571,17 @@ impl Config {
 }
 
 /// Whether the box is reachable from outside the trusted LAN by any path. Pure (free function) so the
-/// exposure decision is unit-tested directly, independent of the full `Config`/environment.
-fn is_internet_exposed(rendezvous: bool, overlay: bool, control_plane_registered: bool) -> bool {
-    rendezvous || overlay || control_plane_registered
+/// exposure decision is unit-tested directly, independent of the full `Config`/environment. The opt-in
+/// remote paths (rendezvous/overlay/control-plane) are auto-detected; `declared` is the operator's
+/// explicit `HELDAR_INTERNET_EXPOSED` for the paths config can't see (reverse proxy, port-forward,
+/// public-cloud bind).
+fn is_internet_exposed(
+    rendezvous: bool,
+    overlay: bool,
+    control_plane_registered: bool,
+    declared: bool,
+) -> bool {
+    rendezvous || overlay || control_plane_registered || declared
 }
 
 /// The subset of config the production guardrails reason about, extracted so the decision is a pure,
@@ -678,10 +699,17 @@ mod guardrail_tests {
 
     #[test]
     fn exposure_predicate_covers_every_path() {
-        assert!(!is_internet_exposed(false, false, false), "LAN-only");
-        assert!(is_internet_exposed(true, false, false), "rendezvous");
-        assert!(is_internet_exposed(false, true, false), "overlay");
-        assert!(is_internet_exposed(false, false, true), "control plane");
+        assert!(!is_internet_exposed(false, false, false, false), "LAN-only");
+        assert!(is_internet_exposed(true, false, false, false), "rendezvous");
+        assert!(is_internet_exposed(false, true, false, false), "overlay");
+        assert!(
+            is_internet_exposed(false, false, true, false),
+            "control plane"
+        );
+        assert!(
+            is_internet_exposed(false, false, false, true),
+            "operator-declared (reverse proxy / port-forward / cloud bind)"
+        );
     }
 
     #[test]

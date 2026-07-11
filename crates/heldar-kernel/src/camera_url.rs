@@ -31,8 +31,9 @@ pub(crate) fn encode_userinfo(s: &str) -> String {
 /// The camera password, decrypted via the process key (see [`crate::services::secrets`]). When no key
 /// is configured this is the stored plaintext unchanged. On a decrypt failure (a sealed value with a
 /// wrong/missing key) it logs and returns `None`, so the URL is built without a password — the camera
-/// fails to authenticate rather than being handed ciphertext.
-fn decrypted_password(cam: &Camera) -> Option<String> {
+/// fails to authenticate rather than being handed ciphertext. Public so the ISAPI/ONVIF/PTZ config
+/// paths decrypt the same way the RTSP builder does (they historically used the raw sealed blob).
+pub fn decrypted_password(cam: &Camera) -> Option<String> {
     let stored = cam.password.as_deref()?;
     match crate::services::secrets::decrypt_stored(stored) {
         Ok(p) => Some(p),
@@ -52,8 +53,19 @@ pub fn stream_url(cam: &Camera, stream: &str) -> Option<String> {
         cam.main_stream_url.as_deref()
     };
     if let Some(u) = explicit {
-        if !u.trim().is_empty() {
-            return Some(u.trim().to_string());
+        let u = u.trim();
+        if !u.is_empty() {
+            // An override may embed credentials in the URL. Decrypt it the same way as the password
+            // column: `decrypt_stored` passes a legacy-plaintext override through unchanged and
+            // unseals one written sealed (e.g. by the ONVIF probe), so ffmpeg is never handed a sealed
+            // blob. A sealed value with the wrong/missing key returns None (fail rather than ciphertext).
+            return match crate::services::secrets::decrypt_stored(u) {
+                Ok(plain) => Some(plain),
+                Err(e) => {
+                    tracing::error!(camera = %cam.id, "stream url override decrypt failed: {e}");
+                    None
+                }
+            };
         }
     }
 
@@ -133,9 +145,21 @@ pub fn anr_replay_url(cam: &Camera, start: DateTime<Utc>, end: DateTime<Utc>) ->
 /// would let ffmpeg/ffprobe/MediaMTX read local files or reach unintended protocols (SSRF/LFI).
 const ALLOWED_SCHEMES: &[&str] = &["rtsp", "rtsps", "http", "https"];
 
-/// Validate an operator-supplied stream URL: must parse and use an allowed scheme.
+/// Validate an operator-supplied stream URL: must parse, use an allowed scheme, and contain no
+/// whitespace or control characters.
 pub fn validate_stream_url(url: &str) -> Result<(), String> {
     let url = url.trim();
+    // Reject embedded whitespace / control characters. This URL is interpolated into the MediaMTX
+    // `runOnDemand` command STRING, which MediaMTX splits on whitespace before exec'ing ffmpeg — so a
+    // space would inject extra ffmpeg arguments/outputs (arbitrary file write / LFI / SSRF), exactly
+    // the class this allow-list exists to close. A well-formed RTSP/HTTP URL never contains raw
+    // whitespace or control chars (they must be percent-encoded).
+    if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+        return Err(format!(
+            "stream URL `{}` contains whitespace or control characters",
+            mask_url(url)
+        ));
+    }
     let Some((scheme, _)) = url.split_once("://") else {
         return Err(format!(
             "invalid stream URL `{}` (no scheme://)",

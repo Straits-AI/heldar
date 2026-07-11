@@ -428,7 +428,11 @@ async fn resolve_device_url(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
     {
-        camera_url::validate_stream_url(&u).map_err(AppError::BadRequest)?;
+        // The device_url is POSTed to as an HTTP SOAP endpoint, so route it through the shared egress
+        // guard (rejects the cloud-metadata/link-local ranges; permits LAN cameras). This closes the
+        // SSRF where an operator points the probe at 169.254.169.254 or an internal service.
+        crate::net_guard::validate_egress_url(&u, &crate::net_guard::EgressPolicy::LAN)
+            .map_err(AppError::BadRequest)?;
         return Ok(u);
     }
     let existing: Option<String> =
@@ -449,7 +453,11 @@ async fn resolve_device_url(
                 "camera has no address; set its address or pass an explicit `device_url`".into(),
             )
         })?;
-    Ok(format!("http://{host}/onvif/device_service"))
+    let derived = format!("http://{host}/onvif/device_service");
+    // The address is operator-supplied too — guard the derived URL against the metadata range.
+    crate::net_guard::validate_egress_url(&derived, &crate::net_guard::EgressPolicy::LAN)
+        .map_err(AppError::BadRequest)?;
+    Ok(derived)
 }
 
 /// Probe a camera's ONVIF interface and persist the result into `camera_onvif`.
@@ -466,7 +474,11 @@ pub async fn probe(
 
     let device_url = resolve_device_url(&state.pool, &cam, device_url_override).await?;
     let user = cam.username.as_deref();
-    let pass = cam.password.as_deref();
+    // Decrypt the stored credential for WS-Security auth. Previously the raw sealed blob (`enc:v1:…`)
+    // was sent verbatim, so enabling encryption-at-rest broke all ONVIF probing/PTZ. Plaintext passes
+    // through unchanged when no key is configured.
+    let pass_plain = camera_url::decrypted_password(&cam);
+    let pass = pass_plain.as_deref();
 
     // 1) Device identification.
     let info = soap_call(
@@ -545,10 +557,15 @@ pub async fn probe(
         if camera_url::record_url(&cam).is_none() {
             if let Some(uri) = get_stream_uri(state, murl, token, user, pass).await {
                 let with_creds = inject_creds(&uri, user, pass);
+                // Seal the URL before persisting so the embedded plaintext credential isn't stored at
+                // rest when encryption is enabled (a no-op passthrough when it isn't). `camera_url`'s
+                // override reader decrypts it back for ffmpeg. Fall back to the raw URL if sealing fails.
+                let stored = crate::services::secrets::encrypt_for_storage(&with_creds)
+                    .unwrap_or_else(|_| with_creds.clone());
                 let _ = sqlx::query(
                     "UPDATE cameras SET main_stream_url = ?, updated_at = ? WHERE id = ? AND (main_stream_url IS NULL OR main_stream_url = '')",
                 )
-                .bind(&with_creds)
+                .bind(&stored)
                 .bind(Utc::now())
                 .bind(camera_id)
                 .execute(&state.pool)
@@ -706,11 +723,15 @@ async fn load_ptz_target(
     pool: &SqlitePool,
     camera_id: &str,
 ) -> AppResult<(Camera, CameraOnvif, String, String)> {
-    let cam: Camera = sqlx::query_as::<_, Camera>("SELECT * FROM cameras WHERE id = ?")
+    let mut cam: Camera = sqlx::query_as::<_, Camera>("SELECT * FROM cameras WHERE id = ?")
         .bind(camera_id)
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("camera {camera_id} not found")))?;
+    // Decrypt the credential in place so every PTZ SOAP call (continuous_move/stop/get_presets/
+    // goto_preset) authenticates with the plaintext password rather than the sealed `enc:v1:…` blob.
+    // These paths only read `cam` for auth (they never persist it), so mutating it here is safe.
+    cam.password = camera_url::decrypted_password(&cam);
     let onvif = load_onvif(pool, camera_id).await?;
     let ptz_url = onvif
         .ptz_url

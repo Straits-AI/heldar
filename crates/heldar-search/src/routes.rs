@@ -18,7 +18,7 @@ use heldar_kernel::error::AppResult;
 use heldar_kernel::state::AppState;
 
 use crate::config::SearchConfig;
-use crate::query::{self, QueryPlan, SearchHit};
+use crate::query::{self, QueryPlan};
 
 pub fn router(cfg: Arc<SearchConfig>) -> Router<AppState> {
     Router::new()
@@ -124,7 +124,7 @@ async fn search_events(
     // Sanitize the caller-supplied plan (clamp out-of-range hours, etc.) before executing — the same
     // guard applied to LLM-produced plans — so a hand-crafted QueryPlan can't smuggle invalid filters.
     let plan = crate::planner::sanitize(plan);
-    let hits = query::execute(&st.pool, &plan, cfg.max_results).await?;
+    let outcome = query::execute(&st.pool, &plan, cfg.max_results).await?;
     log_search(
         &st,
         &principal,
@@ -132,10 +132,10 @@ async fn search_events(
         None,
         &plan,
         "structured",
-        hits.len(),
+        outcome.hits.len(),
     )
     .await;
-    Ok(Json(response(None, "structured", &plan, hits)))
+    Ok(Json(response(None, "structured", &plan, outcome)))
 }
 
 #[derive(Debug, Deserialize)]
@@ -162,9 +162,18 @@ async fn search_nl(
         Some(p) => (crate::planner::sanitize(p), "llm"),
         None => (crate::planner::parse_rules(q, &cams), "rules"),
     };
-    let hits = query::execute(&st.pool, &plan, cfg.max_results).await?;
-    log_search(&st, &principal, "nl", Some(q), &plan, planner, hits.len()).await;
-    Ok(Json(response(Some(q), planner, &plan, hits)))
+    let outcome = query::execute(&st.pool, &plan, cfg.max_results).await?;
+    log_search(
+        &st,
+        &principal,
+        "nl",
+        Some(q),
+        &plan,
+        planner,
+        outcome.hits.len(),
+    )
+    .await;
+    Ok(Json(response(Some(q), planner, &plan, outcome)))
 }
 
 async fn plan_only(
@@ -194,14 +203,22 @@ async fn plan_only(
     ))
 }
 
-fn response(query: Option<&str>, planner: &str, plan: &QueryPlan, hits: Vec<SearchHit>) -> Value {
-    let proof = crate::proof::build(query, planner, plan, &hits);
+fn response(
+    query: Option<&str>,
+    planner: &str,
+    plan: &QueryPlan,
+    outcome: query::ExecOutcome,
+) -> Value {
+    let proof = crate::proof::build(query, planner, plan, &outcome.hits, outcome.truncated);
     json!({
         "query": query,
         "planner": planner,
         "plan": plan,
-        "count": hits.len(),
-        "hits": hits,
+        "count": outcome.hits.len(),
+        // Honest signal: the field-filtered result set may omit older in-window matches because a
+        // source hit its fetch cap. Clients (and the proof layer) must not treat the count as complete.
+        "truncated": outcome.truncated,
+        "hits": outcome.hits,
         "proof": proof,
     })
 }

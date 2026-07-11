@@ -44,15 +44,18 @@ fn valid_severity(s: &str) -> bool {
     VALID_SEVERITIES.contains(&s)
 }
 
-/// Validate + normalize a webhook url. Only http(s) targets are accepted (no `file://`, etc.).
+/// Validate + normalize a webhook url. Only http(s) targets are accepted (no `file://`, etc.), and
+/// the shared egress guard rejects the cloud-metadata/link-local and unspecified ranges so an operator
+/// can't turn delivery/`/test` into an SSRF oracle against those. LAN/private targets stay allowed
+/// (webhooking a local automation server is a normal appliance use); the redirect-following bypass is
+/// closed separately by the delivery client's `redirect::none` policy.
 fn validate_url(url: &str) -> AppResult<String> {
     let url = url.trim();
     if url.is_empty() {
         return Err(AppError::BadRequest("`url` is required".into()));
     }
-    if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return Err(AppError::BadRequest("`url` must be an http(s) URL".into()));
-    }
+    crate::net_guard::validate_egress_url(url, &crate::net_guard::EgressPolicy::LAN)
+        .map_err(|e| AppError::BadRequest(format!("`url` is not a valid webhook target: {e}")))?;
     Ok(url.to_string())
 }
 

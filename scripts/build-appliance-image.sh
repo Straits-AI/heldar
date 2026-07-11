@@ -54,7 +54,9 @@ mkdir -p "$OUT"
 mmdebstrap \
   --variant=minbase \
   --architectures="$ARCH" \
-  --include=systemd,systemd-sysv,dbus,udev,ffmpeg,ca-certificates,curl \
+  `# tzdata: recording schedules are evaluated in the server's local timezone (chrono::Local); without` \
+  `# tzdata (and with TZ unset) Local silently becomes UTC, so schedules fire at the wrong wall time.` \
+  --include=systemd,systemd-sysv,dbus,udev,ffmpeg,ca-certificates,curl,tzdata \
   --customize-hook='
     # service user + data dir
     chroot "$1" useradd -r -s /usr/sbin/nologin heldar || true

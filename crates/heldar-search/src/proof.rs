@@ -12,8 +12,15 @@ use serde_json::{json, Value};
 
 use crate::query::{breakdown, QueryPlan, SearchHit};
 
-/// Build the proof object for a result set. `planner` is "rules" | "llm" | "structured".
-pub fn build(query: Option<&str>, planner: &str, plan: &QueryPlan, hits: &[SearchHit]) -> Value {
+/// Build the proof object for a result set. `planner` is "rules" | "llm" | "structured". `truncated`
+/// is set when a source fetch hit its cap, so the count is a floor, not an exhaustive total.
+pub fn build(
+    query: Option<&str>,
+    planner: &str,
+    plan: &QueryPlan,
+    hits: &[SearchHit],
+    truncated: bool,
+) -> Value {
     let n = hits.len();
     let mut levels: Vec<Value> = Vec::new();
 
@@ -34,14 +41,28 @@ pub fn build(query: Option<&str>, planner: &str, plan: &QueryPlan, hits: &[Searc
     // window actually scanned (the default 7-day window when the plan left from/to unset).
     let (eff_from, eff_to) = crate::query::window(plan);
     let defaulted = plan.from.is_none() || plan.to.is_none();
+    // When a source hit its fetch cap, the window held more rows than we scanned, so the field-filtered
+    // count is a FLOOR (matches beyond the newest page were never fetched) — it must NOT be presented as
+    // an exhaustive/complete total. Downgrade the confidence and say so; a forensic undercount silently
+    // claimed complete is the worst failure for this layer.
+    let statement = if truncated {
+        format!(
+            "At least {n} stored event(s) match the executed plan in the queried window (result \
+             truncated at the scan cap — narrow the time window or add filters for an exhaustive count)."
+        )
+    } else {
+        format!("{n} stored event(s) match the executed plan in the queried window.")
+    };
     levels.push(json!({
         "level": "aggregate",
-        "statement": format!("{n} stored event(s) match the executed plan in the queried window."),
-        "confidence": "high",
+        "statement": statement,
+        "confidence": if truncated { "partial (truncated)" } else { "high" },
+        "complete": !truncated,
         "basis": "Deterministic SQL over kernel fact tables (entry_events, zone_events, breach_alerts); \
                   the answer is these rows, not model output.",
         "evidence": {
             "count": n,
+            "truncated": truncated,
             "breakdown": breakdown(hits),
             "window": { "from": eff_from.to_rfc3339(), "to": eff_to.to_rfc3339(), "defaulted": defaulted },
         },

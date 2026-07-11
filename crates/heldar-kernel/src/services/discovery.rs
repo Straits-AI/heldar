@@ -450,6 +450,15 @@ pub async fn add_device(pool: &SqlitePool, device: &DiscoveredDevice) -> sqlx::R
             )
         })
     };
+    // Seal credentials before persisting so discovery-onboarded cameras honor encryption-at-rest like
+    // the manual create/update paths (previously they stored the plaintext password — and the embedded
+    // credential in main_stream_url — verbatim). No-op passthrough when no key is configured. The
+    // ISAPI/ONVIF/RTSP readers (`camera_url`) decrypt these back.
+    let seal = |s: &str| {
+        crate::services::secrets::encrypt_for_storage(s).unwrap_or_else(|_| s.to_string())
+    };
+    let password = password.map(seal);
+    let main_stream_url = main_stream_url.map(|u| seal(&u));
     let store_vendor = if vendor == "unknown" {
         "generic"
     } else {

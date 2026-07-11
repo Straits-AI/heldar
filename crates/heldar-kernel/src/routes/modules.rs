@@ -170,12 +170,34 @@ async fn forward(
     for (k, v) in headers.iter() {
         let name = k.as_str().to_ascii_lowercase();
         // Never forward the console session/credentials to a plugin — it authenticates to the kernel
-        // with its own minted key, not the user's cookie.
-        if HOP_BY_HOP.contains(&name.as_str()) || name == "cookie" || name == "authorization" {
+        // with its own minted key, not the user's cookie. Also drop any client-supplied `x-heldar-*`
+        // header so a caller can't SPOOF the identity headers the kernel adds below.
+        if HOP_BY_HOP.contains(&name.as_str())
+            || name == "cookie"
+            || name == "authorization"
+            || name.starts_with("x-heldar-")
+        {
             continue;
         }
         rb = rb.header(k, v);
     }
+    // Propagate the AUTHENTICATED caller's identity + role so the sidecar can enforce its OWN
+    // authorization across the proxy boundary. Previously the kernel stripped the caller's credentials
+    // but added nothing, so every proxied request reached the sidecar unattributed and `can_view`
+    // (true for every authenticated principal, including a viewer or another plugin's integration key)
+    // was the only gate — the sidecar could not tell who was calling or with what role. These headers
+    // are authoritative (the client-supplied ones were dropped just above).
+    rb = rb
+        .header("x-heldar-user", principal.id.as_str())
+        .header("x-heldar-role", principal.role.as_str())
+        .header(
+            "x-heldar-principal-kind",
+            match principal.kind {
+                crate::auth::PrincipalKind::User => "user",
+                crate::auth::PrincipalKind::ApiKey => "api_key",
+                crate::auth::PrincipalKind::System => "system",
+            },
+        );
     if !body.is_empty() {
         rb = rb.body(body.to_vec());
     }

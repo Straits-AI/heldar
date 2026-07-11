@@ -10,6 +10,9 @@ interface Props {
   iceServers?: RTCIceServer[] | null;
   /** HLS .m3u8 URL from the liveview endpoint — fallback when WebRTC can't connect. */
   hlsUrl?: string | null;
+  /** Short-lived MediaMTX read token (from the liveview endpoint). Appended after the WHEP `/whep`
+   *  suffix and onto every HLS request; harmless/ignored when MediaMTX isn't token-gating. */
+  liveToken?: string | null;
   className?: string;
   poster?: string;
   /** Camera name shown in the on-image overlay. */
@@ -43,6 +46,7 @@ export function LiveView({
   webrtcUrl,
   iceServers,
   hlsUrl,
+  liveToken,
   className = "",
   poster,
   name,
@@ -94,11 +98,15 @@ export function LiveView({
     let whep: WhepHandle | null = null;
     let disposed = false;
 
+    // Read token appended to stream requests so MediaMTX (when the kernel gates reads) authorizes them.
+    const tokenQuery = liveToken ? `?token=${encodeURIComponent(liveToken)}` : "";
+
     // Preferred transport: WebRTC/WHEP. On failure, fall back to HLS for the same stream.
     const whepFailed = !!webrtcUrl && failedWhepUrlRef.current === webrtcUrl;
     if (webrtcUrl && !whepFailed && typeof RTCPeerConnection !== "undefined") {
       setTransport("webrtc");
-      whep = startWhep(video, `${webrtcUrl}/whep`, {
+      // The token goes AFTER the `/whep` suffix (baking it into webrtcUrl would misplace it).
+      whep = startWhep(video, `${webrtcUrl}/whep${tokenQuery}`, {
         iceServers: iceServers ?? undefined,
         onConnected: () => {
           // Mark ready independent of autoplay so the play overlay can appear if autoplay is blocked.
@@ -130,11 +138,28 @@ export function LiveView({
 
     setTransport("hls");
     if (Hls.isSupported()) {
+      // Custom loader: append the read token to EVERY request (manifest + .ts segments). hls.js resolves
+      // relative segment URLs against the manifest and drops its query string, so without this the
+      // segments would arrive tokenless and MediaMTX would 403 them (when the kernel is gating reads).
+      /* eslint-disable @typescript-eslint/no-explicit-any */
+      const BaseLoader: any = Hls.DefaultConfig.loader;
+      class TokenLoader extends BaseLoader {
+        load(context: any, config: any, callbacks: any) {
+          if (liveToken && context?.url && !/[?&]token=/.test(context.url)) {
+            context.url += (context.url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(liveToken);
+          }
+          super.load(context, config, callbacks);
+        }
+      }
+      /* eslint-enable @typescript-eslint/no-explicit-any */
       hls = new Hls({
         lowLatencyMode: true,
         liveSyncDurationCount: 3,
         manifestLoadingTimeOut: 15000,
         fragLoadingTimeOut: 15000,
+        ...(liveToken
+          ? { loader: TokenLoader as unknown as typeof Hls.DefaultConfig.loader }
+          : {}),
       });
       hls.loadSource(hlsUrl);
       hls.attachMedia(video);
@@ -177,7 +202,7 @@ export function LiveView({
       video.removeAttribute("src");
       video.load();
     };
-  }, [webrtcUrl, iceServers, hlsUrl, retryTick]);
+  }, [webrtcUrl, iceServers, hlsUrl, liveToken, retryTick]);
 
   // Track playback state for the overlays (no transport effects).
   useEffect(() => {

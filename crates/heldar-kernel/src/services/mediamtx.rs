@@ -47,6 +47,10 @@ pub struct LiveUrls {
     pub hls_url: String,
     pub webrtc_url: String,
     pub rtsp_url: String,
+    /// Short-lived, path-scoped read token (see [`crate::services::live_token`]). Already appended as
+    /// `?token=` to `hls_url`/`rtsp_url`; returned separately so the frontend can append it AFTER the
+    /// `/whep` suffix it adds to `webrtc_url`, and so the HLS loader can carry it onto segment requests.
+    pub token: String,
 }
 
 /// MediaMTX (and our default config) listen on loopback. A playback URL like `http://127.0.0.1:8888/…`
@@ -188,11 +192,21 @@ pub async fn ensure_live(
     let hls = hls_base.trim_end_matches('/');
     let webrtc = webrtc_base.trim_end_matches('/');
     let rtsp = rtsp_base.trim_end_matches('/');
+    // Mint a short-lived, path-scoped read token now that `can_view` has passed upstream. MediaMTX
+    // (configured with HTTP external auth) calls the kernel back per read; when kernel auth is enabled
+    // the read is refused unless the URL carries this token — so the browser streaming directly from
+    // MediaMTX is still gated by kernel auth. Token chars are URL-safe (base64url + digits + dots).
+    let token = crate::services::live_token::mint(
+        &name,
+        chrono::Utc::now().timestamp(),
+        state.cfg.live_token_ttl_secs,
+    );
     Ok(LiveUrls {
-        hls_url: format!("{hls}/{name}/index.m3u8"),
+        hls_url: format!("{hls}/{name}/index.m3u8?token={token}"),
         webrtc_url: format!("{webrtc}/{name}"),
-        rtsp_url: format!("{rtsp}/{name}"),
+        rtsp_url: format!("{rtsp}/{name}?token={token}"),
         name,
+        token,
     })
 }
 

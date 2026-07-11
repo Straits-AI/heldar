@@ -45,6 +45,20 @@ fn validate_record_mode(mode: &str) -> AppResult<()> {
     }
 }
 
+/// Reject a camera `address` containing whitespace or control characters. The address is interpolated
+/// into the RTSP URL and thence the MediaMTX `runOnDemand` ffmpeg command string (which is split on
+/// whitespace), so a space would inject extra ffmpeg arguments. A hostname/IP never needs them.
+fn validate_address(address: Option<&str>) -> AppResult<()> {
+    if let Some(a) = address {
+        if a.chars().any(|c| c.is_whitespace() || c.is_control()) {
+            return Err(AppError::BadRequest(
+                "`address` must not contain whitespace or control characters".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn load_camera(pool: &SqlitePool, id: &str) -> AppResult<Camera> {
     sqlx::query_as::<_, Camera>("SELECT * FROM cameras WHERE id = ?")
         .bind(id)
@@ -154,6 +168,14 @@ async fn create_camera(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(str::to_string);
+    // The address flows into the RTSP URL (and thence the MediaMTX ffmpeg command); reject whitespace/
+    // control chars that could inject ffmpeg args. The ANR replay template is passed straight to
+    // `ffmpeg -i`, so hold it to the same scheme allow-list as stream URLs (blocks file:/gopher:/…).
+    validate_address(body.address.as_deref())?;
+    if let Some(tpl) = anr_replay_url_template.as_deref() {
+        camera_url::validate_stream_url(tpl)
+            .map_err(|e| AppError::BadRequest(format!("`anr_replay_url_template`: {e}")))?;
+    }
 
     // Encrypt the camera password at rest when HELDAR_SECRET_KEY is configured (plaintext otherwise).
     let password = body
@@ -264,6 +286,7 @@ async fn update_camera(
     {
         camera_url::validate_stream_url(url).map_err(AppError::BadRequest)?;
     }
+    validate_address(address.as_deref())?;
     let caps = SqlxJson(body.capabilities.unwrap_or(cur.capabilities.0));
     let record_enabled = body.record_enabled.unwrap_or(cur.record_enabled);
     let enabled = body.enabled.unwrap_or(cur.enabled);
@@ -297,6 +320,10 @@ async fn update_camera(
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .or(cur.anr_replay_url_template);
+    if let Some(tpl) = anr_replay_url_template.as_deref() {
+        camera_url::validate_stream_url(tpl)
+            .map_err(|e| AppError::BadRequest(format!("`anr_replay_url_template`: {e}")))?;
+    }
 
     sqlx::query(
         "UPDATE cameras SET

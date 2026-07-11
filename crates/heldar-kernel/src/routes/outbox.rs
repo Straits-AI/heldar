@@ -93,7 +93,10 @@ async fn list_outbox(
     }))
 }
 
-/// This node's fleet identity. No auth: it exposes only public build/site metadata (no secrets).
+/// This node's fleet identity (site_id, version, uptime). Requires an authenticated principal: when
+/// auth is disabled (LAN default) the extractor yields the synthetic admin so this stays open, but on
+/// an auth-enabled / internet-exposed box it no longer discloses the site identity + version to
+/// anonymous callers.
 #[derive(Debug, Serialize)]
 struct SiteInfo {
     site_id: Option<String>,
@@ -102,11 +105,12 @@ struct SiteInfo {
     started_at: DateTime<Utc>,
 }
 
-async fn site_info(State(st): State<AppState>) -> Json<SiteInfo> {
-    Json(SiteInfo {
+async fn site_info(State(st): State<AppState>, principal: Principal) -> AppResult<Json<SiteInfo>> {
+    principal.require(principal.can_view(), "read site info")?;
+    Ok(Json(SiteInfo {
         site_id: st.cfg.site_id.clone(),
         name: "Heldar Core",
         version: env!("CARGO_PKG_VERSION"),
         started_at: st.started_at,
-    })
+    }))
 }

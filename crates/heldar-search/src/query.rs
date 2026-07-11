@@ -102,16 +102,24 @@ pub fn window(plan: &QueryPlan) -> (DateTime<Utc>, DateTime<Utc>) {
     (from, to)
 }
 
+/// Result of executing a plan: the matching hits (newest first, capped) plus whether the per-source
+/// fetch hit its cap. `truncated == true` means a source returned as many rows as `fetch_cap`, so
+/// older in-window rows were cut BEFORE the Rust field-filters ran — the field-filtered result may
+/// therefore be an undercount, and the proof layer must not claim completeness.
+pub struct ExecOutcome {
+    pub hits: Vec<SearchHit>,
+    pub truncated: bool,
+}
+
 /// Execute the plan deterministically and return the matching hits (newest first, capped).
-pub async fn execute(
-    pool: &SqlitePool,
-    plan: &QueryPlan,
-    max: i64,
-) -> sqlx::Result<Vec<SearchHit>> {
+pub async fn execute(pool: &SqlitePool, plan: &QueryPlan, max: i64) -> sqlx::Result<ExecOutcome> {
     let (from, to) = window(plan);
     let fetch_cap = (max * 5).clamp(100, 20_000);
 
     let mut hits: Vec<SearchHit> = Vec::new();
+    // Set when any source returns a full page: the time-window fetch cut older rows before field
+    // filtering, so the answer below may omit in-window matches. Surfaced through the proof layer.
+    let mut truncated = false;
 
     if want(plan, "entry") {
         let rows: Vec<EntryRow> = sqlx::query_as(
@@ -124,6 +132,7 @@ pub async fn execute(
         .bind(fetch_cap)
         .fetch_all(pool)
         .await?;
+        truncated |= rows.len() as i64 >= fetch_cap;
         for r in rows {
             let ev_path = r
                 .evidence
@@ -160,6 +169,7 @@ pub async fn execute(
         .bind(fetch_cap)
         .fetch_all(pool)
         .await?;
+        truncated |= rows.len() as i64 >= fetch_cap;
         for r in rows {
             hits.push(SearchHit {
                 source: "zone".into(),
@@ -188,6 +198,7 @@ pub async fn execute(
         .bind(fetch_cap)
         .fetch_all(pool)
         .await?;
+        truncated |= rows.len() as i64 >= fetch_cap;
         for r in rows {
             hits.push(SearchHit {
                 source: "breach".into(),
@@ -327,7 +338,13 @@ pub async fn execute(
     hits.sort_by_key(|h| std::cmp::Reverse(h.timestamp));
     let limit = plan.limit.unwrap_or(max).clamp(1, max) as usize;
     hits.truncate(limit);
-    Ok(hits)
+    if truncated {
+        tracing::warn!(
+            fetch_cap,
+            "search: a source hit the fetch cap; older in-window matches may be omitted (result flagged non-exhaustive)"
+        );
+    }
+    Ok(ExecOutcome { hits, truncated })
 }
 
 fn parse_ts(s: &Option<String>) -> Option<DateTime<Utc>> {

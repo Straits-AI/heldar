@@ -40,6 +40,19 @@ function errMsg(e: unknown): string {
   return e instanceof ApiError || e instanceof Error ? e.message : String(e);
 }
 
+/** A `homepage` comes from a remote, untrusted plugin catalog. Only render it into an href if it is a
+ * real http(s) URL — otherwise a `javascript:`/`data:` value would be a click-through XSS. Returns
+ * `undefined` for anything else so the link is omitted. */
+function safeHttpUrl(url: string | undefined | null): string | undefined {
+  if (!url) return undefined;
+  try {
+    const u = new URL(url, window.location.origin);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 const KIND_META: Record<string, { label: string; cls: string }> = {
   core: { label: "Core", cls: "border-accent/40 bg-accent/10 text-accent" },
   proprietary: { label: "Proprietary", cls: "border-violet-400/40 bg-violet-400/10 text-violet-300" },
@@ -227,7 +240,7 @@ function StoreCard({
               <Button size="sm">Contact</Button>
             </a>
           ) : entry.homepage ? (
-            <a href={entry.homepage} target="_blank" rel="noreferrer">
+            <a href={safeHttpUrl(entry.homepage)} target="_blank" rel="noreferrer">
               <Button size="sm">Learn more</Button>
             </a>
           ) : (
@@ -405,7 +418,7 @@ function DetailBody({ entry, onInstall, canAdmin }: { entry: RegistryEntry; canA
         )}
       </dl>
       {entry.homepage && (
-        <a href={entry.homepage} target="_blank" rel="noreferrer" className="inline-block text-xs text-accent hover:underline">
+        <a href={safeHttpUrl(entry.homepage)} target="_blank" rel="noreferrer" className="inline-block text-xs text-accent hover:underline">
           {entry.homepage} →
         </a>
       )}

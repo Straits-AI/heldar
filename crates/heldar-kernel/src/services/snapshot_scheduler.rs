@@ -52,6 +52,15 @@ async fn sweep(state: &AppState) -> anyhow::Result<()> {
                 error = %e,
                 "snapshot_scheduler: capture failed"
             );
+            // Advance last_fired_at even on failure. `fire` only stamps it on success, so a persistently
+            // failing camera (offline, bad creds) stayed permanently `due` and was re-attempted on EVERY
+            // watcher tick instead of at the configured interval — a hot retry loop. Stamping here backs
+            // the next attempt off to the normal interval.
+            let _ = sqlx::query("UPDATE snapshot_schedules SET last_fired_at = ? WHERE id = ?")
+                .bind(now)
+                .bind(&sched.id)
+                .execute(&state.pool)
+                .await;
         }
     }
     Ok(())

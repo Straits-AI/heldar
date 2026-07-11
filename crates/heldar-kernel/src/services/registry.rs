@@ -9,7 +9,6 @@
 //! `module_registrations` table (installed sidecars) to compute each entry's shelf + state.
 
 use std::collections::HashSet;
-use std::net::IpAddr;
 use std::sync::RwLock;
 use std::time::Duration;
 
@@ -382,71 +381,18 @@ fn make_view(
     }
 }
 
-/// SSRF guard for an admin-configured registry URL: scheme allowlist + literal-IP rejection of
-/// loopback/private/link-local (unless `allow_private`). Hostname→IP resolution rebinding is out of
-/// scope for v1 (admin-trusted URLs, redirects disabled); documented in the registry guide.
+/// SSRF guard for an admin-configured registry URL, delegating to the shared egress guard
+/// ([`crate::net_guard`]). A registry is a public-internet resource, so by default only public https
+/// targets are allowed; setting `HELDAR_REGISTRY_ALLOW_PRIVATE` relaxes it to permit http + LAN/
+/// loopback targets (a registry self-hosted on the box). The metadata/link-local ranges stay rejected
+/// under both. Hostname→IP rebinding is out of scope for v1 (redirects are disabled on the fetch
+/// client), documented in the registry guide.
 fn validate_registry_url(url: &str, allow_private: bool) -> Result<(), String> {
-    let parsed = reqwest::Url::parse(url).map_err(|e| format!("bad registry url: {e}"))?;
-    match parsed.scheme() {
-        "https" => {}
-        "http" if allow_private => {}
-        "http" => {
-            return Err(
-                "registry url must be https (set HELDAR_REGISTRY_ALLOW_PRIVATE for http)".into(),
-            )
-        }
-        s => return Err(format!("unsupported registry url scheme `{s}`")),
-    }
-    if allow_private {
-        return Ok(());
-    }
-    let Some(host) = parsed.host_str() else {
-        return Err("registry url has no host".into());
+    let policy = crate::net_guard::EgressPolicy {
+        allow_lan: allow_private,
+        require_https: !allow_private,
     };
-    // `url` returns IPv6 literals bracketed (e.g. `[::1]`); strip the brackets before parsing so the
-    // literal-IP guard actually fires for the v6 family. A hostname that resolves to a private IP (DNS
-    // rebinding) is out of scope for v1 (admin-trusted URLs, redirects disabled); see the registry doc.
-    let host_ip = host
-        .strip_prefix('[')
-        .and_then(|h| h.strip_suffix(']'))
-        .unwrap_or(host);
-    if let Ok(ip) = host_ip.parse::<IpAddr>() {
-        return reject_private(ip);
-    }
-    Ok(())
-}
-
-/// Reject loopback/private/link-local/unspecified literals. v4-mapped/compat v6 (`::ffff:127.0.0.1`)
-/// is canonicalized to v4 first so it can't smuggle a private v4 past the v6 arm; native v6 also
-/// rejects unique-local (`fc00::/7`) and link-local (`fe80::/10`).
-fn reject_private(ip: IpAddr) -> Result<(), String> {
-    let ip = match ip {
-        IpAddr::V6(v6) => v6
-            .to_ipv4_mapped()
-            .map(IpAddr::V4)
-            .unwrap_or(IpAddr::V6(v6)),
-        v4 => v4,
-    };
-    let bad = match ip {
-        IpAddr::V4(v4) => {
-            v4.is_loopback()
-                || v4.is_private()
-                || v4.is_link_local()
-                || v4.is_unspecified()
-                || v4.is_broadcast()
-        }
-        IpAddr::V6(v6) => {
-            v6.is_loopback()
-                || v6.is_unspecified()
-                || v6.is_unique_local()
-                || v6.is_unicast_link_local()
-        }
-    };
-    if bad {
-        Err(format!("registry url resolves to a non-public address ({ip}); set HELDAR_REGISTRY_ALLOW_PRIVATE to allow"))
-    } else {
-        Ok(())
-    }
+    crate::net_guard::validate_egress_url(url, &policy).map(|_| ())
 }
 
 /// Background loop: refresh remote registries on the configured cadence. No-op (parks) when the

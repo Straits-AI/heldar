@@ -166,6 +166,23 @@ async fn prune(pool: &SqlitePool, cfg: &MovementConfig) -> anyhow::Result<()> {
         .bind(cutoff)
         .execute(pool)
         .await?;
+    // Unresolved alerts carry plate PII too (subject_type, plate) and must not outlive the retention
+    // window either. Before this, `status != 'resolved'` rows were kept forever, so open alerts grew
+    // without bound — a privacy/retention violation (PII past HELDAR_MOVEMENT_RETENTION_DAYS) and
+    // another leak into the heldar.db size budget. Age them out at the same ceiling, but warn so an
+    // un-actioned alert doesn't disappear silently.
+    let stale_open =
+        sqlx::query("DELETE FROM breach_alerts WHERE created_at < ? AND status <> 'resolved'")
+            .bind(cutoff)
+            .execute(pool)
+            .await?
+            .rows_affected();
+    if stale_open > 0 {
+        tracing::warn!(
+            count = stale_open,
+            "movement reid: pruned unresolved breach alerts past the retention window (PII ceiling)"
+        );
+    }
     Ok(())
 }
 

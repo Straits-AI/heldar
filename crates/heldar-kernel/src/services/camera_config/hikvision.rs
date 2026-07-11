@@ -20,6 +20,7 @@ use super::types::{
     DeviceInfo, NtpConfig, OnvifSettings, OnvifUserType, OsdConfig, TimeConfig, VideoConfig,
 };
 use super::CameraConfigProvider;
+use crate::camera_url;
 use crate::error::{AppError, AppResult};
 use crate::models::Camera;
 
@@ -60,7 +61,10 @@ impl HikVisionIsapiClient {
                     .into(),
             ));
         }
-        let password = cam.password.clone().unwrap_or_default();
+        // Decrypt the stored credential (encryption-at-rest seals it as `enc:v1:…`). Previously the raw
+        // sealed blob was sent as the Digest password, so enabling HELDAR_SECRET_KEY broke all ISAPI
+        // config. `decrypted_password` passes plaintext through unchanged when no key is configured.
+        let password = camera_url::decrypted_password(cam).unwrap_or_default();
         Ok(Self {
             base_url: format!("http://{host}"),
             username,

@@ -38,6 +38,14 @@ fn validate_days(v: &Value) -> AppResult<()> {
     let arr = v.as_array().ok_or_else(|| {
         AppError::BadRequest("`days` must be an array of weekday ints (0=Mon..6=Sun)".into())
     })?;
+    // An empty `days` array is a degenerate schedule that silently never records; reject it rather than
+    // store a window that looks active but does nothing.
+    if arr.is_empty() {
+        return Err(AppError::BadRequest(
+            "`days` must include at least one weekday (0=Mon..6=Sun); an empty set never records"
+                .into(),
+        ));
+    }
     for d in arr {
         match d.as_i64() {
             Some(n) if (0..7).contains(&n) => {}
@@ -47,6 +55,17 @@ fn validate_days(v: &Value) -> AppResult<()> {
                 ))
             }
         }
+    }
+    Ok(())
+}
+
+/// Reject a zero-length recording window (`time_start == time_end`), which the recorder treats as never
+/// active — an operator who wants all-day should use `00:00`–`23:59`.
+fn validate_window(time_start: &str, time_end: &str) -> AppResult<()> {
+    if time_start == time_end {
+        return Err(AppError::BadRequest(
+            "`time_start` and `time_end` must differ (a zero-length window never records; use 00:00–23:59 for all day)".into(),
+        ));
     }
     Ok(())
 }
@@ -91,6 +110,7 @@ async fn create_schedule(
     validate_days(&body.days)?;
     let time_start = normalize_hhmm(&body.time_start, "time_start")?;
     let time_end = normalize_hhmm(&body.time_end, "time_end")?;
+    validate_window(&time_start, &time_end)?;
     let enabled = body.enabled.unwrap_or(true);
     let now = Utc::now();
     let schedule_id = format!("recsch_{}", Uuid::new_v4().simple());
@@ -161,6 +181,7 @@ async fn update_schedule(
         Some(s) => normalize_hhmm(&s, "time_end")?,
         None => cur.time_end.clone(),
     };
+    validate_window(&time_start, &time_end)?;
     let enabled = body.enabled.unwrap_or(cur.enabled);
 
     sqlx::query(

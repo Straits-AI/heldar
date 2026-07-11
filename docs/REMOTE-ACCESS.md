@@ -143,11 +143,22 @@ Headscale + a self-hosted DERP is the maximal-privacy variant, but the highest o
 
 ## Security: authenticate before any exposure
 
-The kernel/MediaMTX read + playback surface is **not** authenticated by default (LAN-appliance
-default). On a tailnet/overlay an ACL gates who can reach it, which is sufficient for a handful of
-trusted viewers. But:
+The MediaMTX read + playback surface is gated by the kernel via **HTTP external-auth**
+(`authMethod: http` → `/internal/mediamtx-auth`). Behavior depends on `HELDAR_AUTH_ENABLED`:
 
-- Add the signed read tokens for MediaMTX playback before exposing it even on the overlay.
+- **Auth enabled (hardened / exposed):** every read/playback requires a short-lived, per-camera,
+  kernel-minted HMAC **read token**. The kernel mints it in `GET /liveview` after its `can_view` check
+  and the browser carries it on the WHEP URL and every HLS request. So a client streaming directly from
+  MediaMTX is gated by the same kernel auth as the API — set `HELDAR_AUTH_ENABLED=true` before any
+  exposure. (WebRTC/WHEP authorizes once and streams indefinitely; the auth-ON HLS fallback re-auths per
+  segment and re-fetches `/liveview` at token expiry — WebRTC is the primary path. `HELDAR_LIVEVIEW_TOKEN_TTL_SECS`
+  tunes the token lifetime; default 3600.)
+- **Auth disabled (LAN-appliance default):** no per-user token, but the kernel still allows only
+  LAN/private/overlay media clients and **denies public** ones — so a port-forwarded box does not serve
+  every camera to the internet. On a tailnet/overlay an ACL further gates who can reach it.
+
+Publishing stays loopback-only (only the kernel's own transcode ffmpeg publishes). Still:
+
 - For **any** public endpoint (the control-plane WebRTC rendezvous, or a VPS browser gateway),
   authentication in front of the endpoint is **mandatory** — never expose the media surface publicly
   unauthenticated. On the WebRTC path the rendezvous brokers signaling only and never sees media, but

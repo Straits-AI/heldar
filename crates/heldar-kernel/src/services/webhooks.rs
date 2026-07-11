@@ -36,18 +36,10 @@ const BATCH: i64 = 100;
 const MAX_ATTEMPTS: i64 = 5;
 
 pub async fn run(pool: SqlitePool, cfg: Arc<Config>) {
-    // Built once, outside the loop, and reused across cycles. On the (practically impossible) build
-    // failure, park forever rather than return — returning would have the supervisor respawn us.
-    let client = match reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::error!(error = %e, "webhooks: failed to build http client; idling");
-            std::future::pending::<reqwest::Client>().await
-        }
-    };
+    // Built once, outside the loop, and reused across cycles. Redirects are disabled (via the shared
+    // egress client) so a webhook target can't 302 the box to an internal/metadata URL and defeat the
+    // create-time target guard.
+    let client = crate::net_guard::egress_client(Duration::from_secs(10));
 
     let mut tick = tokio::time::interval(Duration::from_secs(cfg.notifier_interval_s.max(5)));
     loop {

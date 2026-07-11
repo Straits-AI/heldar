@@ -171,23 +171,34 @@ pub async fn log_event(
     Ok(())
 }
 
-/// Toggle a transient read-lock on a set of segments so the retention sweeper (which only deletes
-/// `locked = 0`) won't remove them while clip/snapshot ffmpeg is reading them — closing the TOCTOU
-/// between selecting segments and ffmpeg opening their files. Best-effort: a failure is logged, not
-/// fatal (the read still proceeds). Locks are cleared at startup ([`crate::db::clear_segment_read_locks`])
-/// so a crash mid-read cannot pin segments forever.
+/// Adjust a transient read-lock on a set of segments so the retention sweeper (which only deletes
+/// `locked = 0`) won't remove them while clip/snapshot/playback ffmpeg is reading them — closing the
+/// TOCTOU between selecting segments and ffmpeg opening their files. `locked` is a **reference count**,
+/// not a boolean: `acquire` increments it and `release` decrements it (floored at 0), so two
+/// overlapping holders of the same segment don't release each other's lock — the segment stays pinned
+/// until the LAST holder releases. (A plain `SET locked = 0/1` let the first finisher unpin footage the
+/// other holder was still reading, so retention could delete it mid-export.) Best-effort: a failure is
+/// logged, not fatal. Locks are reset to 0 at startup ([`crate::db::clear_segment_read_locks`]) so a
+/// crash mid-read cannot pin segments forever.
 pub async fn set_segments_locked(pool: &SqlitePool, ids: &[String], locked: bool) {
     if ids.is_empty() {
         return;
     }
     let placeholders = vec!["?"; ids.len()].join(",");
-    let sql = format!("UPDATE segments SET locked = ? WHERE id IN ({placeholders})");
-    let mut q = sqlx::query(&sql).bind(i64::from(locked));
+    // Increment on acquire; decrement (never below 0) on release. `MAX(locked - 1, 0)` keeps the count
+    // non-negative if a release ever races the startup reset or an unbalanced double-release.
+    let set_expr = if locked {
+        "locked = locked + 1"
+    } else {
+        "locked = MAX(locked - 1, 0)"
+    };
+    let sql = format!("UPDATE segments SET {set_expr} WHERE id IN ({placeholders})");
+    let mut q = sqlx::query(&sql);
     for id in ids {
         q = q.bind(id);
     }
     if let Err(e) = q.execute(pool).await {
-        tracing::warn!(error = %e, locked, "failed to toggle segment read-lock");
+        tracing::warn!(error = %e, locked, "failed to adjust segment read-lock");
     }
 }
 

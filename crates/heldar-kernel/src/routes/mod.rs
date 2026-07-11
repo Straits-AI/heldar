@@ -12,6 +12,7 @@ pub mod discovery;
 pub mod health;
 pub mod incidents;
 pub mod liveview;
+pub mod media_auth;
 pub mod metrics;
 pub mod modules;
 pub mod onvif;
@@ -43,6 +44,7 @@ pub fn api_router() -> Router<AppState> {
         .merge(playback::router())
         .merge(playback_sessions::router())
         .merge(liveview::router())
+        .merge(media_auth::router())
         .merge(health::router())
         .merge(discovery::router())
         .merge(ai::router())

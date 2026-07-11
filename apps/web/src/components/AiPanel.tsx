@@ -401,7 +401,11 @@ export function AiPanel({ cameraId }: { cameraId: string }) {
             <div className="font-mono text-[10px] uppercase tracking-micro text-fg-muted">
               Add AI task
             </div>
-            <Field label="Task type" htmlFor="ai-task-type" hint="Free-form: detection, anpr, tracking…">
+            <Field
+              label="Task type"
+              htmlFor="ai-task-type"
+              hint="Free-form. Built-in analyzers: detection, motion, anpr. Any other type needs a matching custom analyzer/sidecar, or it produces no detections."
+            >
               <Input
                 id="ai-task-type"
                 value={taskType}

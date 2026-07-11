@@ -51,6 +51,15 @@ async fn main() -> anyhow::Result<()> {
     // built, and run the internet-exposed production guardrails (warn, or refuse under STRICT_PROD).
     services::secrets::init_key(cfg.secret_key_b64.as_deref()).context("HELDAR_SECRET_KEY")?;
     cfg.enforce_production_guardrails()?;
+    // Surface the effective local timezone at boot. Recording schedules are evaluated in server-local
+    // time (chrono::Local); in a container/appliance with no tzdata or TZ unset, Local silently
+    // resolves to UTC, so an operator who set "09:00 local" would record in UTC. Logging the offset
+    // makes that misconfiguration visible instead of a silent wrong-hour recording.
+    tracing::info!(
+        tz = %std::env::var("TZ").unwrap_or_else(|_| "<unset>".into()),
+        local_offset = %chrono::Local::now().format("%:z"),
+        "server local timezone (recording schedules use this) — set TZ + install tzdata if the offset is wrong"
+    );
     // Fail fast if the media toolchain is missing — recording/clip/snapshot/sampling all need it.
     heldar_kernel::util::check_media_binaries(&cfg).context("media-binary preflight")?;
     for dir in [
@@ -144,8 +153,13 @@ async fn main() -> anyhow::Result<()> {
     modules.extend(wasm_modules);
     let consumers: Arc<Vec<Arc<dyn DetectionConsumer>>> = Arc::new(consumers);
     let modules = Arc::new(modules);
+    // Redirects are disabled on the shared egress client: following a 3xx is the SSRF bypass that
+    // defeats a target check (a public host 302s to an internal or cloud-metadata URL). None of its
+    // consumers (the local MediaMTX API, camera ISAPI/ONVIF, the sidecar reverse-proxy, webhook
+    // /test, rendezvous signaling) rely on server-side redirect-following.
     let http = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("building http client")?;
     // Plugin store catalog engine (bundled + signed remote registries).

@@ -71,6 +71,81 @@ async fn unlink_snapshot(path: &str) -> bool {
     }
 }
 
+/// Exported clips (`clip_<uuid>.mp4` + their `.txt` concat lists) live only on disk with no DB row, so
+/// they escape every table-driven prune; retain them this long before reclaiming. A clip is a
+/// download-and-go export, so a short window is plenty. (Constant rather than config to avoid churn;
+/// promote to `HELDAR_CLIP_RETENTION_HOURS` if operators need to tune it.)
+const CLIP_RETENTION: std::time::Duration = std::time::Duration::from_secs(48 * 3600);
+
+/// Recursively delete files under `root` whose mtime is older than `max_age`. Best-effort: unreadable
+/// entries are skipped, directories are descended (bounded by an explicit stack), and empty dirs are
+/// left in place. Used to reclaim on-disk artifacts that carry no DB row (exported clips, mirror
+/// segments), which the table-driven prunes and the size-cap can't see.
+async fn prune_tree_older_than(root: &std::path::Path, max_age: std::time::Duration) -> u64 {
+    let now = std::time::SystemTime::now();
+    let mut deleted = 0u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let mut rd = match tokio::fs::read_dir(&dir).await {
+            Ok(r) => r,
+            Err(_) => continue, // missing/unreadable dir (e.g. mirror not yet written) — skip
+        };
+        while let Ok(Some(entry)) = rd.next_entry().await {
+            let Ok(ft) = entry.file_type().await else {
+                continue;
+            };
+            if ft.is_dir() {
+                stack.push(entry.path());
+                continue;
+            }
+            let is_old = entry
+                .metadata()
+                .await
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|mtime| now.duration_since(mtime).ok())
+                .map(|age| age > max_age)
+                .unwrap_or(false);
+            if is_old && tokio::fs::remove_file(entry.path()).await.is_ok() {
+                deleted += 1;
+            }
+        }
+    }
+    deleted
+}
+
+/// Delete aged rows from a high-rate table in bounded batches, so a large backlog (worker catch-up,
+/// clock skew, a stalled sweep) can't delete millions of rows in ONE transaction that holds SQLite's
+/// single writer — stalling all ingest, zone-event and recording-metadata writes for its whole
+/// duration. `where_clause` is a trusted static string with exactly one `?` bound to `cutoff`; the
+/// table name is a trusted static too (never user input). Yields between batches so other writers
+/// interleave. Returns the total rows deleted.
+async fn delete_aged_in_batches(
+    pool: &SqlitePool,
+    table: &str,
+    where_clause: &str,
+    cutoff: DateTime<Utc>,
+) -> sqlx::Result<u64> {
+    const BATCH: i64 = 5_000;
+    let sql = format!(
+        "DELETE FROM {table} WHERE rowid IN (SELECT rowid FROM {table} WHERE {where_clause} LIMIT {BATCH})"
+    );
+    let mut total = 0u64;
+    loop {
+        let n = sqlx::query(&sql)
+            .bind(cutoff)
+            .execute(pool)
+            .await?
+            .rows_affected();
+        total += n;
+        if (n as i64) < BATCH {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    Ok(total)
+}
+
 pub async fn run(pool: SqlitePool, cfg: Arc<Config>) {
     let mut tick = tokio::time::interval(Duration::from_secs(cfg.retention_interval_s.max(30)));
     // Orphan reclamation walks the recordings tree, so run it on a slower (~hourly) cadence than the
@@ -191,6 +266,38 @@ fn orphan_is_reclaimable(
 }
 
 async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
+    // 0) Reclaim on-disk artifacts that carry NO DB row, so they can't quietly fill the volume and
+    //    (worse) drive the disk-free floor below to evict real recordings to make room for them. This
+    //    runs FIRST so the freed space is reflected before the floor decides how much footage to prune.
+    //    (a) Exported clips: `clip_<uuid>.mp4`/`.txt` in clips_dir, older than CLIP_RETENTION.
+    let clips_pruned = prune_tree_older_than(&cfg.clips_dir, CLIP_RETENTION).await;
+    if clips_pruned > 0 {
+        tracing::info!(
+            deleted = clips_pruned,
+            "retention: pruned old exported clips"
+        );
+    }
+    //    (b) Mirror (dual-DVR) segments: unindexed second copies under mirror_recordings_dir/{camera}/.
+    //        Prune each camera's subtree to that camera's own retention_hours (mirroring the primary);
+    //        the segments/size-cap sweeps never see these files.
+    if let Some(mirror_root) = &cfg.mirror_recordings_dir {
+        let cams: Vec<(String, i64)> = sqlx::query_as("SELECT id, retention_hours FROM cameras")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default();
+        let mut mirror_pruned = 0u64;
+        for (cam_id, hours) in cams {
+            let max_age = std::time::Duration::from_secs(hours.max(1) as u64 * 3600);
+            mirror_pruned += prune_tree_older_than(&mirror_root.join(&cam_id), max_age).await;
+        }
+        if mirror_pruned > 0 {
+            tracing::info!(
+                deleted = mirror_pruned,
+                "retention: pruned old mirror segments"
+            );
+        }
+    }
+
     // 1) Age-based retention, per-camera.
     let mut age_deleted: u64 = 0;
     let cams: Vec<(String, i64)> = sqlx::query_as("SELECT id, retention_hours FROM cameras")
@@ -536,22 +643,28 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
 
     // 5) Prune old AI detections (the table grows unbounded otherwise).
     let det_cutoff = Utc::now() - chrono::Duration::hours(cfg.detection_retention_hours.max(1));
-    let pruned = sqlx::query("DELETE FROM detections WHERE created_at < ?")
-        .bind(det_cutoff)
-        .execute(pool)
-        .await?
-        .rows_affected();
+    let pruned = delete_aged_in_batches(pool, "detections", "created_at < ?", det_cutoff).await?;
     if pruned > 0 {
         tracing::info!(deleted = pruned, "retention: pruned old detections");
     }
     // Prune the transactional outbox on the same TTL (until an edge→cloud relay acks + prunes by seq).
-    let ob_pruned = sqlx::query("DELETE FROM outbox WHERE created_at < ?")
-        .bind(det_cutoff)
-        .execute(pool)
-        .await?
-        .rows_affected();
+    let ob_pruned = delete_aged_in_batches(pool, "outbox", "created_at < ?", det_cutoff).await?;
     if ob_pruned > 0 {
         tracing::info!(deleted = ob_pruned, "retention: pruned old outbox rows");
+    }
+    // Prune the per-consumer fan-out ledger on the SAME TTL. `consumer_fanout` is a dedup/at-most-once
+    // claim (consumer, camera_id, frame_id) written on every ingest and — before this — never deleted,
+    // so it grew without bound at fps×cameras×consumers, defeated the heldar.db size cap (which only
+    // sheds `detections`), and slowed every ingest INSERT. A claim only needs to outlive the un-fanned
+    // outbox window it guards against; the outbox itself is pruned above at `det_cutoff`, so any claim
+    // older than that can never be re-driven and is safe to drop.
+    let cf_pruned =
+        delete_aged_in_batches(pool, "consumer_fanout", "fanned_at < ?", det_cutoff).await?;
+    if cf_pruned > 0 {
+        tracing::info!(
+            deleted = cf_pruned,
+            "retention: pruned old consumer-fanout rows"
+        );
     }
 
     // 6) Prune old zone events and delete their evidence frames (same TTL as detections).
@@ -601,11 +714,7 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
     //    mirrors written by the ANPR engine). It is otherwise unbounded. The alert notifier advances
     //    a durable cursor over recent rows, so deleting rows older than the (long) entry TTL — which
     //    are far past delivery — is safe.
-    let evpruned = sqlx::query("DELETE FROM events WHERE created_at < ?")
-        .bind(audit_cutoff)
-        .execute(pool)
-        .await?
-        .rows_affected();
+    let evpruned = delete_aged_in_batches(pool, "events", "created_at < ?", audit_cutoff).await?;
     if evpruned > 0 {
         tracing::info!(deleted = evpruned, "retention: pruned old event-log rows");
     }
@@ -613,11 +722,8 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
     // 8b) Prune the webhook delivery ledger (one row per delivery attempt, per subscription, per event)
     //     past the audit horizon. The delivery cursor lives on the subscription, not these rows, so
     //     deleting old attempt records is safe — they are an at-rest audit trail, not delivery state.
-    let wdpruned = sqlx::query("DELETE FROM webhook_deliveries WHERE created_at < ?")
-        .bind(audit_cutoff)
-        .execute(pool)
-        .await?
-        .rows_affected();
+    let wdpruned =
+        delete_aged_in_batches(pool, "webhook_deliveries", "created_at < ?", audit_cutoff).await?;
     if wdpruned > 0 {
         tracing::info!(
             deleted = wdpruned,

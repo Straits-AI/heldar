@@ -32,24 +32,26 @@ webrtcICEServers2:
 rtmp: no
 srt: no
 
-# Authentication: publishing is restricted to the local host — only the kernel's own ffmpeg
-# (camera proxy / live transcode) and the dev synthetic camera publish, all from loopback. This
-# closes the stream-injection surface (a rogue publisher overwriting a camera feed). Reads/playback
-# stay open for now so the LAN dashboard works without tokens; signed read tokens + a cloud relay
-# for off-LAN viewing are added with the auth-split / edge↔cloud work.
-authMethod: internal
-authInternalUsers:
-  - user: any
-    ips: ['127.0.0.1', '::1']
-    permissions:
-      - action: publish
-      - action: api
-      - action: metrics
-      - action: pprof
-  - user: any
-    permissions:
-      - action: read
-      - action: playback
+# Authentication: DELEGATED TO THE KERNEL via HTTP external auth. For every publish/read/playback,
+# MediaMTX POSTs the request to the kernel's /internal/mediamtx-auth, which decides:
+#   - publish: allowed only from a loopback client — the kernel's own runOnDemand ffmpeg publishes from
+#     rtsp://localhost — closing the stream-injection surface (a rogue publisher overwriting a feed).
+#   - read/playback: when kernel auth is ENABLED, a valid kernel-minted, per-camera token (carried in
+#     the ?token= query the kernel appends to the stream URL, and by the browser's WHEP/HLS loader onto
+#     every request) is required — so the browser streaming DIRECTLY from MediaMTX is gated by the SAME
+#     kernel auth as the API. When kernel auth is DISABLED (LAN-appliance default), the kernel allows
+#     LAN/private/overlay media clients and denies public ones, so a port-forwarded box still does not
+#     serve every camera to the internet.
+# `authInternalUsers` is intentionally omitted — it is IGNORED under authMethod: http.
+# The kernel API is on 127.0.0.1:8000 in every deployment (host-networked); change the port here if you
+# set HELDAR_API_PORT. api/metrics/pprof are excluded from the callback because those servers are
+# already loopback-bound (apiAddress above), so they need no kernel round-trip.
+authMethod: http
+authHTTPAddress: http://127.0.0.1:8000/internal/mediamtx-auth
+authHTTPExclude:
+  - action: api
+  - action: metrics
+  - action: pprof
 
 # Heldar adds named camera proxy paths via the API.
 paths:
