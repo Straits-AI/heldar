@@ -136,6 +136,7 @@ pub async fn ensure_incremental_autovacuum(
     pool: &SqlitePool,
     cfg: &Config,
 ) -> anyhow::Result<bool> {
+    // Current mode is a DB-header property; any connection reports the same value.
     let mode: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
         .fetch_one(pool)
         .await
@@ -143,8 +144,10 @@ pub async fn ensure_incremental_autovacuum(
     if mode == 2 {
         return Ok(false); // already INCREMENTAL
     }
+    // A full VACUUM rewrites the DB and needs ~size of scratch space. Measure + disk-gate via the
+    // POOL *before* pinning a connection — holding the pinned connection while calling a pool-based
+    // helper would self-deadlock a max_connections(1) pool.
     let size = db_size_bytes(pool).await?;
-    // Guard: a full VACUUM rewrites the DB and needs ~size of scratch space.
     match crate::services::storage::disk_stats_async(cfg.data_dir.clone()).await {
         Some(stats) => {
             let need = (size as f64 * 1.1) as u64;
@@ -163,14 +166,33 @@ pub async fn ensure_incremental_autovacuum(
             return Ok(false);
         }
     }
+    // Pin ONE connection: the requesting PRAGMA and the applying VACUUM are connection-scoped — the
+    // VACUUM only converts the DB if it runs on the same connection that set the pragma. On the live
+    // multi-connection pool the two statements could otherwise land on different connections, so the
+    // multi-minute VACUUM would complete without flipping the mode.
+    let mut conn = pool
+        .acquire()
+        .await
+        .context("acquire connection for auto_vacuum conversion")?;
     sqlx::query("PRAGMA auto_vacuum=INCREMENTAL")
-        .execute(pool)
+        .execute(&mut *conn)
         .await
         .context("set auto_vacuum")?;
     sqlx::query("VACUUM")
-        .execute(pool)
+        .execute(&mut *conn)
         .await
         .context("VACUUM (auto_vacuum conversion)")?;
+    // Convergence check: a multi-minute VACUUM that did not actually flip the mode must NOT report
+    // success (that would silently disable the size cap and re-run every boot).
+    let after: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
+        .fetch_one(&mut *conn)
+        .await
+        .context("verify auto_vacuum after VACUUM")?;
+    if after != 2 {
+        anyhow::bail!(
+            "auto_vacuum conversion did not take effect (mode still {after} after VACUUM)"
+        );
+    }
     tracing::info!(
         prior_mode = mode,
         "db retention: converted DB to auto_vacuum=INCREMENTAL (one-time)"
@@ -354,6 +376,61 @@ mod tests {
         let converted2 = ensure_incremental_autovacuum(&pool, &cfg).await.unwrap();
         assert!(!converted2, "already INCREMENTAL — should skip");
         drop(pool);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn conversion_converges_on_multi_connection_pool() {
+        // A pooled, file-backed mode-0 DB with >1 connection: the pinned PRAGMA+VACUUM must still flip
+        // the mode to 2 (guards the connection-scoping trap). Must be a FILE DB — :memory: gives each
+        // pooled connection its own separate database.
+        let dir =
+            std::env::temp_dir().join(format!("heldar-autovacuum-multi-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("test.db");
+        let url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let pool = SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE detections (id TEXT PRIMARY KEY, created_at TEXT, blob TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mode0: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_ne!(mode0, 2, "starts non-incremental");
+        let mut cfg = Config::from_env();
+        cfg.data_dir = std::env::temp_dir(); // plenty of free space so the disk guard passes
+        let converted = ensure_incremental_autovacuum(&pool, &cfg).await.unwrap();
+        assert!(converted, "should have converted");
+        // Verification note: SQLite caches `auto_vacuum` per-connection at file-open time (it's read
+        // from the file header into that connection's in-memory Btree state and is NOT refreshed by a
+        // VACUUM run on a different connection). So an already-open connection elsewhere in THIS pool
+        // (e.g. the one used for the `mode0` check above) can keep reporting the pre-conversion value
+        // even though the on-disk file is genuinely converted — that staleness is an orthogonal SQLite
+        // quirk, not the connection-scoping bug this test guards against. The only way to observe the
+        // actual on-disk state is a connection that opens the file fresh, so drop this pool and reopen
+        // one against the same file (equivalent to what the next server boot would see).
+        drop(pool);
+        let pool2 = SqlitePoolOptions::new()
+            .max_connections(4)
+            .connect(&url)
+            .await
+            .unwrap();
+        let mode1: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
+            .fetch_one(&pool2)
+            .await
+            .unwrap();
+        assert_eq!(
+            mode1, 2,
+            "converged to INCREMENTAL on a multi-connection pool"
+        );
+        drop(pool2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
