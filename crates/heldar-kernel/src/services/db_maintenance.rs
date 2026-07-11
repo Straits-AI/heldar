@@ -127,6 +127,36 @@ pub async fn enforce_db_cap(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<D
     })
 }
 
+/// Outcome of the pre-conversion free-disk check. A conversion `VACUUM` rewrites the whole DB into a
+/// fresh file, so it needs roughly the DB size again in scratch space (we require size × 1.1).
+#[derive(Debug, PartialEq, Eq)]
+enum VacuumDiskCheck {
+    /// Enough free disk — proceed with the conversion.
+    Ok,
+    /// Not enough free disk — skip and retry next boot.
+    Insufficient { free: u64, need: u64 },
+    /// Disk stats couldn't be read (e.g. the data dir doesn't exist) — skip.
+    Unknown,
+}
+
+/// Pure decision for the conversion disk-gate: given the measured DB size and the free-bytes reading
+/// (`None` when statvfs couldn't be read), decide whether there's room for the conversion VACUUM.
+/// Extracted from `ensure_incremental_autovacuum` so both skip branches are unit-testable without a
+/// real filesystem (the insufficient-disk case cannot be forced deterministically otherwise).
+fn check_vacuum_disk(db_size: u64, free_bytes: Option<u64>) -> VacuumDiskCheck {
+    match free_bytes {
+        None => VacuumDiskCheck::Unknown,
+        Some(free) => {
+            let need = (db_size as f64 * 1.1) as u64;
+            if free < need {
+                VacuumDiskCheck::Insufficient { free, need }
+            } else {
+                VacuumDiskCheck::Ok
+            }
+        }
+    }
+}
+
 /// Ensure the DB uses `auto_vacuum=INCREMENTAL` so `incremental_vacuum` can reclaim pages.
 /// New DBs are born INCREMENTAL (via the connect pragma in `db::init_pool`); an existing DB in
 /// mode NONE(0)/FULL(1) is converted with a one-time `VACUUM`. The VACUUM needs temp space ≈ the DB
@@ -148,18 +178,19 @@ pub async fn ensure_incremental_autovacuum(
     // POOL *before* pinning a connection — holding the pinned connection while calling a pool-based
     // helper would self-deadlock a max_connections(1) pool.
     let size = db_size_bytes(pool).await?;
-    match crate::services::storage::disk_stats_async(cfg.data_dir.clone()).await {
-        Some(stats) => {
-            let need = (size as f64 * 1.1) as u64;
-            if stats.free_bytes < need {
-                tracing::warn!(
-                    free = stats.free_bytes, need,
-                    "db retention: skipping auto_vacuum conversion (insufficient free disk); will retry next boot"
-                );
-                return Ok(false);
-            }
+    let free = crate::services::storage::disk_stats_async(cfg.data_dir.clone())
+        .await
+        .map(|s| s.free_bytes);
+    match check_vacuum_disk(size, free) {
+        VacuumDiskCheck::Ok => {}
+        VacuumDiskCheck::Insufficient { free, need } => {
+            tracing::warn!(
+                free, need,
+                "db retention: skipping auto_vacuum conversion (insufficient free disk); will retry next boot"
+            );
+            return Ok(false);
         }
-        None => {
+        VacuumDiskCheck::Unknown => {
             tracing::warn!(
                 "db retention: could not stat disk before auto_vacuum conversion; skipping"
             );
@@ -506,6 +537,66 @@ mod tests {
         assert_eq!(mode, 2, "converted to INCREMENTAL");
         let again = maybe_convert_autovacuum(&pool, &cfg).await.unwrap();
         assert!(!again, "already INCREMENTAL → idempotent no-op");
+        drop(pool);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn vacuum_disk_check_covers_all_branches() {
+        // Enough headroom (free >= size*1.1) -> proceed; the second case is exactly at the need.
+        assert_eq!(check_vacuum_disk(1000, Some(2000)), VacuumDiskCheck::Ok);
+        assert_eq!(check_vacuum_disk(1000, Some(1100)), VacuumDiskCheck::Ok);
+        // Not enough free disk (free < size*1.1) -> skip, reporting the computed need.
+        assert_eq!(
+            check_vacuum_disk(1000, Some(1099)),
+            VacuumDiskCheck::Insufficient {
+                free: 1099,
+                need: 1100
+            }
+        );
+        assert_eq!(
+            check_vacuum_disk(1000, Some(0)),
+            VacuumDiskCheck::Insufficient {
+                free: 0,
+                need: 1100
+            }
+        );
+        // A zero-size DB needs nothing -> proceed even with zero free.
+        assert_eq!(check_vacuum_disk(0, Some(0)), VacuumDiskCheck::Ok);
+        // Disk stats unreadable (statvfs failed) -> skip.
+        assert_eq!(check_vacuum_disk(1000, None), VacuumDiskCheck::Unknown);
+    }
+
+    #[tokio::test]
+    async fn conversion_skips_when_disk_unstattable() {
+        // End-to-end guard for the "could not stat disk" skip branch: point data_dir at a path
+        // statvfs cannot resolve (does not exist) so disk_stats_async returns None; the conversion
+        // must be skipped (Ok(false)) and the DB left unconverted (mode not 2).
+        let dir =
+            std::env::temp_dir().join(format!("heldar-autovacuum-nodisk-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let db_path = dir.join("test.db");
+        let url = format!("sqlite://{}?mode=rwc", db_path.display());
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE detections (id TEXT PRIMARY KEY, created_at TEXT, blob TEXT)")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut cfg = Config::from_env();
+        // A subpath that does not exist -> statvfs fails -> disk_stats_async returns None.
+        cfg.data_dir = dir.join("does-not-exist");
+        let ran = ensure_incremental_autovacuum(&pool, &cfg).await.unwrap();
+        assert!(!ran, "unstattable disk -> skip, no conversion");
+        let mode: i64 = sqlx::query_scalar("PRAGMA auto_vacuum")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_ne!(mode, 2, "DB not converted when disk can't be statted");
         drop(pool);
         let _ = std::fs::remove_dir_all(&dir);
     }
