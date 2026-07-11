@@ -51,6 +51,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hardening is opt-in, so the daemon warns rather than refusing to boot). The embedded NOC dashboard
   prompts for the token and sends it. Alert-route SSRF was also closed (public-https-only validation +
   redirect-disabled client, `heldar-control-plane::net_guard`) and 500s no longer leak raw error strings.
+- **Control-plane CRL hot-reload.** The CRL (and cert/key/CA) were loaded once at boot, so revoking a
+  compromised node cert needed a redeploy. They're now re-read on a background cadence (~30s) and the
+  TLS config is rebuilt + swapped when a file changes, so a re-issued CRL revokes a node on new
+  connections without a restart (a rebuild failure keeps the previous good config; boot still validates
+  the initial one).
 - **MediaMTX per-user video gating.** The browser streams directly from MediaMTX, so the kernel's
   `can_view` was bypassable. MediaMTX now uses HTTP external-auth against a kernel endpoint
   (`/internal/mediamtx-auth`): reads require a short-lived, path-scoped, kernel-minted HMAC token (minted
