@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Tests
+
+- **Characterization tests for the two least-tested critical paths** (recorder supervision + backup
+  execution), which previously had healthy-looking test *counts* dominated by pure-helper tests. The
+  supervision *decision* logic is now pinned by extracting three behavior-preserving pure functions
+  from `run_supervise`/`run_event_supervise` — `next_backoff` (reconnect-storm guard), `extend_trigger_window`
+  (a trigger only extends, never shrinks, an event window), and `event_recheck_secs` (post-roll stops on
+  time, never busy-spins) — plus a test of `build_record_command` that pins the ffmpeg stream-copy/segmenting
+  args and the credential/injection-safety guarantee (the stream URL stays a single argv element). Backup
+  copy execution is now covered by a real filesystem round-trip: `copy_local`'s fs loop was extracted to a
+  testable `copy_segments_to_dir` (byte-identical copy, vanished-source skip) and `dir_size_bytes` is
+  pinned. (Full ffmpeg-child-lifecycle coverage still needs a fake-ffmpeg harness — tracked follow-up.)
+
 ### Added
 
 - **Versioned app-schema migrations.** The composed apps (entry / movement / search + the proprietary

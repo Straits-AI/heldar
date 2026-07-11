@@ -285,7 +285,26 @@ async fn copy_local(
     if base.is_empty() {
         anyhow::bail!("local destination has no `path` configured");
     }
-    let base = Path::new(&base);
+    copy_segments_to_dir(Path::new(&base), segments, |copied, bytes| {
+        update_progress(state, job_id, copied, bytes)
+    })
+    .await
+}
+
+/// Copy each segment file to `{base}/{camera_id}/{basename}`, returning `(files_copied, bytes_copied)`.
+/// A source that vanished between selection and copy is skipped (not an error) — retention or a
+/// concurrent delete can race the backup. `on_progress(copied, bytes)` is awaited after each file so
+/// the caller can persist progress; the fs logic is separated from that side effect so it is testable
+/// without an `AppState`/DB.
+async fn copy_segments_to_dir<F, Fut>(
+    base: &Path,
+    segments: &[Segment],
+    mut on_progress: F,
+) -> anyhow::Result<(u64, u64)>
+where
+    F: FnMut(u64, u64) -> Fut,
+    Fut: std::future::Future<Output = ()>,
+{
     let mut copied = 0u64;
     let mut bytes = 0u64;
     for seg in segments {
@@ -300,11 +319,11 @@ async fn copy_local(
                 bytes += n;
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                tracing::warn!(job = job_id, path = %seg.path, "backup: source segment vanished; skipping");
+                tracing::warn!(path = %seg.path, "backup: source segment vanished; skipping");
             }
             Err(e) => anyhow::bail!("copying {}: {e}", seg.path),
         }
-        update_progress(state, job_id, copied, bytes).await;
+        on_progress(copied, bytes).await;
     }
     Ok((copied, bytes))
 }
@@ -987,5 +1006,116 @@ mod tests {
             "20260613_120000.mp4"
         );
         assert_eq!(file_name_of(""), "segment.mp4");
+    }
+
+    // ---- backup copy execution (the real fs round-trip, minus the AppState/DB progress side effect) --
+
+    fn seg(camera_id: &str, path: &str) -> Segment {
+        Segment {
+            id: format!("seg_{camera_id}"),
+            camera_id: camera_id.into(),
+            path: path.into(),
+            start_time: chrono::Utc::now(),
+            end_time: chrono::Utc::now(),
+            duration_s: 60.0,
+            codec: None,
+            width: None,
+            height: None,
+            size_bytes: 0,
+            container: "mp4".into(),
+            locked: false,
+            evidence_locked: false,
+            incident_id: None,
+            created_at: chrono::Utc::now(),
+        }
+    }
+
+    /// A unique temp dir for one test, removed on drop.
+    struct TmpDir(std::path::PathBuf);
+    impl TmpDir {
+        fn new(tag: &str) -> Self {
+            let p =
+                std::env::temp_dir().join(format!("heldar-backup-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&p);
+            std::fs::create_dir_all(&p).unwrap();
+            TmpDir(p)
+        }
+    }
+    impl Drop for TmpDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn copy_segments_to_dir_copies_files_byte_identical() {
+        let src = TmpDir::new("src-rt");
+        let dst = TmpDir::new("dst-rt");
+        // Two source segments across two cameras, with distinct contents.
+        let p1 = src.0.join("a.mp4");
+        let p2 = src.0.join("b.mp4");
+        std::fs::write(&p1, b"hello-cam-a").unwrap();
+        std::fs::write(&p2, b"world-cam-b-XYZ").unwrap();
+        let segs = vec![
+            seg("camA", p1.to_str().unwrap()),
+            seg("camB", p2.to_str().unwrap()),
+        ];
+
+        let mut progress: Vec<(u64, u64)> = Vec::new();
+        let (copied, bytes) = copy_segments_to_dir(&dst.0, &segs, |c, b| {
+            progress.push((c, b));
+            std::future::ready(())
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(copied, 2);
+        assert_eq!(
+            bytes,
+            (b"hello-cam-a".len() + b"world-cam-b-XYZ".len()) as u64
+        );
+        // Files land at {dest}/{camera_id}/{basename}, byte-identical to the source.
+        assert_eq!(
+            std::fs::read(dst.0.join("camA/a.mp4")).unwrap(),
+            b"hello-cam-a"
+        );
+        assert_eq!(
+            std::fs::read(dst.0.join("camB/b.mp4")).unwrap(),
+            b"world-cam-b-XYZ"
+        );
+        // Progress was reported after each file (cumulative).
+        assert_eq!(progress, vec![(1, 11), (2, 26)]);
+    }
+
+    #[tokio::test]
+    async fn copy_segments_to_dir_skips_vanished_source_without_erroring() {
+        let src = TmpDir::new("src-skip");
+        let dst = TmpDir::new("dst-skip");
+        let good = src.0.join("good.mp4");
+        std::fs::write(&good, b"present").unwrap();
+        // Second segment points at a file that was deleted (raced by retention) — must be SKIPPED.
+        let segs = vec![
+            seg("camA", good.to_str().unwrap()),
+            seg("camA", src.0.join("gone.mp4").to_str().unwrap()),
+        ];
+        let (copied, bytes) = copy_segments_to_dir(&dst.0, &segs, |_, _| std::future::ready(()))
+            .await
+            .unwrap();
+        assert_eq!(copied, 1, "the vanished source is skipped, not counted");
+        assert_eq!(bytes, b"present".len() as u64);
+        assert!(dst.0.join("camA/good.mp4").exists());
+        assert!(!dst.0.join("camA/gone.mp4").exists());
+    }
+
+    #[tokio::test]
+    async fn dir_size_bytes_sums_flat_files_and_ignores_subdirs() {
+        let d = TmpDir::new("size");
+        std::fs::write(d.0.join("a"), b"1234").unwrap(); // 4
+        std::fs::write(d.0.join("b"), b"567").unwrap(); // 3
+        std::fs::create_dir_all(d.0.join("sub")).unwrap();
+        std::fs::write(d.0.join("sub/c"), b"ignored-9chars").unwrap(); // must NOT count
+        assert_eq!(dir_size_bytes(&d.0).await, 7);
+        // A nonexistent dir is best-effort 0, no panic.
+        assert_eq!(dir_size_bytes(&d.0.join("nope")).await, 0);
     }
 }

@@ -389,8 +389,7 @@ impl RecorderManager {
                     let _ = repo::bump_reconnect(&self.pool, &camera_id, &err_tail).await;
                     let _ = repo::log_event(&self.pool, Some(&camera_id), "camera_offline", "warning",
                         json!({ "ran_seconds": ran, "detail": err_tail })).await;
-                    // Reset backoff if it ran a healthy while; otherwise exponential up to 30s.
-                    backoff = if ran > 30 { 1 } else { (backoff * 2).min(30) };
+                    backoff = next_backoff(backoff, ran);
                     if sleep_or_stop(&mut stop, backoff).await {
                         return;
                     }
@@ -551,17 +550,13 @@ impl RecorderManager {
             // longer be recording (trigger window elapsed AND no schedule window open). Reacts
             // immediately to an extended/new trigger via `trig.changed()`.
             let end = loop {
-                let now = Utc::now();
                 // Sleep precisely to the trigger window end (so post-roll stops on time); also re-check
                 // at least every schedule tick to notice a scheduled_event window closing.
-                let mut recheck = self.cfg.schedule_check_interval_s.max(5);
-                if let Some(w_end) = *trig.borrow() {
-                    if w_end > now {
-                        let remaining = (w_end - now).num_seconds().max(0) as u64 + 1;
-                        recheck = recheck.min(remaining);
-                    }
-                }
-                let recheck = recheck.max(1);
+                let recheck = event_recheck_secs(
+                    self.cfg.schedule_check_interval_s.max(5),
+                    *trig.borrow(),
+                    Utc::now(),
+                );
                 tokio::select! {
                     status = child.wait() => break End::Exited(status),
                     _ = stop.changed() => break End::Stop,
@@ -615,7 +610,7 @@ impl RecorderManager {
                         json!({ "ran_seconds": ran, "detail": err_tail }),
                     )
                     .await;
-                    backoff = if ran > 30 { 1 } else { (backoff * 2).min(30) };
+                    backoff = next_backoff(backoff, ran);
                     if sleep_or_stop(&mut stop, backoff).await {
                         return;
                     }
@@ -647,11 +642,8 @@ impl RecorderManager {
         let task = tasks.get(camera_id)?;
         let mut window_end = end;
         task.trigger.send_modify(|cur| {
-            // Keep the later of the existing window and this one (a trigger only extends).
-            let next = match *cur {
-                Some(existing) if existing > end => existing,
-                _ => end,
-            };
+            // A trigger only extends the window, never shrinks it.
+            let next = extend_trigger_window(*cur, end);
             *cur = Some(next);
             window_end = next;
         });
@@ -701,6 +693,49 @@ pub(crate) fn build_record_command(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     cmd
+}
+
+/// Reconnect backoff after an ffmpeg child exits. Resets to 1s if the child ran a healthy while
+/// (`> 30s`), otherwise doubles up to a 30s cap. This is the guard that keeps a dead/flapping camera
+/// from becoming a hot spawn loop (hammering ffmpeg + the DB), while recovering promptly after a
+/// transient blip. Shared by both supervisors so the two cadences can't drift.
+fn next_backoff(prev: u64, ran_seconds: i64) -> u64 {
+    if ran_seconds > 30 {
+        1
+    } else {
+        (prev * 2).min(30)
+    }
+}
+
+/// The end of an event recording window after a trigger: a trigger only ever EXTENDS the window, never
+/// shrinks it, so a burst of events can't cut a prior trigger's post-roll short. Returns the later of
+/// the current window end and the new one.
+fn extend_trigger_window(
+    current: Option<chrono::DateTime<Utc>>,
+    new_end: chrono::DateTime<Utc>,
+) -> chrono::DateTime<Utc> {
+    match current {
+        Some(existing) if existing > new_end => existing,
+        _ => new_end,
+    }
+}
+
+/// How long the event supervisor waits before re-checking, so post-roll stops ON TIME: at most the
+/// schedule tick (`base_tick`), but shorter when a trigger window closes sooner (remaining + 1s).
+/// Always `>= 1` so it never busy-spins on `child.wait()`.
+fn event_recheck_secs(
+    base_tick: u64,
+    window_end: Option<chrono::DateTime<Utc>>,
+    now: chrono::DateTime<Utc>,
+) -> u64 {
+    let mut recheck = base_tick;
+    if let Some(w_end) = window_end {
+        if w_end > now {
+            let remaining = (w_end - now).num_seconds().max(0) as u64 + 1;
+            recheck = recheck.min(remaining);
+        }
+    }
+    recheck.max(1)
 }
 
 /// Sleep for `secs`, returning `true` if a stop was signaled during the wait.
@@ -807,5 +842,169 @@ mod tests {
         assert!(window_active(&days, start, end, 1, 120)); // Tue 02:00 -> Monday's carryover
         assert!(!window_active(&days, start, end, 1, 400)); // Tue 06:40 -> after end
         assert!(!window_active(&days, start, end, 0, 300)); // Mon 05:00 -> would be Sunday's window
+    }
+
+    // ---- supervision decision logic (extracted from run_supervise / run_event_supervise) ----------
+
+    #[test]
+    fn next_backoff_caps_at_30_and_resets_after_a_healthy_run() {
+        // A flapping camera (each attempt dies quickly): 1 -> 2 -> 4 -> 8 -> 16 -> 30 (saturates).
+        let mut b = 1;
+        let expected = [2, 4, 8, 16, 30, 30, 30];
+        for want in expected {
+            b = next_backoff(b, 5); // ran only 5s -> unhealthy -> keep doubling toward the cap
+            assert_eq!(b, want, "backoff should double toward the 30s cap");
+        }
+        // A child that ran a healthy while (> 30s) resets the backoff to 1s, so a recovered camera
+        // reconnects promptly rather than staying stuck at the cap.
+        assert_eq!(next_backoff(30, 31), 1);
+        assert_eq!(next_backoff(16, 45), 1);
+        // Exactly 30s ran is NOT healthy (strict `>`), so it keeps backing off.
+        assert_eq!(next_backoff(4, 30), 8);
+    }
+
+    #[test]
+    fn extend_trigger_window_only_extends() {
+        let t0 = Utc::now();
+        let near = t0 + chrono::Duration::seconds(10);
+        let far = t0 + chrono::Duration::seconds(60);
+        // First trigger sets the window.
+        assert_eq!(extend_trigger_window(None, near), near);
+        // A later, further trigger extends it.
+        assert_eq!(extend_trigger_window(Some(near), far), far);
+        // A nearer trigger while a further window is open never SHRINKS it (post-roll is preserved).
+        assert_eq!(extend_trigger_window(Some(far), near), far);
+    }
+
+    #[test]
+    fn event_recheck_secs_wakes_at_window_end_and_never_busy_spins() {
+        let now = Utc::now();
+        // No open window -> wait the full base tick.
+        assert_eq!(event_recheck_secs(30, None, now), 30);
+        // Window closes in 5s -> wake at remaining+1 (6s), sooner than the base tick.
+        assert_eq!(
+            event_recheck_secs(30, Some(now + chrono::Duration::seconds(5)), now),
+            6
+        );
+        // Window far in the future (100s) -> the base tick still bounds it.
+        assert_eq!(
+            event_recheck_secs(30, Some(now + chrono::Duration::seconds(100)), now),
+            30
+        );
+        // Window already elapsed -> base tick (and never 0 -> no busy-spin on child.wait()).
+        assert_eq!(
+            event_recheck_secs(30, Some(now - chrono::Duration::seconds(5)), now),
+            30
+        );
+        // A tiny base tick still floors at 1.
+        assert_eq!(event_recheck_secs(0, None, now), 1);
+    }
+
+    // ---- ffmpeg command construction (pins the recording pipeline + credential/injection safety) ---
+
+    fn test_camera() -> Camera {
+        Camera {
+            id: "cam1".into(),
+            site_id: None,
+            name: "Cam 1".into(),
+            vendor: "hikvision".into(),
+            model: None,
+            address: Some("192.168.0.2".into()),
+            rtsp_port: 554,
+            username: Some("admin".into()),
+            password: Some("secret".into()),
+            main_stream_url: None,
+            sub_stream_url: None,
+            record_stream: "main".into(),
+            codec: None,
+            resolution_main: None,
+            resolution_sub: None,
+            fps_main: None,
+            fps_sub: None,
+            capabilities: sqlx::types::Json(json!({})),
+            record_enabled: true,
+            segment_seconds: 60,
+            retention_hours: 24,
+            storage_quota_bytes: None,
+            record_audio: false,
+            record_mode: "continuous".into(),
+            pre_roll_seconds: 10,
+            post_roll_seconds: 30,
+            mirror_enabled: false,
+            anr_enabled: false,
+            anr_replay_url_template: None,
+            enabled: true,
+            priority: 100,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn command_args(cmd: &Command) -> Vec<String> {
+        cmd.as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    /// Two adjacent args (`flag` immediately followed by `value`) appear in order.
+    fn has_pair(args: &[String], flag: &str, value: &str) -> bool {
+        args.windows(2).any(|w| w[0] == flag && w[1] == value)
+    }
+
+    #[test]
+    fn build_record_command_uses_stream_copy_segmenting_and_a_single_url_arg() {
+        let mut cfg = Config::from_env();
+        cfg.ffmpeg_bin = "/opt/heldar/ffmpeg".into();
+        let cam = test_camera();
+        let dir = std::path::Path::new("/data/recordings/cam1");
+        // A URL with a space would inject extra ffmpeg args IF it were split — assert it stays ONE arg.
+        let url = "rtsp://admin:secret@192.168.0.2:554/Streaming/Channels/101 -f mpegts /evil";
+        let cmd = build_record_command(&cfg, &cam, url, dir);
+
+        assert_eq!(
+            cmd.as_std().get_program().to_string_lossy(),
+            "/opt/heldar/ffmpeg"
+        );
+        let args = command_args(&cmd);
+        // Stream-copy (no decode), RTSP-over-TCP, fragmented-MP4 segmenting at the camera's interval.
+        assert!(has_pair(&args, "-c", "copy"), "must stream-copy: {args:?}");
+        assert!(has_pair(&args, "-rtsp_transport", "tcp"));
+        assert!(has_pair(&args, "-f", "segment"));
+        assert!(has_pair(&args, "-segment_time", "60")); // segment_seconds
+        assert!(args.iter().any(|a| a.contains("frag_keyframe")));
+        // The URL is passed as a SINGLE argv element right after `-i` — the injection-safety guarantee
+        // (the whitespace in `url` is NOT split into extra ffmpeg arguments).
+        assert!(
+            has_pair(&args, "-i", url),
+            "the whole URL must be one arg after -i: {args:?}"
+        );
+        // Video-only when record_audio is false.
+        assert!(args.iter().any(|a| a == "-an"));
+        assert!(!has_pair(&args, "-c:a", "copy"));
+        // The segment output pattern lands under `dir`.
+        assert!(args.last().unwrap().ends_with("%Y%m%d_%H%M%S.mp4"));
+        // Segments are timestamped in UTC regardless of the host timezone.
+        let tz = cmd
+            .as_std()
+            .get_envs()
+            .find(|(k, _)| *k == std::ffi::OsStr::new("TZ"))
+            .and_then(|(_, v)| v)
+            .map(|v| v.to_string_lossy().into_owned());
+        assert_eq!(tz.as_deref(), Some("UTC"));
+    }
+
+    #[test]
+    fn build_record_command_passes_audio_through_when_enabled() {
+        let cfg = Config::from_env();
+        let mut cam = test_camera();
+        cam.record_audio = true;
+        let cmd = build_record_command(&cfg, &cam, "rtsp://x/s", std::path::Path::new("/d"));
+        let args = command_args(&cmd);
+        assert!(
+            has_pair(&args, "-c:a", "copy"),
+            "audio pass-through: {args:?}"
+        );
+        assert!(!args.iter().any(|a| a == "-an"));
     }
 }
