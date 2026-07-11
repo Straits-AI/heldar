@@ -119,7 +119,7 @@ async fn correlate(
     let lo = ev.timestamp - TimeDelta::try_minutes(5).unwrap();
     let hi = ev.timestamp + TimeDelta::try_minutes(5).unwrap();
     let plate: Option<String> = sqlx::query_scalar(
-        "SELECT plate FROM entry_events
+        "SELECT plate FROM entry_events_read
           WHERE camera_id = ? AND track_id = ? AND plate IS NOT NULL
             AND timestamp >= ? AND timestamp <= ?
           ORDER BY timestamp ASC LIMIT 1",

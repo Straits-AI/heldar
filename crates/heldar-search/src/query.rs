@@ -124,7 +124,7 @@ pub async fn execute(pool: &SqlitePool, plan: &QueryPlan, max: i64) -> sqlx::Res
     if want(plan, "entry") {
         let rows: Vec<EntryRow> = sqlx::query_as(
             "SELECT id, timestamp, camera_id, event_type, plate, subject, auth_status, evidence
-               FROM entry_events WHERE timestamp >= ? AND timestamp <= ?
+               FROM entry_events_read WHERE timestamp >= ? AND timestamp <= ?
               ORDER BY timestamp DESC LIMIT ?",
         )
         .bind(from)
@@ -190,7 +190,7 @@ pub async fn execute(pool: &SqlitePool, plan: &QueryPlan, max: i64) -> sqlx::Res
     if want(plan, "breach") {
         let rows: Vec<BreachRow> = sqlx::query_as(
             "SELECT id, created_at, camera_id, rule, subject_type, subject, zone_name, severity, evidence_path
-               FROM breach_alerts WHERE created_at >= ? AND created_at <= ?
+               FROM breach_alerts_read WHERE created_at >= ? AND created_at <= ?
               ORDER BY created_at DESC LIMIT ?",
         )
         .bind(from)

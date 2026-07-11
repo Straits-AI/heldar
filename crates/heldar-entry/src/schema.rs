@@ -10,11 +10,18 @@
 use heldar_kernel::db::{run_app_migrations, AppMigration};
 use sqlx::SqlitePool;
 
-const MIGRATIONS: &[AppMigration] = &[AppMigration {
-    version: 1,
-    name: "init",
-    sql: include_str!("../migrations/0001_init.sql"),
-}];
+const MIGRATIONS: &[AppMigration] = &[
+    AppMigration {
+        version: 1,
+        name: "init",
+        sql: include_str!("../migrations/0001_init.sql"),
+    },
+    AppMigration {
+        version: 2,
+        name: "read_contract",
+        sql: include_str!("../migrations/0002_read_contract.sql"),
+    },
+];
 
 /// Apply the access-control migrations. Called by the composing server after the kernel migrations run.
 pub async fn init(pool: &SqlitePool) -> anyhow::Result<()> {

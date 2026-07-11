@@ -22,6 +22,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Cross-app read seam (contract views).** App crates used to read each other's SQLite tables via raw
+  SQL on the shared pool with no compiler-visible dependency, so a column rename in the producer silently
+  broke a distant consumer at runtime. Now the owning app publishes a stable `*_read` SQL view
+  (`entry_events_read` owned by entry; `breach_alerts_read` owned by movement) exposing exactly the
+  columns peers may read, and all five cross-app reads (search→entry_events, search→breach_alerts,
+  movement's reid self-join + plate-history + breach.rs) go through the views. A base-column rename is a
+  producer-local migration that redefines the view; each producer ships a `tests/read_contract.rs`
+  drift-guard so the break surfaces in the OWNER's CI (same PR) instead of at runtime in a consumer. Zero
+  new Cargo edges (the "apps depend only on the kernel" principle is preserved), views are Postgres-
+  portable, and `scripts/check-read-seam.sh` (wired into CI) forbids a consumer from reading a peer's
+  base table directly. See DESIGN-PRINCIPLES #9. (Chosen over inter-app crate deps, which couldn't
+  express the cross-owner self-join and would have broken the dependency-graph principle.)
 - **Versioned app-schema migrations.** The composed apps (entry / movement / search + the proprietary
   bakery vertical) previously self-installed a single `CREATE TABLE IF NOT EXISTS` blob with no
   versioning, so a shipped schema change silently no-opped on an already-booted box. They now use the

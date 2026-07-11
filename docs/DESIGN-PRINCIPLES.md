@@ -53,7 +53,14 @@ explicitly and why.
    `DetectionConsumer`, a `Router<AppState>` merge, a self-installed schema (`schema::init`). Adding a
    capability is a registration at the composition root, not an edit to the kernel's ingest or routing
    internals. The lean/open build must always compile without the proprietary and off-by-default
-   features.
+   features. **Cross-app reads go through a contract, not raw SQL:** when one app must read another app's
+   table on the shared pool, the OWNING app publishes a stable `*_read` SQL view (e.g.
+   `entry_events_read`, `breach_alerts_read`) exposing exactly the columns peers may depend on; consumers
+   read the view, never the base table. A base-column rename is then a producer-local migration that
+   redefines the view (aliasing the new column to the contract name), and the producer's
+   `tests/read_contract.rs` fails if the contract breaks — so cross-app drift is caught in the owner's CI,
+   not at runtime in a distant consumer. (A grep lint, `scripts/check-read-seam.sh`, forbids consumers
+   from reading a peer's base table directly.)
 
 ## How we build
 

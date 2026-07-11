@@ -32,6 +32,8 @@ jobs:
         run: cargo build --workspace --locked
       - name: test
         run: cargo test --workspace --locked
+      - name: read-seam lint (cross-app reads go through *_read views)
+        run: ./scripts/check-read-seam.sh
       - name: open build (no proprietary verticals) compiles
         run: cargo build -p heldar-server --no-default-features --locked
       - name: open build stays lean (no wasm runtime linked by default)

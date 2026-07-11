@@ -102,8 +102,8 @@ async fn propose_vehicle_candidates(pool: &SqlitePool, cfg: &MovementConfig) -> 
                 a.subject AS a_subj,
                 b.id AS b_id, b.camera_id AS b_cam, b.timestamp AS b_ts, b.subject AS b_subj,
                 l.transit_seconds AS transit
-           FROM entry_events a
-           JOIN entry_events b
+           FROM entry_events_read a
+           JOIN entry_events_read b
              ON b.plate = a.plate AND b.camera_id != a.camera_id AND b.timestamp > a.timestamp
            JOIN camera_links l
              ON (l.from_camera = a.camera_id AND l.to_camera = b.camera_id)
@@ -205,7 +205,7 @@ pub async fn trail_for_plate(pool: &SqlitePool, plate_norm: &str) -> sqlx::Resul
     const TRAIL_MAX: i64 = 10_000;
     let mut rows = sqlx::query_as::<_, Appearance>(
         "SELECT id AS event_id, camera_id, timestamp, event_type, auth_status, direction
-           FROM entry_events WHERE plate = ? ORDER BY timestamp DESC LIMIT ?",
+           FROM entry_events_read WHERE plate = ? ORDER BY timestamp DESC LIMIT ?",
     )
     .bind(plate_norm)
     .bind(TRAIL_MAX)
