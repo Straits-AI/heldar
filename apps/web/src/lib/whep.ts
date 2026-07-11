@@ -34,6 +34,28 @@ export interface WhepOptions {
 /** How long to wait for the peer to reach `connected` after the answer before declaring a stall. */
 const CONNECT_WATCHDOG_MS = 10_000;
 
+/** How long to wait for the SDP answer (WHEP POST or rendezvous exchange) before giving up. Without
+ * this, a media/relay server that accepts the socket but never answers hangs the offer exchange forever
+ * — the post-answer watchdog never even starts, so the UI is stuck on "Connecting" with no HLS fallback. */
+const EXCHANGE_TIMEOUT_MS = 8_000;
+
+/** Reject `p` after `ms` (for a caller-supplied exchange we can't abort — the fetch path uses AbortController). */
+function withTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
+}
+
 /** Resolve when ICE gathering completes, or after `timeoutMs` (so a slow/half-open gather can't hang). */
 function waitForIceGathering(pc: RTCPeerConnection, timeoutMs: number): Promise<void> {
   if (pc.iceGatheringState === "complete") return Promise.resolve();
@@ -124,18 +146,37 @@ export function startWhep(
       let answer: string;
       if (opts.exchange) {
         // Remote path: relay the offer through the rendezvous (no WHEP resource to DELETE later).
-        answer = await opts.exchange(offerSdp);
+        answer = await withTimeout(
+          opts.exchange(offerSdp),
+          EXCHANGE_TIMEOUT_MS,
+          "WHEP exchange timed out",
+        );
       } else {
-        const res = await fetch(whepUrl, {
-          method: "POST",
-          headers: { "Content-Type": "application/sdp", Accept: "application/sdp" },
-          body: offerSdp,
-        });
+        // Abort the POST if the media server accepts the socket but never answers — otherwise this
+        // await hangs forever, the watchdog below never starts, and the caller never falls back to HLS.
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), EXCHANGE_TIMEOUT_MS);
+        let res: Response;
+        try {
+          res = await fetch(whepUrl, {
+            method: "POST",
+            headers: { "Content-Type": "application/sdp", Accept: "application/sdp" },
+            body: offerSdp,
+            signal: ctrl.signal,
+          });
+        } finally {
+          clearTimeout(timer);
+        }
         if (!res.ok) throw new Error(`WHEP POST ${res.status}`);
         resourceUrl = resolveResource(res.headers.get("Location"), whepUrl);
         answer = await res.text();
       }
-      if (closed) return;
+      // If close() ran while the POST was in flight it saw resourceUrl === null and couldn't DELETE the
+      // WHEP session the server just created — tear it down here so it doesn't leak on MediaMTX.
+      if (closed) {
+        if (resourceUrl) void fetch(resourceUrl, { method: "DELETE" }).catch(() => {});
+        return;
+      }
       if (!answer.trim().startsWith("v=0")) throw new Error("WHEP answer was not SDP");
       await pc.setRemoteDescription({ type: "answer", sdp: answer });
       // If the peer never reaches `connected` (e.g. no reachable candidates without TURN), surface an

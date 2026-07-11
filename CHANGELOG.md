@@ -115,6 +115,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Dashboard**: a plugin catalog's `homepage` URL is scheme-validated before rendering into an `href`
   (blocks `javascript:`/`data:` click-through); the AI task-type hint no longer advertises a `tracking`
   analyzer that doesn't exist.
+- **Live view (WHEP)**: the SDP exchange (WHEP POST / rendezvous) now has an 8s timeout (via
+  `AbortController` for the POST), so a media/relay server that accepts the socket but never answers no
+  longer leaves the player stuck on "Connecting" with no HLS fallback. Fixed a resource leak where
+  `close()` during the in-flight POST left the just-created MediaMTX WHEP session un-`DELETE`d. Also
+  documented two residual risks accurately (rather than pretend-fixing them): the sidecar plugin iframe
+  is served same-origin so `allow-scripts`+`allow-same-origin` does not isolate it from the console
+  origin (real fix = a distinct plugin origin), and the ADR-0003 rendezvous exchange helper carries no
+  viewing ticket and must not be wired into remote viewing until one is added.
 
 ### Changed
 

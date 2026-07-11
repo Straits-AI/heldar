@@ -35,6 +35,13 @@ export async function fetchRendezvousIce(rendezvousUrl: string): Promise<RTCIceS
 /**
  * Build a WHEP `exchange` that relays the offer through the rendezvous to the box for `cameraId`,
  * returning the answer SDP. Usable as `startWhep(video, "", { exchange, iceServers })`.
+ *
+ * ⚠️ SECURITY — DO NOT WIRE INTO `LiveView` AS-IS: this exchange carries NO viewing ticket / auth, so
+ * the box's rendezvous cannot verify the viewer. Before integrating remote viewing (P3), thread a
+ * signed, short-lived viewing ticket (per-camera, minted by the box/control-plane after an auth check)
+ * into the request body and have the box reject sessions without a valid ticket — otherwise any client
+ * who knows a `siteId` + `cameraId` could pull the stream. The kernel's live-view token model
+ * (`services/live_token`) is the natural basis for that ticket.
  */
 export function rendezvousExchange(
   target: RendezvousTarget,
@@ -45,6 +52,7 @@ export function rendezvousExchange(
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/sdp" },
+      // TODO(P3): add `ticket` (signed per-camera viewing ticket) — see the SECURITY note above.
       body: JSON.stringify({ site_id: target.siteId, camera_id: cameraId, sdp_offer: offerSdp }),
     });
     if (!res.ok) {

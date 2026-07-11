@@ -123,8 +123,13 @@ export function ModuleFrame({ id, title }: { id: string; title: string }) {
       src={`/m/${encodeURIComponent(id)}/`}
       title={title}
       className="h-[calc(100vh-3.5rem)] w-full border-0 bg-canvas"
-      // Sandboxed: the plugin runs scripts + same-origin (so its own cookies/storage work) but cannot
-      // navigate the top frame or trigger downloads on the console's behalf.
+      // NOTE (security): the plugin is served same-origin (via the `/m/{id}` kernel proxy), so
+      // `allow-scripts` + `allow-same-origin` does NOT isolate it from the console origin — a
+      // hostile/compromised plugin can reach the parent window's DOM and call the kernel API with the
+      // operator's session cookie, beyond its own minted key. The session cookie is HttpOnly+SameSite=
+      // Strict (JS can't read it) and the sandbox still blocks top-frame navigation/downloads, but true
+      // isolation requires serving plugin UIs from a DISTINCT origin (sandbox subdomain) — tracked as an
+      // architecture follow-up. Only install plugins you trust until then.
       sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
     />
   );
