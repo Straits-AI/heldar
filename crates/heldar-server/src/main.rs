@@ -184,6 +184,23 @@ async fn main() -> anyhow::Result<()> {
         spawn_supervised("retention", move || {
             services::retention::run(p.clone(), c.clone())
         });
+        // One-time legacy migration: convert a pre-existing DB to auto_vacuum=INCREMENTAL so
+        // incremental_vacuum can reclaim pages. Runs in the BACKGROUND (not boot-blocking): the
+        // VACUUM can take minutes on a large DB, so the server binds and serves reads/healthz
+        // throughout. Best-effort + disk-gated + idempotent + convergence-checked; flag-gated. New
+        // DBs are born INCREMENTAL via the connect pragma, so this fires at most once per box.
+        {
+            let (p, c) = (pool.clone(), cfg.clone());
+            tokio::spawn(async move {
+                match services::db_maintenance::maybe_convert_autovacuum(&p, &c).await {
+                    Ok(true) => tracing::info!("db: background auto_vacuum conversion complete"),
+                    Ok(false) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "db: background auto_vacuum conversion failed; will retry next boot")
+                    }
+                }
+            });
+        }
         // Durable perception fan-out: replays detection batches whose consumer fan-out didn't
         // complete before a crash (idempotent via consumer_fanout).
         let (p, cons) = (pool.clone(), drain_consumers.clone());
@@ -442,13 +459,26 @@ async fn run_subcommand(cmd: &str, cfg: &Config) -> anyhow::Result<()> {
             println!("rekey-secrets: re-sealed {n} camera credential(s) under the new key");
             Ok(())
         }
+        "convert-autovacuum" => {
+            let pool = db::init_pool(cfg).await.context("open database")?;
+            let converted =
+                services::db_maintenance::ensure_incremental_autovacuum(&pool, cfg).await?;
+            pool.close().await;
+            if converted {
+                println!("convert-autovacuum: converted DB to auto_vacuum=INCREMENTAL");
+            } else {
+                println!("convert-autovacuum: no conversion needed (already INCREMENTAL, or deferred — insufficient free disk)");
+            }
+            Ok(())
+        }
         "help" | "--help" | "-h" => {
             println!(
                 "heldar-core — Heldar composing server\n\n\
                  Usage:\n  \
                  heldar-core                    run the server (default)\n  \
                  heldar-core backup-db <dest>   online snapshot of the metadata DB (SQLite VACUUM INTO)\n  \
-                 heldar-core rekey-secrets      re-seal camera credentials (HELDAR_SECRET_KEY_OLD -> HELDAR_SECRET_KEY)"
+                 heldar-core rekey-secrets      re-seal camera credentials (HELDAR_SECRET_KEY_OLD -> HELDAR_SECRET_KEY)\n  \
+                 heldar-core convert-autovacuum one-time DB auto_vacuum=INCREMENTAL conversion (run with the server stopped)"
             );
             Ok(())
         }
