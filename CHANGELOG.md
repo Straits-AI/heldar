@@ -116,6 +116,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`consumer_fanout` retention index (perf).** Added an index on `consumer_fanout(fanned_at)` (migration
+  `0005`) so the retention prune (`DELETE … WHERE fanned_at < ? LIMIT N`, `delete_aged_in_batches`) is an
+  index range scan, not a full-table scan. Without it, pruning a large fan-out backlog held the single
+  SQLite writer for seconds per batch and starved live writes (recording/camera_status/detection inserts).
+  Surfaced on the live box: ~1.9M rows, retention batches taking 2–15s each and a 15s `camera_status` stall;
+  the index turned the delete subquery into a covering-index scan and the stalls disappeared. Complements
+  the fan-out retention fix below (that stopped the *leak*; this makes *pruning it* cheap).
 - **Self-bounding storage — closed the leaks.** `consumer_fanout` is now pruned by retention (it grew
   forever and defeated the DB size cap, which only sheds `detections`); exported clips and the mirror
   (dual-DVR) directory are reclaimed by mtime; unresolved movement `breach_alerts` (plate PII) age out at

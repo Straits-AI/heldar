@@ -1,0 +1,13 @@
+-- Index consumer_fanout by fanned_at so the retention prune is an index range scan, not a full-table scan.
+--
+-- consumer_fanout's PRIMARY KEY is (consumer, camera_id, frame_id) — great for the at-most-once fan-out
+-- dedup lookup, but it leaves the retention path unindexed: retention deletes aged rows in bounded batches
+-- with `DELETE ... WHERE fanned_at < ? LIMIT 5000` (services/retention.rs, delete_aged_in_batches). Without
+-- an index on fanned_at, each batch's subquery scans the table, so on a large backlog every batch holds the
+-- single SQLite writer for seconds and starves live writes (recording/camera_status/detection inserts).
+--
+-- Observed on the live box after it fell behind: ~1.9M fan-out rows, retention batches taking 2–15s each and
+-- stalling a camera_status insert for 15s. Adding this index turned the delete subquery into a COVERING
+-- INDEX range scan and the stalls disappeared. Idempotent (IF NOT EXISTS) so it is a no-op where the index
+-- was already created out-of-band.
+CREATE INDEX IF NOT EXISTS idx_consumer_fanout_fanned_at ON consumer_fanout (fanned_at);
