@@ -116,6 +116,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Remote grid: disabled/offline cameras are marked unavailable, not streamed.** Opening a disabled or
+  down camera in the remote multi-camera grid used to start a WHEP session that could only 404 (no
+  publisher), producing a burst of failed requests. The box now advertises each camera's `enabled` + `state`
+  in the rendezvous catalog (`camera_catalog`, mirroring the health routes' disabled-override), the `heldar`
+  Worker forwards those fields, and the grid renders an "unavailable / disabled" tile without opening a
+  session for cameras that can't stream. Defense-in-depth: `bridge_to_local_whep` also refuses to bridge a
+  disabled camera. Backward-compatible — an older box that advertises only `id`+`name` is treated as
+  streamable (unchanged). Both ends must be deployed for the tile to appear (box rebuild + Worker deploy).
 - **`consumer_fanout` retention index (perf).** Added an index on `consumer_fanout(fanned_at)` (migration
   `0005`) so the retention prune (`DELETE … WHERE fanned_at < ? LIMIT N`, `delete_aged_in_batches`) is an
   index range scan, not a full-table scan. Without it, pruning a large fan-out backlog held the single

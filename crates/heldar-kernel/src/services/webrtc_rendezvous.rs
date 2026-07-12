@@ -87,6 +87,20 @@ async fn bridge_to_local_whep(
     camera_id: &str,
     sdp_offer: &str,
 ) -> anyhow::Result<String> {
+    // The grid viewer already renders a disabled/offline camera as unavailable and does not open a session
+    // for it (`enabled`/`state` in the advertised catalog). Defend the box directly too: refuse to bridge a
+    // disabled camera rather than spin up an on-demand transcode that can only 404 (no publisher). An
+    // enabled-but-down camera is still attempted — the transcode may cold-start.
+    match sqlx::query_scalar::<_, bool>("SELECT enabled FROM cameras WHERE id = ?")
+        .bind(camera_id)
+        .fetch_optional(&state.pool)
+        .await
+        .context("checking camera enabled")?
+    {
+        None => anyhow::bail!("no such camera {camera_id}"),
+        Some(false) => anyhow::bail!("camera {camera_id} is disabled — not bridging"),
+        Some(true) => {}
+    }
     let live = mediamtx::ensure_live(state, camera_id, None)
         .await
         .map_err(|e| anyhow::anyhow!("ensure_live({camera_id}) failed: {e}"))?;
@@ -114,21 +128,37 @@ async fn bridge_to_local_whep(
 /// Largest browser SDP offer we'll bridge (defensive — the rendezvous already caps it well below this).
 const MAX_SDP_BYTES: usize = 512 * 1024;
 
-/// The box's camera list (id + display name) advertised to the rendezvous on each poll, so the grid
-/// viewer can enumerate cameras without reaching the box's REST API (that is the Stage C relay). Read
-/// straight from local state (no self-HTTP, so it is unaffected by whether the REST API requires auth);
-/// names fall back to the id. Exposes only id+name — never a stream URL or credential.
-async fn camera_catalog(state: &AppState) -> Vec<serde_json::Value> {
-    sqlx::query_as::<_, (String, Option<String>)>("SELECT id, name FROM cameras ORDER BY id ASC")
-        .fetch_all(&state.pool)
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|(id, name)| {
-            let name = name.filter(|n| !n.is_empty()).unwrap_or_else(|| id.clone());
-            json!({ "id": id, "name": name })
-        })
-        .collect()
+/// The box's camera list advertised to the rendezvous on each poll, so the grid viewer can enumerate
+/// cameras without reaching the box's REST API (that is the Stage C relay). Read straight from local state
+/// (no self-HTTP, so it is unaffected by whether the REST API requires auth); names fall back to the id.
+///
+/// Each entry carries `enabled` + `state` so the grid can render a "disabled/offline — unavailable" tile
+/// instead of opening a doomed WHEP session on a camera that cannot stream (a disabled or down camera has
+/// no publisher, so the session would only 404). `state` mirrors the health routes' disabled-override: a
+/// disabled camera reads "disabled" regardless of any stale recorder state; an enabled camera with no
+/// status row yet reads "unknown". Still exposes no stream URL or credential.
+async fn camera_catalog(pool: &sqlx::SqlitePool) -> Vec<serde_json::Value> {
+    sqlx::query_as::<_, (String, Option<String>, bool, Option<String>)>(
+        "SELECT c.id, c.name, c.enabled, cs.state \
+         FROM cameras c LEFT JOIN camera_status cs ON cs.camera_id = c.id \
+         ORDER BY c.id ASC",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default()
+    .into_iter()
+    .map(|(id, name, enabled, status)| {
+        let name = name.filter(|n| !n.is_empty()).unwrap_or_else(|| id.clone());
+        let state = if !enabled {
+            "disabled".to_string()
+        } else {
+            status
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "unknown".to_string())
+        };
+        json!({ "id": id, "name": name, "enabled": enabled, "state": state })
+    })
+    .collect()
 }
 
 /// One long-poll cycle: ask for the next session; if one arrives, bridge it and report the answer (or the
@@ -146,7 +176,7 @@ async fn poll_once(
         .post(poll_url(rendezvous_url))
         .bearer_auth(token)
         // Piggy-back the camera list so the grid viewer can enumerate cameras (refreshed every poll).
-        .json(&json!({ "site_id": site_id, "cameras": camera_catalog(state).await }))
+        .json(&json!({ "site_id": site_id, "cameras": camera_catalog(&state.pool).await }))
         .send()
         .await
         .context("rendezvous poll request")?;
@@ -624,6 +654,63 @@ pub async fn run_relay(state: AppState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The advertised catalog carries `enabled` + `state` so the grid can mark unavailable cameras, and a
+    /// disabled camera reports `disabled` (mirroring the health routes) regardless of any stale recorder
+    /// state; an enabled camera with no status row reports `unknown`.
+    #[tokio::test]
+    async fn camera_catalog_carries_enabled_and_overrides_disabled_state() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let now = chrono::Utc::now();
+        for (id, enabled) in [("cam_on", 1), ("cam_off", 0)] {
+            sqlx::query(
+                "INSERT INTO cameras (id, name, enabled, created_at, updated_at) VALUES (?,?,?,?,?)",
+            )
+            .bind(id)
+            .bind(id)
+            .bind(enabled)
+            .bind(now)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .unwrap();
+            // both left with a stale 'recording' status row
+            crate::repo::set_state(&pool, id, "recording", None)
+                .await
+                .unwrap();
+        }
+        // an enabled camera with no status row at all
+        sqlx::query(
+            "INSERT INTO cameras (id, name, enabled, created_at, updated_at) VALUES (?,?,?,?,?)",
+        )
+        .bind("cam_new")
+        .bind("cam_new")
+        .bind(1)
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let cat = camera_catalog(&pool).await;
+        let by: std::collections::HashMap<String, &serde_json::Value> = cat
+            .iter()
+            .map(|c| (c["id"].as_str().unwrap().to_string(), c))
+            .collect();
+
+        assert_eq!(by["cam_on"]["enabled"], serde_json::json!(true));
+        assert_eq!(by["cam_on"]["state"], "recording");
+        // disabled camera: enabled=false and state overridden to "disabled" despite the stale 'recording'
+        assert_eq!(by["cam_off"]["enabled"], serde_json::json!(false));
+        assert_eq!(by["cam_off"]["state"], "disabled");
+        // enabled, no status row yet -> "unknown"
+        assert_eq!(by["cam_new"]["enabled"], serde_json::json!(true));
+        assert_eq!(by["cam_new"]["state"], "unknown");
+    }
 
     #[test]
     fn relay_allowlist_pins_surface_and_blocks_internal_and_traversal() {
