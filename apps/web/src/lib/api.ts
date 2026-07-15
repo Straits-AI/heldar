@@ -349,6 +349,9 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(body),
     }),
+  /** Pre-login box-status probe (exists only on the remote Worker; the kernel 404s → treat as online,
+   *  because if the kernel served this page the box is by definition reachable). */
+  siteStatus: () => request<{ status: string }>("/api/v1/site/status"),
   getDbStatus: () => request<DbStatus>("/api/v1/system/db"),
   setDbLimit: (body: DbLimitUpdate) =>
     request<DbStatus>("/api/v1/system/db", {

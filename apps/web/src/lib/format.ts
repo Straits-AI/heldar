@@ -1,5 +1,7 @@
 // Small formatting helpers shared across the dashboard.
 
+import { ApiError } from "./api";
+
 export function formatBytes(bytes: number): string {
   if (!bytes || bytes < 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
@@ -78,4 +80,26 @@ export function localInputToIso(value: string): string | null {
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return null;
   return d.toISOString();
+}
+
+/** Map an error (usually an ApiError) to operator-readable copy. The raw status/message stays
+ *  available on the error object for the console; this is what the UI should show as primary copy.
+ *  401 keeps the server's message (the kernel's auth errors are already human, e.g. login). */
+export function friendlyError(e: unknown): string {
+  if (e instanceof ApiError) {
+    switch (e.status) {
+      case 502:
+      case 504:
+        return "The box is unreachable right now — it may be offline. Try again shortly.";
+      case 429:
+        return "Too many attempts — wait a minute and try again.";
+      case 403:
+        return "You don't have permission for that.";
+      case 0:
+        return "Network problem — check your connection and retry.";
+      default:
+        return e.message;
+    }
+  }
+  return e instanceof Error ? e.message : String(e);
 }

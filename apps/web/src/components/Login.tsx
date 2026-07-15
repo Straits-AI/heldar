@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { api, ApiError, setAuthToken } from "../lib/api";
+import { friendlyError } from "../lib/format";
 import type { Principal } from "../lib/types";
 import { BrandMark, Button, Field, Input, SectionLabel, Spinner } from "./ui";
 
@@ -37,10 +38,49 @@ export function Login({ onSuccess }: { onSuccess: (principal: Principal) => void
   const [error, setError] = useState<string | null>(null);
   const [turnstileToken, setTurnstileToken] = useState<string | null>(null);
   const widgetRef = useRef<HTMLDivElement>(null);
+  // Pre-login box reachability (remote deployments): don't offer a blind login form for a dead box.
+  // "checking" renders a brief spinner; "offline" renders the unreachable panel with a 10s auto-retry.
+  const [boxStatus, setBoxStatus] = useState<"checking" | "online" | "offline">("checking");
 
-  // Load the Turnstile script (once) and render the widget when a site key is configured.
+  // One reachability check on mount decides form vs offline panel. 404 = the KERNEL answered (LAN —
+  // the endpoint only exists on the remote Worker): the box is by definition reachable. Network errors
+  // (status 0) also fall through to the form — a flaky client connection must not masquerade as "box
+  // offline"; a real submit then explains itself via friendlyError.
   useEffect(() => {
-    if (!TURNSTILE_SITE_KEY) return;
+    let alive = true;
+    api
+      .siteStatus()
+      .then((r) => {
+        if (alive) setBoxStatus(r.status === "online" ? "online" : "offline");
+      })
+      .catch(() => {
+        if (alive) setBoxStatus("online");
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  // While offline (from the mount check OR a mid-login 502), re-probe every 10s and flip back to the
+  // form the moment the box re-parks its dial-out at the rendezvous.
+  useEffect(() => {
+    if (boxStatus !== "offline") return;
+    const timer = setInterval(() => {
+      api
+        .siteStatus()
+        .then((r) => {
+          if (r.status === "online") setBoxStatus("online");
+        })
+        .catch(() => setBoxStatus("online")); // 404/network: stop claiming offline; let the form speak
+    }, 10_000);
+    return () => clearInterval(timer);
+  }, [boxStatus]);
+
+  // Load the Turnstile script (once) and render the widget when a site key is configured. Keyed on
+  // the form actually being visible: during the checking/offline states widgetRef isn't mounted, so
+  // rendering must wait for boxStatus === "online" (else the widget silently never appears).
+  useEffect(() => {
+    if (!TURNSTILE_SITE_KEY || boxStatus !== "online") return;
     let widgetId: string | undefined;
     let cancelled = false;
     const renderWidget = () => {
@@ -70,7 +110,7 @@ export function Login({ onSuccess }: { onSuccess: (principal: Principal) => void
       cancelled = true;
       if (widgetId) turnstileApi()?.remove(widgetId);
     };
-  }, []);
+  }, [boxStatus]);
 
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
@@ -93,7 +133,12 @@ export function Login({ onSuccess }: { onSuccess: (principal: Principal) => void
       // Parent unmounts this form on success; no further state writes here.
     } catch (err) {
       setAuthToken(null);
-      setError(err instanceof ApiError ? err.message : String(err));
+      // Operator-readable copy (502/504 → "box unreachable", 429 → rate-limited, …); raw detail
+      // stays on the error object / console, never as the primary UI message.
+      setError(friendlyError(err));
+      if (err instanceof ApiError && (err.status === 502 || err.status === 504)) {
+        setBoxStatus("offline"); // the box dropped mid-login: flip to the offline panel's retry loop
+      }
       setSubmitting(false);
     }
   }
@@ -122,6 +167,23 @@ export function Login({ onSuccess }: { onSuccess: (principal: Principal) => void
           />
         </div>
 
+        {boxStatus === "checking" ? (
+          <div className="flex items-center justify-center gap-2 p-8 font-mono text-xs text-fg-muted">
+            <Spinner size={14} /> Checking box connection…
+          </div>
+        ) : boxStatus === "offline" ? (
+          <div className="space-y-3 p-5" role="alert">
+            <SectionLabel>Box unreachable</SectionLabel>
+            <p className="text-xs leading-relaxed text-fg-secondary">
+              This box isn&apos;t connected right now — it may be powered off or have lost its network
+              connection. Nothing is wrong with your account.
+            </p>
+            <div className="flex items-center gap-2 rounded-md border border-connecting/40 bg-connecting/10 px-3 py-2 font-mono text-[11px] text-amber-200">
+              <Spinner size={12} />
+              <span>Retrying automatically — this page will unlock the moment the box is back.</span>
+            </div>
+          </div>
+        ) : (
         <form onSubmit={handleSubmit} className="space-y-4 p-5">
           <div>
             <SectionLabel>Authenticate</SectionLabel>
@@ -190,6 +252,7 @@ export function Login({ onSuccess }: { onSuccess: (principal: Principal) => void
             )}
           </Button>
         </form>
+        )}
       </div>
     </div>
   );
