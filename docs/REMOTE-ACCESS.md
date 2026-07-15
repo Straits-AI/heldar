@@ -167,6 +167,21 @@ via the "Keep live warm" camera setting). Still:
   unauthenticated. On the WebRTC path the rendezvous brokers signaling only and never sees media, but
   the signaling/control surface itself must still be authenticated.
 
+**Site identity + box auth.** Site ids are **opaque UUIDs** generated at enrollment
+(`cd apps/edge && npm run mint` — prints the UUID + a **site-bound** token for the box's
+`HELDAR_CP_TOKEN`). They appear in dashboard URLs (`/app/?site=…`), referrers, and browser history, so
+guessable/customer names would enable existence-probing and targeted logins. A token authorizes only
+its own site; revoke a box with one `REVOKED_SITES` entry, or rotate `BOX_ENROLL_SECRET` to revoke all.
+There is no shared any-site box token.
+
+**Reachability & self-healing.** The login page probes `GET /api/v1/site/status` before offering the
+form — an offline box shows a "Box unreachable — retrying automatically" panel instead of a blind form
+and a raw 502 (unknown, revoked, and offline sites answer the same uniform `unavailable`, so the probe
+is not an existence oracle). On the box, the relay dial-out is supervised (a wedged poller respawns), a
+watchdog logs `ERROR` while the relay is stale, and `GET /api/v1/system` reports
+`relay {configured, healthy, last_ok_at}` — surfaced on the dashboard's System page as the
+"Remote relay" row — so "box up but remote path dead" is visible instead of silent.
+
 ## What the kernel provides (and what it doesn't)
 
 - **Provides (open, Apache-2.0), always on:** overlay-status *awareness* for an external daemon —
