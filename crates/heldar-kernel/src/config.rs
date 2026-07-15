@@ -198,6 +198,8 @@ pub struct Config {
     pub live_transcode_engine: String,
     /// VAAPI render node used when `live_transcode_engine = vaapi`.
     pub vaapi_device: String,
+    /// Reap an on-demand live publisher after this many seconds with no viewers and no demand.
+    pub live_idle_close_secs: u64,
     // ---- Fleet / multi-site identity ----
     /// Optional site identifier stamped onto outbox rows and surfaced at `GET /api/v1/site` for the
     /// edge->cloud fleet uplink. Empty/unset = a single unnamed site.
@@ -515,6 +517,9 @@ impl Config {
             readyz_min_recording_percent: parse_or("HELDAR_READYZ_MIN_RECORDING_PERCENT", 0.0),
             live_transcode_engine: var_or("HELDAR_LIVE_TRANSCODE_ENGINE", "software"),
             vaapi_device: var_or("HELDAR_VAAPI_DEVICE", "/dev/dri/renderD128"),
+            live_idle_close_secs: var_or("HELDAR_LIVE_IDLE_CLOSE_SECS", "60")
+                .parse()
+                .unwrap_or(60),
             site_id: var("HELDAR_SITE_ID"),
             cp_url: var("HELDAR_CP_URL"),
             public_base_url: var("HELDAR_PUBLIC_BASE_URL"),

@@ -177,27 +177,55 @@ pub fn validate_stream_url(url: &str) -> Result<(), String> {
 
 /// Replace `user:pass@` (or `user@`) credentials in an RTSP/HTTP URL with `***` for safe logging/display.
 pub fn mask_url(url: &str) -> String {
-    let Some(scheme_end) = url.find("://") else {
-        return url.to_string();
-    };
-    let after = scheme_end + 3;
-    // The userinfo/host boundary is the LAST '@' before the first '/' of the authority; using the
-    // last '@' ensures a literal '@' inside the password (from an explicit URL) is fully masked.
-    let authority_end = url[after..]
-        .find('/')
-        .map(|i| after + i)
-        .unwrap_or(url.len());
-    if let Some(at_rel) = url[after..authority_end].rfind('@') {
-        let at = after + at_rel;
-        format!("{}***@{}", &url[..after], &url[at + 1..])
-    } else {
-        url.to_string()
+    // Mask EVERY URL in the input, not just the first: this is also used on multi-line ffmpeg
+    // stderr tails, where the credentialed URL can appear many times ("Opening 'rtsp://u:p@…'",
+    // retry lines, the summary). Masking only the first occurrence would leak the rest.
+    let mut out = String::with_capacity(url.len());
+    let mut rest = url;
+    loop {
+        let Some(scheme_rel) = rest.find("://") else {
+            out.push_str(rest);
+            return out;
+        };
+        let after = scheme_rel + 3;
+        // The userinfo/host boundary is the LAST '@' before the end of the authority (the first
+        // '/', or whitespace/quote on log lines); the last '@' ensures a literal '@' inside the
+        // password is fully masked.
+        let authority_end = rest[after..]
+            .find(|c: char| c == '/' || c.is_whitespace() || c == '\'' || c == '"')
+            .map(|i| after + i)
+            .unwrap_or(rest.len());
+        if let Some(at_rel) = rest[after..authority_end].rfind('@') {
+            let at = after + at_rel;
+            out.push_str(&rest[..after]);
+            out.push_str("***@");
+            rest = &rest[at + 1..];
+        } else {
+            out.push_str(&rest[..authority_end]);
+            rest = &rest[authority_end..];
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// mask_url must mask EVERY credentialed URL in a multi-line string (ffmpeg stderr tails repeat
+    /// the URL), not just the first occurrence.
+    #[test]
+    fn mask_url_masks_all_occurrences_in_multiline_text() {
+        let tail = "Opening 'rtsp://admin:secret@10.0.0.9:554/ch1'\nretrying rtsp://admin:secret@10.0.0.9:554/ch1 ...\nrtsp://admin:secret@10.0.0.9:554/ch1: Connection refused";
+        let masked = mask_url(tail);
+        assert!(
+            !masked.contains("secret"),
+            "no credential may survive: {masked}"
+        );
+        assert_eq!(masked.matches("***@").count(), 3);
+        // plain single-URL behavior unchanged
+        assert_eq!(mask_url("rtsp://u:p@h:554/s"), "rtsp://***@h:554/s");
+        assert_eq!(mask_url("no urls here"), "no urls here");
+    }
     use crate::models::Camera;
     use chrono::Utc;
     use serde_json::json;
@@ -236,6 +264,7 @@ mod tests {
             anr_replay_url_template: None,
             enabled: true,
             priority: 100,
+            live_warm: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

@@ -520,6 +520,11 @@ mod tests {
         AppState {
             recorder: RecorderManager::new(pool.clone(), cfg.clone()),
             sampler: SamplerManager::new(pool.clone(), cfg.clone()),
+            live: crate::services::live_publisher::LivePublisherManager::new(
+                pool.clone(),
+                cfg.clone(),
+                reqwest::Client::new(),
+            ),
             mirror: None,
             consumers: Arc::new(Vec::new()),
             modules: Arc::new(Vec::new()),
@@ -748,6 +753,11 @@ mod tests {
         AppState {
             recorder: RecorderManager::new(pool.clone(), cfg.clone()),
             sampler: SamplerManager::new(pool.clone(), cfg.clone()),
+            live: crate::services::live_publisher::LivePublisherManager::new(
+                pool.clone(),
+                cfg.clone(),
+                reqwest::Client::new(),
+            ),
             mirror: None,
             consumers: std::sync::Arc::new(Vec::new()),
             modules: std::sync::Arc::new(Vec::new()),
@@ -963,6 +973,11 @@ mod tests {
         AppState {
             recorder: RecorderManager::new(pool.clone(), cfg.clone()),
             sampler: SamplerManager::new(pool.clone(), cfg.clone()),
+            live: crate::services::live_publisher::LivePublisherManager::new(
+                pool.clone(),
+                cfg.clone(),
+                reqwest::Client::new(),
+            ),
             mirror: None,
             consumers: Arc::new(Vec::new()),
             modules: Arc::new(Vec::new()),

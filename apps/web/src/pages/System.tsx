@@ -487,6 +487,110 @@ function DatabasePanel({ canAdmin }: { canAdmin: boolean }) {
   );
 }
 
+/* --------------------- live-transcode engine panel --------------------- */
+
+function LiveTranscodePanel({ canAdmin }: { canAdmin: boolean }) {
+  const settings = usePoll(() => api.getTranscode(), 15000);
+  const [editing, setEditing] = useState(false);
+  const [engine, setEngine] = useState("software");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const data = settings.data;
+
+  function startEdit() {
+    setEngine(data?.engine ?? "software");
+    setError(null);
+    setEditing(true);
+  }
+  async function save() {
+    setSaving(true);
+    setError(null);
+    try {
+      await api.setTranscode({ engine });
+      await settings.refresh();
+      setEditing(false);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const detected = (which: "vaapi" | "nvenc") =>
+    which === "vaapi" ? data?.vaapi_available : data?.nvenc_available;
+
+  return (
+    <Panel
+      title="Live transcode"
+      subtitle="Encoder for the live preview (HEVC → H.264) — hardware offload frees the CPU"
+      actions={
+        canAdmin && !editing && data ? (
+          <Button size="sm" onClick={startEdit}>
+            Edit
+          </Button>
+        ) : undefined
+      }
+    >
+      {!data ? (
+        <PanelStatus loading={settings.loading} error={settings.error} label="live transcode" />
+      ) : editing ? (
+        <div className="space-y-3">
+          <label className="block">
+            <SectionLabel>Engine</SectionLabel>
+            <select
+              value={engine}
+              onChange={(e) => setEngine(e.target.value)}
+              className="mt-1.5 w-full rounded-md border border-line bg-canvas px-3 py-2 font-mono text-sm text-fg outline-none focus:border-accent"
+              autoFocus
+            >
+              <option value="software">software (libx264 — CPU)</option>
+              <option value="vaapi">
+                vaapi (Intel/AMD GPU){detected("vaapi") ? " — detected" : " — not detected"}
+              </option>
+              <option value="nvenc">
+                nvenc (NVIDIA GPU){detected("nvenc") ? " — detected" : " — not detected"}
+              </option>
+            </select>
+          </label>
+          {error && (
+            <div className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-[11px] text-red-300">
+              {error}
+            </div>
+          )}
+          <div className="flex gap-2">
+            <Button size="sm" variant="primary" disabled={saving} onClick={() => void save()}>
+              {saving ? <Spinner size={13} /> : "Save"}
+            </Button>
+            <Button size="sm" disabled={saving} onClick={() => setEditing(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="flex items-end justify-between gap-4">
+            <div>
+              <SectionLabel>Engine</SectionLabel>
+              <div className="mt-1 font-mono text-3xl font-semibold text-fg">{data.engine}</div>
+            </div>
+            <div className="text-right font-mono text-[11px] leading-relaxed text-fg-muted">
+              <div>{data.overridden ? "operator-set" : "default (env)"}</div>
+              <div className="mt-0.5">
+                GPU: {data.nvenc_available ? "NVIDIA" : data.vaapi_available ? "VAAPI" : "none detected"}
+              </div>
+            </div>
+          </div>
+          <p className="font-mono text-[11px] leading-relaxed text-fg-muted">
+            New live sessions use this immediately; running streams restart onto it within ~30s
+            (viewers see a brief reconnect). A hardware engine (vaapi/nvenc) offloads the preview
+            transcode to the GPU — pick one that shows &quot;detected&quot;.
+          </p>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
 /* ------------------------- camera health table ------------------------ */
 
 function Th({ children, className }: { children?: ReactNode; className?: string }) {
@@ -949,6 +1053,7 @@ export function System() {
             recordingsBytes={system.data?.recordings_bytes ?? null}
           />
           <DatabasePanel canAdmin={principal?.role === "admin"} />
+          <LiveTranscodePanel canAdmin={principal?.role === "admin"} />
           <HealthPanel
             statuses={health.data}
             cameras={cameras.data}

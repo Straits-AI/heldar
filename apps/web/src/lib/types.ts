@@ -64,6 +64,9 @@ export interface CameraView {
    * null = default Hikvision RTSP playback built from address+credentials. */
   anr_replay_url_template?: string | null;
   enabled: boolean;
+  /** Keep the live H.264 preview publisher running persistently (instant live view) instead of
+   * on-demand-with-idle-reaping. */
+  live_warm: boolean;
   created_at: string;
   updated_at: string;
 }
@@ -94,6 +97,7 @@ export interface CameraCreate {
   anr_enabled?: boolean;
   anr_replay_url_template?: string | null;
   enabled?: boolean;
+  live_warm?: boolean;
 }
 
 export type CameraUpdate = Partial<Omit<CameraCreate, "id">>;
@@ -335,6 +339,18 @@ export interface RetentionLimits {
 export interface RetentionUpdate {
   max_recordings_gb?: number;
   min_free_disk_gb?: number;
+}
+
+/** Live-preview transcode engine (effective value + detected hardware encoders). */
+export interface TranscodeSettings {
+  engine: "software" | "vaapi" | "nvenc" | string;
+  overridden: boolean;
+  env_default: string;
+  vaapi_available: boolean;
+  nvenc_available: boolean;
+}
+export interface TranscodeUpdate {
+  engine: string;
 }
 
 /** Metadata-DB (heldar.db) status + size cap. `incremental` = auto_vacuum=INCREMENTAL (the cap can

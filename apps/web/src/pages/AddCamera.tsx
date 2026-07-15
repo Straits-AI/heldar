@@ -159,6 +159,7 @@ export function AddCamera() {
   const [anrReplayTemplate, setAnrReplayTemplate] = useState("");
   const [recordEnabled, setRecordEnabled] = useState(true);
   const [enabled, setEnabled] = useState(true);
+  const [liveWarm, setLiveWarm] = useState(false);
 
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -192,6 +193,7 @@ export function AddCamera() {
       mirror_enabled: mirrorEnabled,
       anr_enabled: anrEnabled,
       enabled,
+      live_warm: liveWarm,
       segment_seconds: segmentSeconds,
       retention_hours: retentionHours,
     };
@@ -533,6 +535,9 @@ export function AddCamera() {
               </Checkbox>
               <Checkbox checked={enabled} onChange={(e) => setEnabled(e.target.checked)}>
                 Camera enabled
+              </Checkbox>
+              <Checkbox checked={liveWarm} onChange={(e) => setLiveWarm(e.target.checked)}>
+                Keep live warm
               </Checkbox>
             </div>
           </Panel>

@@ -190,8 +190,8 @@ async fn create_camera(
             main_stream_url, sub_stream_url, record_stream, capabilities, record_enabled,
             segment_seconds, retention_hours, storage_quota_bytes, record_audio, record_mode,
             pre_roll_seconds, post_roll_seconds, mirror_enabled, anr_enabled, anr_replay_url_template,
-            enabled, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            enabled, live_warm, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
     )
     .bind(&id)
     .bind(&body.site_id)
@@ -218,6 +218,7 @@ async fn create_camera(
     .bind(anr_enabled)
     .bind(&anr_replay_url_template)
     .bind(enabled)
+    .bind(body.live_warm.unwrap_or(false))
     .bind(now)
     .bind(now)
     .execute(&st.pool)
@@ -236,6 +237,7 @@ async fn create_camera(
     if let Some(m) = &st.mirror {
         m.reconcile(&id).await;
     }
+    st.live.reconcile(&id).await;
     let cam = load_camera(&st.pool, &id).await?;
     auth::audit(
         &st.pool,
@@ -291,6 +293,7 @@ async fn update_camera(
     let record_enabled = body.record_enabled.unwrap_or(cur.record_enabled);
     let enabled = body.enabled.unwrap_or(cur.enabled);
     let priority = body.priority.unwrap_or(cur.priority);
+    let live_warm = body.live_warm.unwrap_or(cur.live_warm);
     let seg = body
         .segment_seconds
         .map(|v| v.clamp(2, 3600))
@@ -331,7 +334,7 @@ async fn update_camera(
             main_stream_url=?, sub_stream_url=?, record_stream=?, capabilities=?, record_enabled=?,
             segment_seconds=?, retention_hours=?, storage_quota_bytes=?, record_audio=?, record_mode=?,
             pre_roll_seconds=?, post_roll_seconds=?, mirror_enabled=?, anr_enabled=?,
-            anr_replay_url_template=?, enabled=?, priority=?, updated_at=?
+            anr_replay_url_template=?, enabled=?, priority=?, live_warm=?, updated_at=?
          WHERE id=?",
     )
     .bind(&name)
@@ -359,6 +362,7 @@ async fn update_camera(
     .bind(&anr_replay_url_template)
     .bind(enabled)
     .bind(priority)
+    .bind(live_warm)
     .bind(Utc::now())
     .bind(&id)
     .execute(&st.pool)
@@ -370,6 +374,8 @@ async fn update_camera(
     }
     // A disable / URL change / enable also affects AI sampling for this camera.
     st.sampler.reconcile().await;
+    // …and the live preview publisher (warm toggle, enable/disable, credential/URL change).
+    st.live.reconcile(&id).await;
     auth::audit(
         &st.pool,
         &principal,
@@ -415,6 +421,8 @@ async fn delete_camera(
         .await?;
     // Stop any AI sampler for this camera (its ai_tasks cascade-deleted) and remove its on-disk data.
     st.sampler.reconcile().await;
+    // Stop the live publisher and remove the camera's MediaMTX path (reconcile sees the row is gone).
+    st.live.reconcile(&id).await;
     let _ = tokio::fs::remove_dir_all(st.cfg.camera_recordings_dir(&id)).await;
     let _ = tokio::fs::remove_dir_all(st.cfg.camera_frames_dir(&id)).await;
     if let Some(dir) = &st.cfg.mirror_recordings_dir {
@@ -497,6 +505,11 @@ mod tests {
         AppState {
             recorder: RecorderManager::new(pool.clone(), cfg.clone()),
             sampler: SamplerManager::new(pool.clone(), cfg.clone()),
+            live: crate::services::live_publisher::LivePublisherManager::new(
+                pool.clone(),
+                cfg.clone(),
+                reqwest::Client::new(),
+            ),
             mirror: None,
             consumers: Arc::new(Vec::new()),
             modules: Arc::new(Vec::new()),

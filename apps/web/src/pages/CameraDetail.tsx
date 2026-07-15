@@ -248,11 +248,14 @@ export function CameraDetail() {
     }
   }
 
-  async function toggle(field: "enabled" | "record_enabled", value: boolean) {
+  async function toggle(field: "enabled" | "record_enabled" | "live_warm", value: boolean) {
     setActionBusy(true);
     try {
       await api.updateCamera(id, { [field]: value });
       await Promise.all([camera.refresh(), status.refresh()]);
+    } catch (e) {
+      // Surface failures (e.g. a viewer-role 403) instead of silently doing nothing.
+      window.alert(e instanceof ApiError ? e.message : String(e));
     } finally {
       setActionBusy(false);
     }
@@ -665,6 +668,14 @@ export function CameraDetail() {
                 className="w-full"
               >
                 {cam?.enabled ? "Disable" : "Enable"}
+              </Button>
+              <Button
+                disabled={actionBusy || !cam}
+                onClick={() => cam && toggle("live_warm", !cam.live_warm)}
+                className="w-full"
+                title="Keep the live preview stream running persistently so live view starts instantly (uses transcode capacity even with no viewers). Takes effect while the camera is enabled."
+              >
+                {cam?.live_warm ? "Unwarm live" : "Warm live"}
               </Button>
               <Button onClick={runTest} disabled={testing} className="w-full">
                 {testing ? "Testing…" : "Test stream"}

@@ -77,6 +77,8 @@ import type {
   SnapshotScheduleUpdate,
   RetentionLimits,
   RetentionUpdate,
+  TranscodeSettings,
+  TranscodeUpdate,
   DbStatus,
   DbLimitUpdate,
   DbConvertResult,
@@ -338,6 +340,12 @@ export const api = {
   getRetention: () => request<RetentionLimits>("/api/v1/system/retention"),
   setRetention: (body: RetentionUpdate) =>
     request<RetentionLimits>("/api/v1/system/retention", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  getTranscode: () => request<TranscodeSettings>("/api/v1/system/transcode"),
+  setTranscode: (body: TranscodeUpdate) =>
+    request<TranscodeSettings>("/api/v1/system/transcode", {
       method: "PUT",
       body: JSON.stringify(body),
     }),

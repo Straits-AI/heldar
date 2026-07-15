@@ -24,6 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-camera "Keep live warm" (`live_warm`, migration `0006`).** A warm camera's live publisher runs
+  persistently instead of on-demand, so live view starts instantly — the product replacement for
+  box-side warming scripts (no more editing an `.sh` to change which cameras are warm). Dashboard: a
+  "Warm live" toggle on the camera page + an Add-Camera checkbox; API: `live_warm` on the camera
+  create/update surface. The reconcile loop boots warm cameras at startup and self-heals MediaMTX
+  restarts.
+- **Live-transcode engine is now a runtime setting.** `GET/PUT /api/v1/system/transcode` (admin-gated,
+  audited) overrides the `HELDAR_LIVE_TRANSCODE_ENGINE` env default via the settings table (same
+  precedence as the disk caps); the System page gains a "Live transcode" panel with a software/vaapi/
+  nvenc picker and device-node hardware detection. Running publishers switch engines within ~30s (the
+  reconcile loop restarts drifted configs); `/api/v1/system` now reports the effective engine.
 - **AI worker task sharding (multi-worker per node).** A single node ran one worker; two workers both
   pulled every task from `/ai/tasks` and redid the same inference (N× GPU for 1× throughput). Workers now
   send a stable `?worker_id=` (the reference `worker.py` defaults to `<hostname>:<pid>`, override with
@@ -115,6 +126,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on-the-fly `:s3:` remote honors `RCLONE_S3_*`._
 
 ### Fixed
+
+- **Live view: the kernel now owns the preview transcode (MediaMTX `runOnDemand` removed).** The live
+  HEVC→H.264 preview relied on MediaMTX exec'ing an ffmpeg command (`runOnDemand`) — but the recommended
+  docker-compose deployment runs the official `bluenviron/mediamtx` image, which ships **no ffmpeg**, so
+  on-demand live view silently never worked there (the live box masked it with a hand-rolled host-side
+  warming script). The publisher ffmpeg is now spawned and supervised by the kernel itself
+  (`services/live_publisher.rs`, mirroring the recorder manager: structured argv, bounded stderr, restart
+  with backoff, restart-on-config-drift, teardown on disable/delete), publishing to a **plain** MediaMTX
+  path — MediaMTX never execs anything, so live view works identically in docker, native, and mixed
+  topologies. Legacy `runOnDemand` path configs are patched clean on contact. On-demand publishers are
+  reaped only when MediaMTX confirms zero readers and no demand for `HELDAR_LIVE_IDLE_CLOSE_SECS` (60s).
+  `liveview` now also refuses disabled cameras (mirrors the remote-bridge guard) and waits (bounded ~8s)
+  for the stream to become ready so the first player request succeeds.
 
 - **Remote grid: disabled/offline cameras are marked unavailable, not streamed.** Opening a disabled or
   down camera in the remote multi-camera grid used to start a WHEP session that could only 404 (no

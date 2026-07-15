@@ -6,6 +6,7 @@ use sqlx::SqlitePool;
 use crate::config::Config;
 use crate::modules::ModuleManifest;
 use crate::services::consumer::DetectionConsumer;
+use crate::services::live_publisher::LivePublisherManager;
 use crate::services::mirror::MirrorRecorderManager;
 use crate::services::recorder::RecorderManager;
 use crate::services::sampler::SamplerManager;
@@ -24,6 +25,8 @@ pub struct AppState {
     /// Dual/mirror recorder, present only when `HELDAR_MIRROR_RECORDINGS_DIR` is configured.
     pub mirror: Option<Arc<MirrorRecorderManager>>,
     pub sampler: Arc<SamplerManager>,
+    /// Kernel-owned live preview publishers (the HEVC→H.264 transcode ffmpegs feeding MediaMTX).
+    pub live: Arc<LivePublisherManager>,
     /// Registered perception consumers, fanned out to from detection ingest.
     pub consumers: Arc<Vec<Arc<dyn DetectionConsumer>>>,
     /// Loaded module manifests (composed by the binary), served at `GET /api/v1/modules` so the

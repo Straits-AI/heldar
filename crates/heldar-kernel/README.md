@@ -54,6 +54,9 @@ db::run_migrations(&pool).await?;
 
 let recorder = RecorderManager::new(pool.clone(), cfg.clone());
 let sampler = SamplerManager::new(pool.clone(), cfg.clone());
+let http = reqwest::Client::new();
+// Kernel-owned live preview publishers (the HEVC→H.264 transcode ffmpegs feeding MediaMTX).
+let live = services::live_publisher::LivePublisherManager::new(pool.clone(), cfg.clone(), http.clone());
 
 // Register perception consumers over the kernel's DetectionConsumer seam.
 let consumers: Arc<Vec<Arc<dyn DetectionConsumer>>> =
@@ -64,13 +67,15 @@ let state = AppState {
     cfg: cfg.clone(),
     recorder,
     sampler,
+    live,
+    mirror: None,
     consumers,
     // Module manifests, served at GET /api/v1/modules so the dashboard builds nav + routes
     // from live truth. The composing binary pushes each linked app's manifest() here.
     modules: Arc::new(vec![]),
     // Plugin store catalog engine (bundled + signed remote registries), GET /api/v1/registry.
     catalog: Arc::new(services::registry::CatalogService::new(&cfg)),
-    http: reqwest::Client::new(),
+    http,
     started_at: chrono::Utc::now(),
 };
 

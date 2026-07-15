@@ -52,6 +52,9 @@ pub struct Camera {
     /// AI decode priority (higher = more important). The frame sampler favors high-priority cameras
     /// under fps-budget pressure and sheds low-priority ones first.
     pub priority: i64,
+    /// Keep the live H.264 preview publisher running persistently (instant live view) instead of
+    /// starting it on demand and reaping it when idle. See `services::live_publisher`.
+    pub live_warm: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -60,6 +63,11 @@ impl Camera {
     /// Whether the recorder should be running a process for this camera.
     pub fn should_record(&self) -> bool {
         self.enabled && self.record_enabled
+    }
+
+    /// Whether the live publisher should run persistently for this camera (kept warm).
+    pub fn should_warm(&self) -> bool {
+        self.enabled && self.live_warm
     }
 }
 
@@ -97,6 +105,7 @@ pub struct CameraView {
     pub anr_replay_url_template: Option<String>,
     pub enabled: bool,
     pub priority: i64,
+    pub live_warm: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -139,6 +148,7 @@ impl From<Camera> for CameraView {
             anr_replay_url_template: c.anr_replay_url_template,
             enabled: c.enabled,
             priority: c.priority,
+            live_warm: c.live_warm,
             created_at: c.created_at,
             updated_at: c.updated_at,
         }
@@ -174,6 +184,7 @@ pub struct CameraCreate {
     pub anr_enabled: Option<bool>,
     pub anr_replay_url_template: Option<String>,
     pub enabled: Option<bool>,
+    pub live_warm: Option<bool>,
 }
 
 fn default_vendor() -> String {
@@ -208,6 +219,7 @@ pub struct CameraUpdate {
     pub anr_replay_url_template: Option<String>,
     pub enabled: Option<bool>,
     pub priority: Option<i64>,
+    pub live_warm: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, FromRow)]

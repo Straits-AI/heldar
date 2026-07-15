@@ -157,7 +157,10 @@ The MediaMTX read + playback surface is gated by the kernel via **HTTP external-
   LAN/private/overlay media clients and **denies public** ones — so a port-forwarded box does not serve
   every camera to the internet. On a tailnet/overlay an ACL further gates who can reach it.
 
-Publishing stays loopback-only (only the kernel's own transcode ffmpeg publishes). Still:
+Publishing stays loopback-only (only the kernel's own live-publisher ffmpeg publishes — the kernel
+spawns and supervises the HEVC→H.264 preview transcode itself; MediaMTX never execs anything, so the
+official ffmpeg-less MediaMTX image works. Per camera it is on-demand with idle reaping, or persistent
+via the "Keep live warm" camera setting). Still:
 
 - For **any** public endpoint (the control-plane WebRTC rendezvous, or a VPS browser gateway),
   authentication in front of the endpoint is **mandatory** — never expose the media surface publicly

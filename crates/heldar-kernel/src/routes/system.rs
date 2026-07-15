@@ -25,6 +25,10 @@ pub fn router() -> Router<AppState> {
         )
         .route("/api/v1/system/db", get(get_db_status).put(put_db_limit))
         .route("/api/v1/system/db/convert", post(post_db_convert))
+        .route(
+            "/api/v1/system/transcode",
+            get(get_transcode).put(put_transcode),
+        )
 }
 
 const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
@@ -121,6 +125,88 @@ async fn put_retention(
     )
     .await;
     Ok(Json(effective_limits(&st).await))
+}
+
+/// The live-preview transcode engine: effective value + which hardware encoders LOOK available on
+/// this box (device-node presence — a hint for the picker, not a guarantee the driver works).
+#[derive(Debug, Serialize)]
+struct TranscodeSettings {
+    /// The engine new live publishers use: `software` | `vaapi` | `nvenc`.
+    engine: String,
+    /// True when the engine is an operator override (settings table) vs the env default.
+    overridden: bool,
+    /// The `HELDAR_LIVE_TRANSCODE_ENGINE` env default this falls back to.
+    env_default: String,
+    /// `/dev/dri/renderD*` present (Intel/AMD VAAPI render node).
+    vaapi_available: bool,
+    /// `/dev/nvidia*` present (NVIDIA NVENC).
+    nvenc_available: bool,
+}
+
+async fn transcode_settings(st: &AppState) -> TranscodeSettings {
+    let override_ = settings::get_str(&st.pool, settings::LIVE_TRANSCODE_ENGINE)
+        .await
+        .filter(|e| crate::services::mediamtx::VALID_ENGINES.contains(&e.as_str()));
+    TranscodeSettings {
+        // The canonical effective engine (an invalid env default reads as the software fallback it
+        // actually runs as), so the UI's picker always shows a real, selectable value.
+        engine: crate::services::mediamtx::effective_engine(&st.pool, &st.cfg).await,
+        overridden: override_.is_some(),
+        env_default: st.cfg.live_transcode_engine.clone(),
+        vaapi_available: std::fs::read_dir("/dev/dri")
+            .map(|d| {
+                d.flatten()
+                    .any(|e| e.file_name().to_string_lossy().starts_with("renderD"))
+            })
+            .unwrap_or(false),
+        nvenc_available: std::path::Path::new("/dev/nvidiactl").exists()
+            || std::path::Path::new("/dev/nvidia0").exists(),
+    }
+}
+
+/// Current live-transcode engine (effective value + detected hardware). Any viewer may read.
+async fn get_transcode(
+    State(st): State<AppState>,
+    principal: Principal,
+) -> AppResult<Json<TranscodeSettings>> {
+    principal.require(principal.can_view(), "view transcode settings")?;
+    Ok(Json(transcode_settings(&st).await))
+}
+
+#[derive(Debug, Deserialize)]
+struct TranscodeUpdate {
+    /// New engine (`software` | `vaapi` | `nvenc`).
+    engine: String,
+}
+
+/// Set the live-transcode engine at runtime (admin only). New live sessions pick it up immediately;
+/// already-running publishers (warm AND watched on-demand) are restarted onto it by the reconcile
+/// loop within ~30s — attached viewers see a brief reconnect. Stored in the settings table; the env
+/// default remains the fallback.
+async fn put_transcode(
+    State(st): State<AppState>,
+    principal: Principal,
+    Json(body): Json<TranscodeUpdate>,
+) -> AppResult<Json<TranscodeSettings>> {
+    principal.require(principal.can_admin(), "change transcode engine")?;
+    let engine = body.engine.trim().to_lowercase();
+    if !crate::services::mediamtx::VALID_ENGINES.contains(&engine.as_str()) {
+        return Err(AppError::BadRequest(format!(
+            "`engine` must be one of: {}",
+            crate::services::mediamtx::VALID_ENGINES.join(", ")
+        )));
+    }
+    settings::set_str(&st.pool, settings::LIVE_TRANSCODE_ENGINE, &engine).await?;
+    crate::auth::audit(
+        &st.pool,
+        &principal,
+        "update_live_transcode_engine",
+        "settings",
+        "live_transcode",
+        json!({ "engine": engine }),
+    )
+    .await;
+    Ok(Json(transcode_settings(&st).await))
 }
 
 /// Metadata-DB (`heldar.db`) status + size cap. `incremental` = the DB is in `auto_vacuum=INCREMENTAL`
@@ -390,6 +476,6 @@ async fn system_info(
         remote_access: remote_access::status(&st.cfg),
         disk_health_ok: recent_disk_alerts == 0,
         last_disk_alert_at,
-        live_transcode_engine: st.cfg.live_transcode_engine.clone(),
+        live_transcode_engine: crate::services::mediamtx::effective_engine(&st.pool, &st.cfg).await,
     }))
 }

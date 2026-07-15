@@ -1,10 +1,11 @@
 //! Live-view gateway integration: registers a camera's stream as a MediaMTX path (server-side,
 //! credentials never exposed to the browser) and returns HLS / WebRTC / RTSP playback URLs.
 
+use std::time::Duration;
+
 use serde::Serialize;
 use serde_json::json;
 
-use crate::camera_url;
 use crate::config::Config;
 use crate::error::{AppError, AppResult};
 use crate::models::Camera;
@@ -14,11 +15,31 @@ use crate::state::AppState;
 const SOFTWARE_CODEC_ARGS: &str =
     "-c:v libx264 -preset ultrafast -tune zerolatency -profile:v baseline -pix_fmt yuv420p -g 30";
 
-/// FFmpeg encoder args for the live preview transcode, selected by `HELDAR_LIVE_TRANSCODE_ENGINE`.
-/// `software` uses libx264 (CPU); `vaapi` offloads to an Intel/AMD render node; `nvenc` to an NVIDIA
-/// GPU. An unknown engine warns and falls back to software so a typo never breaks live preview.
-pub fn transcode_codec_args(cfg: &Config) -> String {
-    select_codec_args(&cfg.live_transcode_engine, &cfg.vaapi_device)
+/// The engines an operator may select for the live preview transcode.
+pub const VALID_ENGINES: [&str; 3] = ["software", "vaapi", "nvenc"];
+
+/// The EFFECTIVE transcode engine: the operator's settings-table override when valid, else the
+/// `HELDAR_LIVE_TRANSCODE_ENGINE` env default — the same precedence as the disk/DB size caps.
+pub async fn effective_engine(pool: &sqlx::SqlitePool, cfg: &Config) -> String {
+    crate::services::settings::get_str(pool, crate::services::settings::LIVE_TRANSCODE_ENGINE)
+        .await
+        .filter(|e| VALID_ENGINES.contains(&e.as_str()))
+        .unwrap_or_else(|| {
+            // Canonicalize an invalid env default to what actually runs (select_codec_args falls
+            // back to software for unknown engines), so the API/UI never report a phantom engine.
+            if VALID_ENGINES.contains(&cfg.live_transcode_engine.as_str()) {
+                cfg.live_transcode_engine.clone()
+            } else {
+                "software".to_string()
+            }
+        })
+}
+
+/// FFmpeg encoder args for the live preview transcode under the effective engine. `software` uses
+/// libx264 (CPU); `vaapi` offloads to an Intel/AMD render node; `nvenc` to an NVIDIA GPU. An unknown
+/// engine warns and falls back to software so a typo never breaks live preview.
+pub async fn effective_codec_args(pool: &sqlx::SqlitePool, cfg: &Config) -> String {
+    select_codec_args(&effective_engine(pool, cfg).await, &cfg.vaapi_device)
 }
 
 fn select_codec_args(engine: &str, vaapi_device: &str) -> String {
@@ -112,8 +133,13 @@ fn split_host_port(authority: &str) -> (&str, Option<&str>) {
         .map_or((authority, None), |(h, p)| (h, Some(p)))
 }
 
-/// Ensure a MediaMTX path exists for this camera and return its playback URLs. `request_host` is the
-/// `Host` header of the originating request, used to make loopback stream URLs reachable by the client.
+/// Ensure the camera's MediaMTX path exists (plain — receive-only) and that the KERNEL-OWNED live
+/// publisher is running for it, then return playback URLs. `request_host` is the `Host` header of
+/// the originating request, used to make loopback stream URLs reachable by the client.
+///
+/// The transcode ffmpeg is spawned by [`crate::services::live_publisher`], never by MediaMTX
+/// (`runOnDemand` is deliberately unused: MediaMTX's exec environment — e.g. the official docker
+/// image, which ships no ffmpeg — is not ours to assume; see the live_publisher module docs).
 pub async fn ensure_live(
     state: &AppState,
     camera_id: &str,
@@ -124,65 +150,36 @@ pub async fn ensure_live(
         .fetch_optional(&state.pool)
         .await?;
     let cam = cam.ok_or_else(|| AppError::NotFound(format!("camera {camera_id} not found")))?;
+    if !cam.enabled {
+        // Same rule the remote WHEP bridge enforces: a disabled camera has no live surface. Without
+        // this, the browser opens a stream that can never become ready and hammers 404s.
+        return Err(AppError::BadRequest(format!(
+            "camera {camera_id} is disabled — enable it to view live"
+        )));
+    }
 
-    let source = camera_url::stream_url(&cam, "sub")
-        .or_else(|| camera_url::record_url(&cam))
-        .ok_or_else(|| AppError::BadRequest("camera has no stream URL".into()))?;
+    // Explicit 400 when the camera has no usable stream URL (address+creds or an explicit URL) —
+    // otherwise the viewer would stall through the ready-wait and get URLs that can never work.
+    if crate::camera_url::stream_url(&cam, "sub")
+        .or_else(|| crate::camera_url::record_url(&cam))
+        .is_none()
+    {
+        return Err(AppError::BadRequest("camera has no stream URL".into()));
+    }
 
     let name = format!("cam_{camera_id}");
     let api = state.cfg.mediamtx_api_url.trim_end_matches('/');
 
-    let existing = state
-        .http
-        .get(format!("{api}/v3/config/paths/get/{name}"))
-        .send()
-        .await;
-    let already = matches!(existing, Ok(ref r) if r.status().is_success());
+    ensure_plain_path(&state.http, api, &name)
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("MediaMTX path setup failed: {e}")))?;
+    // Record viewer demand (starts the publisher; resets the idle-reap clock).
+    state.live.demand(&cam).await;
 
-    if !already {
-        // Transcode to H.264 on demand: many cameras (e.g. these HikVision units) emit HEVC, which
-        // browsers can't play over HLS/WebRTC. FFmpeg decodes the camera stream and republishes
-        // H.264 to this path, but only while someone is actually watching (runOnDemand). The raw
-        // stream is still recorded untouched by the recorder; this decode is preview-only.
-        // $MTX_PATH / $RTSP_PORT are substituted by MediaMTX; credentials stay server-side. The
-        // video encoder args are selected by HELDAR_LIVE_TRANSCODE_ENGINE (software | vaapi | nvenc).
-        let codec_args = transcode_codec_args(&state.cfg);
-        // Live audio is opt-in per camera, reusing the same `record_audio` intent as the recorder:
-        // a camera you record audio for can also be listened to live (re-encoded to AAC for HLS; a
-        // no-op when the source has no audio track). Cameras without it stay video-only (`-an`).
-        let audio_args = if cam.record_audio {
-            "-c:a aac -b:a 96k"
-        } else {
-            "-an"
-        };
-        let run_on_demand = format!(
-            "ffmpeg -nostdin -rtsp_transport tcp -timeout 10000000 -i {source} {audio_args} \
-{codec_args} \
--f rtsp rtsp://localhost:$RTSP_PORT/$MTX_PATH"
-        );
-        let body = json!({
-            "runOnDemand": run_on_demand,
-            "runOnDemandRestart": true,
-            // The HEVC→H.264 transcode cold-start (ffmpeg connect + first keyframe) routinely exceeds
-            // MediaMTX's 10s default, which would drop the WHEP/HLS reader before the source is ready.
-            "runOnDemandStartTimeout": "30s",
-            "runOnDemandCloseAfter": "10s",
-        });
-        let resp = state
-            .http
-            .post(format!("{api}/v3/config/paths/add/{name}"))
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| AppError::Other(anyhow::anyhow!("MediaMTX unreachable at {api}: {e}")))?;
-        let code = resp.status();
-        if !code.is_success() && code.as_u16() != 400 {
-            let txt = resp.text().await.unwrap_or_default();
-            return Err(AppError::Other(anyhow::anyhow!(
-                "MediaMTX add-path failed ({code}): {txt}"
-            )));
-        }
-    }
+    // Give a cold-started publisher a bounded window to come up so the FIRST player request already
+    // finds a ready stream (measured ~2s on HEVC sub-streams). On timeout still return the URLs —
+    // players retry, and the supervise loop keeps working on the stream.
+    wait_ready(&state.http, api, &name, Duration::from_secs(8)).await;
 
     // Rewrite loopback bases to the host the client actually reached us on, so streams are reachable
     // over the tunnel / LAN (not just from the box itself).
@@ -232,6 +229,101 @@ pub async fn set_webrtc_ice_servers(state: &AppState, ice: &serde_json::Value) -
     Ok(())
 }
 
+/// Ensure `name` exists as a PLAIN MediaMTX path — no `runOnDemand`/`runOnInit` exec config (the
+/// kernel owns the publisher process). Also strips those commands from a pre-existing path, healing
+/// deployments configured by older kernels.
+pub async fn ensure_plain_path(
+    http: &reqwest::Client,
+    api: &str,
+    name: &str,
+) -> anyhow::Result<()> {
+    let plain = json!({ "runOnDemand": "", "runOnInit": "" });
+    let existing = http
+        .get(format!("{api}/v3/config/paths/get/{name}"))
+        .send()
+        .await;
+    match existing {
+        Ok(r) if r.status().is_success() => {
+            let cfg: serde_json::Value = r.json().await.unwrap_or_default();
+            let stale = ["runOnDemand", "runOnInit"].iter().any(|k| {
+                cfg.get(*k)
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|s| !s.is_empty())
+            });
+            if stale {
+                let resp = http
+                    .patch(format!("{api}/v3/config/paths/patch/{name}"))
+                    .json(&plain)
+                    .send()
+                    .await
+                    .map_err(|e| anyhow::anyhow!("MediaMTX unreachable at {api}: {e}"))?;
+                if !resp.status().is_success() {
+                    anyhow::bail!("MediaMTX patch-path failed ({})", resp.status());
+                }
+            }
+            Ok(())
+        }
+        _ => {
+            let resp = http
+                .post(format!("{api}/v3/config/paths/add/{name}"))
+                .json(&plain)
+                .send()
+                .await
+                .map_err(|e| anyhow::anyhow!("MediaMTX unreachable at {api}: {e}"))?;
+            let code = resp.status();
+            // 400 = "path already exists" (raced another ensure) — fine.
+            if !code.is_success() && code.as_u16() != 400 {
+                anyhow::bail!("MediaMTX add-path failed ({code})");
+            }
+            Ok(())
+        }
+    }
+}
+
+/// Delete a MediaMTX path (best-effort; missing path or unreachable MediaMTX is fine).
+pub async fn delete_path(http: &reqwest::Client, api: &str, name: &str) {
+    let _ = http
+        .delete(format!("{api}/v3/config/paths/delete/{name}"))
+        .send()
+        .await;
+}
+
+/// How many readers MediaMTX reports on a path; `None` when the path is missing or MediaMTX is
+/// unreachable (callers must treat unknown as "may have viewers").
+pub async fn path_readers(http: &reqwest::Client, api: &str, name: &str) -> Option<usize> {
+    let r = http
+        .get(format!("{api}/v3/paths/get/{name}"))
+        .send()
+        .await
+        .ok()?;
+    if !r.status().is_success() {
+        return None;
+    }
+    let v: serde_json::Value = r.json().await.ok()?;
+    Some(v.get("readers")?.as_array()?.len())
+}
+
+/// Poll until the path reports `ready: true` (a publisher is delivering) or `max` elapses.
+async fn wait_ready(http: &reqwest::Client, api: &str, name: &str, max: Duration) {
+    let start = std::time::Instant::now();
+    while start.elapsed() < max {
+        let ready = async {
+            let r = http
+                .get(format!("{api}/v3/paths/get/{name}"))
+                .send()
+                .await
+                .ok()?;
+            let v: serde_json::Value = r.json().await.ok()?;
+            v.get("ready")?.as_bool()
+        }
+        .await;
+        if ready == Some(true) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,6 +367,44 @@ mod tests {
             client_facing_base("http://127.0.0.1:8888", Some("[fd00::1]:8000")),
             "http://[fd00::1]:8888"
         );
+    }
+
+    /// The operator's settings-table engine override beats the env default; an invalid stored value
+    /// is ignored (falls back to env) so a corrupt setting can never break live preview.
+    #[tokio::test]
+    async fn effective_engine_settings_override_beats_env_and_invalid_is_ignored() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let mut cfg = Config::from_env();
+        cfg.live_transcode_engine = "software".into();
+
+        // unset → env default
+        assert_eq!(effective_engine(&pool, &cfg).await, "software");
+        // valid override wins
+        crate::services::settings::set_str(
+            &pool,
+            crate::services::settings::LIVE_TRANSCODE_ENGINE,
+            "nvenc",
+        )
+        .await
+        .unwrap();
+        assert_eq!(effective_engine(&pool, &cfg).await, "nvenc");
+        assert!(effective_codec_args(&pool, &cfg)
+            .await
+            .contains("h264_nvenc"));
+        // invalid override is ignored → env default again
+        crate::services::settings::set_str(
+            &pool,
+            crate::services::settings::LIVE_TRANSCODE_ENGINE,
+            "bogus",
+        )
+        .await
+        .unwrap();
+        assert_eq!(effective_engine(&pool, &cfg).await, "software");
     }
 
     #[test]

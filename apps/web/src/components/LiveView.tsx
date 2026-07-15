@@ -168,10 +168,19 @@ export function LiveView({
           /* autoplay may be blocked until user interaction */
         });
       });
+      // Bound network-error retries: a stream torn down server-side (camera disabled/deleted —
+      // the kernel removes its MediaMTX path) would otherwise be hammered with 404s forever.
+      let netRetries = 0;
       hls.on(Hls.Events.ERROR, (_event, data) => {
         if (!data.fatal || disposed) return;
         if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-          hls?.startLoad();
+          netRetries += 1;
+          if (netRetries <= 8) {
+            hls?.startLoad();
+          } else {
+            setError("Stream unavailable — the camera may be disabled or offline.");
+            hls?.destroy();
+          }
         } else if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
           hls?.recoverMediaError();
         } else {

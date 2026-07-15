@@ -935,6 +935,7 @@ mod tests {
             anr_replay_url_template: None,
             enabled: true,
             priority: 100,
+            live_warm: false,
             created_at: Utc::now(),
             updated_at: Utc::now(),
         }

@@ -297,6 +297,11 @@ mod tests {
         AppState {
             recorder: crate::services::recorder::RecorderManager::new(pool.clone(), cfg.clone()),
             sampler: crate::services::sampler::SamplerManager::new(pool.clone(), cfg.clone()),
+            live: crate::services::live_publisher::LivePublisherManager::new(
+                pool.clone(),
+                cfg.clone(),
+                reqwest::Client::new(),
+            ),
             mirror: None,
             consumers: std::sync::Arc::new(Vec::new()),
             modules: std::sync::Arc::new(Vec::new()),

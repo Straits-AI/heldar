@@ -490,27 +490,50 @@ cuts need re-encode and arrive later).
 
 Returns `image/jpeg` with `Cache-Control: no-store`.
 
-### Brokered live view via MediaMTX (`services/mediamtx.rs`)
+### Brokered live view via MediaMTX + kernel-owned publishers (`services/mediamtx.rs`, `services/live_publisher.rs`)
 `GET|POST /api/v1/cameras/{id}/liveview`. Live view is **brokered through the media
-gateway** (Layer 3: `Camera → media gateway → browser`, never
-`Camera → every browser`):
+gateway** (Layer 3: `Camera → kernel transcode → media gateway → browser`, never
+`Camera → every browser`), and the transcode process is **owned by the kernel**:
 
-1. Resolve the camera's source RTSP URL **with embedded credentials**
-   (sub-stream preferred, else record URL).
-2. Probe MediaMTX `GET {api}/v3/config/paths/get/cam_{id}`; if absent, `POST
-   {api}/v3/config/paths/add/cam_{id}` with `{source, sourceOnDemand:true}`. A `400`
-   (already exists / race) is tolerated; other failures surface as 500.
-3. Return non-credentialed playback URLs the browser can consume directly:
+1. Refuse disabled cameras (a disabled camera has no live surface — locally and on the
+   remote WHEP bridge alike).
+2. Ensure a **plain** MediaMTX path `cam_{id}` exists (`POST {api}/v3/config/paths/add`,
+   `400` already-exists tolerated). The path carries **no `runOnDemand`/`runOnInit`
+   exec config** — a pre-existing path with legacy commands is patched clean.
+3. Ask the `LivePublisherManager` to ensure a **kernel-supervised ffmpeg publisher** is
+   running for the camera: it pulls the credentialed RTSP source (sub-stream preferred),
+   transcodes HEVC→H.264 (`software` | `vaapi` | `nvenc` — a runtime setting, see below)
+   and republishes to `rtsp://localhost:8554/cam_{id}`. Structured argv, never a shell.
+4. Wait (bounded, ~8s) for the path to report `ready`, then return non-credentialed
+   playback URLs the browser can consume directly:
    - HLS: `{hls_base}/cam_{id}/index.m3u8` (`:8888`)
    - WebRTC (WHEP): `{webrtc_base}/cam_{id}` (`:8889`)
    - RTSP: `{rtsp_base}/cam_{id}` (`:8554`)
 
-The **camera credentials never leave the server** — they live only inside the
-MediaMTX `source` config; the browser only ever sees the gateway path name.
-`sourceOnDemand:true` means MediaMTX only pulls from the camera while a viewer is
-connected, avoiding a permanent extra session per camera. The WebRTC (WHEP) URL is
-also the **remote live-video transport**: over WebRTC remote access (§21) the same
-WHEP endpoint is what the off-site browser viewer plays, DTLS-SRTP encrypted
+**Why the kernel owns the transcode process** (not MediaMTX `runOnDemand`): the kernel
+already requires host ffmpeg (recorder, AI sampler), so the dependency is proven wherever
+the kernel runs — whereas MediaMTX's exec environment is not ours to assume (the official
+`bluenviron/mediamtx` docker image ships **no ffmpeg**, so a `runOnDemand` command dies
+silently inside it and live view never starts). Owning the process also gives real
+supervision: restart with backoff, restart-on-config-drift (engine/credential changes),
+and teardown on disable/delete.
+
+**Publisher lifecycle:** on-demand by default — started by `liveview`, reaped by the
+reconcile loop once MediaMTX confirms **zero readers** and no demand for
+`HELDAR_LIVE_IDLE_CLOSE_SECS` (60s default). Per camera, `live_warm` (dashboard toggle
+"Warm live") keeps the publisher running persistently for instant live view. The
+reconcile loop (30s) is the self-healing backstop: it boots warm cameras, heals MediaMTX
+restarts (API-added paths are lost on restart), and applies engine changes.
+
+**Transcode engine is a runtime setting**: `GET|PUT /api/v1/system/transcode`
+(admin-gated, audited; System → "Live transcode" panel with hardware detection) overrides
+the `HELDAR_LIVE_TRANSCODE_ENGINE` env default via the settings table — the same
+precedence pattern as the disk/DB size caps.
+
+The **camera credentials never leave the server** — they live only inside the kernel's
+publisher process argv; the browser only ever sees the gateway path name. The WebRTC
+(WHEP) URL is also the **remote live-video transport**: over WebRTC remote access (§21)
+the same WHEP endpoint is what the off-site browser viewer plays, DTLS-SRTP encrypted
 end-to-end.
 
 ---

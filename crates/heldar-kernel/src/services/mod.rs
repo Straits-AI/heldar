@@ -12,6 +12,7 @@ pub mod fanout;
 pub mod fleet_register;
 pub mod health;
 pub mod indexer;
+pub mod live_publisher;
 pub mod live_token;
 pub mod mediamtx;
 pub mod metrics;

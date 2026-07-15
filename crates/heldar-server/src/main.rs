@@ -166,12 +166,19 @@ async fn main() -> anyhow::Result<()> {
     let catalog = Arc::new(services::registry::CatalogService::new(&cfg));
     // Kept for the durable fan-out drainer (consumers is moved into AppState below).
     let drain_consumers = Arc::clone(&consumers);
+    // Kernel-owned live preview publishers (the transcode ffmpegs feeding MediaMTX paths).
+    let live = services::live_publisher::LivePublisherManager::new(
+        pool.clone(),
+        cfg.clone(),
+        http.clone(),
+    );
     let state = AppState {
         pool: pool.clone(),
         cfg: cfg.clone(),
         recorder: recorder.clone(),
         mirror: mirror.clone(),
         sampler: sampler.clone(),
+        live: live.clone(),
         consumers,
         modules,
         catalog: catalog.clone(),
@@ -198,6 +205,10 @@ async fn main() -> anyhow::Result<()> {
         spawn_supervised("retention", move || {
             services::retention::run(p.clone(), c.clone())
         });
+        // Live-publisher reconcile loop: starts warm cameras at boot (first tick is immediate),
+        // reaps idle on-demand publishers, restarts drifted configs, heals MediaMTX restarts.
+        let lp = live.clone();
+        spawn_supervised("live_publisher", move || lp.clone().run());
         // One-time legacy migration: convert a pre-existing DB to auto_vacuum=INCREMENTAL so
         // incremental_vacuum can reclaim pages. Runs in the BACKGROUND (not boot-blocking): the
         // VACUUM can take minutes on a large DB, so the server binds and serves reads/healthz
@@ -423,6 +434,7 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(
             recorder.clone(),
+            live.clone(),
             mirror.clone(),
             sampler.clone(),
         ))
@@ -555,6 +567,7 @@ where
 
 async fn shutdown_signal(
     recorder: Arc<RecorderManager>,
+    live: Arc<heldar_kernel::services::live_publisher::LivePublisherManager>,
     mirror: Option<Arc<heldar_kernel::services::mirror::MirrorRecorderManager>>,
     sampler: Arc<SamplerManager>,
 ) {
@@ -578,6 +591,7 @@ async fn shutdown_signal(
     }
     tracing::info!("shutdown signal received; stopping recorders + samplers");
     recorder.shutdown().await;
+    live.shutdown().await;
     if let Some(m) = &mirror {
         m.shutdown().await;
     }

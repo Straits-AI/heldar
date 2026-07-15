@@ -8,7 +8,9 @@ than wrapping an existing DVR/NVR or starting from AI features, it builds its ow
 first (camera registry, RTSP ingest, recording, playback, live view), then layers perception, an
 event engine, and apps on top as *consumers*. Owning the kernel means owning the metadata model, the
 event engine, and the product logic, without re-implementing codecs (FFmpeg and MediaMTX do the
-low-level media work).
+low-level media work — the kernel spawns and supervises every ffmpeg itself: recording, AI sampling,
+and the live-preview transcode, so no piece of the pipeline depends on another component's exec
+environment).
 
 The platform is **open-core**: an Apache-2.0 kernel plus generic reference apps, with vertical and
 client products as separate proprietary crates. See [LICENSING.md](./LICENSING.md).
