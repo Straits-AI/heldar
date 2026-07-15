@@ -173,8 +173,9 @@ pub async fn ensure_live(
     ensure_plain_path(&state.http, api, &name)
         .await
         .map_err(|e| AppError::Other(anyhow::anyhow!("MediaMTX path setup failed: {e}")))?;
-    // Record viewer demand (starts the publisher; resets the idle-reap clock).
-    state.live.demand(&cam).await;
+    // Record viewer demand (starts the publisher; resets the idle-reap clock). Re-validates the
+    // camera under its serialization lock, so a concurrent disable can't be raced past.
+    state.live.demand(camera_id).await;
 
     // Give a cold-started publisher a bounded window to come up so the FIRST player request already
     // finds a ready stream (measured ~2s on HEVC sub-streams). On timeout still return the URLs —

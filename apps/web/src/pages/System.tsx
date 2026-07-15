@@ -581,7 +581,7 @@ function LiveTranscodePanel({ canAdmin }: { canAdmin: boolean }) {
             </div>
           </div>
           <p className="font-mono text-[11px] leading-relaxed text-fg-muted">
-            New live sessions use this immediately; running streams restart onto it within ~30s
+            New live sessions use this immediately; running streams restart onto it within seconds
             (viewers see a brief reconnect). A hardware engine (vaapi/nvenc) offloads the preview
             transcode to the GPU — pick one that shows &quot;detected&quot;.
           </p>

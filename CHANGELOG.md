@@ -138,7 +138,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   topologies. Legacy `runOnDemand` path configs are patched clean on contact. On-demand publishers are
   reaped only when MediaMTX confirms zero readers and no demand for `HELDAR_LIVE_IDLE_CLOSE_SECS` (60s).
   `liveview` now also refuses disabled cameras (mirrors the remote-bridge guard) and waits (bounded ~8s)
-  for the stream to become ready so the first player request succeeds.
+  for the stream to become ready so the first player request succeeds. All per-camera mutators (the
+  PATCH/DELETE hook, the reconcile loop's step, viewer demand) are serialized on a per-camera lock and
+  re-read the row inside it, eliminating the hook-vs-loop TOCTOU entirely; an engine change pokes an
+  immediate reconcile pass, so running publishers switch within seconds.
 
 - **Remote grid: disabled/offline cameras are marked unavailable, not streamed.** Opening a disabled or
   down camera in the remote multi-camera grid used to start a WHEP session that could only 404 (no

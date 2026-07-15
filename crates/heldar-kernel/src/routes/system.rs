@@ -180,9 +180,9 @@ struct TranscodeUpdate {
 }
 
 /// Set the live-transcode engine at runtime (admin only). New live sessions pick it up immediately;
-/// already-running publishers (warm AND watched on-demand) are restarted onto it by the reconcile
-/// loop within ~30s — attached viewers see a brief reconnect. Stored in the settings table; the env
-/// default remains the fallback.
+/// already-running publishers (warm AND watched on-demand) are restarted onto it within seconds
+/// (the write pokes a reconcile pass) — attached viewers see a brief reconnect. Stored in the
+/// settings table; the env default remains the fallback.
 async fn put_transcode(
     State(st): State<AppState>,
     principal: Principal,
@@ -197,6 +197,8 @@ async fn put_transcode(
         )));
     }
     settings::set_str(&st.pool, settings::LIVE_TRANSCODE_ENGINE, &engine).await?;
+    // Apply to running publishers now (a spawned reconcile pass) instead of the next 30s tick.
+    st.live.poke();
     crate::auth::audit(
         &st.pool,
         &principal,

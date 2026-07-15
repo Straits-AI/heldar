@@ -19,8 +19,10 @@
 //!   product replacement for hand-rolled warming scripts); the reconcile loop (re)starts it.
 //! - A camera PATCH/DELETE calls [`LivePublisherManager::reconcile`]; the periodic loop is the
 //!   self-healing backstop (MediaMTX restarts, engine changes, missed nudges) per principle 3.
-//!   The loop re-reads each camera's row immediately before acting, so a hook racing the tick is
-//!   a milliseconds window that converges on the next tick, never a 30s-stale resurrection.
+//!   All mutators — the hook, the loop's per-camera step, and a viewer's `demand` — are SERIALIZED
+//!   per camera: each acquires that camera's async lock and re-reads the row inside it, so
+//!   decisions are linearized on fresh state and a hook can never race the loop into resurrecting
+//!   a disabled/deleted camera (there is no unsynchronized read-then-act window at all).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,6 +59,12 @@ pub struct LivePublisherManager {
     cfg: Arc<Config>,
     http: reqwest::Client,
     tasks: Mutex<HashMap<String, PublisherTask>>,
+    /// Per-camera serialization locks: every mutator (hook reconcile, loop step, viewer demand)
+    /// holds the camera's lock across its fresh-row read AND the resulting action, linearizing
+    /// decisions. Lock order is always camera lock → `tasks` lock, never nested camera locks.
+    /// Entries are never removed — the map is bounded by the set of camera ids ever seen, and a
+    /// stable `Arc` per id is what makes the serialization airtight.
+    locks: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// Set by [`Self::shutdown`]: no new publisher may spawn afterwards, so a reconcile tick or an
     /// in-flight `ensure_live` racing graceful shutdown cannot orphan an ffmpeg.
     shutting_down: AtomicBool,
@@ -130,6 +138,7 @@ impl LivePublisherManager {
             cfg,
             http,
             tasks: Mutex::new(HashMap::new()),
+            locks: Mutex::new(HashMap::new()),
             shutting_down: AtomicBool::new(false),
         })
     }
@@ -152,10 +161,33 @@ impl LivePublisherManager {
         Some(publish_args(&source, audio, &codec, &publish_url))
     }
 
+    /// The camera's serialization lock (created on first use, stable thereafter).
+    async fn camera_lock(&self, camera_id: &str) -> Arc<Mutex<()>> {
+        self.locks
+            .lock()
+            .await
+            .entry(camera_id.to_string())
+            .or_default()
+            .clone()
+    }
+
     /// A viewer wants this camera: record demand and ensure a publisher is running with current
-    /// config. Called from `ensure_live`.
-    pub async fn demand(self: &Arc<Self>, cam: &Camera) {
-        self.ensure_running_inner(cam, true).await;
+    /// config. Called from `ensure_live`. Serialized per camera and re-reads the row inside the
+    /// lock, so a PATCH/DELETE landing mid-request can never be raced into starting a publisher
+    /// for a camera that is no longer enabled.
+    pub async fn demand(self: &Arc<Self>, camera_id: &str) {
+        let lock = self.camera_lock(camera_id).await;
+        let _g = lock.lock().await;
+        let cam: Option<Camera> = sqlx::query_as("SELECT * FROM cameras WHERE id = ?")
+            .bind(camera_id)
+            .fetch_optional(&self.pool)
+            .await
+            .ok()
+            .flatten();
+        match cam {
+            Some(cam) if cam.enabled => self.ensure_running_inner(&cam, true).await,
+            _ => {}
+        }
     }
 
     /// Ensure a publisher is running with current config WITHOUT recording viewer demand (the
@@ -196,6 +228,13 @@ impl LivePublisherManager {
     /// Warm → (re)started immediately. Enabled on-demand → restarted only if it was already running
     /// (keeps current viewers on fresh config; otherwise stays down until demanded).
     pub async fn reconcile(self: &Arc<Self>, camera_id: &str) {
+        let lock = self.camera_lock(camera_id).await;
+        let _g = lock.lock().await;
+        self.reconcile_locked(camera_id).await;
+    }
+
+    /// The hook-reconcile body; caller MUST hold the camera's serialization lock.
+    async fn reconcile_locked(self: &Arc<Self>, camera_id: &str) {
         let cam: Option<Camera> = sqlx::query_as("SELECT * FROM cameras WHERE id = ?")
             .bind(camera_id)
             .fetch_optional(&self.pool)
@@ -262,8 +301,11 @@ impl LivePublisherManager {
             if self.shutting_down.load(Ordering::Relaxed) {
                 return;
             }
-            // Re-read the row immediately before acting: decisions are made on fresh state, so a
-            // PATCH/DELETE hook racing this tick has a milliseconds window, not a 30s-stale one.
+            // Serialize with the PATCH/DELETE hooks and viewer demand: hold the camera's lock
+            // across the fresh-row read AND the action, so this step can never act on state a
+            // hook has already superseded (no resurrection window at all).
+            let lock = self.camera_lock(&id).await;
+            let _g = lock.lock().await;
             let cam: Result<Option<Camera>, _> =
                 sqlx::query_as("SELECT * FROM cameras WHERE id = ?")
                     .bind(&id)
@@ -327,6 +369,16 @@ impl LivePublisherManager {
                 }
             }
         }
+    }
+
+    /// Run one reconcile pass NOW (spawned; non-blocking for the caller). Used when a runtime
+    /// setting that publishers embed (the transcode engine) changes, so it applies in seconds
+    /// instead of waiting for the periodic tick.
+    pub fn poke(self: &Arc<Self>) {
+        let me = self.clone();
+        tokio::spawn(async move {
+            me.reconcile_all().await;
+        });
     }
 
     /// Stop a camera's publisher (kills its ffmpeg). Returns once the task is gone.
