@@ -288,7 +288,7 @@ pub async fn run(state: AppState) {
 
     if cfg.cp_token.is_empty() {
         tracing::warn!(
-            "webrtc rendezvous: HELDAR_CP_TOKEN is empty; the rendezvous will reject polls if it enforces a bearer (BOX_TOKEN)"
+            "webrtc rendezvous: HELDAR_CP_TOKEN is empty; the rendezvous will reject polls (it requires a site-bound enrollment token)"
         );
     }
     tracing::info!(site = %site_id, rendezvous = %rendezvous_url, "webrtc rendezvous: dialing out for remote viewing");
