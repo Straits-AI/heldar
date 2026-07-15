@@ -48,7 +48,7 @@ HELDAR_WEB_DIR=./apps/web/dist
 | 8554 / 8888 / 8889 | MediaMTX RTSP / HLS / WebRTC |
 | 9997 | MediaMTX 控制 API（本地回环） |
 
-实时预览通过 MediaMTX 代理：摄像头凭据仅保存在网关的路径配置中，永远不会传递到浏览器，浏览器只会看到不含凭据的 HLS/WebRTC/RTSP URL。
+实时预览由内核拥有、每摄像头一个的受监督 ffmpeg 发布到 MediaMTX：摄像头凭据始终留在内核内，永远不会到达 MediaMTX 或浏览器，浏览器只会看到不含凭据的 HLS/WebRTC/RTSP URL。实时转码引擎的默认值来自 `HELDAR_LIVE_TRANSCODE_ENGINE`（`software`），并可在运行时切换（software / VAAPI / NVENC）——通过系统页面或 `GET`/`PUT /api/v1/system/transcode`。
 
 ## 认证
 
@@ -87,8 +87,9 @@ Heldar 仅使用 SQLite（WAL 日志，内置迁移）。默认 URL 为
 | `HELDAR_RECORDINGS_DIR` / `CLIPS_DIR` / `SNAPSHOTS_DIR` / `FRAMES_DIR` | 在 `./data` 下 | 媒体根目录（启动时创建） |
 | `HELDAR_MAX_RECORDINGS_GB` | `20` | 软性存储上限；超过后将修剪最旧的未锁定片段 |
 | `HELDAR_MIN_FREE_DISK_GB` | `5` | 硬性主机保护下限；在可用空间低于此值时修剪未锁定片段 |
+| `HELDAR_MAX_DB_GB` | `4` | 限制 `heldar.db` 元数据库本身的大小；空间通过增量 auto_vacuum 在线回收 |
 
-录制内容保留在本地磁盘并从本地提供服务；默认不会推送到云端。证据锁定的片段永远不会被保留策略删除。两个限制均可**在运行时无需重启地调整** — 通过仪表盘系统页面（"录制限制"面板）或 `GET`/`PUT /api/v1/system/retention` 接口（PUT 仅限管理员）；已存储的覆盖值优先于环境变量值，环境变量值仍作为默认值。
+录制内容保留在本地磁盘并从本地提供服务；默认不会推送到云端。证据锁定的片段永远不会被保留策略删除。三个限制均可**在运行时无需重启地调整** — 通过仪表盘系统页面（"录制限制"与"数据库限制"面板）或 `GET`/`PUT /api/v1/system/retention` 及 `GET`/`PUT /api/v1/system/db` 接口（PUT 仅限管理员）；已存储的覆盖值优先于环境变量值，环境变量值仍作为默认值。在上限功能出现之前创建的数据库会在启动时在后台转换为增量 auto_vacuum（`HELDAR_DB_AUTOVACUUM_CONVERT`，默认 `true`；绝不阻塞启动），或通过 `POST /api/v1/system/db/convert` 按需转换。
 
 摄像头凭据保存在此 SQLite 数据库中。设置 `HELDAR_SECRET_KEY`（32 字节的 base64 编码，例如 `openssl rand -base64 32`）以使用 AES-256-GCM 对其进行静态加密；不设置则对可信局域网设备保持明文存储。现有明文凭据将在下次启动时被加密封存 — 参见
 [生产加固指南](https://github.com/Straits-AI/heldar/blob/main/docs/PRODUCTION.md)。

@@ -34,7 +34,8 @@ srt: no
 
 # Authentication: DELEGATED TO THE KERNEL via HTTP external auth. For every publish/read/playback,
 # MediaMTX POSTs the request to the kernel's /internal/mediamtx-auth, which decides:
-#   - publish: allowed only from a loopback client — the kernel's own runOnDemand ffmpeg publishes from
+#   - publish: allowed only from a loopback client — the KERNEL-OWNED live-publisher ffmpeg (spawned and
+#     supervised by heldar-core, never by MediaMTX — this image has no ffmpeg) publishes from
 #     rtsp://localhost — closing the stream-injection surface (a rogue publisher overwriting a feed).
 #   - read/playback: when kernel auth is ENABLED, a valid kernel-minted, per-camera token (carried in
 #     the ?token= query the kernel appends to the stream URL, and by the browser's WHEP/HLS loader onto

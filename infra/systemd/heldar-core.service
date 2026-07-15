@@ -17,6 +17,8 @@ StateDirectory=heldar
 Environment=HELDAR_DATA_DIR=/var/lib/heldar
 Environment=HELDAR_DATABASE_URL=sqlite:///var/lib/heldar/heldar.db
 Environment=HELDAR_API_HOST=0.0.0.0
+# The dashboard: heldar-core serves the built SPA from this dir (appliance images install it here).
+Environment=HELDAR_WEB_DIR=/usr/local/share/heldar/web
 # Recording schedules use the server's LOCAL timezone. Set this to your timezone (needs tzdata, which
 # the appliance image includes) or recording windows fire in UTC. Example: Environment=TZ=Asia/Kuala_Lumpur
 # Environment=TZ=UTC

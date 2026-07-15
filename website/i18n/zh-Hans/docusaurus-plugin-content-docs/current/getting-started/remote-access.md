@@ -21,6 +21,10 @@ sidebar_position: 3
 
 > **为何不使用端口转发 / DDNS / 公共反向代理？** 运营商 CGNAT 屏蔽所有入站流量，且通常是*对称型* NAT，这使普通 STUN 打洞失效。唯一可靠的方式是设备主动拨出——这正是 WebRTC 路径（以及下文介绍的叠加网络替代方案）的做法。
 
+:::info 托管层级从何处开始
+此路径的**设备端**——拨出客户端、WHEP 桥接、中继——是开放内核代码，但它需要一个可拨出的**汇聚点**：托管汇聚点即 Heldar 的托管层级。如果您完全不想依赖托管服务，完全自托管的替代方案是下文介绍的网络叠加层。
+:::
+
 ## 开启方法（设备端）
 
 远程访问需要手动开启。设备需要启用认证并配置拨出汇聚点：
@@ -29,7 +33,7 @@ sidebar_position: 3
 HELDAR_AUTH_ENABLED=true              # required — the relay refuses to run without it
 HELDAR_AUTH_COOKIE_SECURE=true        # the rendezvous terminates TLS
 HELDAR_REMOTE_RENDEZVOUS_URL=https://<your-rendezvous>   # the box dials OUT to this
-HELDAR_CP_TOKEN=<dial-out bearer>     # authenticates the box to the rendezvous (== the Worker's BOX_TOKEN)
+HELDAR_CP_TOKEN=<dial-out bearer>     # the per-box token your rendezvous issued for this HELDAR_SITE_ID (site-bound)
 HELDAR_SITE_ID=<stable-id-for-this-box>
 ```
 

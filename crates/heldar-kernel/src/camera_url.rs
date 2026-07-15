@@ -149,11 +149,12 @@ const ALLOWED_SCHEMES: &[&str] = &["rtsp", "rtsps", "http", "https"];
 /// whitespace or control characters.
 pub fn validate_stream_url(url: &str) -> Result<(), String> {
     let url = url.trim();
-    // Reject embedded whitespace / control characters. This URL is interpolated into the MediaMTX
-    // `runOnDemand` command STRING, which MediaMTX splits on whitespace before exec'ing ffmpeg — so a
-    // space would inject extra ffmpeg arguments/outputs (arbitrary file write / LFI / SSRF), exactly
-    // the class this allow-list exists to close. A well-formed RTSP/HTTP URL never contains raw
-    // whitespace or control chars (they must be percent-encoded).
+    // Reject embedded whitespace / control characters. The URL is now handed to the kernel-spawned
+    // ffmpeg as a single argv element (services/live_publisher.rs — no shell, no whitespace splitting),
+    // but a well-formed RTSP/HTTP URL never contains raw whitespace or control chars (they must be
+    // percent-encoded), they poison logs, and under the removed MediaMTX `runOnDemand` command string
+    // they enabled argument injection (arbitrary file write / LFI / SSRF) — keep this as an
+    // input-validity + defense-in-depth gate.
     if url.chars().any(|c| c.is_whitespace() || c.is_control()) {
         return Err(format!(
             "stream URL `{}` contains whitespace or control characters",

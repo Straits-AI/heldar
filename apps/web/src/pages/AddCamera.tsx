@@ -1,8 +1,8 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import type { ChangeEventHandler, FormEvent, ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
-import type { CameraCreate, RecordMode, RecordStream } from "../lib/types";
+import type { CameraCreate, Principal, RecordMode, RecordStream } from "../lib/types";
 import {
   Button,
   Field,
@@ -129,6 +129,26 @@ export function AddCamera() {
   // after an RTSP / ONVIF scan, so an operator can register a discovered device in one step.
   const [searchParams] = useSearchParams();
 
+  // Camera creation is manager+ (the API enforces this — the form mirrors it instead of letting a
+  // viewer fill every panel and only learn at submit time). When auth is off the server returns the
+  // `system` admin principal; unauthenticated leaves the submit gated off.
+  const [principal, setPrincipal] = useState<Principal | null>(null);
+  useEffect(() => {
+    let alive = true;
+    api
+      .me()
+      .then((p) => {
+        if (alive) setPrincipal(p);
+      })
+      .catch(() => {
+        /* unauthenticated / auth off — leave principal null (submit gated off) */
+      });
+    return () => {
+      alive = false;
+    };
+  }, []);
+  const canManage = principal?.role === "admin" || principal?.role === "manager";
+
   const [name, setName] = useState(() => searchParams.get("name") ?? "");
   const [id, setId] = useState("");
   const [siteId, setSiteId] = useState("");
@@ -148,8 +168,10 @@ export function AddCamera() {
 
   const [recordStream, setRecordStream] = useState<RecordStream>("main");
   const [recordMode, setRecordMode] = useState<RecordMode>("continuous");
-  const [segmentSeconds, setSegmentSeconds] = useState(60);
-  const [retentionHours, setRetentionHours] = useState(24);
+  // Kept as strings so a cleared field is caught by validation instead of Number("") === 0 silently
+  // submitting 0 (which the server would clamp to a 2s segment / 1h retention).
+  const [segmentSeconds, setSegmentSeconds] = useState("60");
+  const [retentionHours, setRetentionHours] = useState("24");
   const [storageQuotaGb, setStorageQuotaGb] = useState("");
   const [preRollSeconds, setPreRollSeconds] = useState(5);
   const [postRollSeconds, setPostRollSeconds] = useState(30);
@@ -182,6 +204,16 @@ export function AddCamera() {
       setError("Name is required.");
       return;
     }
+    const segSecs = Number(segmentSeconds);
+    if (!segmentSeconds.trim() || !Number.isFinite(segSecs) || segSecs < 2) {
+      setError("Segment length must be at least 2 seconds.");
+      return;
+    }
+    const retHours = Number(retentionHours);
+    if (!retentionHours.trim() || !Number.isFinite(retHours) || retHours < 1) {
+      setError("Retention must be at least 1 hour.");
+      return;
+    }
 
     const body: CameraCreate = {
       name: name.trim(),
@@ -194,8 +226,8 @@ export function AddCamera() {
       anr_enabled: anrEnabled,
       enabled,
       live_warm: liveWarm,
-      segment_seconds: segmentSeconds,
-      retention_hours: retentionHours,
+      segment_seconds: segSecs,
+      retention_hours: retHours,
     };
     if (id.trim()) body.id = id.trim();
     if (siteId.trim()) body.site_id = siteId.trim();
@@ -255,6 +287,15 @@ export function AddCamera() {
             </p>
           </div>
         </div>
+
+        {!canManage && (
+          <div className="flex items-start gap-2.5 rounded-md border border-line bg-panel2/60 px-3 py-2.5">
+            <InfoIcon className="mt-0.5 h-3.5 w-3.5 shrink-0 text-fg-muted" />
+            <p className="text-xs leading-relaxed text-fg-secondary">
+              Manager role required to register cameras — this form is read-only for your role.
+            </p>
+          </div>
+        )}
 
         <form onSubmit={handleSubmit} className="space-y-5">
           {/* Identity */}
@@ -478,7 +519,7 @@ export function AddCamera() {
                   value={segmentSeconds}
                   min={2}
                   max={3600}
-                  onChange={(e) => setSegmentSeconds(Number(e.target.value))}
+                  onChange={(e) => setSegmentSeconds(e.target.value)}
                 />
               </Field>
               <Field label="Retention (hours)" htmlFor="retention">
@@ -487,7 +528,7 @@ export function AddCamera() {
                   type="number"
                   value={retentionHours}
                   min={1}
-                  onChange={(e) => setRetentionHours(Number(e.target.value))}
+                  onChange={(e) => setRetentionHours(e.target.value)}
                 />
               </Field>
             </div>
@@ -624,7 +665,7 @@ export function AddCamera() {
             >
               Cancel
             </Link>
-            <Button type="submit" variant="primary" disabled={submitting}>
+            <Button type="submit" variant="primary" disabled={submitting || !canManage}>
               {submitting ? (
                 <>
                   <Spinner size={14} />

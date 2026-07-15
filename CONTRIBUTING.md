@@ -9,7 +9,7 @@ and are out of scope here.
 
 | In scope (Apache-2.0) | Out of scope (proprietary, elsewhere) |
 | --- | --- |
-| `heldar-kernel` — media/DVR, perception ingest + sampler, zone engine, auth/RBAC, retention, remote-access awareness, worker SDK | Vertical/client products (retail analytics, the campus suite, etc.) |
+| `heldar-kernel` — media/DVR, perception ingest + sampler, zone engine, auth/RBAC, retention, remote-access awareness, worker SDK | Vertical/client products (retail analytics, access-control suites, etc.) |
 | `heldar-entry` (access control), `heldar-movement`, `heldar-search` — generic reference apps | Client-specific dashboards, integrations, or business logic |
 | `heldar-server` reference bin, `apps/ai` reference worker, `apps/web` reference dashboard, docs | — |
 
@@ -35,13 +35,20 @@ stack and write reports to `data/`.
 Before opening a PR, all of these must pass:
 
 ```bash
-cargo build --workspace
-cargo clippy --workspace --all-targets   # must be warning-free
-cargo test --workspace
-cargo fmt --all -- --check                # formatted
+cargo fmt --all -- --check                                     # formatted
+cargo clippy --workspace --all-targets --locked -- -D warnings # warning-free (CI denies warnings)
+cargo build --workspace --locked
+cargo test --workspace --locked
 
-# the OPEN reference build must link zero proprietary code:
-cargo build -p heldar-server --no-default-features
+# cross-app reads must go through the owner-published *_read contract views:
+./scripts/check-read-seam.sh
+
+# the OPEN reference build must link zero proprietary code (and no wasm runtime by default):
+cargo build -p heldar-server --no-default-features --locked
+
+# off-by-default features must still compile + lint:
+cargo clippy -p heldar-server --features wasm --all-targets --locked -- -D warnings
+cargo build -p heldar-server --features smtp --locked
 
 # frontend:
 cd apps/web && npm ci && npm run build
@@ -60,10 +67,13 @@ cd apps/web && npm ci && npm run build
 3. Open a PR describing the problem and the approach. Link any issue.
 4. By contributing, you agree your contributions are licensed under **Apache-2.0** (the repo license).
 
+All participation is covered by the [Code of Conduct](./CODE_OF_CONDUCT.md).
+
 ## Reporting security issues
 
 Please do **not** open public issues for vulnerabilities. Report them privately to the maintainers
-(security contact in the repo settings). See the security posture in
+(security contact in the repo settings). The disclosure process, response expectations, and scope
+are in [SECURITY.md](./SECURITY.md). See the security posture in
 [ARCHITECTURE.md](./ARCHITECTURE.md) and the auth/RBAC + remote-access docs.
 
 ## Docs

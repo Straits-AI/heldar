@@ -75,7 +75,8 @@ pub struct LiveUrls {
 }
 
 /// MediaMTX (and our default config) listen on loopback. A playback URL like `http://127.0.0.1:8888/…`
-/// is useless to a REMOTE client — over the WireGuard tunnel (or on the LAN) `127.0.0.1` is the client
+/// is useless to a REMOTE client — over an overlay tunnel (Tailscale/NetBird/WireGuard) or on the LAN,
+/// `127.0.0.1` is the client
 /// itself, not the box. When the configured base points at loopback/unspecified, rewrite its HOST to the
 /// one the client used to reach us (the request's `Host` header), preserving scheme + port. An explicitly
 /// external base (a real hostname/IP, e.g. a CDN) is left untouched so operator overrides still win.

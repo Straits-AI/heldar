@@ -102,6 +102,8 @@ enabling detection tasks, drawing zones, and configuring alerting.
 | Port | Service |
 | --- | --- |
 | 8000 | Heldar Core HTTP API + dashboard |
+| 8080 | Dashboard (Docker deploy, nginx → core :8000) |
 | 5173 | Web dashboard (Vite dev server) |
-| 8554 / 8888 / 8889 | MediaMTX RTSP / HLS / WebRTC |
+| 8554 / 8888 / 8889 | MediaMTX RTSP / HLS / WebRTC (WHEP signaling) |
+| 8189/udp | MediaMTX WebRTC (ICE media) |
 | 9997 | MediaMTX control API (loopback) |

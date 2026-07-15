@@ -127,24 +127,30 @@ impl DetectionConsumer for DwellCounter {
 [`heldar-entry/src/anpr.rs`](https://github.com/Straits-AI/heldar/blob/main/crates/heldar-entry/src/anpr.rs)
 中的 ANPR 引擎（`impl DetectionConsumer for AnprEngine`）。
 
-## 3. 幂等地自安装 schema
+## 3. 用版本化迁移自安装 schema
 
-你的应用拥有自己的数据表。在启动时将其应用到共享连接池，与
+你的应用拥有自己的数据表。在启动时使用内核的版本化、只追加的应用迁移运行器将其应用到共享连接池，与
 [`heldar-entry/src/schema.rs`](https://github.com/Straits-AI/heldar/blob/main/crates/heldar-entry/src/schema.rs)
 完全一致：
 
 ```rust
 // src/schema.rs
+use heldar_kernel::db::{run_app_migrations, AppMigration};
 use sqlx::SqlitePool;
 
-pub async fn init(pool: &SqlitePool) -> sqlx::Result<()> {
-    sqlx::raw_sql(include_str!("schema.sql")).execute(pool).await?;
-    Ok(())
+const MIGRATIONS: &[AppMigration] = &[AppMigration {
+    version: 1,
+    name: "init",
+    sql: include_str!("../migrations/0001_init.sql"),
+}];
+
+pub async fn init(pool: &SqlitePool) -> anyhow::Result<()> {
+    run_app_migrations(pool, "dwell", MIGRATIONS).await
 }
 ```
 
 ```sql
--- src/schema.sql
+-- migrations/0001_init.sql
 CREATE TABLE IF NOT EXISTS dwell_counts (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     camera_id  TEXT NOT NULL,
@@ -154,7 +160,7 @@ CREATE TABLE IF NOT EXISTS dwell_counts (
 CREATE INDEX IF NOT EXISTS idx_dwell_cam_ts ON dwell_counts (camera_id, ts);
 ```
 
-使用 `CREATE TABLE IF NOT EXISTS` 使 `init` 具备幂等性（每次部署单租户）。内核不会定义你的业务表；你共享其 `SqlitePool`，但拥有自己的 schema。
+每条迁移都会以你的组件名（此处为 `"dwell"`）记录在 `_heldar_app_migrations` 中且只应用一次，因此各应用在共享数据库上不会与内核或彼此冲突。之后若要修改 schema，添加一个新的 `migrations/NNNN_*.sql` 并在 `MIGRATIONS` 中加一行——**绝不修改已发布的迁移**（运行器的校验和守卫会拒绝它）。内核不会定义你的业务表；你共享其 `SqlitePool`，但拥有自己的 schema。
 
 ## 4. 暴露 `Router<AppState>` 并合并
 
@@ -239,3 +245,5 @@ spawn_supervised("dwell_rollup", move || heldar_dwell::rollup::run(p.clone()));
 ## 并非所有应用都是 consumer
 
 `heldar-movement` 和 `heldar-search` 基于相同的接缝构建，但不在摄入热路径上：movement 是两个受监督的后台循环（ReID 候选提议器和违规规则引擎），search 是对已存储内核事实的只读查询层。两者仍拥有自己的 schema、暴露路由器，movement 还会启动循环，在服务器中的组合方式与上述完全一致，只是省去了 consumer 注册。根据需要选择合适的模式：使用 consumer 进行逐批解读，使用循环做周期性汇聚，或使用纯路由器进行只读查询。
+
+需要读取另一个应用的事实？查询它发布的 `*_read` 契约视图（`entry_events_read`、`breach_alerts_read` 等），绝不直接查询其基础表——视图才是稳定的跨应用契约，拥有方可以演进其数据表而不破坏你。如果希望其他应用读取你的数据，也请（以迁移的形式）发布你自己的 `*_read` 视图。

@@ -45,9 +45,10 @@ fn validate_record_mode(mode: &str) -> AppResult<()> {
     }
 }
 
-/// Reject a camera `address` containing whitespace or control characters. The address is interpolated
-/// into the RTSP URL and thence the MediaMTX `runOnDemand` ffmpeg command string (which is split on
-/// whitespace), so a space would inject extra ffmpeg arguments. A hostname/IP never needs them.
+/// Reject a camera `address` containing whitespace or control characters. The address flows into the
+/// RTSP URL handed to the kernel-spawned ffmpeg as a single argv element (services/live_publisher.rs —
+/// no whitespace splitting), but a hostname/IP never legitimately contains them, so this stays as
+/// input validation + defense in depth.
 fn validate_address(address: Option<&str>) -> AppResult<()> {
     if let Some(a) = address {
         if a.chars().any(|c| c.is_whitespace() || c.is_control()) {

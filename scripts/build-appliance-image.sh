@@ -31,10 +31,20 @@ say "build heldar-core (release)"
 BIN="$ROOT/target/release/heldar-core"
 [ -x "$BIN" ] || { echo "ERROR: $BIN missing after build" >&2; exit 1; }
 
+# ---- 1b. Build the dashboard (the appliance serves it from HELDAR_WEB_DIR — an appliance without
+# the web UI is an API-only box, useless to the operator it targets) ----
+say "build dashboard (apps/web)"
+have npm || { echo "ERROR: npm not found — the appliance image needs the dashboard built (install Node.js >= 20)" >&2; exit 1; }
+( cd "$ROOT/apps/web" && npm ci && npm run build )
+[ -f "$ROOT/apps/web/dist/index.html" ] || { echo "ERROR: apps/web/dist missing after build" >&2; exit 1; }
+
 # ---- 2. Stage the overlay (files to drop into the rootfs verbatim) ----
 say "stage overlay → $STAGE"
 rm -rf "$STAGE"
 install -D -m755 "$BIN" "$STAGE/usr/local/bin/heldar-core"
+# dashboard: served by heldar-core itself (tower-http ServeDir) — heldar-core.service sets HELDAR_WEB_DIR here
+mkdir -p "$STAGE/usr/local/share/heldar"
+cp -a "$ROOT/apps/web/dist" "$STAGE/usr/local/share/heldar/web"
 # mediamtx: use the vendored binary if present, else the appliance build downloads it (document per-arch).
 if [ -x "$ROOT/infra/mediamtx/mediamtx" ]; then
   install -D -m755 "$ROOT/infra/mediamtx/mediamtx" "$STAGE/usr/local/bin/mediamtx"

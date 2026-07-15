@@ -7,7 +7,8 @@
 //!
 //! Policy:
 //! - `publish` / `api` / `metrics` / `pprof`: allow only from a loopback client (the kernel's own
-//!   runOnDemand ffmpeg publishes from `rtsp://localhost`, and the API/metrics ports are loopback-bound).
+//!   live-publisher ffmpeg (`services/live_publisher.rs`) publishes from `rtsp://localhost`, and the
+//!   API/metrics ports are loopback-bound).
 //!   This preserves the anti-stream-injection posture that `authInternalUsers` used to enforce (which is
 //!   ignored under `authMethod: http`).
 //! - `read` / `playback`:

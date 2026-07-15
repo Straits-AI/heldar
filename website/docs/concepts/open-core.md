@@ -65,6 +65,4 @@ major version bump that apps opt into.
 The kernel and the generic apps are Apache-2.0. Proprietary verticals are
 licensed separately. See
 [LICENSING.md](https://github.com/Straits-AI/heldar/blob/main/LICENSING.md) for
-the boundary and
-[OPEN-CORE-SPLIT.md](https://github.com/Straits-AI/heldar/blob/main/docs/OPEN-CORE-SPLIT.md)
-for the polyrepo split and publishing runbook.
+the boundary.

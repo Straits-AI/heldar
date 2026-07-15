@@ -32,7 +32,9 @@ camera.
 **Camera detail** (`/cameras/:id`) — the operator view for one camera: low-latency **live** video
 (WebRTC/WHEP, HLS fallback) and a **recorded timeline** you click to scrub (1h / 6h / 24h / 3d). From
 here you capture snapshots, export evidence clips (MP4), evidence-lock segments, trigger a manual
-recording (event mode), and manage the camera's **AI tasks** and **zones** (below). Panels show recent
+recording (event mode), toggle **Warm live** (keep this camera's live stream warm for instant playback;
+the default is on-demand start with idle close), and manage the camera's **AI tasks** and **zones**
+(below). Panels show recent
 segments and events, health telemetry (FPS, bitrate, reconnects), PTZ, the recording schedule, and ANR
 gap re-fill.
 
@@ -42,7 +44,7 @@ scrub them all on one master clock with shared play/pause/seek and speed (0.5× 
 **Add camera** (`/cameras/new`) — register a camera. Pick a vendor (Hikvision / Dahua / Generic); the
 RTSP URL is built from the vendor template (you supply address + credentials) or given explicitly for
 Generic. Set the recording mode (continuous / scheduled / event / scheduled+event), stream, segment
-length, retention, per-camera storage quota, and pre/post-roll for event modes.
+length, retention, per-camera storage quota, warm live, and pre/post-roll for event modes.
 
 **Discover** (`/discover`) — scan an IP range for RTSP cameras (and ONVIF), identify vendor/model from
 the banner, verify credentials, and jump to Add Camera pre-filled (manager+).
@@ -65,8 +67,11 @@ credentials.
 
 **System** (`/system`) — health + observability: the storage panel (disk gauge, projected fill horizon,
 write rate), the **recording-limit** controls (size cap + free-disk floor, tunable live — admin+),
-per-camera health, the recent-events feed, the immutable **audit log** (manager+), bulk camera config,
-and the webhooks panel (admin+).
+the **database-limit** controls (the `heldar.db` metadata-DB cap + the one-time auto_vacuum
+conversion — admin+), the **live-transcode** engine selector (software / VAAPI / NVENC, with detected
+hardware encoders; applies to new live sessions immediately — admin+), per-camera health, the
+recent-events feed, the immutable **audit log** (manager+), bulk camera config, and the webhooks
+panel (admin+).
 
 ## Domain modules
 

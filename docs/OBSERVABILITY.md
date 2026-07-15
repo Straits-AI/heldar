@@ -10,7 +10,7 @@ shapes, metric names, event types, and env vars below are the real ones — if a
 field or metric is not listed here, it is not emitted. The authoritative sources
 are: `routes/health.rs`, `routes/system.rs`, `routes/recordings.rs`,
 `routes/metrics.rs`, `services/storage.rs`, `services/metrics.rs`,
-`services/notifier.rs`, `services/retention.rs`, `services/health.rs`,
+`services/webhooks.rs`, `services/retention.rs`, `services/health.rs`,
 `services/indexer.rs`, `config.rs`, and `.env.example`.
 
 Covers observability and reliability (faults visible,
@@ -175,60 +175,68 @@ groups:
 
 ---
 
-## 3. Alerting webhook (notifier)
+## 3. Alerting webhooks (subscriptions)
 
-`services/notifier.rs` runs as a supervised background loop that pushes
-**warning/critical events** to an external webhook as they happen.
+`services/webhooks.rs` runs as a supervised background loop that delivers events to
+external systems through **webhook subscriptions** — it supersedes the old
+single-URL alert notifier.
 
-- **Enable it** by setting `HELDAR_ALERT_WEBHOOK_URL`. If unset/blank, the
-  notifier logs `alerting disabled` and is a no-op.
+- **Enable it** by creating a subscription: `POST /api/v1/webhooks` (or the
+  dashboard's Webhooks panel) with a target `url`, an `event_types` filter (`["*"]`
+  = all), a `min_severity` floor (e.g. `warning`), and an optional HMAC `secret`.
+  No enabled subscriptions = the loop idles.
 - **Poll cadence**: `HELDAR_NOTIFIER_INTERVAL_S` (default `15`, floored at 5s).
-- **HTTP**: `POST` JSON with a 10-second client timeout.
+- **HTTP**: `POST` JSON with a 10-second client timeout; redirects are disabled so
+  a target can't 302 the box to an internal URL.
 
 ### Payload shape (one POST per event)
 
 ```json
 {
-  "source":     "heldar-core",
-  "event_id":   "…",
+  "id":         "…",
+  "camera_id":  "front-gate",
+  "site_id":    "…",
   "event_type": "camera_offline",
   "severity":   "warning",
-  "camera_id":  "front-gate",
   "timestamp":  "2026-06-13T12:34:56Z",
   "payload":    { "ran_seconds": 3, "detail": "…" }
 }
 ```
 
 `camera_id` is `null` for system-wide events (e.g. disk pressure); `payload` is the
-raw event payload object as logged.
+raw event payload object as logged. Each POST carries `X-Heldar-Event` /
+`X-Heldar-Delivery` / `X-Heldar-Timestamp` headers and, when the subscription has a
+secret, `X-Heldar-Signature: sha256=<hex HMAC-SHA256(secret, raw_body)>` over the
+exact bytes sent.
 
 ### What gets delivered
 
-Only events with **`severity IN ('warning', 'critical')`** are delivered (query in
-`deliver()`). In the current code that is:
+Whatever the subscription's `event_types` + `min_severity` filters admit
+(`GET /api/v1/events/types` lists the known types). With a `warning` floor, the
+Stage 1 kernel events are:
 
-| `event_type` | Severity | Delivered? | Emitted by |
-|---|---|---|---|
-| `camera_offline` | warning | ✅ | recorder reconnect (`recorder.rs`) |
-| `recorder_error` | warning | ✅ | no-URL / staleness (`recorder.rs`, `health.rs`) |
-| `recording_gap` | warning | ✅ | indexer detects a >3 s hole (`indexer.rs`) |
-| `disk_pressure` | warning | ✅ | size-cap pruning / locked-exceeds-cap (`retention.rs`) |
-| `disk_pressure` | critical | ✅ | disk-free-floor pruning (`retention.rs`) |
-| `retention_delete` | info | ❌ | routine age-based cleanup (`retention.rs`) |
+| `event_type` | Severity | Emitted by |
+|---|---|---|
+| `camera_offline` | warning | recorder reconnect (`recorder.rs`) |
+| `recorder_error` | warning | no-URL / staleness (`recorder.rs`, `health.rs`) |
+| `recording_gap` | warning | indexer detects a >3 s hole (`indexer.rs`) |
+| `disk_pressure` | warning | size-cap pruning / locked-exceeds-cap (`retention.rs`) |
+| `disk_pressure` | critical | disk-free-floor pruning (`retention.rs`) |
+| `retention_delete` | info | routine age-based cleanup (`retention.rs`) — below a `warning` floor |
 
 ### "Starts from now" + retry behavior
 
-- **Starts from now:** the delivery cursor is initialized to `Utc::now()` at
-  startup, so the notifier **never replays history** when the process boots — you
-  only get events that occur after start-up.
-- **On transport failure** (no HTTP response — connection refused, timeout): the
-  cursor is **not** advanced and the loop `return`s, so the failed event *and any
-  after it* are retried on the next poll cycle. This is at-least-once for
-  unreachable endpoints.
-- **On a non-2xx response** (the endpoint answered but rejected): it is logged as a
-  warning and the cursor **advances** — that event is *not* retried. Make sure your
-  receiver returns 2xx on accept.
-- Each cycle delivers up to 100 events, oldest-first.
+- **Starts from now:** a new subscription's cursor is initialized to `Utc::now()`,
+  so history is **never replayed** — you only get events that occur after it is
+  created. Each subscription keeps its own persisted cursor, so subscriptions
+  advance independently.
+- **On a failed delivery** (transport failure or non-2xx): the attempt is recorded
+  in `webhook_deliveries` and the cursor stays on that event, so it is retried next
+  cycle (at-least-once) — until the per-event attempts reach 5, after which the
+  event is given up on and the cursor advances (a dead endpoint can't wedge the
+  queue). `GET /api/v1/webhooks/{id}/deliveries` shows the ledger;
+  `POST /api/v1/webhooks/{id}/test` sends a synthetic event.
+- Each cycle drains in batches of 100, oldest-first.
 
 ---
 
@@ -344,7 +352,7 @@ losing data.
 ## 7. Background-task supervision
 
 The four observability/reliability loops — **indexer, health, retention,
-notifier** — are launched through `spawn_supervised` in `main.rs`. If a supervised
+webhooks** — are launched through `spawn_supervised` in `main.rs`. If a supervised
 task **returns or panics**, the supervisor logs the cause and **respawns it after a
 5 s delay**; if it is cancelled (graceful shutdown) it stops cleanly. The `run()`
 loops are infinite by design, so a return/panic is treated as a fault and the task
@@ -367,7 +375,7 @@ logs a `camera_offline` event).
   `reconnect_count`, `last_segment_at`
 - **Recent faults?** `GET /api/v1/events?severity=warning` (or `critical`)
 - **Coverage holes?** `GET /api/v1/cameras/{id}/gaps?from=…&to=…`
-- **Get paged automatically?** set `HELDAR_ALERT_WEBHOOK_URL` and/or scrape
+- **Get paged automatically?** create a webhook subscription (§3) and/or scrape
   `/metrics` with the rules in §2.
 
 ---
@@ -380,8 +388,7 @@ All `HELDAR_*` env vars (see `.env.example` / `config.rs`):
 |---|---|---|
 | `HELDAR_MAX_RECORDINGS_GB` | `20` | size cap (retention §6) |
 | `HELDAR_MIN_FREE_DISK_GB` | `5` | disk-free floor (retention §6) |
-| `HELDAR_ALERT_WEBHOOK_URL` | *(unset)* | notifier — unset disables alerting (§3) |
-| `HELDAR_NOTIFIER_INTERVAL_S` | `15` (min 5) | notifier poll cadence |
+| `HELDAR_NOTIFIER_INTERVAL_S` | `15` (min 5) | webhook-delivery poll cadence (subscriptions via `/api/v1/webhooks`, §3) |
 | `HELDAR_RETENTION_INTERVAL_S` | `300` (min 30) | retention sweep cadence |
 | `HELDAR_HEALTH_INTERVAL_S` | `15` (min 5) | staleness monitor cadence |
 | `HELDAR_INDEXER_INTERVAL_S` | `10` (min 2) | indexer / gap-detect cadence |

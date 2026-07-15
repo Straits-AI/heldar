@@ -122,9 +122,10 @@ Con una cámara y una tarea de IA en ejecución, usa el dashboard para:
   entre 0 y 1, correspondiendo a los cuadros de detección. Establece `labels` para filtrar qué detecciones cuentan,
   `dwell_seconds` para activar una alerta de permanencia, y una `severity`. Las detecciones rastreadas
   que cruzan una zona generan eventos de zona `enter` / `exit` / `dwell` con un fotograma de evidencia.
-- **Alertas** — apunta el notificador de alertas a un webhook (`HELDAR_ALERT_WEBHOOK_URL`
-  o la interfaz). Los eventos `warning` y `critical`, incluidos los eventos de zona y
-  los eventos publicados por el worker, se envían a él.
+- **Alertas** — crea una suscripción webhook en **Sistema → Webhooks** (o
+  `POST /api/v1/webhooks` con `min_severity: "warning"`). Los eventos `warning` y
+  `critical`, incluidos los eventos de zona y los eventos publicados por el worker,
+  se envían a ella — ver [Webhooks e integración](../develop/webhooks.md).
 
 ## Siguientes pasos
 

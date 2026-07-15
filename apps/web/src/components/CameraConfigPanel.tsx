@@ -866,6 +866,14 @@ export function BulkConfigPanel({ canManage }: { canManage: boolean }) {
       setError(action);
       return;
     }
+    // Fleet-wide config rewrite (a stray click with nothing selected targets EVERY enabled camera)
+    // — confirm with the resolved action + target count, like the single-camera Reboot above.
+    const actionLabel = BULK_ACTIONS.find((a) => a.value === actionType)?.label ?? actionType;
+    const targetLabel =
+      selected.size > 0
+        ? `${selected.size} selected camera${selected.size === 1 ? "" : "s"}`
+        : `all ${list.filter((c) => c.enabled).length} enabled cameras`;
+    if (!window.confirm(`Apply "${actionLabel}" to ${targetLabel}?`)) return;
     const body: BulkConfigRequest = {
       camera_ids: selected.size > 0 ? [...selected] : null,
       action,

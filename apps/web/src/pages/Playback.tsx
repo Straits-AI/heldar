@@ -1,10 +1,12 @@
 import Hls from "hls.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import { api } from "../lib/api";
 import { usePoll } from "../lib/usePoll";
 import type { PlaybackSession } from "../lib/types";
 import { Button, EmptyState, SectionLabel, Spinner, Stat } from "../components/ui";
 import { hevcDecodeSupported, HEVC_UNSUPPORTED_NOTE } from "../lib/codec";
+import { localInputToIso } from "../lib/format";
 
 // Multi-camera SYNCHRONIZED playback. Each selected camera gets its own segment-spanning HLS VOD
 // session over the same [from,to] window (so every playlist starts at the same wall-clock instant);
@@ -41,6 +43,7 @@ export function Playback() {
   const [opening, setOpening] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [skipped, setSkipped] = useState<string[]>([]);
+  const [failed, setFailed] = useState<string[]>([]);
 
   // transport
   const [playing, setPlaying] = useState(false);
@@ -74,38 +77,62 @@ export function Playback() {
 
   async function open() {
     if (selected.size === 0) return;
-    setOpening(true);
     setError(null);
     setSkipped([]);
+    setFailed([]);
+    // Validate BEFORE converting: a cleared datetime-local field makes `new Date("")` an Invalid
+    // Date whose toISOString() throws — which would strand the page on "Building sessions…".
+    const fromIso = localInputToIso(from);
+    const toIso = localInputToIso(to);
+    if (!fromIso || !toIso) {
+      setError("Both `from` and `to` times are required.");
+      return;
+    }
+    if (new Date(fromIso) >= new Date(toIso)) {
+      setError("`from` must be before `to`.");
+      return;
+    }
+    setOpening(true);
     releaseSessions();
     setSessions(null);
     setPlaying(false);
     setCursor(0);
-    const fromIso = new Date(from).toISOString();
-    const toIso = new Date(to).toISOString();
-    if (new Date(fromIso) >= new Date(toIso)) {
-      setError("`from` must be before `to`.");
+    try {
+      const ids = [...selected];
+      const results = await Promise.all(
+        ids.map((id) =>
+          api
+            .createPlaybackSession(id, fromIso, toIso)
+            .then((s) => ({ id, session: s, error: null as string | null }))
+            .catch((e: unknown) => ({
+              id,
+              session: null as PlaybackSession | null,
+              error: e instanceof Error ? e.message : String(e),
+            })),
+        ),
+      );
+      const nameFor = (id: string) => camList.find((c) => c.id === id)?.name ?? id;
+      const ok = results
+        .filter((r) => r.session && r.session.segment_count > 0)
+        .map((r) => r.session!);
+      // A server error is NOT "no footage" — report it separately so an operator never reads a
+      // backend failure as evidence that footage does not exist.
+      const noFootage = results
+        .filter((r) => r.session && r.session.segment_count === 0)
+        .map((r) => nameFor(r.id));
+      const errored = results
+        .filter((r) => !r.session)
+        .map((r) => `${nameFor(r.id)} (${r.error ?? "unknown error"})`);
+      activeSessions.current = ok;
+      setSkipped(noFootage);
+      setFailed(errored);
+      if (ok.length === 0 && errored.length === 0) {
+        setError("No recorded footage for the selected cameras in that window.");
+      }
+      setSessions(ok);
+    } finally {
       setOpening(false);
-      return;
     }
-    const ids = [...selected];
-    const results = await Promise.all(
-      ids.map((id) =>
-        api
-          .createPlaybackSession(id, fromIso, toIso)
-          .then((s) => ({ id, session: s }))
-          .catch(() => ({ id, session: null as PlaybackSession | null })),
-      ),
-    );
-    const ok = results.filter((r) => r.session && r.session.segment_count > 0).map((r) => r.session!);
-    const noFootage = results.filter((r) => !r.session || r.session.segment_count === 0).map((r) => r.id);
-    activeSessions.current = ok;
-    setSkipped(noFootage);
-    if (ok.length === 0) {
-      setError("No recorded footage for the selected cameras in that window.");
-    }
-    setSessions(ok);
-    setOpening(false);
   }
 
   // Attach an hls.js VOD player to each session's <video> once they render.
@@ -247,8 +274,22 @@ export function Playback() {
 
         {/* Camera picker */}
         <div className="mt-4 flex flex-wrap gap-2" data-testid="pb-camera-picker">
-          {camList.length === 0 ? (
-            <span className="font-mono text-xs text-fg-muted">No cameras registered.</span>
+          {cameras.loading && !cameras.data ? (
+            <span className="flex items-center gap-2 font-mono text-xs text-fg-muted">
+              <Spinner size={13} /> Loading cameras…
+            </span>
+          ) : cameras.error && !cameras.data ? (
+            <span className="font-mono text-xs text-danger">
+              Failed to load cameras: {cameras.error}
+            </span>
+          ) : camList.length === 0 ? (
+            <span className="font-mono text-xs text-fg-muted">
+              No cameras registered.{" "}
+              <Link to="/cameras/new" className="text-accent hover:underline">
+                Add a camera
+              </Link>{" "}
+              to start recording.
+            </span>
           ) : (
             camList.map((c) => {
               const on = selected.has(c.id);
@@ -278,6 +319,11 @@ export function Playback() {
         {error && (
           <div className="mb-4 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-xs text-red-300">
             {error}
+          </div>
+        )}
+        {failed.length > 0 && (
+          <div className="mb-4 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-[11px] text-red-300">
+            Failed to open: {failed.join(", ")}
           </div>
         )}
         {skipped.length > 0 && (

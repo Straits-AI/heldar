@@ -1,9 +1,9 @@
-import { lazy, Suspense, useEffect, useState } from "react";
-import { Link, Route, Routes } from "react-router-dom";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { Link, Route, Routes, useParams } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import Login from "./components/Login";
 import { Button, Spinner } from "./components/ui";
-import { api } from "./lib/api";
+import { api, ApiError } from "./lib/api";
 import type { Principal } from "./lib/types";
 import { ModuleFrame, ModulesProvider, useModules } from "./modules";
 import { ModuleHost } from "./modules/ModuleHost";
@@ -46,6 +46,14 @@ function RouteLoading() {
   );
 }
 
+/** Remount CameraDetail per camera id: /cameras/A → /cameras/B matches the same route, and without a
+ *  key the page keeps polling state (health, timeline, segments) from A rendered under B's header —
+ *  and segment actions (evidence lock) would target A's ids — until the refetch lands. */
+function CameraDetailRoute() {
+  const { id = "" } = useParams();
+  return <CameraDetail key={id} />;
+}
+
 /** Platform routes are static; module routes come from the loaded manifests (only loaded modules
  *  with a bundled page are routed). While modules are still loading, an unmatched path shows a spinner
  *  rather than flashing 404 on a module deep-link. */
@@ -64,7 +72,7 @@ function AppRoutes() {
         <Route path="/backup" element={<Backup />} />
         <Route path="/plugins" element={<Plugins />} />
         <Route path="/system" element={<System />} />
-        <Route path="/cameras/:id" element={<CameraDetail />} />
+        <Route path="/cameras/:id" element={<CameraDetailRoute />} />
 
         {/* Modules — dynamic from GET /api/v1/modules. In-process modules load their UI at runtime
             (mount=runtime → ModuleHost imports the bundle from `ui_url`); imported sidecars
@@ -90,20 +98,45 @@ function AppRoutes() {
 /** Gate the whole console behind authentication. On the appliance (auth disabled) `/auth/me` returns a
  *  synthetic `system` principal and the app renders straight through. When auth is enabled (the remote
  *  dashboard), an unauthenticated `/auth/me` 401s → render the sign-in form; on success the app mounts
- *  and a sign-out control appears (hidden for the appliance's `system` principal). */
+ *  and a sign-out control appears (hidden for the appliance's `system` principal). Only a 401/403 means
+ *  "signed out" — a network failure or 5xx (Core restarting) renders a retryable unreachable screen
+ *  instead of stranding an appliance operator (who has no credentials) at the sign-in form. */
 function AuthGate({ children }: { children: React.ReactNode }) {
   const [principal, setPrincipal] = useState<Principal | null | "loading">("loading");
-  useEffect(() => {
-    let alive = true;
-    api
-      .me()
-      .then((p) => alive && setPrincipal(p))
-      .catch(() => alive && setPrincipal(null));
-    return () => {
-      alive = false;
-    };
+  const [authError, setAuthError] = useState<string | null>(null);
+  const loadMe = useCallback(async () => {
+    setPrincipal("loading");
+    setAuthError(null);
+    try {
+      setPrincipal(await api.me());
+    } catch (e) {
+      if (e instanceof ApiError && (e.status === 401 || e.status === 403)) {
+        setPrincipal(null);
+      } else {
+        setAuthError(e instanceof Error ? e.message : String(e));
+      }
+    }
   }, []);
+  useEffect(() => {
+    void loadMe();
+  }, [loadMe]);
 
+  if (authError) {
+    return (
+      <div className="flex min-h-screen items-center justify-center px-4">
+        <div className="w-full max-w-md rounded-panel border border-line bg-panel p-5 text-center shadow-panel">
+          <h1 className="font-display text-lg font-bold text-fg">Core unreachable</h1>
+          <p className="mt-2 text-sm text-fg-secondary">
+            The console could not reach the Core to verify the session. It may be restarting.
+          </p>
+          <p className="mt-2 break-words font-mono text-xs text-danger">{authError}</p>
+          <Button variant="primary" className="mt-4" onClick={() => void loadMe()}>
+            Retry
+          </Button>
+        </div>
+      </div>
+    );
+  }
   if (principal === "loading") {
     return (
       <div className="flex min-h-screen items-center justify-center text-fg-muted">

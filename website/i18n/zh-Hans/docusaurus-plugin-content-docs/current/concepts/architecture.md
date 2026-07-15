@@ -50,7 +50,7 @@ pub trait DetectionConsumer: Send + Sync {
 
 ### 3. 自安装 Schema
 
-每个应用拥有自己的表，并在启动时对共享连接池幂等地应用其模式（每次部署单租户）。内核不定义领域表。其模式是运行一个 `schema::init(pool)`，该函数对包含若干 `CREATE TABLE IF NOT EXISTS` 语句的 `schema.sql` 文件执行 `include_str!`。
+每个应用拥有自己的表，并在启动时以版本化、只追加的迁移形式将其自行安装到共享连接池（`db::run_app_migrations`，按组件记录在 `_heldar_app_migrations` 中）。内核不定义领域表。其模式是运行一个 `schema::init(pool)`，该函数执行应用的 `MIGRATIONS` 数组中的 `migrations/NNNN_*.sql` 文件——演进 schema 时追加新迁移，绝不修改已发布的迁移。
 
 ### 4. 认证原语
 

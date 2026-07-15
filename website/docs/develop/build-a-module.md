@@ -143,24 +143,30 @@ in
 [`heldar-entry/src/anpr.rs`](https://github.com/Straits-AI/heldar/blob/main/crates/heldar-entry/src/anpr.rs)
 (`impl DetectionConsumer for AnprEngine`).
 
-## 3. Self-install your schema idempotently
+## 3. Self-install your schema with versioned migrations
 
-Your app owns its tables. Apply them against the shared pool on startup, exactly
-like
+Your app owns its tables. Apply them against the shared pool on startup with the
+kernel's versioned, append-only app-migration runner, exactly like
 [`heldar-entry/src/schema.rs`](https://github.com/Straits-AI/heldar/blob/main/crates/heldar-entry/src/schema.rs):
 
 ```rust
 // src/schema.rs
+use heldar_kernel::db::{run_app_migrations, AppMigration};
 use sqlx::SqlitePool;
 
-pub async fn init(pool: &SqlitePool) -> sqlx::Result<()> {
-    sqlx::raw_sql(include_str!("schema.sql")).execute(pool).await?;
-    Ok(())
+const MIGRATIONS: &[AppMigration] = &[AppMigration {
+    version: 1,
+    name: "init",
+    sql: include_str!("../migrations/0001_init.sql"),
+}];
+
+pub async fn init(pool: &SqlitePool) -> anyhow::Result<()> {
+    run_app_migrations(pool, "dwell", MIGRATIONS).await
 }
 ```
 
 ```sql
--- src/schema.sql
+-- migrations/0001_init.sql
 CREATE TABLE IF NOT EXISTS dwell_counts (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     camera_id  TEXT NOT NULL,
@@ -170,9 +176,12 @@ CREATE TABLE IF NOT EXISTS dwell_counts (
 CREATE INDEX IF NOT EXISTS idx_dwell_cam_ts ON dwell_counts (camera_id, ts);
 ```
 
-Use `CREATE TABLE IF NOT EXISTS` so `init` is idempotent (single-tenant per
-deployment). The kernel never defines your domain tables; you share its
-`SqlitePool` but own your schema.
+Each migration is recorded in `_heldar_app_migrations` under your component name
+(`"dwell"` here) and applied exactly once, so apps never collide with the kernel
+or each other on the shared DB. To change the schema later, add a new
+`migrations/NNNN_*.sql` and a line to `MIGRATIONS` — **never edit a shipped
+migration** (the runner's checksum guard rejects it). The kernel never defines
+your domain tables; you share its `SqlitePool` but own your schema.
 
 ## 4. Expose a `Router<AppState>` and merge it
 
@@ -283,3 +292,9 @@ and (for movement) spawn loops, composed in the server exactly as above, minus
 the consumer registration. Pick the pattern that fits: a consumer for per-batch
 interpretation, a loop for periodic rollups, or a plain router for read-only
 queries.
+
+Reading another app's facts? Query its published `*_read` contract view
+(`entry_events_read`, `breach_alerts_read`, …), never its base tables — the view
+is the stable cross-app contract, so the owning app can evolve its tables
+without breaking you. And publish a `*_read` view of your own (as a migration)
+if peers should read you.

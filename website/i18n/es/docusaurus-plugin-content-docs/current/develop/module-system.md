@@ -23,7 +23,7 @@ son el detalle.
 | **Wasm** | en proceso, en sandbox (wasmi) | sin cabeza — sin página (`mount: headless`) | recompilar el kernel | cómputo no confiable sobre el flujo de detección |
 
 - Los módulos **en proceso** se registran a través de los puntos de integración del kernel — un `DetectionConsumer`, una fusión `Router<AppState>`
-  y un esquema auto-instalado (`schema::init`) — y exponen un `manifest()` que contiene
+  y un esquema auto-instalado versionado (`schema::init` sobre `db::run_app_migrations`) — y exponen un `manifest()` que contiene
   `mount: runtime` + una `ui_url`. Su UI **no** está compilada en el panel (ver más abajo).
   Ver [Construir un módulo](./build-a-module.md).
 - Los plugins **sidecar** se registran en tiempo de ejecución vía `POST /api/v1/modules`: el kernel genera una clave de API con privilegios mínimos + una suscripción webhook para el plugin y realiza un proxy inverso de su UI + API bajo `/m/{id}/*`.

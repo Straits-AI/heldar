@@ -4,8 +4,8 @@ This is the integration guide for **AI workers** against the Heldar Core media
 kernel. It documents the Stage 2 **frame sampler** and the **worker contract**
 (§§1–10) plus the Stage 3 **detection + tracking analyzer and zone engine** (§11)
 exactly as built in `crates/heldar-kernel` (`services/sampler.rs`, `services/zones.rs`,
-`routes/ai.rs`, `routes/zones.rs`, `models.rs`, `config.rs`, `migrations/0003_ai.sql`,
-`migrations/0004_zones.sql`).
+`routes/ai.rs`, `routes/zones.rs`, `models.rs`, `config.rs`, and the AI + zones tables
+in `migrations/0001_init.sql`).
 
 Stage 2 delivers the **frame sampler and AI task scheduler**. Its success criterion is:
 
@@ -127,7 +127,7 @@ or `offline` / `error` / `stopped`.
 
 ## 3. The AI task model
 
-A row in `ai_tasks` (`migrations/0003_ai.sql`, `models.rs::AiTask`) declares
+A row in `ai_tasks` (`migrations/0001_init.sql`, `models.rs::AiTask`) declares
 *what perception to run on a camera*. Workers consume tasks; the kernel only uses
 `fps`/`width`/`enabled` to drive the sampler.
 
@@ -428,7 +428,7 @@ drops intermediate frames — acceptable for detection/tracking at these rates.
 ## 7. Conventions
 
 - **`bbox` is `[x, y, w, h]` normalized 0…1**, top-left origin (per the
-  `migrations/0003_ai.sql` comment). Normalizing means detections survive any
+  `detections` comment in `migrations/0001_init.sql`). Normalizing means detections survive any
   later change to `width` and are resolution-independent for the UI. Stored as
   raw JSON; the kernel does not validate the shape, so the worker owns
   correctness.
@@ -606,8 +606,8 @@ Stage 3 turns frames into **events**. It has two halves that meet at the **uncha
 1. a worker-side **YOLO + ByteTrack analyzer** that posts *tracked* detections, and
 2. a kernel-side **zone engine** that turns tracked detections into zone events.
 
-Kernel implementation: `services/zones.rs`, `routes/zones.rs`,
-`migrations/0004_zones.sql` (see [`ARCHITECTURE.md`](../ARCHITECTURE.md) §16).
+Kernel implementation: `services/zones.rs`, `routes/zones.rs`, and the zones
+tables in `migrations/0001_init.sql` (see [`ARCHITECTURE.md`](../ARCHITECTURE.md) §16).
 
 ### 11.1 The YOLO + ByteTrack analyzer (worker side)
 
@@ -714,8 +714,8 @@ machine in [`ARCHITECTURE.md`](../ARCHITECTURE.md) §16.2.
 
 ### 11.3 Zones API — `routes/zones.rs`
 
-A **zone** is a polygon region on a camera (`migrations/0004_zones.sql`,
-`models.rs::Zone`). Coordinates are **normalized 0…1**, matching the detection
+A **zone** is a polygon region on a camera (the `zones` table in
+`migrations/0001_init.sql`, `models.rs::Zone`). Coordinates are **normalized 0…1**, matching the detection
 `bbox`, so a zone drawn on the UI overlay maps directly onto detections regardless of
 sample resolution.
 

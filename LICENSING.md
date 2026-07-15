@@ -31,5 +31,5 @@ layer their specifics on top. They plug in only through the kernel's public seam
 primitive. A deployment is **composed** from the open kernel + open apps + whichever proprietary app
 crates that client needs (single-tenant per deployment).
 
-See `ARCHITECTURE.md` for the seams, and `docs/OPEN-CORE-SPLIT.md` for how the two repos are produced
-and the open crates are published.
+See `ARCHITECTURE.md` for the seams. The public `heldar` repo is generated from the private monorepo
+(this file is the licensing statement of record), and the open crates are published to crates.io.

@@ -50,6 +50,16 @@ enabled or disabled tasks.
 interprets. The `fps` here is the requested rate; the effective sampled rate
 after budgeting is reported by `GET /api/v1/ai/samplers`.
 
+Running more than one worker? Pass a stable identity as `?worker_id=` (e.g.
+`GET /api/v1/ai/tasks?worker_id=nvr1:4242`) and the kernel registers you as a
+live worker and returns only **your shard** of the task list, modulo-sharded
+across the live worker set. Omitting it returns everything (single-worker
+back-compat) — a custom worker that skips it will double-process every task
+next to any other worker. Tasks are rebalanced whenever the live worker set
+changes: a worker whose last poll is older than the liveness TTL (60s) is
+treated as gone and its tasks reassigned, so poll faster than the TTL (the
+default poll interval is 10s).
+
 ### 2. Pull a frame - `GET /api/v1/cameras/{id}/frame`
 
 Serves the latest sampled JPEG for a camera. Pull it on your own cadence,
@@ -211,6 +221,9 @@ HELDAR_API=http://localhost:8000 python worker.py
 
 Worker-side config (CLI flag or env var) covers the API base URL
 (`--api` / `HELDAR_API`), the task poll interval
-(`--poll-interval` / `HELDAR_AI_POLL_INTERVAL`), and HTTP/backoff/logging knobs.
+(`--poll-interval` / `HELDAR_AI_POLL_INTERVAL`), the sharding identity
+(`--worker-id` / `HELDAR_AI_WORKER_ID`, default `<hostname>:<pid>` — sent as
+`?worker_id=` so multiple workers split the task list), and
+HTTP/backoff/logging knobs.
 The full table is in
 [apps/ai/README.md](https://github.com/Straits-AI/heldar/blob/main/apps/ai/README.md).

@@ -203,8 +203,9 @@ export function Discover() {
 
   const navigate = useNavigate();
 
-  // ONVIF WS-Discovery is a manager+ action (it touches devices). When auth is off the server returns
-  // the `system` admin principal; unauthenticated leaves the control gated off. Reads are never blocked.
+  // ONVIF WS-Discovery and registering a discovered device (auto_add) are manager+ actions. When auth
+  // is off the server returns the `system` admin principal; unauthenticated leaves the controls gated
+  // off. Reads (the scan itself) are never blocked.
   const [principal, setPrincipal] = useState<Principal | null>(null);
   useEffect(() => {
     let alive = true;
@@ -543,7 +544,7 @@ export function Discover() {
                               <Button
                                 size="sm"
                                 variant="primary"
-                                disabled={adding || addingAddr !== null}
+                                disabled={adding || addingAddr !== null || !canManage}
                                 onClick={() => void handleAdd(d)}
                               >
                                 {adding ? (
@@ -563,6 +564,11 @@ export function Discover() {
                   </tbody>
                 </table>
               </div>
+              {!canManage && (
+                <p className="border-t border-line px-4 py-3 font-mono text-[11px] text-fg-muted">
+                  Manager role required to register cameras.
+                </p>
+              )}
             </Panel>
           ))}
 

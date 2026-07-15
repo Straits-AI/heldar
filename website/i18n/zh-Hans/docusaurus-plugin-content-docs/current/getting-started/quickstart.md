@@ -94,7 +94,7 @@ HELDAR_API=http://localhost:8000 python worker.py
 
 - **检测** - 为每个摄像头创建或调整 AI 任务（`task_type`、请求的 `fps`、采样 `width`，以及工作进程读取的自由格式 `config` 字段）。
 - **区域** - 在摄像头画面上绘制多边形区域。坐标已归一化至 0..1，与检测框对应。设置 `labels` 可过滤哪些检测结果计入区域，`dwell_seconds` 用于触发停留告警，`severity` 用于设置严重等级。被追踪的检测目标穿越区域时，会触发带有证据帧的 `enter` / `exit` / `dwell` 区域事件。
-- **告警** - 将告警通知器指向 Webhook（`HELDAR_ALERT_WEBHOOK_URL` 或 UI 配置）。`warning` 和 `critical` 事件（包括区域事件和工作进程上报的事件）将被投递至该地址。
+- **告警** - 在**系统 → Webhooks** 中创建一个 Webhook 订阅（或使用 `min_severity: "warning"` 调用 `POST /api/v1/webhooks`）。`warning` 和 `critical` 事件（包括区域事件和工作进程上报的事件）将被投递至该地址——参见 [Webhook 与集成](../develop/webhooks.md)。
 
 ## 下一步
 

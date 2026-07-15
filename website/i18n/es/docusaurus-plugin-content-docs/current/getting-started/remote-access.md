@@ -21,6 +21,10 @@ El dispositivo **marca hacia afuera** hacia un punto de encuentro; el espectador
 
 > **¿Por qué no usar redirección de puertos / DDNS / un proxy inverso público?** El CGNAT de los operadores bloquea todas las conexiones entrantes y normalmente es NAT *simétrico*, lo que frustra la apertura de agujeros STUN simple. Lo único que funciona de forma fiable es que el dispositivo marque hacia afuera — que es exactamente lo que hace el camino WebRTC (y la alternativa de overlay que se describe más abajo).
 
+:::info Dónde empieza el nivel gestionado
+El **lado del dispositivo** de este camino — el cliente de marcado saliente, el puente WHEP, el relay — es código abierto del kernel, pero necesita un **punto de encuentro** al que marcar: el punto de encuentro alojado es el nivel gestionado de Heldar. Si prefiere no depender de ningún servicio alojado, la alternativa totalmente auto-alojada es el overlay de red que se describe más abajo.
+:::
+
 ## Activación (en el lado del dispositivo)
 
 El acceso remoto es opcional. El dispositivo necesita la autenticación activada y un punto de encuentro al que marcar:
@@ -29,7 +33,7 @@ El acceso remoto es opcional. El dispositivo necesita la autenticación activada
 HELDAR_AUTH_ENABLED=true              # required — the relay refuses to run without it
 HELDAR_AUTH_COOKIE_SECURE=true        # the rendezvous terminates TLS
 HELDAR_REMOTE_RENDEZVOUS_URL=https://<your-rendezvous>   # the box dials OUT to this
-HELDAR_CP_TOKEN=<dial-out bearer>     # authenticates the box to the rendezvous (== the Worker's BOX_TOKEN)
+HELDAR_CP_TOKEN=<dial-out bearer>     # the per-box token your rendezvous issued for this HELDAR_SITE_ID (site-bound)
 HELDAR_SITE_ID=<stable-id-for-this-box>
 ```
 

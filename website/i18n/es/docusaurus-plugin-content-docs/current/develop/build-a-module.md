@@ -143,24 +143,31 @@ cola o tu propio bucle de fondo. Para un consumidor completo de ejemplo, consult
 [`heldar-entry/src/anpr.rs`](https://github.com/Straits-AI/heldar/blob/main/crates/heldar-entry/src/anpr.rs)
 (`impl DetectionConsumer for AnprEngine`).
 
-## 3. Autoinstalar tu esquema de forma idempotente
+## 3. Autoinstalar tu esquema con migraciones versionadas
 
-Tu aplicación es dueña de sus tablas. Aplícalas contra el pool compartido al inicio, exactamente
+Tu aplicación es dueña de sus tablas. Aplícalas contra el pool compartido al inicio con el
+runner de migraciones de aplicación del kernel — versionado y de solo-añadir —, exactamente
 como
 [`heldar-entry/src/schema.rs`](https://github.com/Straits-AI/heldar/blob/main/crates/heldar-entry/src/schema.rs):
 
 ```rust
 // src/schema.rs
+use heldar_kernel::db::{run_app_migrations, AppMigration};
 use sqlx::SqlitePool;
 
-pub async fn init(pool: &SqlitePool) -> sqlx::Result<()> {
-    sqlx::raw_sql(include_str!("schema.sql")).execute(pool).await?;
-    Ok(())
+const MIGRATIONS: &[AppMigration] = &[AppMigration {
+    version: 1,
+    name: "init",
+    sql: include_str!("../migrations/0001_init.sql"),
+}];
+
+pub async fn init(pool: &SqlitePool) -> anyhow::Result<()> {
+    run_app_migrations(pool, "dwell", MIGRATIONS).await
 }
 ```
 
 ```sql
--- src/schema.sql
+-- migrations/0001_init.sql
 CREATE TABLE IF NOT EXISTS dwell_counts (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     camera_id  TEXT NOT NULL,
@@ -170,9 +177,13 @@ CREATE TABLE IF NOT EXISTS dwell_counts (
 CREATE INDEX IF NOT EXISTS idx_dwell_cam_ts ON dwell_counts (camera_id, ts);
 ```
 
-Usa `CREATE TABLE IF NOT EXISTS` para que `init` sea idempotente (un solo inquilino por
-despliegue). El kernel nunca define tus tablas de dominio; compartes su
-`SqlitePool` pero eres dueño de tu esquema.
+Cada migración se registra en `_heldar_app_migrations` bajo el nombre de tu componente
+(`"dwell"` aquí) y se aplica exactamente una vez, de modo que las aplicaciones nunca
+colisionan con el kernel ni entre sí en la BD compartida. Para cambiar el esquema más
+adelante, añade un nuevo `migrations/NNNN_*.sql` y una línea a `MIGRATIONS` — **nunca
+edites una migración ya publicada** (la guarda de checksum del runner la rechaza). El
+kernel nunca define tus tablas de dominio; compartes su `SqlitePool` pero eres dueño
+de tu esquema.
 
 ## 4. Exponer un `Router<AppState>` y fusionarlo
 
@@ -284,3 +295,9 @@ sobre hechos del kernel ya almacenados. Ambos siguen siendo dueños de un esquem
 y (en el caso de movement) lanzan bucles, compuestos en el servidor exactamente como se describe arriba,
 menos el registro del consumidor. Elige el patrón que se ajuste: un consumidor para la interpretación
 por lote, un bucle para resúmenes periódicos, o un router simple para consultas de solo lectura.
+
+¿Necesitas leer los hechos de otra aplicación? Consulta su vista de contrato `*_read` publicada
+(`entry_events_read`, `breach_alerts_read`, …), nunca sus tablas base — la vista es el contrato
+estable entre aplicaciones, de modo que la aplicación dueña puede evolucionar sus tablas sin
+romperte. Y publica una vista `*_read` propia (como una migración) si otras aplicaciones deben
+leerte.

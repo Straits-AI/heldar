@@ -78,11 +78,13 @@ del núcleo, y el grabador/muestreador/cliente HTTP.
 
 ### 3. Esquema de autoinstalación
 
-Cada aplicación posee sus propias tablas y aplica su esquema de forma idempotente
-contra el pool compartido al iniciar (un solo inquilino por despliegue). El
-núcleo no define tablas de dominio. El patrón es un `schema::init(pool)` que
-ejecuta un `include_str!` de un `schema.sql` lleno de
-`CREATE TABLE IF NOT EXISTS`.
+Cada aplicación posee sus propias tablas y las instala ella misma como migraciones
+versionadas y de solo-añadir contra el pool compartido al iniciar
+(`db::run_app_migrations`, registradas por componente en `_heldar_app_migrations`).
+El núcleo no define tablas de dominio. El patrón es un `schema::init(pool)` que
+ejecuta el array `MIGRATIONS` de la aplicación con sus archivos
+`migrations/NNNN_*.sql` — para evolucionar un esquema se añade una migración
+nueva, nunca se edita una ya publicada.
 
 ### 4. La primitiva de autenticación
 

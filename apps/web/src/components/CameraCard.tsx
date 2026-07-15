@@ -21,20 +21,22 @@ const TELE_TONE = {
   bad: "text-danger",
 } as const;
 
-/* Compact monospace telemetry cell. */
+/* Compact monospace telemetry cell. `title` spells out the abbreviated label on hover. */
 function Tele({
   label,
+  title,
   value,
   unit,
   tone = "default",
 }: {
   label: string;
+  title?: string;
   value: string | number;
   unit?: string;
   tone?: keyof typeof TELE_TONE;
 }) {
   return (
-    <div className="flex min-w-0 flex-col gap-0.5">
+    <div className="flex min-w-0 flex-col gap-0.5" title={title}>
       <span className="font-mono text-[9px] uppercase tracking-micro text-fg-muted">
         {label}
       </span>
@@ -190,15 +192,21 @@ export function CameraCard({ camera, status }: Props) {
         </div>
 
         <dl className="grid grid-cols-4 gap-2 border-t border-line pt-2.5">
-          <Tele label="Res" value={resolution} />
-          <Tele label="Seg" value={segments != null ? segments.toLocaleString() : "—"} />
+          <Tele label="Res" title="Resolution" value={resolution} />
+          <Tele
+            label="Seg"
+            title="Segments written"
+            value={segments != null ? segments.toLocaleString() : "—"}
+          />
           <Tele
             label="Rate"
+            title="Bitrate"
             value={bitrateValue}
             unit={bitrate == null ? undefined : bitrateHigh ? "Mb/s" : "kb/s"}
           />
           <Tele
             label="Rcn"
+            title="Stream reconnects"
             value={reconnects ?? "—"}
             tone={reconnects != null && reconnects > 0 ? "warn" : "default"}
           />

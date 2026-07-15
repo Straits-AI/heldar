@@ -233,6 +233,7 @@ export function CameraDetail() {
   const [testResult, setTestResult] = useState<CameraTestResult | null>(null);
   const [testing, setTesting] = useState(false);
   const [actionBusy, setActionBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
 
   async function runTest() {
     setTesting(true);
@@ -250,12 +251,13 @@ export function CameraDetail() {
 
   async function toggle(field: "enabled" | "record_enabled" | "live_warm", value: boolean) {
     setActionBusy(true);
+    setActionError(null);
     try {
       await api.updateCamera(id, { [field]: value });
       await Promise.all([camera.refresh(), status.refresh()]);
     } catch (e) {
-      // Surface failures (e.g. a viewer-role 403) instead of silently doing nothing.
-      window.alert(e instanceof ApiError ? e.message : String(e));
+      // Surface failures instead of silently doing nothing.
+      setActionError(e instanceof ApiError ? e.message : String(e));
     } finally {
       setActionBusy(false);
     }
@@ -267,36 +269,33 @@ export function CameraDetail() {
       return;
     }
     setActionBusy(true);
+    setActionError(null);
     try {
       await api.deleteCamera(id);
       navigate("/");
     } catch (e) {
-      window.alert(e instanceof Error ? e.message : String(e));
+      setActionError(e instanceof Error ? e.message : String(e));
       setActionBusy(false);
     }
   }
 
   // ---- Evidence lock / incident tag (per segment) + manual record trigger ----
   const [segBusy, setSegBusy] = useState<string | null>(null);
+  const [segError, setSegError] = useState<string | null>(null);
   const [trigBusy, setTrigBusy] = useState(false);
   const [trigResult, setTrigResult] = useState<RecordTriggerResult | null>(null);
 
+  // Locking offers an inline incident-id input backed by a datalist of the existing cases, so tagging
+  // extends a case instead of a typo in a free-text prompt silently splitting evidence across two.
+  const [lockTarget, setLockTarget] = useState<SegmentView | null>(null);
+  const [lockIncident, setLockIncident] = useState("");
+  const incidents = usePoll(() => api.listIncidents(), 0);
+
   async function toggleEvidence(seg: SegmentView) {
+    setSegError(null);
     if (!seg.evidence_locked) {
-      const inc = window.prompt(
-        "Lock this segment as evidence (never pruned by retention). Optional incident id (blank = none):",
-        seg.incident_id ?? "",
-      );
-      if (inc === null) return; // cancelled
-      setSegBusy(seg.id);
-      try {
-        await api.lockSegmentEvidence(seg.id, inc.trim() ? inc.trim() : null);
-        await segments.refresh();
-      } catch (e) {
-        window.alert(e instanceof ApiError ? e.message : String(e));
-      } finally {
-        setSegBusy(null);
-      }
+      setLockTarget(seg);
+      setLockIncident(seg.incident_id ?? "");
       return;
     }
     setSegBusy(seg.id);
@@ -304,7 +303,23 @@ export function CameraDetail() {
       await api.unlockSegmentEvidence(seg.id);
       await segments.refresh();
     } catch (e) {
-      window.alert(e instanceof ApiError ? e.message : String(e));
+      setSegError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setSegBusy(null);
+    }
+  }
+
+  async function confirmLock(e: FormEvent) {
+    e.preventDefault();
+    if (!lockTarget) return;
+    setSegBusy(lockTarget.id);
+    setSegError(null);
+    try {
+      await api.lockSegmentEvidence(lockTarget.id, lockIncident.trim() ? lockIncident.trim() : null);
+      setLockTarget(null);
+      await Promise.all([segments.refresh(), incidents.refresh()]);
+    } catch (e) {
+      setSegError(e instanceof ApiError ? e.message : String(e));
     } finally {
       setSegBusy(null);
     }
@@ -312,12 +327,13 @@ export function CameraDetail() {
 
   async function recordNow() {
     setTrigBusy(true);
+    setSegError(null);
     try {
       const r = await api.triggerRecord(id);
       if (liveForThisCamera()) setTrigResult(r);
       await segments.refresh();
     } catch (e) {
-      window.alert(e instanceof ApiError ? e.message : String(e));
+      if (liveForThisCamera()) setSegError(e instanceof ApiError ? e.message : String(e));
     } finally {
       if (liveForThisCamera()) setTrigBusy(false);
     }
@@ -515,9 +531,9 @@ export function CameraDetail() {
             )}
           </Panel>
 
-          <AiPanel cameraId={id} />
+          <AiPanel cameraId={id} canManage={canManage} />
 
-          <ZonePanel cameraId={id} />
+          <ZonePanel cameraId={id} canManage={canManage} />
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <Panel title="Snapshot" subtitle="Frame grab">
@@ -656,21 +672,21 @@ export function CameraDetail() {
           <Panel title="Settings" subtitle="Recording & actions">
             <div className="grid grid-cols-2 gap-2">
               <Button
-                disabled={actionBusy || !cam}
+                disabled={actionBusy || !cam || !canManage}
                 onClick={() => cam && toggle("record_enabled", !cam.record_enabled)}
                 className="w-full"
               >
                 {cam?.record_enabled ? "Pause rec" : "Resume rec"}
               </Button>
               <Button
-                disabled={actionBusy || !cam}
+                disabled={actionBusy || !cam || !canManage}
                 onClick={() => cam && toggle("enabled", !cam.enabled)}
                 className="w-full"
               >
                 {cam?.enabled ? "Disable" : "Enable"}
               </Button>
               <Button
-                disabled={actionBusy || !cam}
+                disabled={actionBusy || !cam || !canManage}
                 onClick={() => cam && toggle("live_warm", !cam.live_warm)}
                 className="w-full"
                 title="Keep the live preview stream running persistently so live view starts instantly (uses transcode capacity even with no viewers). Takes effect while the camera is enabled."
@@ -680,10 +696,27 @@ export function CameraDetail() {
               <Button onClick={runTest} disabled={testing} className="w-full">
                 {testing ? "Testing…" : "Test stream"}
               </Button>
-              <Button variant="danger" disabled={actionBusy} onClick={remove} className="w-full">
+              <Button
+                variant="danger"
+                disabled={actionBusy || !canManage}
+                onClick={remove}
+                className="w-full"
+              >
                 Delete
               </Button>
             </div>
+
+            {!canManage && (
+              <p className="mt-3 font-mono text-[11px] text-fg-muted">
+                Manager role required to change camera settings.
+              </p>
+            )}
+
+            {actionError && (
+              <div className="mt-3 rounded-md border border-danger/40 bg-danger/10 px-2.5 py-2 font-mono text-[11px] text-red-300">
+                {actionError}
+              </div>
+            )}
 
             {testResult && (
               <div
@@ -757,6 +790,53 @@ export function CameraDetail() {
                 Recording window extended to {formatClock(trigResult.window_end)} (post-roll{" "}
                 {trigResult.post_roll_seconds}s).
               </div>
+            )}
+            {segError && (
+              <div className="mb-3 rounded-md border border-danger/40 bg-danger/10 px-2.5 py-2 font-mono text-[11px] text-red-300">
+                {segError}
+              </div>
+            )}
+            {lockTarget && (
+              <form
+                onSubmit={confirmLock}
+                className="mb-3 space-y-2 rounded-md border border-line bg-canvas p-2.5"
+              >
+                <div className="font-mono text-[10px] uppercase tracking-micro text-fg-muted">
+                  Lock {formatTimeShort(lockTarget.start_time)} →{" "}
+                  {formatTimeShort(lockTarget.end_time)} as evidence (never pruned by retention)
+                </div>
+                <Field
+                  label="Incident id — blank = none"
+                  htmlFor="seg-incident"
+                  hint="Pick an existing case to extend it, or type a new id to open one."
+                >
+                  <Input
+                    id="seg-incident"
+                    list="incident-ids"
+                    value={lockIncident}
+                    onChange={(e) => setLockIncident(e.target.value)}
+                    placeholder="case-2026-001"
+                  />
+                </Field>
+                <datalist id="incident-ids">
+                  {(incidents.data ?? []).map((i) => (
+                    <option key={i.incident_id} value={i.incident_id} />
+                  ))}
+                </datalist>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="submit"
+                    size="sm"
+                    variant="primary"
+                    disabled={segBusy === lockTarget.id}
+                  >
+                    {segBusy === lockTarget.id ? "Locking…" : "Lock"}
+                  </Button>
+                  <Button type="button" size="sm" variant="ghost" onClick={() => setLockTarget(null)}>
+                    Cancel
+                  </Button>
+                </div>
+              </form>
             )}
             {recentSegments.length === 0 ? (
               <p className="font-mono text-xs text-fg-muted">No recorded segments yet.</p>

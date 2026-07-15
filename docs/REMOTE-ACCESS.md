@@ -5,9 +5,9 @@ common case for home/small-site internet: a shared public IPv4, no inbound port-
 useless). This is an **open kernel** capability: every deployment of the Apache-2.0 kernel gets
 private remote viewing out of the box.
 
-Remote access is **WebRTC-primary, browser-based** — see
-[`docs/adr/0003-webrtc-remote-access.md`](adr/0003-webrtc-remote-access.md) for the design of
-record. All phases are **shipped** (P1 live video → P2 universal reach → P3 the full dashboard; see
+Remote access is **WebRTC-primary, browser-based** — see [`ARCHITECTURE.md`](../ARCHITECTURE.md) §21
+(the WebRTC model; the full design of record is ADR 0003, `docs/adr/0003-webrtc-remote-access.md` in
+the private monorepo). All phases are **shipped** (P1 live video → P2 universal reach → P3 the full dashboard; see
 _Status & phasing_ below). The optional self-hoster **overlay** paths (Recipes A/B) remain available
 for operators who prefer full-L3 reach over the hosted rendezvous. Hardening a deployment for the
 public internet: [`docs/PRODUCTION.md`](PRODUCTION.md).
@@ -20,8 +20,8 @@ public internet: [`docs/PRODUCTION.md`](PRODUCTION.md).
   the box **dials out** — no inbound port, no client install. Universal NAT traversal comes from
   **signaling + TURN hosted in `heldar-control-plane`**; live video rides **MediaMTX / WHEP**
   (`:8889`). Media is **end-to-end encrypted (DTLS-SRTP)**: the rendezvous brokers only SDP/ICE and
-  relayed control, never the video bytes. Design of record:
-  [`docs/adr/0003-webrtc-remote-access.md`](adr/0003-webrtc-remote-access.md).
+  relayed control, never the video bytes. Design: [`ARCHITECTURE.md`](../ARCHITECTURE.md) §21
+  (ADR 0003).
 - **Optional (works today): a WireGuard overlay** running as an external daemon on the host, for
   self-hosters who want full L3 reachability rather than just the browser view.
   - **Your own / dev use → Tailscale** (Personal, free): zero servers, near-zero ops, $0.
@@ -84,8 +84,8 @@ Headscale) removes even that third-party metadata, at the cost of a small VPS to
 
 ## Status & phasing
 
-WebRTC remote access **shipped in three phases, all landed** (full plan in
-[`docs/adr/0003-webrtc-remote-access.md`](adr/0003-webrtc-remote-access.md)):
+WebRTC remote access **shipped in three phases, all landed** (implementation:
+[`ARCHITECTURE.md`](../ARCHITECTURE.md) §21; full phased plan: ADR 0003):
 
 - **P1 — LAN / WHEP ✅:** sub-second live video in the browser over MediaMTX WHEP (`:8889`) on the LAN.
 - **P2 — universal reach ✅:** the box dials out to **signaling + TURN**, so the same browser view works
@@ -177,8 +177,7 @@ via the "Keep live warm" camera setting). Still:
   `HELDAR_REMOTE_RENDEZVOUS_URL`, the kernel **dials OUT** to a rendezvous (`services/webrtc_rendezvous.rs`)
   and bridges browser WHEP offers to its own MediaMTX; it also **programs MediaMTX's ICE servers** so the
   box gathers a relay candidate for symmetric-NAT traversal. Live video is MediaMTX/WHEP; media is
-  end-to-end over DTLS-SRTP. Design of record:
-  [`docs/adr/0003-webrtc-remote-access.md`](adr/0003-webrtc-remote-access.md).
+  end-to-end over DTLS-SRTP. Design: [`ARCHITECTURE.md`](../ARCHITECTURE.md) §21 (ADR 0003).
 - **Bring your own TURN, or use ours.** TURN is the only thing that needs hosting:
   - **Your own** — set `HELDAR_WEBRTC_ICE_SERVERS` (a MediaMTX `webrtcICEServers2` JSON array) to point
     MediaMTX at any STUN/TURN you run (coturn, your Cloudflare Realtime, …). The kernel programs it in.
@@ -194,9 +193,11 @@ via the "Keep live warm" camera setting). Still:
     it after a real kernel login; separate `RELAY_CAP_SECRET`) proves the browser may *reach* this box.
   - **Inner gate** — the browser's **real kernel session** is forwarded verbatim; the box replays the
     request against its own `127.0.0.1` kernel, which runs its normal auth + RBAC. The relay is a dumb,
-    **allowlisted** pipe (GET reads + login/out only in Stage C; traversal/admin/internal paths refused),
-    never an auth-bypass. The kernel session token lives in a Worker-side **HttpOnly** cookie, so browser
-    JS never holds it.
+    **allowlisted** pipe — all HTTP methods on `/api/v1/*`, `/media/*`, and the sidecar-plugin proxy
+    `/m/{plugin}/*` (path canonicalized first; the relay/rendezvous/metrics internals are refused),
+    never an auth-bypass: the kernel's own auth + RBAC on the replayed loopback request is the real
+    gate. The kernel session token lives in a Worker-side **HttpOnly** cookie, so browser JS never
+    holds it.
   - **Fail-safe:** the relay **refuses to run unless `HELDAR_AUTH_ENABLED=true` and a real user exists** —
     the open auth-off API is never exposed remotely. Pair with a short `HELDAR_SESSION_TTL_HOURS` +
     `HELDAR_SESSION_IDLE_TIMEOUT_MIN` and `HELDAR_AUTH_COOKIE_SECURE=true`.

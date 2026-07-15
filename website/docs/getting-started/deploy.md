@@ -55,9 +55,12 @@ logs that the dashboard is not served.
 | 8554 / 8888 / 8889 | MediaMTX RTSP / HLS / WebRTC |
 | 9997 | MediaMTX control API (loopback) |
 
-Live view is brokered through MediaMTX: camera credentials live only in the
-gateway's path config and never reach the browser, which only ever sees the
-non-credentialed HLS/WebRTC/RTSP URLs.
+Live view is published to MediaMTX by a kernel-owned, supervised ffmpeg per
+camera; camera credentials stay in the kernel and never reach MediaMTX or the
+browser, which only ever sees the non-credentialed HLS/WebRTC/RTSP URLs. The
+live-transcode engine defaults to `HELDAR_LIVE_TRANSCODE_ENGINE` (`software`)
+and can be switched at runtime (software / VAAPI / NVENC) from the System page
+or `GET`/`PUT /api/v1/system/transcode`.
 
 ## Authentication
 
@@ -106,12 +109,17 @@ Heldar uses SQLite only (WAL journal, embedded migrations). The default URL is
 | `HELDAR_RECORDINGS_DIR` / `CLIPS_DIR` / `SNAPSHOTS_DIR` / `FRAMES_DIR` | under `./data` | media roots (created at boot) |
 | `HELDAR_MAX_RECORDINGS_GB` | `20` | soft footprint cap; oldest unlocked segments are pruned past it |
 | `HELDAR_MIN_FREE_DISK_GB` | `5` | hard host-protection floor; prunes unlocked segments while free space is below it |
+| `HELDAR_MAX_DB_GB` | `4` | caps the `heldar.db` metadata DB itself; space is reclaimed online via incremental auto_vacuum |
 
 Recordings stay on the local disk and are served from there; nothing is pushed
 to a cloud by default. Evidence-locked segments are never deleted by retention.
-Both limits are also **runtime-tunable without a restart** — from the dashboard
-System page ("Recording limit" panel) or via `GET`/`PUT /api/v1/system/retention`
+All three limits are also **runtime-tunable without a restart** — from the dashboard
+System page ("Recording limit" and "Database limit" panels) or via
+`GET`/`PUT /api/v1/system/retention` and `GET`/`PUT /api/v1/system/db`
 (PUT is admin-only); a stored override shadows the env value, which remains the default.
+A DB created before the cap existed is converted to incremental auto_vacuum in
+the background at boot (`HELDAR_DB_AUTOVACUUM_CONVERT`, default `true`; never
+boot-blocking) or on demand via `POST /api/v1/system/db/convert`.
 
 Camera credentials live in this SQLite DB. Set `HELDAR_SECRET_KEY` (base64 of 32
 bytes, e.g. `openssl rand -base64 32`) to encrypt them at rest with AES-256-GCM;

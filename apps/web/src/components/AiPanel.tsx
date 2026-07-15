@@ -44,6 +44,15 @@ function isBbox(b: unknown): b is [number, number, number, number] {
   return Array.isArray(b) && b.length === 4 && b.every((n) => typeof n === "number");
 }
 
+/** Read-only notice shown to non-managers in lieu of mutation controls. */
+function ReadOnlyNote() {
+  return (
+    <p className="font-mono text-[11px] text-fg-muted">
+      Manager role required to change AI tasks.
+    </p>
+  );
+}
+
 /* -------------------------------- frame -------------------------------- */
 
 function SampledFrame({
@@ -189,7 +198,9 @@ function TaskRow({
 
 /* -------------------------------- panel -------------------------------- */
 
-export function AiPanel({ cameraId }: { cameraId: string }) {
+// Reads are open to any principal; task/zone mutations are manager+ (the API enforces this — the
+// controls mirror it by gating on `canManage`, same as the other CameraDetail panels).
+export function AiPanel({ cameraId, canManage }: { cameraId: string; canManage: boolean }) {
   const tasks = usePoll(() => api.listAiTasks(cameraId), 8000, [cameraId]);
   const detections = usePoll(
     () => api.cameraDetections(cameraId, { limit: 50 }),
@@ -349,12 +360,18 @@ export function AiPanel({ cameraId }: { cameraId: string }) {
                 <TaskRow
                   key={t.id}
                   task={t}
-                  busy={busy}
+                  busy={busy || !canManage}
                   onToggle={() => void toggle(t)}
                   onDelete={() => void remove(t)}
                 />
               ))}
             </ul>
+          )}
+
+          {!canManage && (
+            <div className="mt-3">
+              <ReadOnlyNote />
+            </div>
           )}
 
           {/* Engine-status hint: explains why detection may be idle (does not block creation). */}
@@ -377,7 +394,7 @@ export function AiPanel({ cameraId }: { cameraId: string }) {
               <Button
                 variant="primary"
                 className="flex-1"
-                disabled={busy}
+                disabled={busy || !canManage}
                 onClick={() => void createPreset("people")}
               >
                 Detect people
@@ -385,7 +402,7 @@ export function AiPanel({ cameraId }: { cameraId: string }) {
               <Button
                 variant="primary"
                 className="flex-1"
-                disabled={busy}
+                disabled={busy || !canManage}
                 onClick={() => void createPreset("vehicles")}
               >
                 Detect vehicles
@@ -460,7 +477,7 @@ export function AiPanel({ cameraId }: { cameraId: string }) {
                 <option value="main">main (full-res)</option>
               </Select>
             </Field>
-            <Button type="submit" variant="primary" className="w-full" disabled={busy}>
+            <Button type="submit" variant="primary" className="w-full" disabled={busy || !canManage}>
               {busy ? "Working…" : "Add AI task"}
             </Button>
             {addError && <p className="font-mono text-xs text-danger">{addError}</p>}

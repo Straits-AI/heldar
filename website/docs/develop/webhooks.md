@@ -185,7 +185,7 @@ generic auth, event log, transactional outbox, and webhook delivery are all
 inherited from the kernel. See [Build a module](./build-a-module.md) for the
 seams.
 
-Take a campus visitor-portal as the worked pattern. It integrates in two
+Take a visitor-portal vertical as the worked pattern. It integrates in two
 directions on top of the kernel:
 
 - **Inbound** — the portal calls the vertical's own REST endpoints (for example
@@ -193,7 +193,7 @@ directions on top of the kernel:
   the `integration` role. The endpoints are the vertical's; the API key, RBAC,
   and audit log are the kernel's.
 - **Outbound** — the parent app subscribes a webhook to the vertical's domain
-  events (for example a `campus.*` event the vertical emits), filtered by event
+  events (for example a `portal.*` event the vertical emits), filtered by event
   type and severity and verified with the same `X-Heldar-Signature` HMAC. No
   vertical-specific delivery code is needed — it is the same engine documented
   above.

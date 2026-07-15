@@ -36,6 +36,4 @@ Heldar 以开放核心平台的形式发布：Apache-2.0 内核和一组通用�
 ## 许可证
 
 内核和通用应用程序采用 Apache-2.0 许可证。私有垂直应用程序单独授权。请参阅
-[LICENSING.md](https://github.com/Straits-AI/heldar/blob/main/LICENSING.md) 了解边界划分，以及
-[OPEN-CORE-SPLIT.md](https://github.com/Straits-AI/heldar/blob/main/docs/OPEN-CORE-SPLIT.md)
-了解多仓库拆分和发布操作手册。
+[LICENSING.md](https://github.com/Straits-AI/heldar/blob/main/LICENSING.md) 了解边界划分。

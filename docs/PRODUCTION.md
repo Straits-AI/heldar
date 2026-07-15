@@ -33,9 +33,11 @@ Each tagged release attaches static `heldar-core` binaries (x86_64 + aarch64). T
     curl -fsSLO "https://github.com/$REPO/releases/download/$V/heldar-core-$V-$ARCH-linux-musl"
     curl -fsSLO "https://github.com/$REPO/releases/download/$V/heldar-core-$V-$ARCH-linux-musl.sha256"
     sha256sum -c "heldar-core-$V-$ARCH-linux-musl.sha256"
-    bash /home/soh/heldar-live/stop.sh
-    install -m 0755 "heldar-core-$V-$ARCH-linux-musl" /usr/local/bin/heldar-core   # the path your start.sh / systemd ExecStart= launches — check the unit file with: systemctl cat heldar-core
-    bash /home/soh/heldar-live/start.sh
+    systemctl stop heldar-core
+    install -m 0755 "heldar-core-$V-$ARCH-linux-musl" /usr/local/bin/heldar-core   # the path your systemd ExecStart= launches — check the unit file with: systemctl cat heldar-core
+    systemctl start heldar-core
+
+(For a non-systemd install, substitute your deployment's own stop/start scripts.)
 
 The static musl binary needs only the `ffmpeg` CLI present (it links no ffmpeg libraries). Open-core
 self-hosters pull the equivalent asset from the public `Straits-AI/heldar` releases.
@@ -58,7 +60,12 @@ self-hosters pull the equivalent asset from the public `Straits-AI/heldar` relea
 
 Set these as Cloudflare secrets (`wrangler secret put <NAME>`):
 
-- `BOX_TOKEN` — the bearer the box presents (`== HELDAR_CP_TOKEN`). Box auth is **fail-closed** without it.
+- `BOX_ENROLL_SECRET` — the **primary** box-auth secret: mints per-box, **site-bound** tokens
+  (`cd apps/edge && npm run mint -- <site_id>` → set as the box's `HELDAR_CP_TOKEN`, accepted only for
+  its own `HELDAR_SITE_ID`). Revoke a box by adding its `site_id` to the `REVOKED_SITES` var, or rotate
+  the secret (revokes all → re-mint). See `apps/edge/README.md` (the private rendezvous Worker).
+- `BOX_TOKEN` *(legacy)* — a shared bearer that authorizes **any** site. Migration-only fallback —
+  retire it (unset the secret) before onboarding a second client.
 - `RENDEZVOUS_SECRET` — signs viewing tickets.
 - `RELAY_CAP_SECRET` — signs dashboard relay capabilities (a separate key).
 - `TURN_API_TOKEN` — Cloudflare Realtime TURN credential minting.
@@ -66,8 +73,8 @@ Set these as Cloudflare secrets (`wrangler secret put <NAME>`):
   Pair with the public `TURNSTILE_SITE_KEY` var (also passed to the dashboard build as
   `VITE_TURNSTILE_SITE_KEY`); unset = no challenge.
 
-**Never set `ALLOW_OPEN_BOX_AUTH`** — it is a dev-only escape hatch that opens box auth when `BOX_TOKEN`
-is unset. The Worker logs a loud warning if it is ever active.
+**Never set `ALLOW_OPEN_BOX_AUTH`** — it is a dev-only escape hatch that opens box auth when neither
+`BOX_TOKEN` nor `BOX_ENROLL_SECRET` is set. The Worker logs a loud warning if it is ever active.
 
 The Worker rate-limits the ticket-gated `/api/v1/rtc/*` endpoints per IP, so a leaked view link is a
 **bounded** rather than unmetered TURN/transcode faucet, and it warns once if any configured secret
@@ -90,7 +97,8 @@ looks too short. Generate each secret with `openssl rand -base64 32`.
       iif "lo" accept
       tcp dport { 22 } accept                 # SSH (management)
       tcp dport { 8080 } accept               # Heldar API (adjust to HELDAR_API_PORT)
-      tcp dport { 8554, 8889, 8189 } accept   # RTSP / WHEP / WebRTC (MediaMTX)
+      tcp dport { 8554, 8888, 8889 } accept   # RTSP / HLS / WHEP signaling (MediaMTX)
+      udp dport 8189 accept                   # WebRTC ICE media — note: UDP, not TCP
     }
   }
   ```

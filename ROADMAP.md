@@ -3,7 +3,7 @@
 > **Thesis:** Camera streams become structured events → events become workflows → workflows become operational intelligence.
 > We build the **media kernel first**, then AI as plugins on top, then vertical apps. The long arc is to turn continuous video into a **compressed, queryable, verifiable world memory** of a physical space — so analytical intent can be defined *after* collection, not before.
 
-> **Status (2026-06):** Stages **0–7 are all shipped (✅ DONE)** — the media kernel, observability, the AI frame sampler, detection/tracking/zones, Access Control, BakerySense, Movement intelligence, and Semantic search. What remains is the research frontier below (Level 4–5) and the per-stage accuracy benchmarking gated on local footage.
+> **Status (2026-07):** Stages **0–7 are all shipped (✅ DONE)** — the media kernel, observability, the AI frame sampler, detection/tracking/zones, Access Control, BakerySense, Movement intelligence, and Semantic search. What remains is the **post-Stage-7 platform work** below (WebRTC remote-access deploy steps, control-plane Phases 4–5), the research frontier (Level 4–5), and the per-stage accuracy benchmarking gated on local footage.
 
 ---
 
@@ -34,13 +34,13 @@ Goal: *own the base VMS.* Record compressed packets without decode; index, play 
 
 **Shipped checklist:**
 
-- [x] **Camera registry** — `tenants → sites → cameras` schema; CRUD API (`/api/v1/cameras`), vendor RTSP-URL templating + explicit override, main/sub stream + record-stream selection, capabilities JSON, connection test endpoint. (`routes/cameras.rs`, `camera_url.rs`, `migrations/0001_init.sql`)
+- [x] **Camera registry** — `sites → cameras` schema (single-org multi-site; the vestigial `tenants` scaffold was removed per ADR 0001 Phase 0); CRUD API (`/api/v1/cameras`), vendor RTSP-URL templating + explicit override, main/sub stream + record-stream selection, capabilities JSON, connection test endpoint. (`routes/cameras.rs`, `camera_url.rs`, `migrations/0001_init.sql`)
 - [x] **RTSP ingest + recording** — per-camera recorder writing **compressed segments (no re-encode)**, configurable `segment_seconds`, reconnect/restart supervision. (`services/recorder.rs`)
 - [x] **Timeline index** — one `segments` row per file (start/end/duration/codec/size, indexed by camera+time); segment list + timeline API. (`services/indexer.rs`, `routes/recordings.rs`)
 - [x] **Playback** — segment listing + timeline for a camera/time range; live + recorded delivery via MediaMTX. (`routes/playback.rs`, `routes/recordings.rs`)
 - [x] **Clip export** — MP4 export for a camera/time window. (`routes/playback.rs` → `services/clip.rs`)
 - [x] **Snapshot** — frame extraction at a timestamp. (`routes/playback.rs` → `services/snapshot.rs`)
-- [x] **Live view** — brokered through MediaMTX gateway (HLS / WebRTC / RTSP URLs; camera credentials never exposed to the browser). (`routes/liveview.rs`, `services/mediamtx.rs`)
+- [x] **Live view** — brokered through MediaMTX gateway (HLS / WebRTC / RTSP URLs; camera credentials never exposed to the browser); the preview transcode is a **kernel-owned, supervised ffmpeg publisher** (on-demand with idle reaping, or persistent per camera via `live_warm`; MediaMTX `runOnDemand` deliberately not used), with a runtime transcode-engine setting (`GET`/`PUT /api/v1/system/transcode`). (`routes/liveview.rs`, `services/mediamtx.rs`, `services/live_publisher.rs`, `routes/system.rs`)
 - [x] **Camera health** — per-camera status (state, last segment, reconnect count, segments written, observed fps/bitrate, last error) + lifecycle event log; health + events API. (`services/health.rs`, `routes/health.rs`, `camera_status`/`events` tables)
 - [x] **Retention** — per-camera age policy + global size cap sweeper; **evidence-lock** (`locked` segments never deleted); retention/disk events logged. (`services/retention.rs`)
 - [x] **System surface** — `/healthz`, `/api/v1/system` info; web frontend scaffolded (React + Vite + TS in `apps/web`).
@@ -69,22 +69,22 @@ Goal: *own the base VMS.* Record compressed packets without decode; index, play 
 - [x] **Stream metrics** — observed `fps_observed` + `bitrate_kbps` computed per indexed segment and stored on `camera_status`, surfaced via the health API and (bitrate) Prometheus. (`services/indexer.rs`, `repo.rs`, `routes/health.rs`)
 - [x] **Disk / storage health monitor** — `statvfs` free-space, recordings footprint, recent write rate, and free-disk-fill projection in the `/api/v1/system` `storage` block; `disk_pressure` events on pressure. (`services/storage.rs`, `routes/system.rs`)
 - [x] **Prometheus metrics + liveness/readiness** — `GET /metrics` (system + per-camera gauges/counters), `GET /healthz` (liveness), `GET /readyz` (readiness, 200/503 on DB reachability). (`services/metrics.rs`, `routes/metrics.rs`, `routes/health.rs`)
-- [x] **Alerting** — `HELDAR_ALERT_WEBHOOK_URL` notifier POSTs warning/critical events as JSON; starts-from-now (no replay on boot), retries on transport failure. (`services/notifier.rs`)
+- [x] **Alerting** — webhook **subscriptions** POST matching events as JSON (per-subscription cursor, event-type/severity filters, optional HMAC-SHA256 signing, `webhook_deliveries` ledger with bounded retries); starts-from-now (no replay on boot). Managed via `/api/v1/webhooks` + the dashboard. (`services/webhooks.rs`, `routes/webhooks.rs`)
 - [x] **Disk-free retention floor** — `HELDAR_MIN_FREE_DISK_GB` hard floor prunes oldest *unlocked* segments when the filesystem gets tight, on top of the age policy + `HELDAR_MAX_RECORDINGS_GB` size cap; evidence-lock honored throughout. (`services/retention.rs`)
-- [x] **Service watchdog / auto-restart** — `spawn_supervised` respawns the indexer / health / retention / notifier loops 5 s after any return or panic. (`main.rs`)
+- [x] **Service watchdog / auto-restart** — `spawn_supervised` respawns the indexer / health / retention / webhook loops 5 s after any return or panic. (`main.rs`)
 
 **Deferred (rolls into later edge/cloud work):**
 
-- [ ] Per-camera health **dashboard** UI (the health/events/metrics APIs exist; the web frontend view is still pending — `apps/web`)
-- [ ] Edge offline buffer + cloud sync retry (the webhook notifier is the first upstream alert path; full store-and-forward sync remains planned)
+- [x] Per-camera health **dashboard** UI — shipped: the camera-detail Health panel (recorder telemetry, polling the health API) plus the Dashboard / System / Incidents pages. (`apps/web/src/pages/CameraDetail.tsx`, `Dashboard.tsx`, `System.tsx`, `Incidents.tsx`)
+- [x] Edge offline buffer + cloud sync retry — shipped as the durable ordered **outbox** + cursor drain API (`routes/outbox.rs`, `GET /api/v1/outbox`), drained by the control plane with node self-registration + retry (`services/fleet_register.rs`; ADR 0001 Phase 3), plus ANR re-fill of recording gaps from camera onboard storage (`services/anr.rs`).
 - [ ] Packet-loss / throughput **trends** (current fps/bitrate are last-value, not time-series; trend storage is future work)
 
 **Stage 1 success criteria:**
 
 | Success criterion | Status | Backed by |
 |---|---|---|
-| System operable by a non-developer | ✅ health/system/events/metrics APIs + webhook alerts surface state without log-diving | `routes/health.rs`, `routes/system.rs`, `routes/metrics.rs`, `services/notifier.rs` |
-| Faults are visible | ✅ `/metrics` + `/api/v1/events` + alert webhook; staleness → `error`, reconnect/offline/disk events logged | `services/metrics.rs`, `services/health.rs`, `services/notifier.rs` |
+| System operable by a non-developer | ✅ health/system/events/metrics APIs + webhook alerts surface state without log-diving | `routes/health.rs`, `routes/system.rs`, `routes/metrics.rs`, `services/webhooks.rs` |
+| Faults are visible | ✅ `/metrics` + `/api/v1/events` + webhook subscriptions; staleness → `error`, reconnect/offline/disk events logged | `services/metrics.rs`, `services/health.rs`, `services/webhooks.rs` |
 | Recording gaps are explainable | ✅ live `recording_gap` events + `/gaps` endpoint, cross-referenced with `camera_offline`/`recorder_error` events | `services/indexer.rs`, `routes/recordings.rs`, `services/recorder.rs` |
 
 > Still **Level 1** (operable substrate). Stage 1 hardens the kernel for unattended operation; AI begins at Stage 2.
@@ -97,24 +97,24 @@ Goal: *own the base VMS.* Record compressed packets without decode; index, play 
 
 **Shipped checklist:**
 
-- [x] **Substream frame sampler** — one supervised FFmpeg per AI-enabled camera, `-vf fps=<budgeted>,scale=<width>:-2` → `frames/<cam>/latest.jpg` (`-update 1`, overwritten in place). Decode happens **only** here; the recorder's 24/7 `-c copy` path stays decode-free. Sub-stream preferred (falls back to record URL); crash → `offline` + `sampler_offline` event + exponential backoff. (`services/sampler.rs`)
-- [x] **FPS budgeting + task model** — global `HELDAR_AI_MAX_TOTAL_FPS` (default 40) split across active cameras: per-camera `effective = min(MAX(task.fps), budget/active)`, floored at `MIN_FPS=0.5`. `ai_tasks` carries `task_type / enabled / stream_profile / fps / width / config`; any create/update/delete triggers `reconcile()` → rebalance. (`services/sampler.rs`, `routes/ai.rs`, `migrations/0003_ai.sql`, `models.rs`)
-- [x] **Frame delivery to workers (not raw RTSP)** — `GET /api/v1/cameras/{id}/frame` serves the latest sampled JPEG with `x-frame-age-ms` + `x-frame-captured-at` freshness headers; `GET /api/v1/ai/tasks` is worker discovery (each task + its `frame_url`); `GET /api/v1/ai/samplers` reports per-camera state + effective fps. (`routes/ai.rs`)
-- [x] **Detections / events ingestion** — `POST /api/v1/ai/events` writes detections (`bbox` normalized `[x,y,w,h]` 0…1, `track_id`, `attributes`) and an optional event through the **same** `events`/notifier path as the kernel, so `warning`/`critical` AI events reuse the Stage 1 alert webhook. `GET /api/v1/cameras/{id}/detections` queries them. (`routes/ai.rs`, `repo.rs`, `migrations/0003_ai.sql`)
-- [x] **Backpressure** — implemented as a **static** proportional fps split (adding AI cameras degrades per-camera fps, not the host). (`services/sampler.rs`)
+- [x] **Substream frame sampler** — one supervised FFmpeg per **(AI-enabled camera, stream profile)** pair, `-vf fps=<budgeted>,scale=<width>:-2` → `frames/<cam>/latest_<profile>.jpg` (`-update 1`, overwritten in place). Decode happens **only** here; the recorder's 24/7 `-c copy` path stays decode-free. The task's `stream_profile` resolves the source URL (falls back to record URL); crash → `offline` + `sampler_offline` event + exponential backoff. (`services/sampler.rs`)
+- [x] **FPS budgeting + task model** — global `HELDAR_AI_MAX_TOTAL_FPS` (default 40) allocated across active samplers, floored at `MIN_FPS=0.5`. `ai_tasks` carries `task_type / enabled / stream_profile / fps / width / config`; any create/update/delete triggers `reconcile()` → rebalance. (`services/sampler.rs`, `routes/ai.rs`, `migrations/0001_init.sql`, `models.rs`)
+- [x] **Frame delivery to workers (not raw RTSP)** — `GET /api/v1/cameras/{id}/frame` serves the latest sampled JPEG with `x-frame-age-ms` + `x-frame-captured-at` freshness headers; `GET /api/v1/ai/tasks` is worker discovery (each task + its `frame_url`), with optional `?worker_id=` **sharding** across concurrent workers (the poll doubles as a liveness heartbeat — `ai_workers` lease table, `migrations/0004_ai_workers.sql`); `GET /api/v1/ai/samplers` reports per-camera state + effective fps. (`routes/ai.rs`)
+- [x] **Detections / events ingestion** — `POST /api/v1/ai/events` writes detections (`bbox` normalized `[x,y,w,h]` 0…1, `track_id`, `attributes`) and an optional event through the **same** `events`/webhook path as the kernel, so `warning`/`critical` AI events reuse the Stage 1 webhook subscriptions; detections also fan out to the registered apps through the `DetectionConsumer` seam. `GET /api/v1/cameras/{id}/detections` queries them. (`routes/ai.rs`, `repo.rs`, `services/consumer.rs`, `services/fanout.rs`, `migrations/0001_init.sql`)
+- [x] **Backpressure** — **priority-greedy** allocation: cameras ordered by priority each get their requested fps while reserving `MIN_FPS` for the rest; the lowest-priority are floored to `MIN_FPS` or shed to 0 beyond `max_samplers` (adding AI cameras degrades the least important cameras, not the host). (`services/sampler.rs::allocate_fps`)
 - [x] **Reference worker + `Analyzer` seam** — `apps/ai/worker.py`: supervisor + per-task threads, discover → pull → analyze → post, retry/backoff, graceful shutdown. Ships a model-free `MotionAnalyzer` (frame-differencing) so the full path validates with no GPU/model; Stage 3 registers a real model behind the same `Analyzer` interface. (`apps/ai/`)
 
 **Deferred (rolls into Stage 3 / later):**
 
-- [ ] **High-res snapshot on trigger** (main-stream crop for plate/face) — not in the sampler; a worker can use the Stage 0 `/snapshot` endpoint today. Per-task `stream_profile=main` is stored/validated but the sampler currently always samples the sub-stream.
-- [ ] **Dynamic backpressure ladder** (720p·5fps → 480p·1fps critical-only → recovery) — current split is static proportional fps; load-driven resolution downgrade + auto-recovery is future work.
+- [x] **Main-stream sampling per task profile** — shipped: the sampler spawns one ffmpeg per (camera, `stream_profile`) pair, so an `anpr`/face task on `main` samples the high-res stream continuously. Still open: a **triggered** high-res crop (grab a main-stream frame only on a sub-stream hit) — a worker can use the Stage 0 `/snapshot` endpoint today.
+- [ ] **Dynamic backpressure ladder** (720p·5fps → 480p·1fps critical-only → recovery) — current allocation is priority-greedy fps with lowest-priority shedding; load-driven **resolution** downgrade + auto-recovery is future work.
 - [ ] **Frame queue / `frame_id` stream** — realized as a single last-value `latest.jpg` per camera (staleness via `x-frame-age-ms`), not a multi-frame queue.
 
 **Stage 2 success criterion:**
 
 | Success criterion | Status | Backed by |
 |---|---|---|
-| AI consumes frames **without breaking recording/live view** | ✅ sampler is a separate supervised ffmpeg set decoding only the sub-stream at a bounded total fps; recorder `-c copy` + MediaMTX live view share no process/file/channel with it; a crashed/absent worker only stops frame *reads* | `services/sampler.rs`, `routes/ai.rs`, `ARCHITECTURE.md` §15.8 |
+| AI consumes frames **without breaking recording/live view** | ✅ sampler is a separate supervised ffmpeg set decoding only the sampled stream profiles (sub by default) at a bounded total fps; recorder `-c copy` + MediaMTX live view share no process/file/channel with it; a crashed/absent worker only stops frame *reads* | `services/sampler.rs`, `routes/ai.rs`, `ARCHITECTURE.md` §15.8 |
 
 > AI begins here. Detection/tracking **models** (YOLO/RT-DETR, ByteTrack/BoT-SORT) and the canonical event model are **Stage 3**, slotting into the worker's `Analyzer` interface with no change to the kernel or the HTTP contract. Still **Level 1** substrate until Stage 3 turns frames into events.
 
@@ -136,10 +136,10 @@ Reference worker: `apps/ai`.
 
 - [x] **Person / vehicle detector (YOLO / RT-DETR baseline)** — runs in the worker behind the `Analyzer` seam, emitting class-labelled boxes (`bbox` normalized `[x,y,w,h]` 0…1). No kernel/contract change. (`apps/ai/worker.py` `Analyzer`, `docs/AI-WORKERS.md` §11.1)
 - [x] **Multi-object tracker (ByteTrack)** — associates boxes across frames into stable `track_id`s, one tracker instance per task thread (per-camera state on `self`); **anonymous session tracking by default** (`track_id` ≠ identity; ReID is Stage 6). (`apps/ai/worker.py`)
-- [x] **Zone annotation** — per-camera **polygon** zones (normalized 0…1 vertices), with `kind`, per-zone `labels` filter, `dwell_seconds`, `severity`, `enabled`; full CRUD API. (`routes/zones.rs`, `migrations/0004_zones.sql`, `models.rs::Zone`)
+- [x] **Zone annotation** — per-camera **polygon** zones (normalized 0…1 vertices), with `kind`, per-zone `labels` filter, `dwell_seconds`, `severity`, `enabled`; full CRUD API. (`routes/zones.rs`, `migrations/0001_init.sql`, `models.rs::Zone`)
 - [x] **Zone entry/exit + dwell-time events** — `ZoneEngine` evaluates each tracked detection's **bbox ground point** (bottom-center) with point-in-polygon + a per-`(camera,zone,track)` state machine → `enter` / `exit` / `dwell` events (dwell fires once per visit; state TTL-pruned at 120 s). Fed synchronously from detection ingest. (`services/zones.rs`)
 - [x] **Evidence builder (snapshot)** — on `enter`, the engine copies the camera's latest sampled sub-stream frame to `/media/snapshots/zoneevt_<id>.jpg` (cheap copy, no decode) and stores it as the event's `evidence_path`. (`services/zones.rs::copy_evidence`)
-- [x] **Canonical event (first concrete instance) + alert reuse** — each zone event is written to both `zone_events` **and** the kernel `events` log as `zone_{enter,exit,dwell}` at the zone's severity, so `warning`/`critical` zone events flow through the **Stage 1 alert webhook** unchanged. The event carries subject (`track_id`+`label`), location (`zone_id`/`zone_name`), timestamp, and an evidence pointer. (`services/zones.rs`, `repo::log_event`, `migrations/0004_zones.sql`)
+- [x] **Canonical event (first concrete instance) + alert reuse** — each zone event is written to both `zone_events` **and** the kernel `events` log as `zone_{enter,exit,dwell}` at the zone's severity, so `warning`/`critical` zone events flow through the **Stage 1 webhook subscriptions** unchanged. The event carries subject (`track_id`+`label`), location (`zone_id`/`zone_name`), timestamp, and an evidence pointer. (`services/zones.rs`, `repo::log_event`, `migrations/0001_init.sql`)
 - [x] **Event/search API** — `GET /api/v1/cameras/{id}/zone-events` (filter by `from`/`to`/`zone_id`/`event_type`, newest-first), alongside Stage 2's `/detections` (by time/label) and the kernel `/events` log. (`routes/zones.rs`, `routes/ai.rs`)
 
 **Deferred (rolls into Stage 4+ / the fuller event model):**
@@ -188,10 +188,10 @@ integrator guide: [`docs/ACCESS-CONTROL.md`](docs/ACCESS-CONTROL.md); implementa
 
 **Shipped checklist:**
 
-- [x] **Visitor pre-registration + guard-booth check-in (operator dashboard surface)** — `visitor_passes` (auto `V-XXXXXX` code, validity window, `active→checked_in→checked_out`/`revoked` lifecycle) + check-in/out endpoints that also write a manual `visitor_checkin`/`visitor_checkout` entry event. Full CRUD API for the booth UI. (`routes/entry.rs`, `migrations/0005_entry.sql`)
-- [x] **ANPR / ALPR** — vehicle→plate→OCR (worker `AnprAnalyzer`) → **server-time temporal voting** per `(camera,track)` → format/plausibility validate → registry lookup, committing **one** canonical event per vehicle. Plate/pass = **primary** identity anchor; voting is on the plate (min `HELDAR_ANPR_MIN_VOTES`, default 3) with commit-on-prune for fast passers. (`services/anpr.rs`, `apps/ai/worker.py`)
-- [x] **Vehicle attributes (type → color → make → model)** — **secondary** verification + search metadata only: the engine compares **color + vehicle_type** for mismatch (→ *exception for guard review*, never auto-reject); make/model is assistive and never a hard access decision. The reference worker emits type + color (no make/model classifier yet). (`services/anpr.rs::check_mismatch`, `apps/ai/worker.py`)
-- [x] **Daily entry logs · exception reports · audit reports** — `GET /reports/entry-log` (window + `by_auth_status` counts), `GET /reports/exceptions` (blocked/exception/unmatched/rejected), `GET /audit` (immutable action log, manager+). (`routes/entry.rs`)
+- [x] **Visitor pre-registration + guard-booth check-in (operator dashboard surface)** — `visitor_passes` (auto `V-XXXXXX` code, validity window, `active→checked_in→checked_out`/`revoked` lifecycle) + check-in/out endpoints that also write a manual `visitor_checkin`/`visitor_checkout` entry event. Full CRUD API for the booth UI. (`crates/heldar-entry/src/routes.rs`, `crates/heldar-entry/migrations/0001_init.sql`)
+- [x] **ANPR / ALPR** — vehicle→plate→OCR (worker `AnprAnalyzer`) → **server-time temporal voting** per `(camera,track)` → format/plausibility validate → registry lookup, committing **one** canonical event per vehicle. Plate/pass = **primary** identity anchor; voting is on the plate (min `HELDAR_ANPR_MIN_VOTES`, default 3) with commit-on-prune for fast passers. (`crates/heldar-entry/src/anpr.rs`, `apps/ai/worker.py`)
+- [x] **Vehicle attributes (type → color → make → model)** — **secondary** verification + search metadata only: the engine compares **color + vehicle_type** for mismatch (→ *exception for guard review*, never auto-reject); make/model is assistive and never a hard access decision. The reference worker emits type + color (no make/model classifier yet). (`crates/heldar-entry/src/anpr.rs::check_mismatch`, `apps/ai/worker.py`)
+- [x] **Daily entry logs · exception reports · audit reports** — `GET /reports/entry-log` (window + `by_auth_status` counts), `GET /reports/exceptions` (blocked/exception/unmatched/rejected), `GET /audit` (immutable action log, manager+). (`crates/heldar-entry/src/routes.rs`)
 - [x] **Role matrix (RBAC) + API integration layer** — five roles (`admin`/`manager`/`guard`/`viewer`/`integration`) × five capabilities; opaque `vos_` sessions + `vok_` API keys (SHA-256 at rest, argon2id passwords); `auth_enabled` gating with a synthetic system admin when off; env bootstrap admin. API keys (`X-API-Key` / `Bearer`) are the integration seam for the worker + external callers. (`auth.rs`, `routes/auth.rs`)
 
 **Done when (status):** ✅ **Met.** A guard runs entry end-to-end — ANPR auto-resolves
@@ -224,9 +224,9 @@ task pending local footage (see deferrals).
 
 | Phase 1 (Access Control) item | Status | Backed by |
 |---|---|---|
-| Visitor registration + guard-booth check-in | ✅ | `visitor_passes` + checkin/checkout (`routes/entry.rs`), manual entry events |
-| ANPR / ALPR (primary identity anchor) | ✅ engineering; ⚠️ accuracy unbenchmarked | `services/anpr.rs` temporal voting + resolution, worker `AnprAnalyzer` |
-| Vehicle attributes (type/color/make/model, secondary) | ◑ type + color shipped; make/model classifier deferred | `services/anpr.rs::check_mismatch` (color+type → exception), worker color heuristic |
+| Visitor registration + guard-booth check-in | ✅ | `visitor_passes` + checkin/checkout (`crates/heldar-entry/src/routes.rs`), manual entry events |
+| ANPR / ALPR (primary identity anchor) | ✅ engineering; ⚠️ accuracy unbenchmarked | `crates/heldar-entry/src/anpr.rs` temporal voting + resolution, worker `AnprAnalyzer` |
+| Vehicle attributes (type/color/make/model, secondary) | ◑ type + color shipped; make/model classifier deferred | `crates/heldar-entry/src/anpr.rs::check_mismatch` (color+type → exception), worker color heuristic |
 | Daily entry logs | ✅ | `GET /reports/entry-log` (+ `by_auth_status`) |
 | Exception reports (plate/vehicle mismatch) | ✅ | `GET /reports/exceptions`; mismatches surface as `exception` events |
 | Audit reports | ✅ | `audit_log` + `GET /audit` (manager+), written on every mutation |
@@ -320,8 +320,8 @@ with its own schema/config/loops/retention/routes. Operator/integrator guide:
 - [x] **Multi-camera topology graph + movement trails** — `camera_links` operator-defined
   directed adjacency (`from`/`to`/`transit_seconds`/`bidirectional`) scopes all matching;
   movement trail = all `entry_events` for a normalized plate, time-ordered
-  (`trail_for_plate`). Full CRUD API (manage-gated). (`schema.sql`, `routes.rs`,
-  `reid.rs::trail_for_plate`)
+  (`trail_for_plate`). Full CRUD API (manage-gated). (`crates/heldar-movement/migrations/0001_init.sql`,
+  `routes.rs`, `reid.rs::trail_for_plate`)
 - [x] **Red/green zone breach alerts (rule engine)** — `breach::sweep()` resolves red zones
   by `kind` (`HELDAR_MOVEMENT_RED_ZONE_KINDS`, default `restricted,red`), records one
   `breach_alerts` incident per zone `enter` event (`ON CONFLICT(zone_event_id) DO NOTHING`
@@ -477,6 +477,27 @@ retrieval seam (search-by-image) is documented, not built (see deferrals).
 > worker. This is **Level 3 → 4** (event memory → latent world memory): a typed,
 > evidence-backed, deterministic query layer whose **only** inference — reading the question
 > — is surfaced, fallible, and decoupled from the answer.
+
+---
+
+## 🧱 Post-Stage-7 platform work
+
+The staged plan above ends at semantic search, but the platform kept moving. The workstreams since, with honest status:
+
+| Workstream | Status | Backed by |
+|---|---|---|
+| **WebRTC remote access** (browser-based; signaling + TURN via the rendezvous, MediaMTX/WHEP video, full remote dashboard) | ◑ P1 + P3 shipped; P2 signaling live — **remaining:** Cloudflare Realtime TURN key + Worker secrets + box env/restart | ADR 0003; `services/webrtc_rendezvous.rs`, `apps/edge/` |
+| **Control-plane fleet** (Postgres fleet index, outbox drain, node self-registration, mTLS + CRL, cross-site alert routing, fleet dashboard) | ◑ Phases 0–3 done — **remaining:** Phases 4–5 (out-of-process decode workers; media-plane isolation + worker trust scoping + `integrity_hash`), CRL hot-reload/OCSP, dashboard ack/paging | ADR 0001; `crates/heldar-control-plane`, `routes/outbox.rs`, `services/fleet_register.rs` |
+| **Per-box enrollment auth** (site-bound `HELDAR_CP_TOKEN` minted from `BOX_ENROLL_SECRET`; shared `BOX_TOKEN` demoted to legacy) | ◑ merged to main — **remaining:** deploy (set the Worker secret + re-mint box tokens) | `apps/edge/README.md` |
+| **Plugin platform** (module registry, sidecar plugins with signed webhooks + `/m/{id}/` proxy, sandboxed Wasm host behind the off-by-default `wasm` feature) | ✅ DONE | `services/modules.rs`, `services/registry.rs`, `crates/heldar-wasm`, `examples/` |
+| **Backup engine** (destinations / policies / jobs, DB snapshot CLI + systemd timer) | ✅ DONE | `services/backup.rs`, `routes/backup.rs`, `infra/systemd/heldar-db-backup.*` |
+| **ONVIF discovery + ISAPI camera-config** (probe/enroll cameras; HikVision ISAPI settings) | ✅ DONE | `services/onvif.rs`, `services/discovery.rs`, `services/camera_config/` |
+| **Mirror recording** (secondary copy of segments) | ✅ DONE | `services/mirror.rs` |
+| **ANR** (recording-gap re-fill from camera onboard storage) | ✅ DONE | `services/anr.rs` |
+| **SMTP event notifier** (email, behind the off-by-default `smtp` feature) | ✅ DONE | `services/email.rs` |
+| **Kernel-owned live transcode** (supervised publisher, per-camera `live_warm`, runtime engine setting `GET`/`PUT /api/v1/system/transcode`) | ✅ DONE | `services/live_publisher.rs`, `migrations/0006_live_warm.sql`, `routes/system.rs` |
+| **Self-bounding DB size cap** (`HELDAR_MAX_DB_GB` + background `auto_vacuum` conversion, dashboard-managed) | ✅ DONE (takes effect on box redeploy) | `services/retention.rs`, `docs/PRODUCTION.md` |
+| **Worker sharding** (`GET /api/v1/ai/tasks?worker_id=`, poll-as-heartbeat lease) | ✅ DONE | `routes/ai.rs`, `migrations/0004_ai_workers.sql`, `docs/AI-WORKERS.md` §5.1 |
 
 ---
 

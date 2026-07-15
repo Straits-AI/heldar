@@ -6,7 +6,7 @@
 #
 # After running:
 #   1. Add '<locale>' to i18n.locales + i18n.localeConfigs (label + htmlLang) in website/docusaurus.config.ts
-#   2. Add README.<locale>.md (translate README.md) + add it to OPEN_PATHS in scripts/prepare-open-repo.sh
+#   2. Add README.<locale>.md (translate README.md; maintainers: also list it in the release allowlist)
 #   3. Translate the generated i18n/<locale>/**/*.{json,md} — see website/i18n/TRANSLATING.md
 #   4. cd website && npm run build
 # Untranslated pages fall back to English automatically, so partial progress is always shippable.

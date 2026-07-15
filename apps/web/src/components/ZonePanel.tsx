@@ -47,6 +47,15 @@ function isBbox(b: unknown): b is [number, number, number, number] {
   return Array.isArray(b) && b.length === 4 && b.every((n) => typeof n === "number");
 }
 
+/** Read-only notice shown to non-managers in lieu of mutation controls. */
+function ReadOnlyNote() {
+  return (
+    <p className="font-mono text-[11px] text-fg-muted">
+      Manager role required to change zones.
+    </p>
+  );
+}
+
 /** Coerce the server's polygon JSON into a clean [x,y][] of finite numbers. */
 function asPolygon(poly: unknown): ZonePoint[] {
   if (!Array.isArray(poly)) return [];
@@ -298,7 +307,9 @@ function ZoneCanvas({
 
 /* -------------------------------- panel -------------------------------- */
 
-export function ZonePanel({ cameraId }: { cameraId: string }) {
+// Reads are open to any principal; zone mutations are manager+ (the API enforces this — the
+// controls mirror it by gating on `canManage`, same as the other CameraDetail panels).
+export function ZonePanel({ cameraId, canManage }: { cameraId: string; canManage: boolean }) {
   const zones = usePoll(() => api.listZones(cameraId), 10000, [cameraId]);
   const detections = usePoll(
     () => api.cameraDetections(cameraId, { limit: 50 }),
@@ -442,7 +453,7 @@ export function ZonePanel({ cameraId }: { cameraId: string }) {
               </Button>
             </div>
           ) : (
-            <Button size="sm" variant="primary" onClick={startDrawing}>
+            <Button size="sm" variant="primary" disabled={!canManage} onClick={startDrawing}>
               New zone
             </Button>
           )
@@ -560,12 +571,17 @@ export function ZonePanel({ cameraId }: { cameraId: string }) {
                 <ZoneRow
                   key={z.id}
                   zone={z}
-                  busy={busy}
+                  busy={busy || !canManage}
                   onToggle={() => void toggleZone(z)}
                   onDelete={() => void removeZone(z)}
                 />
               ))}
             </ul>
+          )}
+          {!canManage && (
+            <div className="mt-3">
+              <ReadOnlyNote />
+            </div>
           )}
           {!drawing && formError && (
             <p className="mt-3 font-mono text-xs text-danger">{formError}</p>

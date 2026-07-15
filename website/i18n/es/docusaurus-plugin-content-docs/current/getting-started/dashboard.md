@@ -29,7 +29,8 @@ conteos de cámaras/grabadores/segmentos, un medidor de almacenamiento, tiempo d
 **Detalle de cámara** (`/cameras/:id`) — la vista del operador para una cámara: vídeo **en directo** de baja latencia
 (WebRTC/WHEP, fallback a HLS) y una **línea de tiempo grabada** que puede desplazar con un clic (1h / 6h / 24h / 3d). Desde
 aquí puede capturar instantáneas, exportar clips de evidencia (MP4), bloquear segmentos como evidencia, activar una grabación manual
-(modo de evento) y gestionar las **tareas de IA** y las **zonas** de la cámara (a continuación). Los paneles muestran segmentos y eventos recientes, telemetría de estado (FPS, tasa de bits, reconexiones), PTZ, el horario de grabación y el relleno de huecos ANR.
+(modo de evento), alternar **directo en caliente** (mantener el flujo en directo de esta cámara siempre activo para una reproducción
+instantánea; el valor por defecto es arranque bajo demanda con cierre por inactividad) y gestionar las **tareas de IA** y las **zonas** de la cámara (a continuación). Los paneles muestran segmentos y eventos recientes, telemetría de estado (FPS, tasa de bits, reconexiones), PTZ, el horario de grabación y el relleno de huecos ANR.
 
 **Reproducción** (`/playback`) — revisión sincronizada de múltiples cámaras: elija cámaras y una ventana de tiempo, luego
 desplácese por todas ellas con un reloj maestro compartido de reproducir/pausar/buscar y velocidad (0.5× … 4×).
@@ -37,7 +38,7 @@ desplácese por todas ellas con un reloj maestro compartido de reproducir/pausar
 **Añadir cámara** (`/cameras/new`) — registrar una cámara. Elija un proveedor (Hikvision / Dahua / Genérico); la
 URL RTSP se construye a partir de la plantilla del proveedor (usted proporciona la dirección y las credenciales) o se indica explícitamente para
 Genérico. Establezca el modo de grabación (continuo / programado / evento / programado+evento), el flujo, la duración del segmento,
-la retención, la cuota de almacenamiento por cámara y la pre/post-grabación para los modos de evento.
+la retención, la cuota de almacenamiento por cámara, el directo en caliente y la pre/post-grabación para los modos de evento.
 
 **Descubrir** (`/discover`) — escanear un rango de IP en busca de cámaras RTSP (y ONVIF), identificar proveedor/modelo a partir del
 banner, verificar credenciales y saltar a Añadir cámara con los campos prellenados (manager+).
@@ -59,6 +60,9 @@ desinstale módulos y sidecars (manager+), y consulte las insignias verificadas/
 
 **Sistema** (`/system`) — estado y observabilidad: el panel de almacenamiento (medidor de disco, horizonte de llenado proyectado,
 tasa de escritura), los controles de **límite de grabación** (límite de tamaño + umbral de disco libre, ajustable en vivo — admin+),
+los controles de **límite de base de datos** (el límite de la BD de metadatos `heldar.db` + la conversión única de auto_vacuum — admin+),
+el selector del motor de **transcodificación en vivo** (software / VAAPI / NVENC, con los codificadores hardware detectados;
+se aplica de inmediato a las nuevas sesiones en directo — admin+),
 estado por cámara, el feed de eventos recientes, el **registro de auditoría** inmutable (manager+), configuración masiva de cámaras
 y el panel de webhooks (admin+).
 

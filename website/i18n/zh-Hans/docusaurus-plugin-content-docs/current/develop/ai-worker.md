@@ -42,6 +42,9 @@ Heldar AI Worker 是任何能够响应四个 HTTP 端点的进程。内核负责
 `task_type` 是你自定义的自由格式字符串；内核仅使用 `fps` / `width` /
 `enabled` 来驱动采样器，`config` 是由你的 Worker 解释的不透明数据块。这里的 `fps` 是请求速率；经过预算调度后的实际采样速率由 `GET /api/v1/ai/samplers` 报告。
 
+运行多个 Worker？通过 `?worker_id=` 传入一个稳定标识（例如
+`GET /api/v1/ai/tasks?worker_id=nvr1:4242`），内核会将你注册为存活 Worker，并只返回按存活 Worker 集合取模分片后**属于你的那部分**任务列表。省略该参数则返回全部任务（单 Worker 向后兼容）——不传它的自定义 Worker 与任何其他 Worker 并行时会重复处理每个任务。存活 Worker 集合变化时任务会重新分配：最后一次轮询早于存活 TTL（60 秒）的 Worker 会被视为已下线，其任务被重新指派，因此轮询频率必须快于该 TTL（默认轮询间隔为 10 秒）。
+
 ### 2. 拉取帧 - `GET /api/v1/cameras/{id}/frame`
 
 为指定摄像头提供最新采样的 JPEG 帧。按照你自己的节奏拉取，通常等于或略低于任务的 `fps`。
@@ -172,6 +175,8 @@ HELDAR_API=http://localhost:8000 python worker.py
 
 Worker 端配置（CLI 参数或环境变量）涵盖 API 基础 URL
 （`--api` / `HELDAR_API`）、任务轮询间隔
-（`--poll-interval` / `HELDAR_AI_POLL_INTERVAL`），以及 HTTP/退避/日志相关参数。
+（`--poll-interval` / `HELDAR_AI_POLL_INTERVAL`）、分片标识
+（`--worker-id` / `HELDAR_AI_WORKER_ID`，默认 `<hostname>:<pid>`——作为
+`?worker_id=` 发送，使多个 Worker 分摊任务列表），以及 HTTP/退避/日志相关参数。
 完整参数列表请参阅
 [apps/ai/README.md](https://github.com/Straits-AI/heldar/blob/main/apps/ai/README.md)。

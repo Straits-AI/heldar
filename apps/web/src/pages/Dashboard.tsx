@@ -209,6 +209,30 @@ export function Dashboard() {
           </div>
         )}
 
+        {/* Telemetry failure is distinct from a camera-list failure: without it the stat strip zeros
+            out and every card reads UNKNOWN, which an operator misreads as "nothing is recording". */}
+        {health.error && (
+          <div className="mb-4 flex items-center gap-2 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-xs text-red-300 animate-rise">
+            <svg
+              viewBox="0 0 16 16"
+              width="14"
+              height="14"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+              className="shrink-0"
+            >
+              <path d="M8 1.5l6.5 11.5H1.5z" />
+              <path d="M8 6.5v3.5" />
+              <path d="M8 11.6v.4" />
+            </svg>
+            Camera telemetry unavailable (states and counters may be stale): {health.error}
+          </div>
+        )}
+
         {showLoading ? (
           <div className="flex items-center justify-center gap-3 rounded-panel border border-line bg-panel py-16 text-fg-secondary animate-rise">
             <Spinner />

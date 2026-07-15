@@ -185,7 +185,7 @@ auth genérica, el log de eventos, el outbox transaccional y la entrega de webho
 del kernel. Véase [Construir un módulo](./build-a-module.md) para los
 puntos de integración.
 
-Tomemos un portal de visitantes de campus como patrón de trabajo. Se integra en dos
+Tomemos un vertical de portal de visitantes como patrón de trabajo. Se integra en dos
 direcciones sobre el kernel:
 
 - **Entrante** — el portal llama a los propios endpoints REST del vertical (por ejemplo,
@@ -193,7 +193,7 @@ direcciones sobre el kernel:
   rol `integration`. Los endpoints son del vertical; la clave API, RBAC
   y el log de auditoría son del kernel.
 - **Saliente** — la app padre suscribe un webhook a los eventos de dominio del vertical (por ejemplo,
-  un evento `campus.*` que emite el vertical), filtrado por tipo de evento y severidad y verificado
+  un evento `portal.*` que emite el vertical), filtrado por tipo de evento y severidad y verificado
   con el mismo HMAC `X-Heldar-Signature`. No se necesita código de entrega
   específico del vertical — es el mismo motor documentado anteriormente.
 

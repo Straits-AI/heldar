@@ -8,7 +8,7 @@ camera health. The detection/tracking **models** are a later stage (Stage 3) and
 are intentionally absent here.
 
 **Stage 1 (observability & reliability) has since shipped** on top of this kernel —
-storage/disk monitoring, Prometheus metrics, an alert webhook, a disk-free
+storage/disk monitoring, Prometheus metrics, webhook alert subscriptions, a disk-free
 retention floor, recording-gap reporting, observed fps/bitrate, a `/readyz`
 readiness probe, and supervised background tasks. It is documented in §14 below and,
 for operators, in [`docs/OBSERVABILITY.md`](docs/OBSERVABILITY.md).
@@ -30,7 +30,7 @@ behind the Stage 2 `Analyzer` seam) and posts **tracked** detections (`track_id`
 per object); the kernel gains a **zone engine** that evaluates those tracked
 detections against per-camera polygon zones and raises `enter` / `exit` / `dwell`
 events with an evidence frame. New schema: `zones` + `zone_events`
-(`migrations/0004_zones.sql`). It is documented in §16 below and, for integrators,
+(in `migrations/0001_init.sql`). It is documented in §16 below and, for integrators,
 in [`docs/AI-WORKERS.md`](docs/AI-WORKERS.md). The detection/tracking *engineering*
 is production-grade; model *accuracy* on local footage (Malaysian vehicles/plates,
 crowded ReID) still needs a local benchmark set before any hard decision is made on
@@ -43,7 +43,9 @@ vehicles, visitor passes, watchlist), and an **ANPR temporal-voting engine**
 (`services/anpr.rs`) that consolidates per-frame plate reads from an `anpr` worker
 task into one canonical entry/exit event, resolves it against the
 registry, and drives a guard confirm/reject **workflow** + daily/exception/audit
-**reports**. New schema: `migrations/0005_entry.sql`. It is documented in §17 below
+**reports**. New schema: the RBAC tables are kernel-owned (`migrations/0001_init.sql`); the
+entry domain tables live in the app's own `crates/heldar-entry/migrations/0001_init.sql`,
+self-installed via `db::run_app_migrations`. It is documented in §17 below
 and, for operators/integrators, in [`docs/ACCESS-CONTROL.md`](docs/ACCESS-CONTROL.md).
 The ANPR/attribute *engineering* is production-grade; OCR + make/model *accuracy*
 needs the same local benchmark before any hard access decision.
@@ -162,7 +164,7 @@ sampler) is deliberately out of scope for Stage 0.
 | **Layer 3 — Playback** | Segment listing, coalesced timeline ranges, clip export, snapshot extraction | `routes/playback.rs`, `routes/recordings.rs`, `services/clip.rs`, `services/snapshot.rs` |
 | **Layer 3 — Live view (brokered)** | MediaMTX path registration + HLS/WebRTC/RTSP URL minting (server-side creds) | `services/mediamtx.rs`, `routes/liveview.rs` |
 | **Camera health** | Staleness downgrade monitor + status & event APIs | `services/health.rs`, `routes/health.rs` |
-| **Layer 4 — AI frame sampler** | **Shipped in Stage 2** (§15): budgeted sub-stream sampler → `frames/<cam>/latest.jpg`; `ai_tasks`/`detections` tables; pull-based worker contract. Detection/tracking *models* are Stage 3. | `services/sampler.rs`, `routes/ai.rs`, `migrations/0003_ai.sql`, `apps/ai/worker.py` |
+| **Layer 4 — AI frame sampler** | **Shipped in Stage 2** (§15): budgeted sub-stream sampler → `frames/<cam>/latest.jpg`; `ai_tasks`/`detections` tables; pull-based worker contract. Detection/tracking *models* are Stage 3. | `services/sampler.rs`, `routes/ai.rs`, `migrations/0001_init.sql` (AI tables), `apps/ai/worker.py` |
 
 ### Process boot order (`main.rs`)
 
@@ -173,7 +175,7 @@ sampler) is deliberately out of scope for Stage 0.
    as a background task after boot (step 6), so this step never blocks on a multi-minute `VACUUM`.
 4. Construct `RecorderManager` and shared `reqwest::Client` (10s timeout).
 5. `recorder.start_all()` — spawn one supervisor task per recordable camera.
-6. Launch the indexer, health monitor, retention sweeper, and alert notifier as
+6. Launch the indexer, health monitor, retention sweeper, and webhook deliverer as
    **supervised** background loops (`spawn_supervised` — respawn on return/panic, §14). Also fires a
    one-shot (non-supervised) `tokio::spawn` for the legacy-DB `auto_vacuum=INCREMENTAL` conversion,
    flag-gated by `HELDAR_DB_AUTOVACUUM_CONVERT` (default `true`) — best-effort, disk-gated, idempotent;
@@ -642,8 +644,7 @@ All via `HELDAR_*` env vars (see `.env.example`). Notable defaults:
 | `HELDAR_MIN_FREE_DISK_GB` | `5` | disk-free floor (hard host-protection floor) |
 | `HELDAR_MAX_DB_GB` | `4` | metadata-DB (`heldar.db`) size cap; sheds oldest `detections` above this |
 | `HELDAR_DB_AUTOVACUUM_CONVERT` | `true` | one-time background `auto_vacuum=INCREMENTAL` conversion for a pre-existing DB (§13); `false` = skip, run `convert-autovacuum` manually |
-| `HELDAR_ALERT_WEBHOOK_URL` | *(unset)* | alert webhook; unset disables the notifier |
-| `HELDAR_NOTIFIER_INTERVAL_S` | `15` (min 5) | notifier poll cadence |
+| `HELDAR_NOTIFIER_INTERVAL_S` | `15` (min 5) | webhook-delivery poll cadence (subscriptions are managed via `/api/v1/webhooks`, §14.3) |
 | `HELDAR_API_HOST` / `API_PORT` | `0.0.0.0` / `8000` | bind address |
 | `HELDAR_CORS_ORIGINS` | `http://localhost:5173` | `*`/empty = allow all |
 | `HELDAR_SESSION_TTL_HOURS` / `_IDLE_TIMEOUT_MIN` | `12` / `0` (off) | login-session lifetime / idle timeout (remote access, §21) |
@@ -687,7 +688,7 @@ All via `HELDAR_*` env vars (see `.env.example`). Notable defaults:
    ├─ spawn_supervised indexer::run   (every ~10s)  scans dirs → segments rows, gaps, fps/bitrate
    ├─ spawn_supervised health::run    (every ~15s)  recording→error on staleness
    ├─ spawn_supervised retention::run (every ~300s) age + size-cap + free-floor purge (skip locked)
-   ├─ spawn_supervised notifier::run  (every ~15s)  POST warning/critical events → webhook
+   ├─ spawn_supervised webhooks::run  (every ~15s)  POST matching events → webhook subscriptions
    │     (each spawn_supervised wrapper respawns its task 5s after any return/panic)
    │
    ├─ tokio::spawn maybe_convert_autovacuum (once, if HELDAR_DB_AUTOVACUUM_CONVERT=true; default true)
@@ -703,8 +704,8 @@ All concerns (1 supervisor-set + 4 supervised loops + HTTP) share the single
 sets `connecting`/`recording`/`offline`) and the indexer (reads files, confirms
 `recording`, computes bitrate/fps) is entirely through the filesystem and the
 `camera_status` row — there is no in-process channel between them, which keeps the
-write path non-blocking. The notifier reads only the `events` table (a polling
-cursor), so alerting is fully decoupled from the producers.
+write path non-blocking. The webhook deliverer reads only the `events` table (a
+polling cursor per subscription), so alerting is fully decoupled from the producers.
 
 ---
 
@@ -753,24 +754,26 @@ registry). System gauges: `heldar_build_info`, `heldar_cameras_total`,
 full table (types/labels/conditions) is in `docs/OBSERVABILITY.md` §2. Note there is
 **no fps metric** on `/metrics`; observed fps is health-API-only (§14.6).
 
-### 14.3 Alert notifier (`services/notifier.rs`)
+### 14.3 Webhook delivery engine (`services/webhooks.rs`)
 
-A supervised loop that **POSTs warning/critical events to a webhook** when
-`HELDAR_ALERT_WEBHOOK_URL` is set (no-op otherwise). Key properties:
+A supervised loop that **POSTs events to external systems** — the single deliverer of
+generic events, superseding the old single-URL alert notifier. Subscriptions
+(`webhook_subscriptions`, managed via `/api/v1/webhooks` + the dashboard) each carry an
+event-type + severity filter and an optional HMAC secret. Key properties:
 
-- **Starts from now:** the delivery cursor is `Utc::now()` at boot, so history is
-  never replayed on restart.
-- Polls every `HELDAR_NOTIFIER_INTERVAL_S` (default 15, min 5); each cycle pulls
-  up to 100 events with `severity IN ('warning','critical') AND created_at > cursor`
-  oldest-first and POSTs one JSON body per event
-  (`{source, event_id, event_type, severity, camera_id, timestamp, payload}`).
-- **Retry semantics:** a *transport* failure (no response) stops the cursor and
-  retries that event next cycle (at-least-once); a *non-2xx response* is logged but
-  the cursor advances (not retried). 10 s HTTP timeout.
-
-Delivered event types today: `camera_offline`, `recorder_error`, `recording_gap`
-(all warning), and `disk_pressure` (warning/critical). `retention_delete` (info) is
-**not** delivered.
+- **Per-subscription cursor:** each enabled subscription keeps its own persisted
+  `cursor_at` (an `events.created_at`), so subscriptions advance independently.
+- Polls every `HELDAR_NOTIFIER_INTERVAL_S` (default 15, min 5); each cycle delivers
+  the events newer than the cursor that pass the filter (batches of 100), POSTing the
+  JSON envelope with `X-Heldar-Event` / `X-Heldar-Delivery` / `X-Heldar-Timestamp`
+  headers and, when a secret is set,
+  `X-Heldar-Signature: sha256=<hex HMAC-SHA256(secret, raw_body)>`.
+- **Retry semantics + poison handling:** every attempt is recorded in
+  `webhook_deliveries`; a retryable failure keeps the cursor (retried next cycle)
+  until the per-event attempts reach `MAX_ATTEMPTS` (5), after which the cursor
+  advances so one dead endpoint cannot wedge the queue forever. 10 s HTTP timeout;
+  redirects are disabled (egress guard) so a target can't 302 the box to an
+  internal/metadata URL.
 
 ### 14.4 Disk-free retention floor (`services/retention.rs`)
 
@@ -828,7 +831,7 @@ orchestrators/load balancers, distinct from liveness.
 
 ### 14.8 Supervised background tasks (`main.rs`)
 
-The indexer, health monitor, retention sweeper, and notifier are launched through
+The indexer, health monitor, retention sweeper, and webhook deliverer are launched through
 `spawn_supervised(name, make)`: an outer task re-runs the inner `run()` loop, and
 if it ever **returns or panics** it logs the cause and respawns after 5 s
 (cancellation = clean stop). The `run()` loops are infinite by design, so this is a
@@ -848,16 +851,16 @@ stores a task model + detection results, and exposes a pull-based worker contrac
 AI workers never touch RTSP, and a slow/absent worker cannot affect recording or
 live view. The integrator-facing guide is [`docs/AI-WORKERS.md`](docs/AI-WORKERS.md);
 this section documents the implementation. New code: `services/sampler.rs`,
-`routes/ai.rs`, `migrations/0003_ai.sql`, the AI types in `models.rs`, and the
+`routes/ai.rs`, the AI tables in `migrations/0001_init.sql`, the AI types in `models.rs`, and the
 `ai_*` settings in `config.rs`. The reference Python worker lives in `apps/ai`.
 
 ```
    AI tasks (DB)            SamplerManager (services/sampler.rs)             AI worker (apps/ai)
-   ai_tasks ──reconcile──►  rebalance(): one ffmpeg per AI-enabled camera   ┌──────────────┐
+   ai_tasks ──reconcile──►  rebalance(): one ffmpeg per (camera, profile)   ┌──────────────┐
    (enabled)                  ▼                                             │ GET /ai/tasks│ discover
                        ffmpeg -vf fps=<budgeted>,scale=<w>:-2 ──► decode    │ GET /frame   │ pull JPEG
                               ▼                                             │ POST /ai/    │ post results
-                    frames/<cam>/latest.jpg  (─update 1, overwritten)       │   events     │
+                    frames/<cam>/latest_<profile>.jpg  (─update 1)          │   events     │
                               ▼                                             └──────┬───────┘
               GET /api/v1/cameras/{id}/frame  (+ x-frame-age-ms / -captured-at)    │
                                                                                    ▼
@@ -867,29 +870,29 @@ this section documents the implementation. New code: `services/sampler.rs`,
 ### 15.1 Sampler supervisor (`services/sampler.rs`)
 
 `SamplerManager` is constructed in `main.rs`, stored in `AppState`, started via
-`start_all()` and stopped on shutdown. It owns `Mutex<HashMap<camera_id,
-SamplerTask>>` (a `watch::Sender<bool>` stop channel + `JoinHandle` per camera), a
-parallel `info` map of `SamplerInfo {camera_id, state, fps}`, and a
-`rebalance_lock`.
+`start_all()` and stopped on shutdown. It owns a `Mutex<HashMap<key,
+SamplerTask>>` keyed per (camera, stream profile) (a `watch::Sender<bool>` stop
+channel + `JoinHandle` per sampler), a parallel `info` map of
+`SamplerInfo {camera_id, stream_profile, state, fps}`, and a `rebalance_lock`.
 
 - **`rebalance()`** (also reached via `reconcile()`, and by `start_all()`) is the
   single mutating path, **serialized by `rebalance_lock`** so concurrent AI-task
   edits can't race into overlapping ffmpegs. It: stops every running sampler,
   clears `info`, returns early if `!ai_enabled`, then queries the active set —
-  `SELECT c.id, MAX(t.fps), MAX(t.width) FROM cameras c JOIN ai_tasks t ON
-  t.camera_id=c.id WHERE c.enabled=1 AND t.enabled=1 GROUP BY c.id` — and spawns
-  one supervisor per camera at the budgeted fps. **One sampler per camera**, with
-  fps/width taken as the **MAX across that camera's enabled tasks** (all tasks on a
-  camera share one ffmpeg and one frame file).
-- **`supervise()` loop** per camera: loads the camera, resolves the source as
-  `stream_url(cam,"sub")` falling back to `record_url(cam)` (sub-stream preferred —
-  the per-task `stream_profile` is *advisory* here today), `create_dir_all` on the
-  frames dir, and spawns:
+  `SELECT c.id, t.stream_profile, MAX(t.fps), MAX(t.width), c.priority FROM cameras c
+  JOIN ai_tasks t ON t.camera_id=c.id WHERE c.enabled=1 AND t.enabled=1 GROUP BY
+  c.id, t.stream_profile ORDER BY c.priority DESC` — and spawns one supervisor per
+  **(camera, stream profile)** pair at the allocated fps. Fps/width are taken as
+  the **MAX across that pair's enabled tasks** (all tasks on a camera sharing a
+  profile share one ffmpeg and one frame file).
+- **`supervise()` loop** per (camera, profile): loads the camera, resolves the
+  source as `stream_url(cam, profile)` falling back to `record_url(cam)`,
+  `create_dir_all` on the frames dir, and spawns:
 
   ```
   ffmpeg -nostdin -hide_banner -loglevel warning -rtsp_transport tcp -timeout 15000000
          -i <url> -an -vf "fps=<fps>,scale=<width>:-2" -q:v 5
-         -f image2 -update 1 -y  <frames_dir>/<cam>/latest.jpg
+         -f image2 -update 1 -y  <frames_dir>/<cam>/latest_<profile>.jpg
   ```
 
   stderr is drained concurrently (tail capped at 8 KB), `kill_on_drop(true)`
@@ -902,10 +905,11 @@ parallel `info` map of `SamplerInfo {camera_id, state, fps}`, and a
 ### 15.2 Frame storage
 
 `HELDAR_FRAMES_DIR` (default `<DATA_DIR>/frames`, via
-`Config::camera_frames_dir`) holds **one `latest.jpg` per camera** in
-`frames/<camera_id>/`. `-update 1` overwrites that single file in place — there is
-no growing frame directory and no per-frame id; it is the always-current frame
-(last-value). `GET /api/v1/cameras/{id}/frame` serves it with `Content-Type:
+`Config::camera_frames_dir`) holds **one `latest_<profile>.jpg` per (camera, stream
+profile)** in `frames/<camera_id>/`. `-update 1` overwrites that single file in
+place — there is no growing frame directory and no per-frame id; it is the
+always-current frame (last-value). `GET /api/v1/cameras/{id}/frame` (optional
+`?profile=sub|main`, default `sub`) serves it with `Content-Type:
 image/jpeg`, `Cache-Control: no-store`, and two freshness headers computed from the
 file mtime: **`x-frame-age-ms`** and **`x-frame-captured-at`** (RFC3339). The `{id}`
 segment is rejected if it contains `/`, `\`, or `..` (path-traversal defense);
@@ -913,27 +917,22 @@ missing file → `404` ("no sampled frame yet…").
 
 ### 15.3 Budget & backpressure
 
-A single global fps budget is shared across AI-enabled cameras so adding cameras
-degrades per-camera fps instead of overloading the host:
-
-```
-active         = # enabled cameras with ≥1 enabled AI task
-budget         = HELDAR_AI_MAX_TOTAL_FPS  (default 40, floored at 1.0)
-per_camera_cap = budget / active
-effective_fps  = max( min(MAX(task.fps), per_camera_cap), 0.5 )
-```
-
-So with the default budget: 4 AI cameras → ≤10 fps each, 8 → ≤5, 20 → ≤2; a camera
-never exceeds its requested fps. The `MIN_FPS=0.5` floor wins over the strict budget
-(many cameras can push the summed rate slightly above budget rather than starve any
-camera to zero). Any AI-task create/update/delete triggers `reconcile()` →
-`rebalance()`, recomputing the split and restarting samplers. This is a **static**
-proportional fps split; the dynamic resolution-downgrade ladder + load-driven
+A single global fps budget is shared across the active samplers so adding cameras
+degrades the least important cameras instead of overloading the host. Allocation
+(`allocate_fps`) is **priority-greedy**: samplers are ordered by camera `priority`
+(DESC), each granted its requested fps while reserving `MIN_FPS = 0.5` for the
+remaining running samplers, so high-priority cameras (e.g. an ANPR gate lane) keep
+full fidelity and the lowest-priority are floored to `MIN_FPS` — or shed to 0
+entirely beyond `max_samplers = budget / MIN_FPS` (the concurrent-decoder cap that
+keeps the summed rate within `HELDAR_AI_MAX_TOTAL_FPS`, default 40). A camera never
+exceeds its requested fps. Any AI-task create/update/delete triggers `reconcile()` →
+`rebalance()`, recomputing the allocation and restarting samplers. This is an
+fps-only ladder; the dynamic resolution-downgrade ladder + load-driven
 recovery is deferred (per-task `width` is honored as MAX, not
 auto-downgraded). High-res on-trigger capture is not in the sampler — a worker can
 use the Stage 0 `/snapshot` endpoint for a main-stream grab.
 
-### 15.4 Data model (`migrations/0003_ai.sql`)
+### 15.4 Data model (`migrations/0001_init.sql`, AI tables)
 
 Two tables, both `camera_id` FK → `cameras` `ON DELETE CASCADE`:
 
@@ -953,7 +952,7 @@ Two tables, both `camera_id` FK → `cameras` `ON DELETE CASCADE`:
 |---|---|---|
 | GET / POST | `/api/v1/cameras/{id}/ai-tasks` | list a camera's tasks / create a task (`201`) |
 | PATCH / DELETE | `/api/v1/ai-tasks/{task_id}` | partial update / delete (`204`) — both `reconcile()` |
-| GET | `/api/v1/ai/tasks` | **worker discovery**: every enabled task on an enabled camera + its `frame_url` |
+| GET | `/api/v1/ai/tasks` | **worker discovery**: every enabled task on an enabled camera + its `frame_url`; optional `?worker_id=` shards tasks across concurrent workers (the poll doubles as a liveness heartbeat) — see `docs/AI-WORKERS.md` §5.1 |
 | GET | `/api/v1/ai/samplers` | per-camera sampler `{camera_id, state, fps}` (effective fps) |
 | GET | `/api/v1/cameras/{id}/frame` | latest sampled JPEG + `x-frame-age-ms` / `x-frame-captured-at` |
 | POST | `/api/v1/ai/events` | **ingest**: detections (+ optional event) for a camera |
@@ -1015,11 +1014,12 @@ and BakerySense apps. It has two halves that meet at the Stage 2 `POST
 2. **In the kernel (`crates/heldar-kernel`)** — a **zone engine** (`services/zones.rs`)
    evaluates each tracked detection against the camera's polygon **zones** and
    raises **`enter` / `exit` / `dwell`** zone events (with an evidence frame). Zone
-   CRUD + a zone-events query live in `routes/zones.rs`; the schema is
-   `migrations/0004_zones.sql`. This section documents the kernel half.
+   CRUD + a zone-events query live in `routes/zones.rs`; the schema is the zones
+   tables in `migrations/0001_init.sql`. This section documents the kernel half.
 
 New code: `services/zones.rs`, `routes/zones.rs`, the `Zone` / `ZoneCreate` /
-`ZoneUpdate` / `ZoneEvent` types in `models.rs`, and `migrations/0004_zones.sql`.
+`ZoneUpdate` / `ZoneEvent` types in `models.rs`, and the zones tables in
+`migrations/0001_init.sql`.
 The `ZoneEngine` is built in `main.rs` and held in `AppState` (`state.zones`); it
 has **no background loop** — it is driven synchronously from the detection-ingest
 path.
@@ -1140,7 +1140,7 @@ concrete **canonical event**: a typed event with a subject (`track_id` +
 detections behind it, and an evidence pointer. Identity/authorization/workflow
 fields of the full canonical-event model arrive with Stages 4/6.
 
-### 16.4 Data model (`migrations/0004_zones.sql`)
+### 16.4 Data model (`migrations/0001_init.sql`, zones tables)
 
 Two tables. `zones` is camera-scoped and editable; `zone_events` is an append-only
 log.
@@ -1246,8 +1246,10 @@ section documents the implementation.
 
 New code: `services/anpr.rs` (engine), `auth.rs` (RBAC + `Principal` extractor),
 `routes/auth.rs` (login/users/keys), `routes/entry.rs` (registry + events +
-reports), the Stage 4 types in `models.rs`, the `auth_*`/`anpr_*`/`entry_*` settings
-in `config.rs`, and `migrations/0005_entry.sql`. The `AnprEngine` is built in
+reports), the Stage 4 types in `models.rs`, and the `auth_*`/`anpr_*`/`entry_*` settings
+in `config.rs`. Schema: the RBAC + audit tables are kernel-owned (`migrations/0001_init.sql`);
+the entry domain tables live in `crates/heldar-entry/migrations/0001_init.sql`, self-installed
+via `db::run_app_migrations` (tracked per-component in `_heldar_app_migrations`). The `AnprEngine` is built in
 `main.rs` and held in `AppState` (`state.anpr`); like the zone engine it has **no
 background loop** — it is driven synchronously from the detection-ingest path.
 
@@ -1275,11 +1277,14 @@ background loop** — it is driven synchronously from the detection-ingest path.
          routes/entry.rs / routes/auth.rs handlers ── principal.require(can_*(), action)
 ```
 
-### 17.1 Entry domain tables (`migrations/0005_entry.sql`)
+### 17.1 RBAC (kernel) + entry domain tables (heldar-entry)
 
-Eight tables across three groups. As with `zone_events`, **event/audit rows have no
-camera FK** so they outlive a camera deletion (audit integrity); registry rows key on
-a normalized plate.
+Eight tables across three groups, split by owner: the **RBAC** group and `audit_log` are
+**kernel-owned** (`crates/heldar-kernel/migrations/0001_init.sql`); the **Registry** group and
+`entry_events` belong to the Access Control app and live in its own versioned migrations
+(`crates/heldar-entry/migrations/0001_init.sql`, run via `db::run_app_migrations`). As with
+`zone_events`, **event/audit rows have no camera FK** so they outlive a camera deletion (audit
+integrity); registry rows key on a normalized plate.
 
 **RBAC**
 
@@ -1593,11 +1598,14 @@ a scored *candidate* a human reviews, and every identity-like *search* is audite
 every `HELDAR_MOVEMENT_INTERVAL_S`; each tick runs `propose_vehicle_candidates()` then
 `prune()`. `run_once()` exposes the proposer for the manual trigger (§19.6) and tests.
 
-**Pairing.** The proposer joins `entry_events` to itself on the **same normalized plate**
+**Pairing.** The proposer joins `entry_events_read` to itself on the **same normalized plate**
 appearing on **two different, topology-linked cameras**, `b` later than `a`, with `b`
 inside the scan window — gated by a `camera_links` join that honors link direction
 (bidirectional links also match the reverse edge). It rejects implausible gaps before
-scoring: `gap < 1 s`, or `gap > transit_seconds × 4`.
+scoring: `gap < 1 s`, or `gap > transit_seconds × 4`. (Cross-app reads go through the
+owner-published `*_read` contract views — `entry_events_read` is published by heldar-entry,
+guarded by the owner's `tests/read_contract.rs` and the `scripts/check-read-seam.sh` CI lint;
+see `docs/DESIGN-PRINCIPLES.md` #9.)
 
 **Scoring (`score_pair`)** fuses signals into `[0,1]` with the **plate as the anchor**:
 
@@ -1654,7 +1662,7 @@ best-effort: it joins the breach's `(camera_id, track_id)` to a **vehicle plate*
 `unknown` (person breaches stay unknown — no plate, no embedding).
 
 **Complements, does not duplicate, the kernel.** The kernel zone engine already mirrors
-`warning`/`critical` zone events into the `events` log + Stage 1 alert webhook (§16.3);
+`warning`/`critical` zone events into the `events` log + Stage 1 webhook subscriptions (§16.3);
 the breach engine **does not re-notify** — it adds the **worked, deduped, subject-correlated
 incident** (open → acknowledged → resolved, with `resolved_by`/`resolved_at`). Real-time
 push stays with the kernel; accountability + triage live here.
@@ -1796,9 +1804,12 @@ accepted directly by `/search/events`, is echoed in every response, and is store
 `execute(pool, plan, max)` is **pure SQL + Rust**, fully reproducible. It (1) resolves the
 window — unset `from` defaults to **now − 7 days**, `to` to now + 1 min, so an unbounded
 query never scans the whole history; (2) issues **one time-bounded, newest-first SQL query
-per requested source**, capped at `fetch_cap = (max×5).clamp(100, 20_000)` — `entry_events`,
-`zone_events LEFT JOIN zones` (for `kind`), and `breach_alerts` — normalizing every row into
-a unified `SearchHit` (`claim_level = "event"`); (3) applies the remaining plan fields as
+per requested source**, capped at `fetch_cap = (max×5).clamp(100, 20_000)` — `entry_events_read`,
+`zone_events LEFT JOIN zones` (for `kind`), and `breach_alerts_read` — normalizing every row into
+a unified `SearchHit` (`claim_level = "event"`). The cross-app sources are the owner-published
+`*_read` contract views (guarded by the owner's `tests/read_contract.rs` and the
+`scripts/check-read-seam.sh` CI lint; `docs/DESIGN-PRINCIPLES.md` #9); `zone_events`/`zones`
+are kernel tables. (3) applies the remaining plan fields as
 **deterministic Rust filters** (`hits.retain`: cameras, UTC hour bounds, plate, colour/type
 on `subject`, lenient `subject_type`, `auth_status`, `event_type`, `zone_kind`, lowercased
 `text` substring); (4) **merges, sorts newest-first, and truncates** to
@@ -1920,7 +1931,9 @@ kernel remains the sole RBAC authority**, and the relay refuses to run unless `H
 and a real user exists. Session lifetime is bounded by `HELDAR_SESSION_TTL_HOURS` (default 12),
 `HELDAR_SESSION_IDLE_TIMEOUT_MIN` (default 0 = off — set it for remote exposure), and
 `HELDAR_AUTH_COOKIE_SECURE` (`true` for any non-LAN exposure). The relay is defense-in-depth: its
-allowlist pins the surface to `/api/v1/*` + `/media/*` and denies `/api/v1/relay|rendezvous` +
+allowlist pins the surface to `/api/v1/*` + `/media/*` + the sidecar-plugin proxy `/m/{plugin}/*`
+(so sidecar UIs load remotely; the kernel forwards to the sidecar with the sidecar's own minted key,
+never the user's) and denies `/api/v1/relay|rendezvous` +
 `/metrics`, but only **after canonicalizing the path** (parsing it through `reqwest::Url::join`, which
 resolves `.`/`..`/`%2e%2e` dot-segments) and re-confirming the resolved URL still targets the loopback
 origin — closing a `%2e%2e` dot-segment SSRF that would otherwise escape the pin. Relayed bodies are

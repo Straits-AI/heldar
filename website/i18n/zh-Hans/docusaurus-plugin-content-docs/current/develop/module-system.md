@@ -19,7 +19,7 @@ Heldar 采用组合式架构，而非单体设计：内核不依赖具体业务�
 | **Sidecar** | 进程外服务（任意语言） | 通过 `/m/{id}/*` 反向代理的沙箱 iframe（`mount: iframe`） | 重新编译内核或仪表盘 | 第三方 / 独立部署的应用 |
 | **Wasm** | 进程内，沙箱化（wasmi） | 无界面——无页面（`mount: headless`） | 重新编译内核 | 在检测流上执行不受信任的计算 |
 
-- **进程内**模块通过内核接口注册——包括 `DetectionConsumer`、`Router<AppState>` 合并，以及自安装的 schema（`schema::init`）——并暴露一个携带 `mount: runtime` 与 `ui_url` 的 `manifest()`。其 UI **不会**编译进仪表盘（详见下文）。参见[构建模块](./build-a-module.md)。
+- **进程内**模块通过内核接口注册——包括 `DetectionConsumer`、`Router<AppState>` 合并，以及版本化的自安装 schema（`schema::init`，基于 `db::run_app_migrations`）——并暴露一个携带 `mount: runtime` 与 `ui_url` 的 `manifest()`。其 UI **不会**编译进仪表盘（详见下文）。参见[构建模块](./build-a-module.md)。
 - **Sidecar** 插件在运行时通过 `POST /api/v1/modules` 注册：内核为插件生成最小权限 API 密钥和 webhook 订阅，并在 `/m/{id}/*` 下反向代理其 UI 与 API。参见 [Sidecar 插件](./sidecar-plugins.md)。
 - **Wasm** 插件从目录加载（需启用默认关闭的 `wasm` feature），作为沙箱化的 `DetectionConsumer` 运行。参见 [Wasm 插件](./wasm-plugins.md)。
 

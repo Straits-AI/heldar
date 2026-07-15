@@ -32,7 +32,14 @@ install -d /etc/heldar
 install -m644 infra/mediamtx/mediamtx.yml /etc/heldar/mediamtx.yml
 install -m600 infra/systemd/heldar.env.example /etc/heldar/heldar.env   # edit for your deployment
 
-# 4. Units
+# 4. Dashboard (the kernel serves the built SPA itself — no nginx needed)
+(cd apps/web && npm ci && npm run build)
+install -d /usr/local/share/heldar/web
+cp -r apps/web/dist/. /usr/local/share/heldar/web/
+#    then set HELDAR_WEB_DIR=/usr/local/share/heldar/web in /etc/heldar/heldar.env — without it the
+#    box boots API-only, with no UI.
+
+# 5. Units
 install -m644 infra/systemd/heldar-core.service infra/systemd/mediamtx.service /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now mediamtx heldar-core

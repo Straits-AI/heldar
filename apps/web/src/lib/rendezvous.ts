@@ -18,13 +18,23 @@ export interface RendezvousTarget {
   url: string;
   /** The box's stable site id — its Durable Object key. */
   siteId: string;
+  /** A signed, short-lived viewing ticket for the site (or a single camera on it). */
+  ticket: string;
 }
 
 const trimSlash = (u: string) => u.replace(/\/+$/, "");
 
-/** Fetch short-lived ICE servers (STUN + Cloudflare TURN) for the WebRTC peer to gather against. */
-export async function fetchRendezvousIce(rendezvousUrl: string): Promise<RTCIceServer[]> {
-  const res = await fetch(`${trimSlash(rendezvousUrl)}/api/v1/rtc/turn`);
+/** Fetch short-lived ICE servers (STUN + Cloudflare TURN) for the WebRTC peer to gather against.
+ *  The Worker requires a valid viewing ticket; `siteId`, when given, must match the ticket's site. */
+export async function fetchRendezvousIce(
+  rendezvousUrl: string,
+  ticket: string,
+  siteId?: string,
+): Promise<RTCIceServer[]> {
+  const params = new URLSearchParams();
+  if (siteId) params.set("site", siteId);
+  params.set("ticket", ticket);
+  const res = await fetch(`${trimSlash(rendezvousUrl)}/api/v1/rtc/turn?${params.toString()}`);
   if (!res.ok) throw new Error(`rendezvous TURN ${res.status}`);
   const data = (await res.json()) as { iceServers?: RTCIceServer | RTCIceServer[] };
   if (!data.iceServers) return [];
@@ -36,12 +46,11 @@ export async function fetchRendezvousIce(rendezvousUrl: string): Promise<RTCIceS
  * Build a WHEP `exchange` that relays the offer through the rendezvous to the box for `cameraId`,
  * returning the answer SDP. Usable as `startWhep(video, "", { exchange, iceServers })`.
  *
- * ⚠️ SECURITY — DO NOT WIRE INTO `LiveView` AS-IS: this exchange carries NO viewing ticket / auth, so
- * the box's rendezvous cannot verify the viewer. Before integrating remote viewing (P3), thread a
- * signed, short-lived viewing ticket (per-camera, minted by the box/control-plane after an auth check)
- * into the request body and have the box reject sessions without a valid ticket — otherwise any client
- * who knows a `siteId` + `cameraId` could pull the stream. The kernel's live-view token model
- * (`services/live_token`) is the natural basis for that ticket.
+ * SECURITY: the Worker enforces viewing tickets on both RTC endpoints (`/api/v1/rtc/turn` and
+ * `/api/v1/rtc/session` — see `apps/edge/src/index.ts`), so a request without a valid, unexpired
+ * ticket for the target site/camera gets a 401. Callers must mint a ticket first (an admin session
+ * does so via the Worker's `POST /api/v1/admin/ticket`; a per-camera ticket authorizes only that
+ * camera, a site-scoped ticket any camera on the site) and thread it through `RendezvousTarget`.
  */
 export function rendezvousExchange(
   target: RendezvousTarget,
@@ -52,8 +61,12 @@ export function rendezvousExchange(
     const res = await fetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/sdp" },
-      // TODO(P3): add `ticket` (signed per-camera viewing ticket) — see the SECURITY note above.
-      body: JSON.stringify({ site_id: target.siteId, camera_id: cameraId, sdp_offer: offerSdp }),
+      body: JSON.stringify({
+        site_id: target.siteId,
+        camera_id: cameraId,
+        ticket: target.ticket,
+        sdp_offer: offerSdp,
+      }),
     });
     if (!res.ok) {
       let detail = "";

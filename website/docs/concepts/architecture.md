@@ -72,10 +72,12 @@ shared SQLite pool, the kernel config, and the recorder/sampler/HTTP client.
 
 ### 3. Self-installed schema
 
-Each app owns its own tables and applies its schema idempotently against the
-shared pool at startup (single-tenant per deployment). The kernel does not define
-domain tables. The pattern is a `schema::init(pool)` that runs an `include_str!`
-of a `schema.sql` full of `CREATE TABLE IF NOT EXISTS`.
+Each app owns its own tables and installs them itself as versioned, append-only
+migrations against the shared pool at startup (`db::run_app_migrations`, tracked
+per-component in `_heldar_app_migrations`). The kernel does not define domain
+tables. The pattern is a `schema::init(pool)` that runs the app's `MIGRATIONS`
+array of `migrations/NNNN_*.sql` files — to evolve a schema you append a new
+migration, never edit a shipped one.
 
 ### 4. The auth primitive
 

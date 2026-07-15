@@ -56,4 +56,5 @@ The same flow is available without curl: **Plugins → Install a sidecar plugin*
 
 Copy this directory and change the four handlers. Anything that can serve HTTP works — Python, Node,
 Go, a container. The contract is the four endpoints above plus the manifest you register with. See
-`website/docs/develop/build-a-module.md` for the full SPI.
+`website/docs/develop/sidecar-plugins.md` for the full sidecar SPI and manifest (the compiled-in-crate
+path is a different guide: `website/docs/develop/build-a-module.md`).

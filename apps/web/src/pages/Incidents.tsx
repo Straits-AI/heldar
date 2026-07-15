@@ -6,12 +6,14 @@
 // manager+ (the API enforces this — the UI mirrors it by gating the controls).
 
 import { useEffect, useMemo, useState } from "react";
-import type { ReactNode } from "react";
+import type { FormEvent, ReactNode } from "react";
 import { api, ApiError } from "../lib/api";
 import { usePoll } from "../lib/usePoll";
 import {
   Button,
   EmptyState,
+  Field,
+  Input,
   Panel,
   SectionLabel,
   Spinner,
@@ -257,17 +259,25 @@ export function Incidents() {
     }
   }
 
-  async function retag(seg: SegmentView) {
-    const input = window.prompt(
-      "Retag this segment — enter an incident id (blank clears the tag):",
-      seg.incident_id ?? "",
-    );
-    if (input === null) return; // cancelled
-    const next = input.trim() ? input.trim() : null;
-    setSegBusy(seg.id);
+  // Retag offers an inline incident-id input backed by a datalist of the existing cases, so moving
+  // evidence extends a case instead of a typo in a free-text prompt silently opening a new one.
+  const [retagTarget, setRetagTarget] = useState<SegmentView | null>(null);
+  const [retagValue, setRetagValue] = useState("");
+
+  function startRetag(seg: SegmentView) {
+    setRetagTarget(seg);
+    setRetagValue(seg.incident_id ?? "");
+    setActionError(null);
+  }
+
+  async function confirmRetag(e: FormEvent) {
+    e.preventDefault();
+    if (!retagTarget) return;
+    setSegBusy(retagTarget.id);
     setActionError(null);
     try {
-      await api.tagSegmentIncident(seg.id, next);
+      await api.tagSegmentIncident(retagTarget.id, retagValue.trim() ? retagValue.trim() : null);
+      setRetagTarget(null);
       await refreshBoth();
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : String(err));
@@ -356,6 +366,7 @@ export function Incidents() {
                         setSelected(i.incident_id);
                         setPlayback(null);
                         setActionError(null);
+                        setRetagTarget(null);
                       }}
                     />
                   </li>
@@ -415,6 +426,48 @@ export function Incidents() {
                 <ErrorNote>{actionError}</ErrorNote>
               </div>
             )}
+            {retagTarget && (
+              <form
+                onSubmit={confirmRetag}
+                className="mb-3 space-y-2 rounded-md border border-line bg-canvas p-3"
+              >
+                <div className="font-mono text-[10px] uppercase tracking-micro text-fg-muted">
+                  Retag {retagTarget.camera_id} · {formatTimeShort(retagTarget.start_time)} →{" "}
+                  {formatTimeShort(retagTarget.end_time)}
+                </div>
+                <Field
+                  label="Incident id — blank clears the tag"
+                  htmlFor="retag-incident"
+                  hint="Pick an existing case to move the segment into it, or type a new id to open one."
+                >
+                  <Input
+                    id="retag-incident"
+                    list="incident-ids"
+                    value={retagValue}
+                    onChange={(e) => setRetagValue(e.target.value)}
+                    placeholder="case-2026-001"
+                  />
+                </Field>
+                <datalist id="incident-ids">
+                  {list.map((i) => (
+                    <option key={i.incident_id} value={i.incident_id} />
+                  ))}
+                </datalist>
+                <div className="flex items-center gap-2">
+                  <Button
+                    type="submit"
+                    size="sm"
+                    variant="primary"
+                    disabled={segBusy === retagTarget.id}
+                  >
+                    {segBusy === retagTarget.id ? "Retagging…" : "Retag"}
+                  </Button>
+                  <Button type="button" size="sm" variant="ghost" onClick={() => setRetagTarget(null)}>
+                    Cancel
+                  </Button>
+                </div>
+              </form>
+            )}
             {!selected ? (
               <p className="font-mono text-xs text-fg-muted">No case selected.</p>
             ) : segments.error && !segments.data ? (
@@ -443,7 +496,7 @@ export function Incidents() {
                       })
                     }
                     onToggleLock={() => void toggleLock(seg)}
-                    onRetag={() => void retag(seg)}
+                    onRetag={() => startRetag(seg)}
                   />
                 ))}
               </ul>

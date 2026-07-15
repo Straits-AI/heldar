@@ -35,6 +35,13 @@ allows outbound, so this works where port-forwarding and DDNS can't.
 > is the box dialing out — which is exactly what the WebRTC path (and the overlay alternative below)
 > does.
 
+:::info Where the managed tier begins
+The **box side** of this path — the dial-out client, the WHEP bridge, the relay — is open kernel
+code, but it needs a **rendezvous** to dial: the hosted rendezvous is Heldar's managed tier. If you'd
+rather not depend on a hosted service at all, the fully self-hosted alternative is the network
+overlay described below.
+:::
+
 ## Turn it on (the box side)
 
 Remote access is opt-in. The box needs auth on and a rendezvous to dial:
@@ -43,7 +50,7 @@ Remote access is opt-in. The box needs auth on and a rendezvous to dial:
 HELDAR_AUTH_ENABLED=true              # required — the relay refuses to run without it
 HELDAR_AUTH_COOKIE_SECURE=true        # the rendezvous terminates TLS
 HELDAR_REMOTE_RENDEZVOUS_URL=https://<your-rendezvous>   # the box dials OUT to this
-HELDAR_CP_TOKEN=<dial-out bearer>     # authenticates the box to the rendezvous (== the Worker's BOX_TOKEN)
+HELDAR_CP_TOKEN=<dial-out bearer>     # the per-box token your rendezvous issued for this HELDAR_SITE_ID (site-bound)
 HELDAR_SITE_ID=<stable-id-for-this-box>
 ```
 

@@ -30,6 +30,11 @@ else
 fi
 docker info >/dev/null 2>&1 \
   || die "The Docker daemon is not reachable (not running, or you lack permission). Start Docker (or add yourself to the 'docker' group) and re-run."
+# The compose stack uses Linux host networking (network_mode: host). Docker Desktop on macOS runs
+# containers in a VM, so host-net ports (the :8080 dashboard, MediaMTX) never reach the Mac itself.
+if [ "$(uname -s)" = "Darwin" ]; then
+  say "WARNING: macOS detected — the stack needs Linux host networking; on Docker Desktop the dashboard at :8080 will NOT be reachable. Run this on a Linux host instead."
+fi
 
 say "Installing into $DIR"
 mkdir -p "$DIR"

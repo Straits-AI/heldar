@@ -25,7 +25,7 @@ are the detail.
 | **Wasm** | in-process, sandboxed (wasmi) | headless — no page (`mount: headless`) | recompiling the kernel | untrusted compute on the detection stream |
 
 - **In-process** modules register over the kernel seams — a `DetectionConsumer`, a `Router<AppState>`
-  merge, and a self-installed schema (`schema::init`) — and expose a `manifest()` that carries
+  merge, and a versioned self-installed schema (`schema::init` over `db::run_app_migrations`) — and expose a `manifest()` that carries
   `mount: runtime` + a `ui_url`. Their UI is **not** compiled into the dashboard (see below).
   See [Build a module](./build-a-module.md).
 - **Sidecar** plugins register at runtime via `POST /api/v1/modules`: the kernel mints a least-privilege

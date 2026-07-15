@@ -124,9 +124,10 @@ With a camera and an AI task running, use the dashboard to:
   `dwell_seconds` to arm a dwell alert, and a `severity`. Tracked detections
   crossing a zone raise `enter` / `exit` / `dwell` zone events with an evidence
   frame.
-- **Alerting** - point the alert notifier at a webhook (`HELDAR_ALERT_WEBHOOK_URL`
-  or the UI). `warning` and `critical` events, including zone events and
-  worker-posted events, are delivered to it.
+- **Alerting** - create a webhook subscription in **System → Webhooks** (or
+  `POST /api/v1/webhooks` with `min_severity: "warning"`). `warning` and
+  `critical` events, including zone events and worker-posted events, are
+  delivered to it — see [Webhooks & Integration](../develop/webhooks.md).
 
 ## Next
 

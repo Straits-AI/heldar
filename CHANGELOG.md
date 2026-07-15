@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs & community
+
+- **Production-readiness sweep** (docs, UI/UX, open repo). A seven-surface audit + fix pass: updated every
+  doc that drifted from the kernel-owned live transcode / `live_warm` / runtime transcode-engine setting /
+  worker-`?worker_id=`-sharding / per-box-enrollment / versioned-app-migration / `*_read`-contract-view
+  changes (README, ARCHITECTURE, ROADMAP, PRODUCTION, REMOTE-ACCESS, OBSERVABILITY, AI-WORKERS,
+  ACCESS-CONTROL, the env templates, and all three website locales — en/zh-Hans/es); replaced the dead
+  `HELDAR_ALERT_WEBHOOK_URL` guidance with webhook subscriptions and swept renumbered migration paths.
+  UI: role-gated the last ungated camera/AI/zone controls for viewers, made `AuthGate` distinguish a Core
+  outage from a logout, fixed a Playback spinner-forever + error-swallowing bug, keyed CameraDetail by id
+  (no cross-camera stale state), and replaced `window.prompt` incident tagging with an inline datalist.
+  Open repo: added `SECURITY.md`, `CODE_OF_CONDUCT.md`, issue/PR templates; split the docker prod overlay
+  into an open hardening overlay + a private full-image overlay; the appliance image now builds and serves
+  the dashboard (`HELDAR_WEB_DIR`); hardened the open-repo generator's leak gates (Makefile + root files in
+  scope, `campus[-.]`/`release.sh`/`docs/agents` handled) and its allowlist. ROADMAP gained a
+  "Post-Stage-7 platform work" section, and the genuinely-open items are now tracked as GitHub issues.
+
 ### Tests
 
 - **Characterization tests for the two least-tested critical paths** (recorder supervision + backup

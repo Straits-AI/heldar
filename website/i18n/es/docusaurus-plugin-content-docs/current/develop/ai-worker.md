@@ -50,6 +50,16 @@ recién habilitadas o deshabilitadas.
 El valor de `fps` aquí es la tasa solicitada; la tasa de muestreo efectiva
 tras el presupuesto se informa mediante `GET /api/v1/ai/samplers`.
 
+¿Ejecutas más de un worker? Pasa una identidad estable como `?worker_id=` (p. ej.
+`GET /api/v1/ai/tasks?worker_id=nvr1:4242`) y el kernel te registra como worker vivo
+y devuelve solo **tu fragmento** de la lista de tareas, particionada por módulo entre
+el conjunto de workers vivos. Omitirlo devuelve todo (retrocompatibilidad de worker
+único) — un worker personalizado que lo omita procesará por duplicado cada tarea
+junto a cualquier otro worker. Las tareas se rebalancean cuando cambia el conjunto
+de workers vivos: un worker cuyo último sondeo es más antiguo que el TTL de vida
+(60 s) se considera caído y sus tareas se reasignan, así que sondea más rápido que
+el TTL (el intervalo de sondeo por defecto es de 10 s).
+
 ### 2. Obtener un fotograma - `GET /api/v1/cameras/{id}/frame`
 
 Sirve el último JPEG muestreado para una cámara. Obténlo a tu propio ritmo,
@@ -211,6 +221,9 @@ HELDAR_API=http://localhost:8000 python worker.py
 
 La configuración del lado del worker (indicador CLI o variable de entorno) cubre la URL base de la API
 (`--api` / `HELDAR_API`), el intervalo de sondeo de tareas
-(`--poll-interval` / `HELDAR_AI_POLL_INTERVAL`), y los parámetros de HTTP, retroceso exponencial y registro.
+(`--poll-interval` / `HELDAR_AI_POLL_INTERVAL`), la identidad de particionado
+(`--worker-id` / `HELDAR_AI_WORKER_ID`, por defecto `<hostname>:<pid>` — enviada como
+`?worker_id=` para que varios workers se repartan la lista de tareas), y los parámetros
+de HTTP, retroceso exponencial y registro.
 La tabla completa está en
 [apps/ai/README.md](https://github.com/Straits-AI/heldar/blob/main/apps/ai/README.md).

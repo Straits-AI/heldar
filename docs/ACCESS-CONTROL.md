@@ -7,8 +7,9 @@ per-frame plate reads into one authoritative entry/exit event, a guard
 confirm/reject workflow, and daily/exception/audit reports.
 
 Implementation: `services/anpr.rs` (engine), `auth.rs` + `routes/auth.rs` (RBAC),
-`routes/entry.rs` (registry + events + reports), `migrations/0005_entry.sql`
-(schema), `config.rs` (knobs). The ANPR *worker* side (vehicle→plate→OCR) is the
+`routes/entry.rs` (registry + events + reports), `crates/heldar-entry/migrations/0001_init.sql`
+(the entry schema, self-installed via `db::run_app_migrations`; the RBAC tables are
+kernel-owned in `migrations/0001_init.sql`), `config.rs` (knobs). The ANPR *worker* side (vehicle→plate→OCR) is the
 `AnprAnalyzer` in `apps/ai/worker.py`, documented in
 [`docs/AI-WORKERS.md`](AI-WORKERS.md) §12. The kernel architecture is in
 [`ARCHITECTURE.md`](../ARCHITECTURE.md) §17.

@@ -74,6 +74,4 @@ mayor al que las aplicaciones se adhieren voluntariamente.
 El kernel y las aplicaciones genéricas son Apache-2.0. Los verticales
 propietarios tienen licencia por separado. Consulte
 [LICENSING.md](https://github.com/Straits-AI/heldar/blob/main/LICENSING.md) para
-conocer el límite y
-[OPEN-CORE-SPLIT.md](https://github.com/Straits-AI/heldar/blob/main/docs/OPEN-CORE-SPLIT.md)
-para la división en polirrepositorios y el manual de publicación.
+conocer el límite.

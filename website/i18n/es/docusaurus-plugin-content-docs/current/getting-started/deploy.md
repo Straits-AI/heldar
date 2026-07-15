@@ -54,9 +54,12 @@ registra que el panel de control no está siendo servido.
 | 8554 / 8888 / 8889 | MediaMTX RTSP / HLS / WebRTC |
 | 9997 | API de control MediaMTX (loopback) |
 
-La vista en vivo se gestiona a través de MediaMTX: las credenciales de las cámaras solo residen en la
-configuración de rutas del gateway y nunca llegan al navegador, que únicamente ve las
-URLs de HLS/WebRTC/RTSP sin credenciales.
+La vista en vivo se publica en MediaMTX mediante un ffmpeg supervisado y propiedad del kernel por
+cámara; las credenciales de las cámaras permanecen en el kernel y nunca llegan a MediaMTX ni al
+navegador, que únicamente ve las URLs de HLS/WebRTC/RTSP sin credenciales. El motor de transcodificación
+en vivo toma su valor por defecto de `HELDAR_LIVE_TRANSCODE_ENGINE` (`software`) y puede cambiarse en
+tiempo de ejecución (software / VAAPI / NVENC) desde la página Sistema o mediante
+`GET`/`PUT /api/v1/system/transcode`.
 
 ## Autenticación
 
@@ -105,12 +108,17 @@ Heldar usa únicamente SQLite (journal WAL, migraciones integradas). La URL por 
 | `HELDAR_RECORDINGS_DIR` / `CLIPS_DIR` / `SNAPSHOTS_DIR` / `FRAMES_DIR` | bajo `./data` | raíces de medios (creadas al arrancar) |
 | `HELDAR_MAX_RECORDINGS_GB` | `20` | límite suave de espacio; los segmentos más antiguos no bloqueados se eliminan al superarlo |
 | `HELDAR_MIN_FREE_DISK_GB` | `5` | piso duro de protección del host; elimina segmentos no bloqueados mientras el espacio libre esté por debajo |
+| `HELDAR_MAX_DB_GB` | `4` | limita la propia BD de metadatos `heldar.db`; el espacio se recupera en línea mediante auto_vacuum incremental |
 
 Las grabaciones permanecen en el disco local y se sirven desde ahí; por defecto nada se sube
 a la nube. Los segmentos bloqueados como evidencia nunca son eliminados por la retención.
-Ambos límites también son **configurables en tiempo de ejecución sin reiniciar** — desde la página
-Sistema del panel de control (panel "Límite de grabación") o mediante `GET`/`PUT /api/v1/system/retention`
+Los tres límites también son **configurables en tiempo de ejecución sin reiniciar** — desde la página
+Sistema del panel de control (paneles "Límite de grabación" y "Límite de base de datos") o mediante
+`GET`/`PUT /api/v1/system/retention` y `GET`/`PUT /api/v1/system/db`
 (PUT es solo para administradores); un valor almacenado tiene prioridad sobre el valor del entorno, que sigue siendo el predeterminado.
+Una BD creada antes de que existiera el límite se convierte a auto_vacuum incremental en
+segundo plano al arrancar (`HELDAR_DB_AUTOVACUUM_CONVERT`, por defecto `true`; nunca bloquea el
+arranque) o bajo demanda mediante `POST /api/v1/system/db/convert`.
 
 Las credenciales de las cámaras residen en esta BD SQLite. Establece `HELDAR_SECRET_KEY` (base64 de 32
 bytes, p. ej. `openssl rand -base64 32`) para cifrarlas en reposo con AES-256-GCM;
