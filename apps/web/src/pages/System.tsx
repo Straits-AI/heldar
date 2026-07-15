@@ -895,6 +895,21 @@ function SystemStatusPanel({
             }
             hint={info.remote_access.enabled ? info.remote_access.note : undefined}
           />
+          {/* Remote relay (WebRTC dial-out that carries remote login/API) — hidden unless configured */}
+          {info.relay?.configured && (
+            <StatusRow
+              label="Remote relay"
+              state={info.relay.healthy ? "recording" : "error"}
+              value={info.relay.healthy ? "connected" : "stale"}
+              hint={
+                info.relay.healthy
+                  ? info.relay.last_ok_at
+                    ? `last poll ${timeAgo(info.relay.last_ok_at)}`
+                    : undefined
+                  : "remote login will fail — check the rendezvous/network"
+              }
+            />
+          )}
           {/* Disk / array health */}
           <StatusRow
             label="Disk health"

@@ -223,6 +223,48 @@ async fn poll_once(
     Ok(result.is_err())
 }
 
+// ---- Dial-out health (heartbeats + staleness) ----------------------------------------------------
+//
+// The 2026-07-15 incident: the relay pollers wedged while the ICE refresh kept ticking, so the box
+// LOOKED healthy while remote login was dead for hours. These heartbeats make that failure class
+// either self-heal (supervised pollers) or impossible to miss (watchdog ERROR + /api/v1/system).
+
+use std::sync::atomic::{AtomicI64, Ordering};
+
+/// Unix seconds of the last SUCCESSFUL relay poll cycle (a clean empty long-poll counts — "parked and
+/// timed out cleanly" IS healthy). 0 = never. Written by the relay pollers, read by the watchdog + API.
+static RELAY_LAST_OK_UNIX: AtomicI64 = AtomicI64::new(0);
+/// Same, for the rendezvous (viewing) dial-out loop.
+static RENDEZVOUS_LAST_OK_UNIX: AtomicI64 = AtomicI64::new(0);
+
+/// How long without a successful poll before the dial-out counts as stale (the long-poll cycle is
+/// ≤25s + backoff caps at 30s, so 300s of silence means genuinely wedged, not slow).
+const STALE_AFTER_S: i64 = 300;
+/// Watchdog cadence.
+const WATCHDOG_EVERY: Duration = Duration::from_secs(60);
+/// Respawn delay for a poller that returned/panicked (mirrors the binary's spawn_supervised).
+const POLLER_RESPAWN_DELAY: Duration = Duration::from_secs(5);
+
+/// Pure staleness predicate (unit-tested): stale when never-succeeded or older than `threshold_s`.
+fn dialout_stale(now_unix: i64, last_ok_unix: i64, threshold_s: i64) -> bool {
+    last_ok_unix == 0 || now_unix - last_ok_unix > threshold_s
+}
+
+/// Relay health for the system API: `(healthy, last_ok_unix)`. `healthy` is meaningful only when the
+/// relay is configured + running (the route combines it with the config); `last_ok` is None if never.
+pub fn relay_health() -> (bool, Option<i64>) {
+    let last = RELAY_LAST_OK_UNIX.load(Ordering::Relaxed);
+    let now = chrono::Utc::now().timestamp();
+    (
+        !dialout_stale(now, last, STALE_AFTER_S),
+        (last > 0).then_some(last),
+    )
+}
+
+fn mark_ok(slot: &AtomicI64) {
+    slot.store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
+}
+
 /// The dial-out loop. Parks forever unless `HELDAR_REMOTE_RENDEZVOUS_URL` + `HELDAR_SITE_ID` are set
 /// (remote access is opt-in). Otherwise long-polls the rendezvous, bridging each viewing session to the
 /// local MediaMTX, with exponential backoff on transport failure. Never returns.
@@ -253,10 +295,17 @@ pub async fn run(state: AppState) {
     let mut backoff = Duration::from_secs(1);
     loop {
         match poll_once(&state, &client, rendezvous_url, site_id, &cfg.cp_token).await {
-            Ok(false) => backoff = Duration::from_secs(1),
+            Ok(false) => {
+                mark_ok(&RENDEZVOUS_LAST_OK_UNIX);
+                backoff = Duration::from_secs(1);
+            }
             // A bridge to the local MediaMTX failed (e.g. camera/transcode down) — the answer/error was
             // already reported to the browser; pause briefly so a persistent failure can't tight-loop.
-            Ok(true) => tokio::time::sleep(Duration::from_secs(2)).await,
+            // The POLL itself succeeded (the failure is local), so the dial-out heartbeat still counts.
+            Ok(true) => {
+                mark_ok(&RENDEZVOUS_LAST_OK_UNIX);
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
             Err(e) => {
                 tracing::warn!(site = %site_id, error = %e, "webrtc rendezvous poll failed; backing off");
                 tokio::time::sleep(backoff).await;
@@ -625,29 +674,96 @@ pub async fn run_relay(state: AppState) {
         }
     };
     tracing::info!(site = %site_id, "webrtc relay: dialing out for the authenticated remote dashboard (read-only)");
+    // Startup grace: count boot as fresh so the watchdog doesn't fire before the first dial completes.
+    mark_ok(&RELAY_LAST_OK_UNIX);
     let mut tasks = Vec::new();
-    for _ in 0..RELAY_POLLERS {
+    for slot in 0..RELAY_POLLERS {
         let state = state.clone();
         let client = client.clone();
         let rendezvous_url = rendezvous_url.clone();
         let site_id = site_id.clone();
         let token = cfg.cp_token.clone();
+        // SUPERVISED: a poller that panics or returns is respawned (2026-07-15: an unsupervised
+        // poller pool silently shrank to zero — remote login dead while the box looked healthy).
         tasks.push(tokio::spawn(async move {
-            let mut backoff = Duration::from_secs(1);
             loop {
-                match relay_poll_once(&state, &client, &rendezvous_url, &site_id, &token).await {
-                    Ok(()) => backoff = Duration::from_secs(1),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "webrtc relay poll failed; backing off");
-                        tokio::time::sleep(backoff).await;
-                        backoff = (backoff * 2).min(Duration::from_secs(30));
+                let (st, cl, url, site, tok) = (
+                    state.clone(),
+                    client.clone(),
+                    rendezvous_url.clone(),
+                    site_id.clone(),
+                    token.clone(),
+                );
+                let handle =
+                    tokio::spawn(async move { relay_poller(&st, &cl, &url, &site, &tok).await });
+                match handle.await {
+                    Ok(()) => tracing::error!(
+                        slot,
+                        "webrtc relay poller returned unexpectedly; respawning"
+                    ),
+                    Err(e) if e.is_panic() => {
+                        tracing::error!(slot, "webrtc relay poller PANICKED; respawning")
                     }
+                    Err(_) => return, // cancelled — runtime shutting down
+                }
+                tokio::time::sleep(POLLER_RESPAWN_DELAY).await;
+            }
+        }));
+    }
+    // WATCHDOG: a wedged dial-out must be loud. ERROR for the relay (remote login is dead), WARN for
+    // the rendezvous (remote viewing degraded). Repeats every tick until recovery.
+    {
+        let site = site_id.clone();
+        tasks.push(tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(WATCHDOG_EVERY).await;
+                let now = chrono::Utc::now().timestamp();
+                let relay_last = RELAY_LAST_OK_UNIX.load(Ordering::Relaxed);
+                if dialout_stale(now, relay_last, STALE_AFTER_S) {
+                    tracing::error!(
+                        site = %site,
+                        stale_s = now - relay_last.max(0),
+                        "webrtc relay: no successful poll — remote login WILL FAIL; check the rendezvous/network"
+                    );
+                }
+                let rdv_last = RENDEZVOUS_LAST_OK_UNIX.load(Ordering::Relaxed);
+                if rdv_last > 0 && dialout_stale(now, rdv_last, STALE_AFTER_S) {
+                    tracing::warn!(
+                        site = %site,
+                        stale_s = now - rdv_last,
+                        "webrtc rendezvous: no successful poll — remote viewing degraded"
+                    );
                 }
             }
         }));
     }
     for t in tasks {
         let _ = t.await;
+    }
+}
+
+/// One relay poller: long-poll → replay → respond, forever, with capped exponential backoff on
+/// transport failure. Every successful cycle (including clean empty polls) feeds the heartbeat.
+async fn relay_poller(
+    state: &AppState,
+    client: &reqwest::Client,
+    rendezvous_url: &str,
+    site_id: &str,
+    token: &str,
+) {
+    let mut backoff = Duration::from_secs(1);
+    loop {
+        match relay_poll_once(state, client, rendezvous_url, site_id, token).await {
+            Ok(()) => {
+                mark_ok(&RELAY_LAST_OK_UNIX);
+                backoff = Duration::from_secs(1);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "webrtc relay poll failed; backing off");
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+            }
+        }
     }
 }
 
@@ -784,5 +900,19 @@ mod tests {
             answer_url("https://rv.example.com/"),
             "https://rv.example.com/api/v1/rendezvous/answer"
         );
+    }
+
+    /// The watchdog/health staleness predicate: never-succeeded is stale; within the threshold is
+    /// fresh (boundary inclusive); beyond it is stale.
+    #[test]
+    fn dialout_staleness_predicate() {
+        let now = 10_000;
+        assert!(dialout_stale(now, 0, 300), "never succeeded = stale");
+        assert!(!dialout_stale(now, now, 300), "just succeeded = fresh");
+        assert!(
+            !dialout_stale(now, now - 300, 300),
+            "exactly at threshold = fresh"
+        );
+        assert!(dialout_stale(now, now - 301, 300), "past threshold = stale");
     }
 }

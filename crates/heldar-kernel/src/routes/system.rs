@@ -410,12 +410,37 @@ struct SystemInfo {
     max_recordings_gb: f64,
     storage: StorageReport,
     remote_access: OverlayStatus,
+    /// WebRTC remote-dashboard relay health (the dial-out that carries remote login/API). `configured`
+    /// false = remote access not set up (UI hides the row); `healthy` false while configured = the box
+    /// is up but the remote path is dead (the 2026-07-15 failure mode) — surfaced instead of hidden.
+    relay: RelayStatus,
     /// No recent disk_smart_warning/raid_degraded events (see services::health disk-health pass).
     disk_health_ok: bool,
     /// Timestamp of the most recent disk-health alert (any time), or null if none ever fired.
     last_disk_alert_at: Option<DateTime<Utc>>,
     /// Active live-preview transcode engine (software | vaapi | nvenc).
     live_transcode_engine: String,
+}
+
+/// Health of the WebRTC remote-dashboard relay dial-out (see `services::webrtc_rendezvous`).
+#[derive(Debug, Serialize)]
+struct RelayStatus {
+    configured: bool,
+    healthy: bool,
+    last_ok_at: Option<DateTime<Utc>>,
+}
+
+fn relay_status(st: &AppState) -> RelayStatus {
+    // The relay runs only when remote access is configured AND kernel auth is on (its own guard).
+    let configured =
+        st.cfg.rendezvous_url.is_some() && st.cfg.site_id.is_some() && st.cfg.auth_enabled;
+    let (healthy, last_ok) = crate::services::webrtc_rendezvous::relay_health();
+    RelayStatus {
+        configured,
+        // Unconfigured = trivially healthy (nothing to be unhealthy about; the UI hides the row).
+        healthy: !configured || healthy,
+        last_ok_at: last_ok.and_then(|s| DateTime::<Utc>::from_timestamp(s, 0)),
+    }
 }
 
 async fn system_info(
@@ -476,6 +501,7 @@ async fn system_info(
         max_recordings_gb: limits.max_recordings_gb,
         storage,
         remote_access: remote_access::status(&st.cfg),
+        relay: relay_status(&st),
         disk_health_ok: recent_disk_alerts == 0,
         last_disk_alert_at,
         live_transcode_engine: crate::services::mediamtx::effective_engine(&st.pool, &st.cfg).await,

@@ -318,6 +318,9 @@ export interface SystemInfo {
   storage: StorageReport;
   /** Remote-access overlay status (LAN-only when not enabled). */
   remote_access: OverlayStatus;
+  /** WebRTC remote-dashboard relay health: configured=false → hide; healthy=false while configured →
+   *  the box is up but the remote path is dead (surface it, don't mask it). */
+  relay: { configured: boolean; healthy: boolean; last_ok_at: string | null };
   /** No recent disk_smart_warning/raid_degraded events (SMART/RAID health pass). */
   disk_health_ok: boolean;
   /** Timestamp of the most recent disk-health alert (any time), or null if none. */
