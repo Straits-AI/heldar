@@ -61,9 +61,17 @@ self-hosters pull the equivalent asset from the public `Straits-AI/heldar` relea
 Set these as Cloudflare secrets (`wrangler secret put <NAME>`):
 
 - `BOX_ENROLL_SECRET` — the **primary** box-auth secret: mints per-box, **site-bound** tokens
-  (`cd apps/edge && npm run mint -- <site_id>` → set as the box's `HELDAR_CP_TOKEN`, accepted only for
-  its own `HELDAR_SITE_ID`). Revoke a box by adding its `site_id` to the `REVOKED_SITES` var, or rotate
-  the secret (revokes all → re-mint). See `apps/edge/README.md` (the private rendezvous Worker).
+  (`cd apps/edge && npm run mint` → prints a fresh **UUID site id** + the token; set them as the box's
+  `HELDAR_SITE_ID` / `HELDAR_CP_TOKEN` — the token is accepted only for its own site). Site ids are
+  **opaque UUIDs by design**: they appear in dashboard URLs (`/app/?site=…`), referrers, and browser
+  history, so a guessable/customer-named id enables existence-probing and targeted login attempts.
+  Revoke a box by adding its `site_id` to the `REVOKED_SITES` var, or rotate the secret (revokes all →
+  re-mint). See `apps/edge/README.md` (the private rendezvous Worker).
+
+  **Renaming an existing site to a UUID:** `npm run mint` (new UUID + site-bound token) → update the
+  box's `HELDAR_SITE_ID` + `HELDAR_CP_TOKEN` → restart the kernel → verify login at the new
+  `/app/?site=<uuid>` → add the OLD id to `REVOKED_SITES` and redeploy the Worker (the old URL dies).
+  Sessions/users are untouched (the site id only routes the rendezvous).
 - `BOX_TOKEN` *(legacy)* — a shared bearer that authorizes **any** site. Migration-only fallback —
   retire it (unset the secret) before onboarding a second client.
 - `RENDEZVOUS_SECRET` — signs viewing tickets.
