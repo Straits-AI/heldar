@@ -66,6 +66,9 @@ export interface CameraView {
   /** Ingest plate reads from the camera's ON-BOARD ANPR engine (kernel ISAPI poller) instead of
    * relying solely on the AI worker's server-side OCR. */
   native_anpr_enabled: boolean;
+  /** Ingest the camera's ON-BOARD smart events (motion/line-crossing/intrusion via its alert
+   * stream) into the kernel event machinery (event log, webhooks, event-mode recording). */
+  native_events_enabled: boolean;
   enabled: boolean;
   /** Keep the live H.264 preview publisher running persistently (instant live view) instead of
    * on-demand-with-idle-reaping. */
@@ -100,6 +103,7 @@ export interface CameraCreate {
   anr_enabled?: boolean;
   anr_replay_url_template?: string | null;
   native_anpr_enabled?: boolean;
+  native_events_enabled?: boolean;
   enabled?: boolean;
   live_warm?: boolean;
 }

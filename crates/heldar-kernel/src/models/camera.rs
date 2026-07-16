@@ -51,6 +51,9 @@ pub struct Camera {
     /// Ingest plate reads from the camera's ON-BOARD ANPR engine (ISAPI poller) instead of relying
     /// solely on the AI worker's server-side OCR. See `services::native_anpr`.
     pub native_anpr_enabled: bool,
+    /// Ingest the camera's ON-BOARD smart events (motion/line-crossing/intrusion via the device's
+    /// alert stream) into the kernel event machinery. See `services::camera_events`.
+    pub native_events_enabled: bool,
     pub enabled: bool,
     /// AI decode priority (higher = more important). The frame sampler favors high-priority cameras
     /// under fps-budget pressure and sheds low-priority ones first.
@@ -107,6 +110,7 @@ pub struct CameraView {
     pub anr_enabled: bool,
     pub anr_replay_url_template: Option<String>,
     pub native_anpr_enabled: bool,
+    pub native_events_enabled: bool,
     pub enabled: bool,
     pub priority: i64,
     pub live_warm: bool,
@@ -151,6 +155,7 @@ impl From<Camera> for CameraView {
             anr_enabled: c.anr_enabled,
             anr_replay_url_template: c.anr_replay_url_template,
             native_anpr_enabled: c.native_anpr_enabled,
+            native_events_enabled: c.native_events_enabled,
             enabled: c.enabled,
             priority: c.priority,
             live_warm: c.live_warm,
@@ -189,6 +194,7 @@ pub struct CameraCreate {
     pub anr_enabled: Option<bool>,
     pub anr_replay_url_template: Option<String>,
     pub native_anpr_enabled: Option<bool>,
+    pub native_events_enabled: Option<bool>,
     pub enabled: Option<bool>,
     pub live_warm: Option<bool>,
 }
@@ -224,6 +230,7 @@ pub struct CameraUpdate {
     pub anr_enabled: Option<bool>,
     pub anr_replay_url_template: Option<String>,
     pub native_anpr_enabled: Option<bool>,
+    pub native_events_enabled: Option<bool>,
     pub enabled: Option<bool>,
     pub priority: Option<i64>,
     pub live_warm: Option<bool>,

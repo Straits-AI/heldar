@@ -44,7 +44,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+# `stream` powers the on-camera event alertStream consumer (services/camera_events).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+# StreamExt over the alertStream response body; already resolved in Cargo.lock (transitive dep).
+futures-util = { version = "0.3", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"

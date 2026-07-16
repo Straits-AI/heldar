@@ -75,6 +75,33 @@ audit log.
 The raw output **pulse** endpoint is manager+ and intended for wiring verification ("test pulse").
 The guard-facing gate-open goes through the entry app's policy (below), not this primitive.
 
+## 2b. On-camera smart events (issue #46)
+
+The camera's own detection engine (motion / line-crossing / intrusion) can drive Heldar directly —
+the low-CPU alternative to server-side zones where the hardware supports it:
+
+- **Arm/disarm from the Device panel**: the "Built-in detections" chips are toggles for the kinds
+  that carry a device config resource (`PUT /api/v1/cameras/{id}/control/detections/{kind}`,
+  manager+, audited). Zone/line geometry is drawn in the camera's own web UI for now.
+- **Ingest events** (per-camera `native_events_enabled`, the "Ingest events" toggle): the kernel
+  keeps one connection to the device's event notification stream
+  (`/ISAPI/Event/notification/alertStream`) per opted-in camera (`services/camera_events.rs`).
+  Active events are mapped to stable kinds (`VMD`→motion, `linedetection`→line_crossing,
+  `fielddetection`→intrusion, tamper; unknown types pass through) and logged as
+  `camera_<kind>` warning events — so webhooks, email, and the events feed see them — and every
+  active block extends **event-mode recording** via the same trigger the zone engine uses.
+- A rising-edge debounce logs ONE event per activity burst (the device re-posts `active` blocks
+  ~1/s during motion; `HELDAR_CAMERA_EVENTS_REARM_SECS`, default 10, is the quiet gap that re-arms
+  logging), while recording is extended continuously for the whole burst.
+- Reliability: per-camera reader tasks with reconnect backoff, an idle watchdog (heartbeats stop →
+  reconnect), and a reconcile loop that starts/stops readers as cameras opt in/out. One camera's
+  failure never affects another.
+
+**When to use which:** server-side zones work on ANY camera and support Heldar-drawn polygons,
+confidence floors, and static suppression; on-camera events cost zero server CPU and use the
+vendor's tuned detector, but geometry is configured on the device. Both feed the same event
+machinery, so alerts/recording behave identically downstream.
+
 ## 3. Camera-native ANPR (issue #43)
 
 Dedicated ANPR barrier cameras (e.g. HikVision iDS-series) recognize plates **on-device** with
@@ -138,6 +165,7 @@ so an external system can also observe actuations Heldar performed itself.
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `HELDAR_NATIVE_ANPR_POLL_MS` | `1000` | Poll cadence of the camera-native ANPR poller. |
+| `HELDAR_CAMERA_EVENTS_REARM_SECS` | `10` | Quiet gap after which a new on-camera event burst logs a fresh event. |
 | `HELDAR_ISAPI_REQUEST_TIMEOUT_MS` | `8000` | Per-request timeout for all ISAPI device calls (shared with camera config). |
 | `HELDAR_ANPR_MIN_VOTES` | `3` | Worker-OCR vote threshold; camera-native reads are weighted to meet it in one read. |
 

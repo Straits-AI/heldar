@@ -39,6 +39,10 @@ pub fn router() -> Router<AppState> {
             "/api/v1/cameras/{id}/control/image",
             get(get_image).put(put_image),
         )
+        .route(
+            "/api/v1/cameras/{id}/control/detections/{kind}",
+            axum::routing::put(put_detection),
+        )
         .route("/api/v1/cameras/{id}/control/io/outputs", get(list_outputs))
         .route(
             "/api/v1/cameras/{id}/control/io/outputs/{port}/pulse",
@@ -176,6 +180,42 @@ async fn put_image(
     )
     .await;
     Ok(Json(updated))
+}
+
+// ========================= Built-in detections =========================
+
+#[derive(Debug, Deserialize)]
+struct DetectionUpdate {
+    enabled: bool,
+}
+
+/// Arm/disarm one of the camera's built-in detections (motion / line_crossing / intrusion) on the
+/// device, then refresh the capability map in the background so the panel's state stays truthful.
+async fn put_detection(
+    State(st): State<AppState>,
+    Path((id, kind)): Path<(String, String)>,
+    principal: Principal,
+    Json(body): Json<DetectionUpdate>,
+) -> AppResult<Json<Value>> {
+    principal.require(
+        principal.can_manage_registry(),
+        "configure camera built-in detections",
+    )?;
+    let provider = provider_for(&st, &id).await?;
+    provider.set_builtin_detection(&kind, body.enabled).await?;
+    auth::audit(
+        &st.pool,
+        &principal,
+        "camera_control_put_detection",
+        "camera",
+        &id,
+        json!({ "kind": kind, "enabled": body.enabled }),
+    )
+    .await;
+    camera_control::spawn_probe(&st, &id);
+    Ok(Json(
+        json!({ "ok": true, "kind": kind, "enabled": body.enabled }),
+    ))
 }
 
 // ========================= IO outputs =========================

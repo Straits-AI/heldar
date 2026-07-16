@@ -116,7 +116,15 @@ export function DeviceControlPanel({
           supplementModes={map.supplement_light_modes ?? []}
         />
       )}
-      {detections.length > 0 && <BuiltinDetectionsSection detections={detections} />}
+      {detections.length > 0 && (
+        <BuiltinDetectionsSection
+          camera={camera}
+          canManage={canManage}
+          detections={detections}
+          onCameraUpdated={onCameraUpdated}
+          onDetectionChanged={() => void caps.refresh()}
+        />
+      )}
       {outputs.length > 0 && (
         <OutputsSection cameraId={cameraId} canManage={canManage} outputs={outputs} />
       )}
@@ -402,32 +410,103 @@ const DETECTION_LABELS: Record<string, string> = {
   unattended_baggage: "Unattended object",
 };
 
+/** Detection kinds that can be armed/disarmed from here (they carry a config resource). */
+const TOGGLEABLE_KINDS = new Set(["motion", "line_crossing", "intrusion"]);
+
 function BuiltinDetectionsSection({
+  camera,
+  canManage,
   detections,
+  onCameraUpdated,
+  onDetectionChanged,
 }: {
+  camera: CameraView;
+  canManage: boolean;
   detections: NonNullable<DeviceControlCapabilities["built_in_detections"]>;
+  onCameraUpdated: () => void;
+  onDetectionChanged: () => void;
 }) {
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  async function toggleDetection(kind: string, enabled: boolean) {
+    setBusy(kind);
+    setError(null);
+    try {
+      await api.putCameraDetection(camera.id, kind, enabled);
+      // The kernel re-probes in the background; give it a beat, then refresh the panel state.
+      setTimeout(() => onDetectionChanged(), 2500);
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function toggleIngest() {
+    setBusy("ingest");
+    setError(null);
+    try {
+      await api.updateCamera(camera.id, {
+        native_events_enabled: !camera.native_events_enabled,
+      });
+      onCameraUpdated();
+    } catch (e) {
+      setError(errMsg(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
   return (
     <div className="mt-4 border-t border-line pt-3">
       <div className={`${SECTION_LABEL} mb-2`}>Built-in detections (on-camera)</div>
+      {error && <p className="mb-2 font-mono text-[11px] text-danger">{error}</p>}
       <div className="flex flex-wrap gap-1.5">
-        {detections.map((d) => (
-          <span
-            key={d.kind}
-            className="inline-flex items-center gap-1.5 rounded-md border border-line bg-canvas px-2 py-1 font-mono text-[11px] text-fg-secondary"
-          >
-            {DETECTION_LABELS[d.kind] ?? d.kind}
-            {d.enabled != null && (
-              <span className={d.enabled ? "text-emerald-400" : "text-fg-muted"}>
-                {d.enabled ? "on" : "off"}
-              </span>
-            )}
-          </span>
-        ))}
+        {detections.map((d) => {
+          const toggleable = canManage && d.enabled != null && TOGGLEABLE_KINDS.has(d.kind);
+          return (
+            <button
+              key={d.kind}
+              type="button"
+              disabled={!toggleable || busy != null}
+              title={
+                toggleable
+                  ? `Turn ${DETECTION_LABELS[d.kind] ?? d.kind} ${d.enabled ? "off" : "on"} on the camera`
+                  : undefined
+              }
+              onClick={() => toggleable && void toggleDetection(d.kind, !d.enabled)}
+              className={`inline-flex items-center gap-1.5 rounded-md border border-line bg-canvas px-2 py-1 font-mono text-[11px] text-fg-secondary ${
+                toggleable ? "hover:border-[#34373e] hover:bg-[#23262c]" : "cursor-default"
+              }`}
+            >
+              {busy === d.kind ? "…" : DETECTION_LABELS[d.kind] ?? d.kind}
+              {d.enabled != null && (
+                <span className={d.enabled ? "text-emerald-400" : "text-fg-muted"}>
+                  {d.enabled ? "on" : "off"}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </div>
+      <div className="mt-3 flex items-center justify-between gap-2">
+        <p className="font-mono text-[11px] text-fg-muted">
+          Ingest these on-camera events into Heldar (event feed, webhooks, email, event-mode
+          recording triggers) — the low-CPU alternative to server-side zones for this camera.
+        </p>
+        <Button
+          size="sm"
+          variant={camera.native_events_enabled ? "primary" : "default"}
+          disabled={!canManage || busy != null}
+          onClick={() => void toggleIngest()}
+        >
+          {busy === "ingest" ? "…" : camera.native_events_enabled ? "Ingesting" : "Ingest events"}
+        </Button>
       </div>
       <p className="mt-2 font-mono text-[10px] text-fg-muted">
-        The camera's own smart events, currently configured on the device. Heldar's server-side
-        zones (Zones panel above) work on any camera; ingesting these on-camera events is planned.
+        Detection zones/lines are drawn in the camera's own web UI for now; arm/disarm and
+        ingestion live here.
       </p>
     </div>
   );

@@ -38,6 +38,8 @@ const IRCUT_PATH: &str = "/ISAPI/Image/channels/1/ircutFilter";
 const IO_OUTPUTS_PATH: &str = "/ISAPI/System/IO/outputs";
 /// On-board ANPR plate-results endpoint (traffic cameras / ANPR barrier cameras).
 const ANPR_PLATES_PATH: &str = "/ISAPI/Traffic/channels/1/vehicleDetect/plates";
+/// On-camera event notification stream (multipart XML long-poll).
+const ALERT_STREAM_PATH: &str = "/ISAPI/Event/notification/alertStream";
 /// Smart-event capability flags (`/ISAPI/Smart/capabilities` `isSupportX` element → stable kind
 /// token → optional config resource whose `<enabled>` gives the current arm state).
 const SMART_DETECTIONS: &[(&str, &str, Option<&str>)] = &[
@@ -632,6 +634,74 @@ impl CameraConfigProvider for HikVisionIsapiClient {
         Ok(out)
     }
 
+    async fn set_builtin_detection(&self, kind: &str, enabled: bool) -> AppResult<()> {
+        let path = builtin_detection_path(kind).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "built-in detection `{kind}` cannot be armed/disarmed on this device"
+            ))
+        })?;
+        let body = self.isapi_request(Method::GET, path, None).await?;
+        let body = replace_first_text(&body, "enabled", bool_text(enabled));
+        self.isapi_request(Method::PUT, path, Some(body)).await?;
+        Ok(())
+    }
+
+    async fn open_event_stream(
+        &self,
+        stream_http: &reqwest::Client,
+    ) -> AppResult<reqwest::Response> {
+        // The digest dance by hand: the challenge leg is bounded, but the authorized leg must NOT
+        // carry a request timeout — the response is an endless multipart stream (the caller owns
+        // an idle watchdog per chunk). `stream_http` must be a client with no total timeout.
+        let url = format!("{}{}", self.base_url, ALERT_STREAM_PATH);
+        let resp = stream_http
+            .get(&url)
+            .timeout(self.timeout)
+            .send()
+            .await
+            .map_err(|e| AppError::Other(anyhow::anyhow!("alertStream probe failed: {e}")))?;
+        if resp.status() != StatusCode::UNAUTHORIZED {
+            if resp.status().is_success() {
+                return Ok(resp); // anonymous stream (auth disabled on the device)
+            }
+            return Err(AppError::Other(anyhow::anyhow!(
+                "alertStream refused: HTTP {}",
+                resp.status()
+            )));
+        }
+        let www = resp
+            .headers()
+            .get(reqwest::header::WWW_AUTHENTICATE)
+            .and_then(|v| v.to_str().ok())
+            .ok_or_else(|| {
+                AppError::Other(anyhow::anyhow!("alertStream: 401 without WWW-Authenticate"))
+            })?
+            .to_string();
+        let auth = super::digest::digest_auth_header(
+            "GET",
+            ALERT_STREAM_PATH,
+            &self.username,
+            &self.password,
+            &www,
+        )
+        .ok_or_else(|| {
+            AppError::Other(anyhow::anyhow!("alertStream: unsupported Digest challenge"))
+        })?;
+        let resp = stream_http
+            .get(&url)
+            .header(reqwest::header::AUTHORIZATION, auth)
+            .send()
+            .await
+            .map_err(|e| AppError::Other(anyhow::anyhow!("alertStream connect failed: {e}")))?;
+        if !resp.status().is_success() {
+            return Err(AppError::Other(anyhow::anyhow!(
+                "alertStream auth failed: HTTP {}",
+                resp.status()
+            )));
+        }
+        Ok(resp)
+    }
+
     async fn list_io_outputs(&self) -> AppResult<Vec<IoOutput>> {
         let xml = self
             .isapi_request(Method::GET, IO_OUTPUTS_PATH, None)
@@ -724,6 +794,17 @@ fn build_video_put_body(original: &str, cfg: &VideoConfig) -> AppResult<String> 
     out.push_str(&v);
     out.push_str(&original[ce..]);
     Ok(out)
+}
+
+/// The config resource whose `<enabled>` arms/disarms a built-in detection kind, for the kinds
+/// that carry a per-feature resource (the same three the capability probe reads state from).
+fn builtin_detection_path(kind: &str) -> Option<&'static str> {
+    match kind {
+        "motion" => Some("/ISAPI/System/Video/inputs/channels/1/motionDetection"),
+        "line_crossing" => Some("/ISAPI/Smart/LineDetection/1"),
+        "intrusion" => Some("/ISAPI/Smart/FieldDetection/1"),
+        _ => None,
+    }
 }
 
 /// Parse an `<IrcutFilter>` document into a [`DayNightConfig`].
@@ -864,7 +945,7 @@ fn bool_text(b: bool) -> &'static str {
 }
 
 /// Interpret ISAPI boolean text (`true`/`1`/`yes`, case-insensitive).
-fn parse_bool_text(s: &str) -> bool {
+pub(crate) fn parse_bool_text(s: &str) -> bool {
     matches!(s.trim().to_ascii_lowercase().as_str(), "true" | "1" | "yes")
 }
 
@@ -921,7 +1002,7 @@ fn replace_in_block(xml: &str, block: &str, local: &str, new_value: &str) -> Str
 /// Locate the first element with local name `local` at/after byte `from`. Returns
 /// `(open_lt, open_gt, self_closing)`: index of the opening `<`, index of that tag's `>`, and whether
 /// the element is self-closing (`/>`). Comments, declarations, and closing tags are skipped.
-fn find_open(xml: &str, local: &str, from: usize) -> Option<(usize, usize, bool)> {
+pub(crate) fn find_open(xml: &str, local: &str, from: usize) -> Option<(usize, usize, bool)> {
     let bytes = xml.as_bytes();
     let mut i = from.min(xml.len());
     while let Some(rel) = xml[i..].find('<') {
@@ -949,7 +1030,7 @@ fn find_open(xml: &str, local: &str, from: usize) -> Option<(usize, usize, bool)
 }
 
 /// Find the byte offset of the first closing tag `</...local>` in `xml`.
-fn find_close(xml: &str, local: &str) -> Option<usize> {
+pub(crate) fn find_close(xml: &str, local: &str) -> Option<usize> {
     let mut i = 0;
     while let Some(rel) = xml[i..].find("</") {
         let pos = i + rel;
@@ -966,7 +1047,7 @@ fn find_close(xml: &str, local: &str) -> Option<usize> {
 }
 
 /// Inner XML (raw) of the first element with local name `local`.
-fn first_inner<'a>(xml: &'a str, local: &str) -> Option<&'a str> {
+pub(crate) fn first_inner<'a>(xml: &'a str, local: &str) -> Option<&'a str> {
     let (_lt, gt, self_closing) = find_open(xml, local, 0)?;
     if self_closing {
         return Some("");
@@ -978,7 +1059,7 @@ fn first_inner<'a>(xml: &'a str, local: &str) -> Option<&'a str> {
 
 /// Trimmed, entity-decoded text content of the first element with local name `local`. Returns `None`
 /// when the element is absent or its text is empty.
-fn first_text(xml: &str, local: &str) -> Option<String> {
+pub(crate) fn first_text(xml: &str, local: &str) -> Option<String> {
     let inner = first_inner(xml, local)?;
     let t = inner.trim();
     if t.is_empty() {
@@ -1012,7 +1093,7 @@ fn elements<'a>(xml: &'a str, local: &str) -> Vec<(&'a str, &'a str)> {
 }
 
 /// Decode the five predefined XML entities.
-fn xml_unescape(s: &str) -> String {
+pub(crate) fn xml_unescape(s: &str) -> String {
     s.replace("&lt;", "<")
         .replace("&gt;", ">")
         .replace("&quot;", "\"")

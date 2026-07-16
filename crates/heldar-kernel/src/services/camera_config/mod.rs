@@ -122,6 +122,21 @@ pub trait CameraConfigProvider: Send + Sync {
         unsupported("built-in detections")
     }
 
+    /// Arm/disarm one built-in detection (`motion` | `line_crossing` | `intrusion`) on the device.
+    async fn set_builtin_detection(&self, _kind: &str, _enabled: bool) -> AppResult<()> {
+        unsupported("built-in detections")
+    }
+
+    /// Open the device's live event-notification stream (an endless multipart response consumed
+    /// by `services::camera_events`). `stream_http` must be a client with NO total timeout — the
+    /// caller owns an idle watchdog. Default: unsupported.
+    async fn open_event_stream(
+        &self,
+        _stream_http: &reqwest::Client,
+    ) -> AppResult<reqwest::Response> {
+        unsupported("on-camera event stream")
+    }
+
     /// The device's alarm/relay output ports.
     async fn list_io_outputs(&self) -> AppResult<Vec<IoOutput>> {
         unsupported("IO outputs")

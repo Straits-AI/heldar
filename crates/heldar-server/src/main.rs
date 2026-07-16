@@ -242,6 +242,15 @@ async fn main() -> anyhow::Result<()> {
                 services::native_anpr::run(st.clone())
             });
         }
+        // On-camera smart-event ingestion (issue #46): one alertStream reader per camera with
+        // native_events_enabled, feeding the kernel event log + event-mode recording triggers.
+        // Self-idles when no camera opts in; per-camera failures reconnect with backoff.
+        {
+            let st = state.clone();
+            spawn_supervised("camera_events", move || {
+                services::camera_events::run(st.clone())
+            });
+        }
         // Durable perception fan-out: replays detection batches whose consumer fan-out didn't
         // complete before a crash (idempotent via consumer_fanout).
         let (p, cons) = (pool.clone(), drain_consumers.clone());

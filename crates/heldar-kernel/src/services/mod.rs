@@ -3,6 +3,7 @@ pub mod anr;
 pub mod backup;
 pub mod camera_config;
 pub mod camera_control;
+pub mod camera_events;
 pub mod clip;
 pub mod consumer;
 pub mod db_maintenance;

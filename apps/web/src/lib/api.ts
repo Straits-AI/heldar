@@ -881,6 +881,13 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(patch),
     }),
+  /** Arm/disarm one built-in detection (motion | line_crossing | intrusion) on the device (manager+). */
+  putCameraDetection: (id: string, kind: string, enabled: boolean) =>
+    request<{ ok: boolean; kind: string; enabled: boolean }>(
+      `/api/v1/cameras/${enc(id)}/control/detections/${enc(kind)}`,
+      { method: "PUT", body: JSON.stringify({ enabled }) },
+      30000,
+    ),
   listCameraIoOutputs: (id: string) =>
     request<IoOutput[]>(`/api/v1/cameras/${enc(id)}/control/io/outputs`),
   /** Pulse a relay output — PHYSICAL side effect, e.g. a barrier test fire (manager+). */

@@ -934,6 +934,7 @@ mod tests {
             anr_enabled: false,
             anr_replay_url_template: None,
             native_anpr_enabled: false,
+            native_events_enabled: false,
             enabled: true,
             priority: 100,
             live_warm: false,

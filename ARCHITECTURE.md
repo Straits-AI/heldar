@@ -2006,6 +2006,18 @@ Native reads carry `attributes.source = "camera_native"`; the entry engine weigh
 vote threshold (the device already consolidated frames), while worker-OCR reads still vote one at a
 time. The device picture name is the idempotency key, so replays after a crash never double-count.
 
+**On-camera smart events (`services/camera_events.rs`, migration `0008`).** For cameras with
+`native_events_enabled`, the kernel holds one connection to the device's event notification stream
+(an endless multipart of small XML blocks; verified live: ongoing events re-post `active` ~1/s,
+idle cameras heartbeat `videoloss/inactive`). A rising-edge debounce logs one `camera_<kind>`
+event per burst (motion / line_crossing / intrusion / tamper; unknown active types pass through)
+into the kernel event log — webhooks/email subscribe there — while every active block extends
+event-mode recording through the same recorder trigger the zone engine uses. Built-in detections
+are armed/disarmed from the Device panel (`PUT .../control/detections/{kind}`, read-modify-write
+of the device config). Readers reconnect with backoff, carry an idle watchdog, and are reconciled
+against the opted-in camera set; the stream uses a dedicated no-total-timeout HTTP client (the
+shared egress client's 10s timeout would sever every stream).
+
 **Gate actuation (`heldar-entry/src/gate.rs`, entry migration `0003`).** Per-lane `gate_policies`
 (auto-open on `matched`, output port, pulse width) plus a global `gate_settings.kill_switch` that
 halts all actuation. The ANPR engine fires `GateActuator::auto_open` **after** the entry event is

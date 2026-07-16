@@ -180,6 +180,9 @@ pub struct Config {
     pub isapi_request_timeout_ms: u64,
     /// Poll cadence of the camera-native ANPR plate poller (per enabled camera) in milliseconds.
     pub native_anpr_poll_ms: u64,
+    /// Quiet gap (seconds) after which a new on-camera event burst logs a fresh event
+    /// (`services::camera_events` rising-edge debounce).
+    pub camera_events_rearm_secs: u64,
     // ---- Disk / array health (HA ops; see docs/HA.md) ----
     /// Run periodic SMART self-assessment checks (`smartctl -H`) inside the health loop. Off by
     /// default; needs `smartmontools` on PATH. Missing binary degrades to a one-time log + skip.
@@ -506,6 +509,7 @@ impl Config {
             onvif_request_timeout_ms: parse_or("HELDAR_ONVIF_REQUEST_TIMEOUT_MS", 5000),
             isapi_request_timeout_ms: parse_or("HELDAR_ISAPI_REQUEST_TIMEOUT_MS", 8000),
             native_anpr_poll_ms: parse_or("HELDAR_NATIVE_ANPR_POLL_MS", 1000),
+            camera_events_rearm_secs: parse_or("HELDAR_CAMERA_EVENTS_REARM_SECS", 10),
             smart_check_enabled: parse_bool("HELDAR_SMART_CHECK_ENABLED", false),
             smart_devices: var("HELDAR_SMART_DEVICES")
                 .map(|v| {
