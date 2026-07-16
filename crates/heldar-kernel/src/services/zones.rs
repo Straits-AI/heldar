@@ -24,6 +24,8 @@ const STATE_TTL_SECS: i64 = 120;
 /// Default consecutive-observation confirmation before a membership transition (debounce); a zone
 /// can override via config.confirm_frames.
 const DEFAULT_CONFIRM_FRAMES: u32 = 2;
+/// Default per-zone confidence floor (see `min_confidence`).
+const DEFAULT_MIN_CONFIDENCE: f64 = 0.5;
 
 #[derive(Debug, Clone)]
 struct TrackZoneState {
@@ -102,6 +104,22 @@ fn parse_labels(v: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Per-zone minimum detection confidence for zone membership. Detections below it are invisible
+/// to the zone (they neither enter nor sustain presence). Default 0.5: verified live that
+/// borderline detector output (a 0.26–0.33 "person" that was actually laundry on a line) streams
+/// continuous presence/dwell events from a full-frame zone — near-threshold detections are noise
+/// far more often than signal. Override per zone via `config.min_confidence` (0.0 restores the
+/// old accept-everything behavior).
+fn min_confidence(zone: &Zone) -> f64 {
+    zone.config
+        .0
+        .get("min_confidence")
+        .and_then(|v| v.as_f64())
+        .filter(|v| v.is_finite())
+        .unwrap_or(DEFAULT_MIN_CONFIDENCE)
+        .clamp(0.0, 1.0)
 }
 
 fn confirm_frames(zone: &Zone) -> u32 {
@@ -185,13 +203,14 @@ impl ZoneEngine {
             Ok(z) if !z.is_empty() => z,
             _ => return,
         };
-        let parsed: Vec<(Vec<[f64; 2]>, Vec<String>, u32)> = zones
+        let parsed: Vec<(Vec<[f64; 2]>, Vec<String>, u32, f64)> = zones
             .iter()
             .map(|z| {
                 (
                     parse_polygon(&z.polygon.0),
                     parse_labels(&z.labels.0),
                     confirm_frames(z),
+                    min_confidence(z),
                 )
             })
             .collect();
@@ -206,8 +225,13 @@ impl ZoneEngine {
                 };
                 let label = d.label.as_deref().unwrap_or("");
                 for (idx, zone) in zones.iter().enumerate() {
-                    let (poly, labels, confirm) = &parsed[idx];
+                    let (poly, labels, confirm, min_conf) = &parsed[idx];
                     if !labels.is_empty() && !labels.iter().any(|l| l == label) {
+                        continue;
+                    }
+                    // Below the zone's confidence floor: invisible to this zone (no enter, no
+                    // dwell sustain) — borderline detections must not drive zone state.
+                    if d.confidence.unwrap_or(0.0) < *min_conf {
                         continue;
                     }
                     let raw_inside = point_in_polygon(point, poly);
@@ -382,6 +406,47 @@ fn make_evt(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn zone_with_config(config: Value) -> Zone {
+        Zone {
+            id: "z1".into(),
+            camera_id: "cam".into(),
+            name: "test".into(),
+            kind: "presence".into(),
+            polygon: sqlx::types::Json(json!([[0, 0], [1, 0], [1, 1], [0, 1]])),
+            dwell_seconds: 0.0,
+            labels: sqlx::types::Json(json!([])),
+            severity: "info".into(),
+            config: sqlx::types::Json(config),
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    /// The confidence floor defaults to 0.5 and clamps the per-zone override into 0..=1. A zero
+    /// override restores the old accept-everything behavior.
+    #[test]
+    fn min_confidence_default_override_and_clamp() {
+        assert_eq!(min_confidence(&zone_with_config(json!({}))), 0.5);
+        assert_eq!(
+            min_confidence(&zone_with_config(json!({ "min_confidence": 0.25 }))),
+            0.25
+        );
+        assert_eq!(
+            min_confidence(&zone_with_config(json!({ "min_confidence": 0.0 }))),
+            0.0
+        );
+        assert_eq!(
+            min_confidence(&zone_with_config(json!({ "min_confidence": 7.0 }))),
+            1.0
+        );
+        // Non-numeric / non-finite → default.
+        assert_eq!(
+            min_confidence(&zone_with_config(json!({ "min_confidence": "high" }))),
+            0.5
+        );
+    }
 
     #[test]
     fn point_in_polygon_basic() {

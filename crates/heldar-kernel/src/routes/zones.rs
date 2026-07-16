@@ -130,6 +130,22 @@ async fn create_zone(
     let labels = SqlxJson(body.labels.unwrap_or_else(|| json!([])));
     let config = SqlxJson(body.config.unwrap_or_else(|| json!({})));
     let polygon = SqlxJson(body.polygon);
+
+    // Idempotency: a camera has at most one zone of a given name. If one already exists, return
+    // it instead of silently creating a duplicate — stacked-up identical zones (e.g. a
+    // provisioning script re-POSTing on every restart) each fire their own copy of every event.
+    // Observed live: 4 duplicates of one full-frame zone quadrupling every enter/dwell. Change an
+    // existing zone via PATCH, not by re-creating it.
+    if let Some(existing) =
+        sqlx::query_as::<_, Zone>("SELECT * FROM zones WHERE camera_id = ? AND name = ?")
+            .bind(&id)
+            .bind(&body.name)
+            .fetch_optional(&st.pool)
+            .await?
+    {
+        return Ok((StatusCode::OK, Json(existing)));
+    }
+
     let now = Utc::now();
     let zone_id = format!("zone_{}", Uuid::new_v4().simple());
 
