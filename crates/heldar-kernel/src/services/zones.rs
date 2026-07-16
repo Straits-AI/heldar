@@ -27,6 +27,9 @@ const DEFAULT_CONFIRM_FRAMES: u32 = 2;
 /// Default per-zone confidence floor (see `min_confidence`).
 const DEFAULT_MIN_CONFIDENCE: f64 = 0.5;
 
+/// Per-zone precomputed evaluation parameters: polygon, label filter, confirm-frames, confidence floor.
+type ZoneParams = (Vec<[f64; 2]>, Vec<String>, u32, f64);
+
 #[derive(Debug, Clone)]
 struct TrackZoneState {
     track: String,
@@ -203,7 +206,7 @@ impl ZoneEngine {
             Ok(z) if !z.is_empty() => z,
             _ => return,
         };
-        let parsed: Vec<(Vec<[f64; 2]>, Vec<String>, u32, f64)> = zones
+        let parsed: Vec<ZoneParams> = zones
             .iter()
             .map(|z| {
                 (
