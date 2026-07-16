@@ -45,6 +45,9 @@ pub struct SamplerInfo {
     pub stream_profile: String,
     pub state: String,
     pub fps: f64,
+    /// Effective decode width — may be below the requested width when the resolution ladder
+    /// stepped this camera down to keep it running under budget pressure.
+    pub width: i64,
 }
 
 /// Owns and supervises the per-(camera,profile) frame samplers.
@@ -118,33 +121,46 @@ impl SamplerManager {
         }
 
         let budget = self.cfg.ai_max_total_fps.max(1.0);
-        // Cap concurrent decoders so total fps cannot exceed the budget even at the MIN_FPS floor.
-        let max_samplers = (budget / MIN_FPS).floor().max(1.0) as usize;
-        let run = rows.len().min(max_samplers);
+        // Cap concurrent decoders so total cost cannot exceed the budget even at the ladder floor.
+        let max_samplers = (budget / ladder_floor_cost()).floor().max(1.0) as usize;
         // Priority-aware allocation: rows are ordered priority DESC, so high-priority cameras (e.g. an
-        // ANPR gate lane) get their requested fps first and the lowest-priority cameras are floored to
-        // MIN_FPS or shed to 0 — instead of degrading every camera equally / blinding arbitrary ones.
-        let want: Vec<f64> = rows.iter().map(|r| r.2).collect();
-        let alloc = allocate_fps(&want, budget, max_samplers);
-        if rows.len() > run {
+        // ANPR gate lane) get their requested fps/width first. Under pressure the RESOLUTION LADDER
+        // steps lower-priority cameras down (floor fps at reduced width — a cheaper frame) before any
+        // camera is shed to 0 — degraded sight beats blindness.
+        let want: Vec<(f64, i64)> = rows.iter().map(|r| (r.2, r.3)).collect();
+        let alloc = allocate(&want, budget, max_samplers);
+        let shed = alloc.iter().filter(|(fps, _)| *fps <= 0.0).count();
+        let downgraded = alloc
+            .iter()
+            .zip(want.iter())
+            .filter(|((fps, w), (_, wq))| *fps > 0.0 && w < wq)
+            .count();
+        if shed > 0 {
             tracing::warn!(
                 requested = rows.len(),
-                running = run,
-                "sampler: AI fps budget exhausted; lowest-priority cameras will not be sampled"
+                shed,
+                "sampler: AI budget exhausted even at the ladder floor; lowest-priority cameras will not be sampled"
+            );
+        }
+        if downgraded > 0 {
+            tracing::info!(
+                downgraded,
+                "sampler: resolution ladder stepped lower-priority cameras down to stay in budget"
             );
         }
         tracing::info!(
-            samplers = run,
+            samplers = alloc.iter().filter(|(fps, _)| *fps > 0.0).count(),
             budget,
             "sampler: rebalancing AI frame budget by priority"
         );
 
-        for (i, (cam, profile, _max_fps, width, _priority)) in rows.into_iter().enumerate() {
-            let fps = alloc[i];
+        for (i, (cam, profile, _max_fps, _width, _priority)) in rows.into_iter().enumerate() {
+            let (fps, width) = alloc[i];
             if fps > 0.0 {
                 self.spawn(cam, profile, fps, width).await;
             } else {
-                self.set_info(&cam, &profile, "budget_exhausted", 0.0).await;
+                self.set_info(&cam, &profile, "budget_exhausted", 0.0, 0)
+                    .await;
             }
         }
     }
@@ -188,7 +204,7 @@ impl SamplerManager {
         }
     }
 
-    async fn set_info(&self, camera_id: &str, profile: &str, state: &str, fps: f64) {
+    async fn set_info(&self, camera_id: &str, profile: &str, state: &str, fps: f64, width: i64) {
         self.info.lock().await.insert(
             sampler_key(camera_id, profile),
             SamplerInfo {
@@ -196,6 +212,7 @@ impl SamplerManager {
                 stream_profile: profile.to_string(),
                 state: state.to_string(),
                 fps,
+                width,
             },
         );
     }
@@ -218,7 +235,8 @@ impl SamplerManager {
         let mut backoff: u64 = 1;
         loop {
             if *stop.borrow() {
-                self.set_info(&camera_id, &profile, "stopped", fps).await;
+                self.set_info(&camera_id, &profile, "stopped", fps, width)
+                    .await;
                 return;
             }
             let cam = match sqlx::query_as::<_, Camera>("SELECT * FROM cameras WHERE id = ?")
@@ -244,7 +262,8 @@ impl SamplerManager {
             let Some(url) =
                 camera_url::stream_url(&cam, &profile).or_else(|| camera_url::record_url(&cam))
             else {
-                self.set_info(&camera_id, &profile, "error", fps).await;
+                self.set_info(&camera_id, &profile, "error", fps, width)
+                    .await;
                 if sleep_or_stop(&mut stop, 30).await {
                     return;
                 }
@@ -257,7 +276,8 @@ impl SamplerManager {
             }
             let latest = dir.join(frame_filename(&profile));
             let vf = format!("fps={fps},scale={width}:-2");
-            self.set_info(&camera_id, &profile, "connecting", fps).await;
+            self.set_info(&camera_id, &profile, "connecting", fps, width)
+                .await;
             tracing::info!(%camera_id, %profile, fps, width, url = %camera_url::mask_url(&url), "sampler: starting");
 
             let mut child = match Command::new(&self.cfg.ffmpeg_bin)
@@ -279,14 +299,16 @@ impl SamplerManager {
                 Ok(c) => c,
                 Err(e) => {
                     tracing::error!(%camera_id, "sampler: spawn ffmpeg failed: {e}");
-                    self.set_info(&camera_id, &profile, "error", fps).await;
+                    self.set_info(&camera_id, &profile, "error", fps, width)
+                        .await;
                     if sleep_or_stop(&mut stop, 15).await {
                         return;
                     }
                     continue;
                 }
             };
-            self.set_info(&camera_id, &profile, "sampling", fps).await;
+            self.set_info(&camera_id, &profile, "sampling", fps, width)
+                .await;
             let started = Instant::now();
 
             let stderr = child.stderr.take();
@@ -315,7 +337,7 @@ impl SamplerManager {
                     let tail = String::from_utf8_lossy(&stderr_task.await.unwrap_or_default()).trim().to_string();
                     let masked = camera_url::mask_url(&tail);
                     tracing::warn!(%camera_id, %profile, status = ?status.ok().and_then(|s| s.code()), tail = %masked, "sampler: ffmpeg exited");
-                    self.set_info(&camera_id, &profile, "offline", fps).await;
+                    self.set_info(&camera_id, &profile, "offline", fps, width).await;
                     let _ = repo::log_event(&self.pool, Some(&camera_id), "sampler_offline", "warning",
                         json!({ "profile": profile, "detail": masked })).await;
                     // Reset backoff after a healthy run (>30s); otherwise grow it (exponential up to
@@ -328,7 +350,7 @@ impl SamplerManager {
                 }
                 _ = stop.changed() => {
                     let _ = child.kill().await;
-                    self.set_info(&camera_id, &profile, "stopped", fps).await;
+                    self.set_info(&camera_id, &profile, "stopped", fps, width).await;
                     return;
                 }
             }
@@ -346,21 +368,68 @@ async fn sleep_or_stop(stop: &mut watch::Receiver<bool>, secs: u64) -> bool {
     }
 }
 
-/// Allocate the global AI fps `budget` across `want` (each camera's requested max fps), which MUST be
-/// ordered priority-high-first. Returns granted fps per camera (0.0 = shed / budget-exhausted). Greedy
-/// by priority: each running camera gets its requested fps while reserving `MIN_FPS` for the remaining
-/// running cameras — so high-priority cameras keep full fidelity, the lowest-priority are floored to
-/// `MIN_FPS`, and any beyond `max_samplers` are shed to 0.
-fn allocate_fps(want: &[f64], budget: f64, max_samplers: usize) -> Vec<f64> {
-    let run = want.len().min(max_samplers);
-    let mut out = vec![0.0; want.len()];
+/// The resolution ladder: fractions of the requested width a pressured camera steps down through
+/// before being shed. Inference cost scales ~quadratically with linear resolution, so a half-width
+/// frame is budgeted at a quarter of a full frame — the budget stays an honest inference-load proxy.
+const LADDER_STEPS: &[f64] = &[1.0, 0.75, 0.5];
+/// Never scale below this width (detection quality collapses; matches the task width floor).
+const MIN_LADDER_WIDTH: i64 = 320;
+
+/// Budget cost of running `fps` at `width` when `width_req` was requested (quadratic in the
+/// downscale ratio; full width costs exactly `fps`).
+fn frame_cost(fps: f64, width: i64, width_req: i64) -> f64 {
+    let ratio = (width as f64 / width_req.max(1) as f64).clamp(0.0, 1.0);
+    fps * ratio * ratio
+}
+
+/// The cheapest admission the ladder allows (floor fps at the deepest width step) — what the
+/// greedy pass reserves per still-unallocated camera so pressure degrades instead of shedding.
+fn ladder_floor_cost() -> f64 {
+    let last = *LADDER_STEPS.last().unwrap_or(&1.0);
+    MIN_FPS * last * last
+}
+
+/// Allocate the global AI budget across `want` (each camera's requested `(fps, width)`), which
+/// MUST be ordered priority-high-first. Returns granted `(fps, width)` per camera (`fps == 0.0` =
+/// shed).
+///
+/// Two-tier greedy, priority-first:
+/// 1. Admission count: at most `k = budget / ladder_floor_cost` cameras run (and never more than
+///    `max_samplers`) — anything beyond `k` is shed UPFRONT, so scarcity sheds from the BOTTOM of
+///    the priority order (a reserve-based loop could otherwise starve the leader).
+/// 2. Each admitted camera takes its full fps at full width when that fits after reserving a
+///    FULL-WIDTH floor (`MIN_FPS`) for every admitted camera behind it — identical to the old
+///    allocator when the budget covers full-width floors. Only when it doesn't does the camera
+///    walk the resolution ladder (floor fps at 100% → 75% → 50% width, never below
+///    `MIN_LADDER_WIDTH`) against the cheaper ladder-floor reserve — degraded sight, not
+///    blindness. A camera whose deepest affordable rung still doesn't fit is shed.
+fn allocate(want: &[(f64, i64)], budget: f64, max_samplers: usize) -> Vec<(f64, i64)> {
+    let admissible = (budget / ladder_floor_cost()).floor() as usize;
+    let run = want.len().min(max_samplers).min(admissible.max(1));
+    let mut out = vec![(0.0, 0); want.len()];
     let mut remaining = budget;
-    for (i, &w) in want.iter().enumerate().take(run) {
+    for (i, &(fps_req, width_req)) in want.iter().enumerate().take(run) {
         let others_after = (run - i - 1) as f64;
-        let reserve = MIN_FPS * others_after;
-        let grant = w.min((remaining - reserve).max(MIN_FPS)).max(MIN_FPS);
-        out[i] = grant;
-        remaining -= grant;
+        // Tier 1: full width, reserving full-width floors for the rest (the pre-ladder behavior).
+        let headroom_full = remaining - MIN_FPS * others_after;
+        if headroom_full >= MIN_FPS {
+            let grant = fps_req.min(headroom_full).max(MIN_FPS);
+            out[i] = (grant, width_req);
+            remaining -= grant;
+            continue;
+        }
+        // Tier 2: the ladder, reserving only the cheapest admission for the rest.
+        let headroom = (remaining - ladder_floor_cost() * others_after).max(0.0);
+        for step in LADDER_STEPS {
+            let width = (((width_req as f64) * step).round() as i64).max(MIN_LADDER_WIDTH);
+            let cost = frame_cost(MIN_FPS, width, width_req);
+            if cost <= headroom + 1e-9 {
+                out[i] = (MIN_FPS, width);
+                remaining -= cost;
+                break;
+            }
+        }
+        // No rung fit: shed (stays (0.0, 0)).
     }
     out
 }
@@ -378,33 +447,83 @@ impl SamplerManager {
 mod tests {
     use super::*;
 
-    #[test]
-    fn allocate_favors_priority_then_floors_the_rest() {
-        // Priority-ordered requests [10,5,5] against a budget of 10.
-        let got = allocate_fps(&[10.0, 5.0, 5.0], 10.0, 10);
-        assert_eq!(got.len(), 3);
-        assert!(
-            got[0] > got[1] && got[0] > got[2],
-            "highest-priority camera gets the most: {got:?}"
-        );
-        assert!(
-            got[1] >= MIN_FPS && got[2] >= MIN_FPS,
-            "running cameras stay >= MIN_FPS: {got:?}"
-        );
-        assert!(
-            (got.iter().sum::<f64>() - 10.0).abs() < 1e-9,
-            "the whole budget is allocated when demand exceeds it: {got:?}"
-        );
+    /// Total budget cost of an allocation, in the allocator's own currency.
+    fn total_cost(alloc: &[(f64, i64)], want: &[(f64, i64)]) -> f64 {
+        alloc
+            .iter()
+            .zip(want)
+            .map(|((fps, w), (_, wq))| frame_cost(*fps, *w, *wq))
+            .sum()
     }
 
     #[test]
-    fn allocate_sheds_lowest_priority_beyond_capacity() {
-        // Room for only 2 of 3 cameras: the last (lowest-priority) is shed to 0.
-        let got = allocate_fps(&[5.0, 5.0, 5.0], 10.0, 2);
-        assert_eq!(got[2], 0.0, "lowest-priority camera shed to 0: {got:?}");
+    fn allocate_favors_priority_then_floors_the_rest() {
+        // Priority-ordered requests against a budget of 10: plenty of headroom for the leader,
+        // the rest floored but RUNNING at full width (no ladder needed at this pressure).
+        let want = [(10.0, 640), (5.0, 640), (5.0, 640)];
+        let got = allocate(&want, 10.0, 10);
+        assert_eq!(got.len(), 3);
         assert!(
-            got[0] >= MIN_FPS && got[1] >= MIN_FPS,
-            "the two running cameras stay >= MIN_FPS: {got:?}"
+            got[0].0 > got[1].0 && got[0].0 > got[2].0,
+            "highest-priority camera gets the most fps: {got:?}"
         );
+        assert!(
+            got.iter().all(|(fps, w)| *fps >= MIN_FPS && *w == 640),
+            "all three run, none downgraded at this pressure: {got:?}"
+        );
+        assert!(total_cost(&got, &want) <= 10.0 + 1e-9);
+    }
+
+    /// The heart of #39: pressure that previously SHED cameras now steps them down the resolution
+    /// ladder — floor fps at reduced width — so every camera keeps sight. Budget 1.4 cannot cover
+    /// four full-width floors (4 × MIN_FPS = 2.0); the old allocator would shed the tail.
+    #[test]
+    fn allocate_downgrades_resolution_before_shedding() {
+        let want = [(2.0, 640), (2.0, 640), (2.0, 640), (2.0, 640)];
+        let got = allocate(&want, 1.4, 16);
+        assert!(
+            got.iter().all(|(fps, _)| *fps > 0.0),
+            "no camera is shed while the ladder can pay for it: {got:?}"
+        );
+        assert!(
+            got.iter().any(|(_, w)| *w < 640),
+            "at least one camera stepped down the ladder: {got:?}"
+        );
+        assert!(
+            total_cost(&got, &want) <= 1.4 + 1e-9,
+            "ladder admissions stay inside the budget: {got:?}"
+        );
+        // Priority order respected: earlier cameras never worse off than later ones.
+        assert!(got[0].0 >= got[3].0 && got[0].1 >= got[3].1, "{got:?}");
+    }
+
+    /// Extreme scarcity sheds from the BOTTOM of the priority order (the admission count keeps the
+    /// leader alive), and the decoder cap sheds regardless of budget.
+    #[test]
+    fn allocate_sheds_lowest_priority_under_extreme_scarcity() {
+        let want = [(2.0, 640), (2.0, 640), (2.0, 640), (2.0, 640)];
+        // Budget 0.3 affords two deepest-rung admissions (2 × 0.125) and nothing more.
+        let got = allocate(&want, 0.3, 16);
+        assert!(got[0].0 > 0.0 && got[1].0 > 0.0, "top two survive: {got:?}");
+        assert_eq!(got[2], (0.0, 0), "{got:?}");
+        assert_eq!(got[3], (0.0, 0), "{got:?}");
+        assert!(total_cost(&got, &want) <= 0.3 + 1e-9);
+        // Decoder cap still sheds regardless of budget.
+        let capped = allocate(&want, 100.0, 2);
+        assert_eq!(capped[2], (0.0, 0));
+        assert_eq!(capped[3], (0.0, 0));
+    }
+
+    #[test]
+    fn ladder_width_never_below_floor_and_cost_is_quadratic() {
+        // Force the second camera onto a deep rung: floors won't fit, ladder must.
+        let want = [(2.0, 480), (2.0, 480)];
+        let got = allocate(&want, MIN_FPS + 0.23, 16);
+        assert!(got[1].0 > 0.0, "ladder admission: {got:?}");
+        assert!(got[1].1 >= MIN_LADDER_WIDTH, "width floored: {got:?}");
+        assert!(got[1].1 < 480, "and genuinely downgraded: {got:?}");
+        // Cost model: half width = quarter cost.
+        assert!((frame_cost(2.0, 320, 640) - 0.5).abs() < 1e-9);
+        assert!((frame_cost(2.0, 640, 640) - 2.0).abs() < 1e-9);
     }
 }
