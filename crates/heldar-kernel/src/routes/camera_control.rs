@@ -207,7 +207,14 @@ async fn pulse_output(
 ) -> AppResult<Json<Value>> {
     principal.require(principal.can_manage_registry(), "pulse a camera IO output")?;
     let req = body.map(|Json(b)| b).unwrap_or_default();
-    let held_ms = camera_control::pulse_output(&st, &id, port, req.pulse_ms).await?;
+    // Map a device refusal to a 400 with the ISAPI reason — the operator needs to see e.g.
+    // "Invalid Operation" (camera has no relay port), not a generic internal error.
+    let held_ms = camera_control::pulse_output(&st, &id, port, req.pulse_ms)
+        .await
+        .map_err(|e| match e {
+            crate::error::AppError::NotFound(_) | crate::error::AppError::BadRequest(_) => e,
+            other => crate::error::AppError::BadRequest(format!("output pulse failed: {other}")),
+        })?;
     auth::audit(
         &st.pool,
         &principal,

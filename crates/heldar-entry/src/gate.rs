@@ -109,9 +109,12 @@ impl GateActuator {
         let outcome = self
             .pulse(camera_id, policy.output_port, policy.pulse_ms)
             .await;
+        // Surface the device's failure reason to the operator (a 500 would render as a generic
+        // "internal error", hiding e.g. "Invalid Operation" from a camera with no relay port —
+        // observed live on a DS-2CD3T56WDV3-L, which has none).
         let res = match &outcome {
             Ok(ms) => Ok(*ms),
-            Err(e) => Err(AppError::Other(anyhow::anyhow!("gate open failed: {e}"))),
+            Err(e) => Err(AppError::BadRequest(format!("gate open failed: {e}"))),
         };
         self.log_actuation(camera_id, principal_id, "manual", &policy, outcome)
             .await;
