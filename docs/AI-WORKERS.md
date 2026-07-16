@@ -946,3 +946,34 @@ See also: [`ARCHITECTURE.md`](../ARCHITECTURE.md) §15 (Stage 2 implementation),
 [`ROADMAP.md`](../ROADMAP.md) Stages 2–4 (checklists),
 [`docs/OBSERVABILITY.md`](OBSERVABILITY.md) (Stage 1 metrics/alerts the AI + zone +
 entry events feed into).
+
+
+## 13. ANPR accuracy benchmarking + DIY make/model classifier (issue #37)
+
+Accuracy claims only mean anything on **your** plates and lighting, so the loop is DIY:
+collect → label → score, with `apps/ai/anpr_bench.py`:
+
+```bash
+# 1) Collect vehicle crops + side-by-side OCR reads (images dir, video file, or live kernel frames)
+python3 anpr_bench.py collect --kernel http://127.0.0.1:8000 --camera cam7 \
+    --api-key vok_... --duration 300 --out bench/
+
+# 2) Label: fill the `truth` column in bench/manifest.csv (crops are in bench/crops/)
+
+# 3) Score: exact accuracy, character (Levenshtein) accuracy, read rate — per OCR backend
+python3 anpr_bench.py score --out bench/
+```
+
+Every installed OCR backend (PaddleOCR, EasyOCR) is run on every crop so the manifest compares
+them directly; backends that aren't installed simply don't appear. The optional `truth_make_model`
+column scores the classifier below the same way.
+
+**DIY make/model classifier**: the ANPR analyzer accepts an ONNX image classifier over vehicle
+crops via task config — `make_model_onnx` (path), `make_model_labels` (one "Make Model" per line),
+`make_model_min_conf` (default 0.5), `make_model_input` (default 224, ImageNet normalization).
+Bring your own weights (e.g. a ResNet fine-tuned on Stanford Cars / VMMRdb / local footage;
+`pip install onnxruntime`). Predictions populate the `make`/`model` attributes the entry engine
+already consumes — and by policy those are SECONDARY assist only (a mismatch against the registry
+raises a guard-review exception, never an auto-reject), so imperfect weights degrade to extra
+reviews, not wrong gate decisions. The benchmark's `--make-model-onnx/--make-model-labels` flags
+run the same classifier during collection so its accuracy is measured before it is trusted.

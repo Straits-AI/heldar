@@ -848,6 +848,80 @@ class _OcrBackend:
             return None
 
 
+class _MakeModelClassifier:
+    """Optional DIY vehicle make/model classifier (issue #37): an ONNX image classifier applied to
+    vehicle crops. Bring your own weights — any classifier over vehicle-crop images works (e.g. a
+    ResNet fine-tuned on Stanford Cars / VMMRdb / local footage). Emits `make` + `model` attributes
+    (labels formatted "Make Model" or "Make|Model", one per line); the core's engine treats them as
+    SECONDARY assist only (a mismatch raises a review exception, never an auto-reject), so imperfect
+    weights degrade to extra guard reviews, not wrong gate decisions.
+
+    Task config keys: `make_model_onnx` (path), `make_model_labels` (path), and
+    `make_model_min_conf` (default 0.5). Disabled unless both files load; import of onnxruntime is
+    lazy and failures are non-fatal."""
+
+    def __init__(self, config: Dict[str, Any], log: logging.LoggerAdapter):
+        self.log = log
+        self._session = None
+        self.labels: List[str] = []
+        self.min_conf = float(config.get("make_model_min_conf", 0.5))
+        self.input_size = int(config.get("make_model_input", 224))
+        onnx_path = config.get("make_model_onnx")
+        labels_path = config.get("make_model_labels")
+        if not onnx_path or not labels_path:
+            return
+        try:
+            import onnxruntime  # type: ignore
+
+            with open(labels_path, "r", encoding="utf-8") as fh:
+                self.labels = [ln.strip() for ln in fh if ln.strip()]
+            self._session = onnxruntime.InferenceSession(
+                onnx_path, providers=onnxruntime.get_available_providers()
+            )
+            self._input_name = self._session.get_inputs()[0].name
+            self.log.info(
+                "make/model classifier loaded: %s (%d labels)", onnx_path, len(self.labels)
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._session = None
+            self.log.warning("make/model classifier unavailable (%s); attribute disabled", exc)
+
+    @property
+    def enabled(self) -> bool:
+        return self._session is not None and bool(self.labels)
+
+    def classify(self, crop: "Image.Image") -> Optional[tuple]:
+        """Returns (make, model, confidence) or None below the confidence floor / on error."""
+        if not self.enabled:
+            return None
+        try:
+            img = crop.convert("RGB").resize((self.input_size, self.input_size))
+            arr = np.asarray(img, dtype=np.float32) / 255.0
+            # Standard ImageNet normalization; DIY exporters should match it (documented).
+            mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+            std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+            arr = (arr - mean) / std
+            arr = arr.transpose(2, 0, 1)[None, ...]  # NCHW
+            out = self._session.run(None, {self._input_name: arr})[0][0]
+            out = np.asarray(out, dtype=np.float64)
+            # Softmax if the exporter left logits.
+            if out.min() < 0.0 or out.max() > 1.0:
+                e = np.exp(out - out.max())
+                out = e / e.sum()
+            idx = int(out.argmax())
+            conf = float(out[idx])
+            if conf < self.min_conf or idx >= len(self.labels):
+                return None
+            raw = self.labels[idx].replace("|", " ")
+            parts = raw.split(None, 1)
+            make = parts[0]
+            model = parts[1] if len(parts) > 1 else ""
+            return (make, model, conf)
+        except Exception as exc:  # noqa: BLE001
+            self.log.debug("make/model classify failed: %s", exc)
+            return None
+
+
 class AnprAnalyzer(Analyzer):
     """ANPR / vehicle-attribute analyzer (Stage 4).
 
@@ -893,9 +967,11 @@ class AnprAnalyzer(Analyzer):
         self.direction = direction if direction in ("inbound", "outbound") else None
         self.min_box_area = float(self.config.get("min_box_area", 0.0))
         self.ocr = _OcrBackend(self.config.get("ocr"), log)
+        self.make_model = _MakeModelClassifier(self.config, log)
         self.model_versions = {
             "anpr": f"anpr_v0.1_{self.ocr.kind or 'noocr'}",
             "vehicle_attr": "heuristic_v0.1",
+            "make_model": "onnx_diy" if self.make_model.enabled else "none",
             "detector": self.weights,
         }
         self.log.info(
@@ -955,13 +1031,21 @@ class AnprAnalyzer(Analyzer):
                     attrs["color"] = color
                 if self.direction:
                     attrs["direction"] = self.direction
-                if self.ocr.enabled:
+                if self.ocr.enabled or self.make_model.enabled:
                     crop = img.crop((int(x1), int(y1), int(x2), int(y2)))
-                    plate = self.ocr.read_plate(crop)
-                    if plate:
-                        attrs["plate"] = plate[0]
-                        attrs["plate_confidence"] = round(plate[1], 4)
-                        plates_read += 1
+                    if self.ocr.enabled:
+                        plate = self.ocr.read_plate(crop)
+                        if plate:
+                            attrs["plate"] = plate[0]
+                            attrs["plate_confidence"] = round(plate[1], 4)
+                            plates_read += 1
+                    if self.make_model.enabled:
+                        mm = self.make_model.classify(crop)
+                        if mm:
+                            attrs["make"] = mm[0]
+                            if mm[1]:
+                                attrs["model"] = mm[1]
+                            attrs["make_model_confidence"] = round(mm[2], 4)
 
                 detections.append(
                     Detection(
