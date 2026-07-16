@@ -31,7 +31,9 @@ import {
 import type {
   ApiKeyCreated,
   AuthStatus,
+  CameraView,
   EntryEvent,
+  GateState,
   OwnerType,
   PassStatus,
   Principal,
@@ -830,6 +832,236 @@ function WatchlistTab() {
 /* Tab: Reports                                                           */
 /* ====================================================================== */
 
+/* ====================================================================== */
+/* Gate tab — barrier actuation policy + manual open (issue #44).         */
+/* ====================================================================== */
+
+function GateTab({ canOperate, canManage }: { canOperate: boolean; canManage: boolean }) {
+  const gate = usePoll<GateState>(() => api.getGateState(), 8000);
+  const cameras = usePoll<CameraView[]>(() => api.listCameras(), 0);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+
+  // Add-lane form.
+  const [addCamera, setAddCamera] = useState("");
+  const [addPort, setAddPort] = useState("1");
+  const [addPulse, setAddPulse] = useState("1000");
+
+  const state = gate.data;
+  const policies = state?.policies ?? [];
+  const configured = new Set(policies.map((p) => p.camera_id));
+  const candidates = (cameras.data ?? []).filter((c) => !configured.has(c.id));
+  const cameraName = (id: string) => (cameras.data ?? []).find((c) => c.id === id)?.name ?? id;
+
+  async function run(key: string, fn: () => Promise<unknown>, doneNote?: string) {
+    setBusy(key);
+    setError(null);
+    setNote(null);
+    try {
+      await fn();
+      await gate.refresh();
+      if (doneNote) setNote(doneNote);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function addLane(e: FormEvent) {
+    e.preventDefault();
+    if (!addCamera) return;
+    await run("add", () =>
+      api.putGatePolicy(addCamera, {
+        enabled: false,
+        output_port: Number(addPort) || 1,
+        pulse_ms: Number(addPulse) || 1000,
+      }),
+    );
+    setAddCamera("");
+  }
+
+  return (
+    <div className="animate-rise space-y-4">
+      <Panel
+        title="Barrier Actuation"
+        subtitle="Pulse the lane camera's relay output on a matched entry"
+        actions={
+          state && (
+            <Button
+              size="sm"
+              variant={state.kill_switch ? "danger" : "default"}
+              disabled={!canManage || busy != null}
+              onClick={() =>
+                void run(
+                  "kill",
+                  () => api.putGateSettings(!state.kill_switch),
+                  state.kill_switch ? "Actuation re-enabled." : "KILL SWITCH ON — all actuation halted.",
+                )
+              }
+            >
+              {state.kill_switch ? "Kill switch: ON" : "Kill switch: off"}
+            </Button>
+          )
+        }
+      >
+        {error && <ErrorNote>{error}</ErrorNote>}
+        {note && <p className="mb-3 font-mono text-[11px] text-fg-secondary">{note}</p>}
+        {state?.kill_switch && (
+          <div className="mb-3 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-[11px] text-red-300">
+            The global kill-switch is ON: no gate opens, automatic or manual, until a manager turns
+            it off.
+          </div>
+        )}
+
+        {!state ? (
+          <Loading label="Loading gate state…" />
+        ) : policies.length === 0 ? (
+          <EmptyState
+            title="No gate lanes configured"
+            hint="Add a lane below: pick the ANPR camera watching the barrier and the relay output port wired to the boom."
+          />
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[640px] border-separate border-spacing-0">
+              <thead>
+                <tr className="border-b border-line">
+                  <Th>Camera</Th>
+                  <Th>Auto-open</Th>
+                  <Th>Output port</Th>
+                  <Th>Pulse</Th>
+                  <Th className="text-right">Actions</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {policies.map((p) => (
+                  <tr key={p.camera_id} className="border-b border-line/50">
+                    <Td>
+                      <span className="font-mono text-xs font-semibold text-fg">
+                        {cameraName(p.camera_id)}
+                      </span>
+                      <span className="ml-2 font-mono text-[10px] text-fg-muted">{p.camera_id}</span>
+                    </Td>
+                    <Td>
+                      <Pill
+                        label={p.enabled ? "on matched" : "manual only"}
+                        color={p.enabled ? "#10b981" : "#71717a"}
+                      />
+                    </Td>
+                    <Td>
+                      <span className="font-mono text-xs text-fg-secondary">#{p.output_port}</span>
+                    </Td>
+                    <Td>
+                      <span className="font-mono text-xs text-fg-secondary">{p.pulse_ms} ms</span>
+                    </Td>
+                    <Td className="text-right">
+                      <div className="flex justify-end gap-1.5">
+                        <Button
+                          size="sm"
+                          variant="primary"
+                          disabled={!canOperate || busy != null || state.kill_switch}
+                          title="Pulse the relay now (audited)."
+                          onClick={() =>
+                            void run(
+                              `open:${p.camera_id}`,
+                              () => api.gateOpen(p.camera_id),
+                              `Gate opened at ${cameraName(p.camera_id)}.`,
+                            )
+                          }
+                        >
+                          {busy === `open:${p.camera_id}` ? "Opening…" : "Open gate"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          disabled={!canManage || busy != null}
+                          onClick={() =>
+                            void run(`toggle:${p.camera_id}`, () =>
+                              api.putGatePolicy(p.camera_id, { enabled: !p.enabled }),
+                            )
+                          }
+                        >
+                          {p.enabled ? "Disable auto" : "Enable auto"}
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="danger"
+                          disabled={!canManage || busy != null}
+                          onClick={() =>
+                            void run(`del:${p.camera_id}`, () => api.deleteGatePolicy(p.camera_id))
+                          }
+                        >
+                          Remove
+                        </Button>
+                      </div>
+                    </Td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </Panel>
+
+      {canManage && (
+        <Panel title="Add lane" subtitle="Bind a camera's relay output to the barrier">
+          <form onSubmit={addLane} className="flex flex-wrap items-end gap-3">
+            <div className="min-w-[220px] flex-1">
+              <Field label="Camera" htmlFor="gate-cam">
+                <Select
+                  id="gate-cam"
+                  value={addCamera}
+                  onChange={(e) => setAddCamera(e.target.value)}
+                  required
+                >
+                  <option value="">Select camera…</option>
+                  {candidates.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} ({c.id})
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
+            <div className="w-28">
+              <Field label="Output port" htmlFor="gate-port">
+                <Input
+                  id="gate-port"
+                  type="number"
+                  min={1}
+                  value={addPort}
+                  onChange={(e) => setAddPort(e.target.value)}
+                />
+              </Field>
+            </div>
+            <div className="w-32">
+              <Field label="Pulse (ms)" htmlFor="gate-pulse">
+                <Input
+                  id="gate-pulse"
+                  type="number"
+                  min={100}
+                  max={30000}
+                  step={100}
+                  value={addPulse}
+                  onChange={(e) => setAddPulse(e.target.value)}
+                />
+              </Field>
+            </div>
+            <Button type="submit" variant="primary" disabled={busy != null || !addCamera}>
+              Add lane
+            </Button>
+          </form>
+          <p className="mt-3 font-mono text-[11px] text-fg-muted">
+            Lanes start in manual-only mode. Verify the wiring with "Open gate", then enable
+            auto-open. The relay ports a camera exposes are listed on its Device panel
+            (Cameras → camera → Device).
+          </p>
+        </Panel>
+      )}
+    </div>
+  );
+}
+
 function todayStr(): string {
   const d = new Date();
   const local = new Date(d.getTime() - d.getTimezoneOffset() * 60000);
@@ -1163,7 +1395,7 @@ function AdminTab() {
 /* Page shell: auth gate + tabs.                                          */
 /* ====================================================================== */
 
-type TabKey = "live" | "passes" | "vehicles" | "watchlist" | "reports" | "admin";
+type TabKey = "live" | "passes" | "vehicles" | "watchlist" | "gate" | "reports" | "admin";
 
 function TabButton({
   active,
@@ -1230,6 +1462,7 @@ export function Entry() {
       { key: "passes", label: "Visitor Passes" },
       { key: "vehicles", label: "Vehicles" },
       { key: "watchlist", label: "Watchlist" },
+      { key: "gate", label: "Gate" },
       { key: "reports", label: "Reports" },
     ];
     if (isAdmin) base.push({ key: "admin", label: "Admin" });
@@ -1326,6 +1559,12 @@ export function Entry() {
         {activeTab === "passes" && <PassesTab />}
         {activeTab === "vehicles" && <VehiclesTab />}
         {activeTab === "watchlist" && <WatchlistTab />}
+        {activeTab === "gate" && (
+          <GateTab
+            canOperate={canOperate}
+            canManage={principal.role === "admin" || principal.role === "manager"}
+          />
+        )}
         {activeTab === "reports" && <ReportsTab />}
         {activeTab === "admin" && isAdmin && <AdminTab />}
       </div>

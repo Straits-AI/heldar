@@ -163,6 +163,7 @@ async fn create_camera(
         .clamp(0, 3600);
     let mirror_enabled = body.mirror_enabled.unwrap_or(false);
     let anr_enabled = body.anr_enabled.unwrap_or(false);
+    let native_anpr_enabled = body.native_anpr_enabled.unwrap_or(false);
     let anr_replay_url_template = body
         .anr_replay_url_template
         .as_deref()
@@ -191,8 +192,8 @@ async fn create_camera(
             main_stream_url, sub_stream_url, record_stream, capabilities, record_enabled,
             segment_seconds, retention_hours, storage_quota_bytes, record_audio, record_mode,
             pre_roll_seconds, post_roll_seconds, mirror_enabled, anr_enabled, anr_replay_url_template,
-            enabled, live_warm, created_at, updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            native_anpr_enabled, enabled, live_warm, created_at, updated_at)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
     )
     .bind(&id)
     .bind(&body.site_id)
@@ -218,6 +219,7 @@ async fn create_camera(
     .bind(mirror_enabled)
     .bind(anr_enabled)
     .bind(&anr_replay_url_template)
+    .bind(native_anpr_enabled)
     .bind(enabled)
     .bind(body.live_warm.unwrap_or(false))
     .bind(now)
@@ -317,6 +319,7 @@ async fn update_camera(
         .unwrap_or(cur.post_roll_seconds);
     let mirror_enabled = body.mirror_enabled.unwrap_or(cur.mirror_enabled);
     let anr_enabled = body.anr_enabled.unwrap_or(cur.anr_enabled);
+    let native_anpr_enabled = body.native_anpr_enabled.unwrap_or(cur.native_anpr_enabled);
     let anr_replay_url_template = body
         .anr_replay_url_template
         .as_deref()
@@ -335,7 +338,7 @@ async fn update_camera(
             main_stream_url=?, sub_stream_url=?, record_stream=?, capabilities=?, record_enabled=?,
             segment_seconds=?, retention_hours=?, storage_quota_bytes=?, record_audio=?, record_mode=?,
             pre_roll_seconds=?, post_roll_seconds=?, mirror_enabled=?, anr_enabled=?,
-            anr_replay_url_template=?, enabled=?, priority=?, live_warm=?, updated_at=?
+            anr_replay_url_template=?, native_anpr_enabled=?, enabled=?, priority=?, live_warm=?, updated_at=?
          WHERE id=?",
     )
     .bind(&name)
@@ -361,6 +364,7 @@ async fn update_camera(
     .bind(mirror_enabled)
     .bind(anr_enabled)
     .bind(&anr_replay_url_template)
+    .bind(native_anpr_enabled)
     .bind(enabled)
     .bind(priority)
     .bind(live_warm)

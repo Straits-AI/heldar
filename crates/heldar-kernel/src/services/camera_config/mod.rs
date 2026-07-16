@@ -13,8 +13,16 @@ use async_trait::async_trait;
 use crate::error::{AppError, AppResult};
 use crate::models::Camera;
 use types::{
-    DeviceInfo, NtpConfig, OnvifSettings, OnvifUserType, OsdConfig, TimeConfig, VideoConfig,
+    DayNightConfig, DayNightPatch, DeviceInfo, ImageConfig, ImageConfigPatch, IoOutput,
+    NativePlateRead, NtpConfig, OnvifSettings, OnvifUserType, OsdConfig, TimeConfig, VideoConfig,
 };
+
+/// The default answer for a device-control surface the vendor implementation does not provide.
+fn unsupported<T>(what: &str) -> AppResult<T> {
+    Err(AppError::BadRequest(format!(
+        "{what} is not supported for this camera vendor"
+    )))
+}
 
 /// A vendor-agnostic surface for reading and writing a camera's on-device configuration. The kernel
 /// owns the persistence/audit; an implementor only talks the device's native protocol (HikVision
@@ -71,6 +79,54 @@ pub trait CameraConfigProvider: Send + Sync {
 
     /// Reboot the device (DISRUPTIVE).
     async fn reboot(&self) -> AppResult<()>;
+
+    // ---- Device-control surfaces (day/night, image/lighting, IO outputs, on-board ANPR). ----
+    // Default implementations report "unsupported" so a vendor implementation only overrides what
+    // its device actually exposes; the capability probe (services::camera_control) records which
+    // surfaces answered so the dashboard renders only real controls.
+
+    /// The day/night (IR-cut filter) configuration.
+    async fn get_day_night(&self) -> AppResult<DayNightConfig> {
+        unsupported("day/night configuration")
+    }
+
+    /// Write the day/night configuration (read-modify-write; only present patch fields change).
+    async fn put_day_night(&self, _patch: &DayNightPatch) -> AppResult<()> {
+        unsupported("day/night configuration")
+    }
+
+    /// The image/lighting configuration (brightness/contrast/saturation, WDR, BLC, supplement light).
+    async fn get_image_config(&self) -> AppResult<ImageConfig> {
+        unsupported("image configuration")
+    }
+
+    /// Write the image/lighting configuration (read-modify-write per sub-resource; only present
+    /// patch fields change).
+    async fn put_image_config(&self, _patch: &ImageConfigPatch) -> AppResult<()> {
+        unsupported("image configuration")
+    }
+
+    /// The device's alarm/relay output ports.
+    async fn list_io_outputs(&self) -> AppResult<Vec<IoOutput>> {
+        unsupported("IO outputs")
+    }
+
+    /// Set one alarm/relay output `high` or `low` (`active: true` = high). The caller owns pulse
+    /// semantics (set high, hold, set low) — see `services::camera_control::pulse_output`.
+    async fn set_io_output(&self, _port: i64, _active: bool) -> AppResult<()> {
+        unsupported("IO outputs")
+    }
+
+    /// Whether the device exposes an on-board ANPR (plate recognition) engine.
+    async fn supports_native_anpr(&self) -> bool {
+        false
+    }
+
+    /// Plate reads from the device's on-board ANPR engine strictly AFTER the given device-format
+    /// cursor time (empty cursor = everything the device still buffers).
+    async fn fetch_anpr_plates(&self, _after: &str) -> AppResult<Vec<NativePlateRead>> {
+        unsupported("on-board ANPR")
+    }
 }
 
 /// Build a [`CameraConfigProvider`] for `cam`, dispatching on its vendor. Only HikVision (ISAPI) is

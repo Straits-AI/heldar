@@ -7,6 +7,7 @@ pub mod anr;
 pub mod auth;
 pub mod backup;
 pub mod camera_config;
+pub mod camera_control;
 pub mod cameras;
 pub mod discovery;
 pub mod health;
@@ -37,6 +38,7 @@ pub fn api_router() -> Router<AppState> {
         .merge(modules::router())
         .merge(registry::router())
         .merge(camera_config::router())
+        .merge(camera_control::router())
         .merge(cameras::router())
         .merge(recordings::router())
         .merge(anr::router())

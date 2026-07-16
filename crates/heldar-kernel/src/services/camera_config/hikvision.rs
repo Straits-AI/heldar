@@ -17,7 +17,8 @@ use async_trait::async_trait;
 use reqwest::{Method, StatusCode};
 
 use super::types::{
-    DeviceInfo, NtpConfig, OnvifSettings, OnvifUserType, OsdConfig, TimeConfig, VideoConfig,
+    DayNightConfig, DayNightPatch, DeviceInfo, ImageConfig, ImageConfigPatch, IoOutput,
+    NativePlateRead, NtpConfig, OnvifSettings, OnvifUserType, OsdConfig, TimeConfig, VideoConfig,
 };
 use super::CameraConfigProvider;
 use crate::camera_url;
@@ -30,6 +31,12 @@ const HIK_NS: &str = "http://www.hikvision.com/ver20/XMLSchema";
 const OSD_PATH: &str = "/ISAPI/System/Video/inputs/channels/1/overlays";
 /// ONVIF user provisioning endpoint.
 const ONVIF_USERS_PATH: &str = "/ISAPI/Security/ONVIF/users";
+/// Day/night (IR-cut filter) endpoint for the primary image channel.
+const IRCUT_PATH: &str = "/ISAPI/Image/channels/1/ircutFilter";
+/// Alarm/relay output ports endpoint.
+const IO_OUTPUTS_PATH: &str = "/ISAPI/System/IO/outputs";
+/// On-board ANPR plate-results endpoint (traffic cameras / ANPR barrier cameras).
+const ANPR_PLATES_PATH: &str = "/ISAPI/Traffic/channels/1/vehicleDetect/plates";
 
 /// A HikVision camera reached over ISAPI with HTTP Digest authentication.
 pub struct HikVisionIsapiClient {
@@ -410,6 +417,147 @@ impl CameraConfigProvider for HikVisionIsapiClient {
             .await?;
         Ok(())
     }
+
+    // ---- Device-control surfaces ----
+
+    async fn get_day_night(&self) -> AppResult<DayNightConfig> {
+        let xml = self.isapi_request(Method::GET, IRCUT_PATH, None).await?;
+        Ok(parse_day_night(&xml))
+    }
+
+    async fn put_day_night(&self, patch: &DayNightPatch) -> AppResult<()> {
+        let original = self.isapi_request(Method::GET, IRCUT_PATH, None).await?;
+        let mut body = original;
+        if let Some(mode) = &patch.mode {
+            body = replace_first_text(&body, "IrcutFilterType", mode);
+        }
+        if let Some(s) = patch.sensitivity {
+            body = replace_first_text(&body, "nightToDayFilterLevel", &s.to_string());
+        }
+        self.isapi_request(Method::PUT, IRCUT_PATH, Some(body))
+            .await?;
+        Ok(())
+    }
+
+    async fn get_image_config(&self) -> AppResult<ImageConfig> {
+        // Aggregate the sub-resources a firmware may or may not expose. `color` is the baseline
+        // (any camera with the Image service has it); WDR/BLC/supplementLight are best-effort.
+        let color = self
+            .isapi_request(Method::GET, "/ISAPI/Image/channels/1/color", None)
+            .await?;
+        let mut cfg = ImageConfig {
+            brightness: first_text(&color, "brightnessLevel").and_then(|s| s.parse().ok()),
+            contrast: first_text(&color, "contrastLevel").and_then(|s| s.parse().ok()),
+            saturation: first_text(&color, "saturationLevel").and_then(|s| s.parse().ok()),
+            ..ImageConfig::default()
+        };
+        if let Ok((status, wdr)) = self
+            .isapi_request_raw(Method::GET, "/ISAPI/Image/channels/1/WDR", None)
+            .await
+        {
+            if status.is_success() {
+                cfg.wdr_mode = first_text(&wdr, "mode");
+                cfg.wdr_level = first_text(&wdr, "WDRLevel").and_then(|s| s.parse().ok());
+            }
+        }
+        if let Ok((status, blc)) = self
+            .isapi_request_raw(Method::GET, "/ISAPI/Image/channels/1/BLC", None)
+            .await
+        {
+            if status.is_success() {
+                cfg.blc_enabled = first_text(&blc, "enabled").map(|s| parse_bool_text(&s));
+            }
+        }
+        if let Ok((status, sl)) = self
+            .isapi_request_raw(Method::GET, "/ISAPI/Image/channels/1/supplementLight", None)
+            .await
+        {
+            if status.is_success() {
+                cfg.supplement_light_mode = first_text(&sl, "supplementLightMode");
+            }
+        }
+        Ok(cfg)
+    }
+
+    async fn put_image_config(&self, patch: &ImageConfigPatch) -> AppResult<()> {
+        // Each sub-resource is read-modify-written only when the patch touches it, so a device
+        // without (say) WDR is never sent a WDR write.
+        if patch.brightness.is_some() || patch.contrast.is_some() || patch.saturation.is_some() {
+            let path = "/ISAPI/Image/channels/1/color";
+            let mut body = self.isapi_request(Method::GET, path, None).await?;
+            if let Some(v) = patch.brightness {
+                body = replace_first_text(&body, "brightnessLevel", &clamp_pct(v).to_string());
+            }
+            if let Some(v) = patch.contrast {
+                body = replace_first_text(&body, "contrastLevel", &clamp_pct(v).to_string());
+            }
+            if let Some(v) = patch.saturation {
+                body = replace_first_text(&body, "saturationLevel", &clamp_pct(v).to_string());
+            }
+            self.isapi_request(Method::PUT, path, Some(body)).await?;
+        }
+        if patch.wdr_mode.is_some() || patch.wdr_level.is_some() {
+            let path = "/ISAPI/Image/channels/1/WDR";
+            let mut body = self.isapi_request(Method::GET, path, None).await?;
+            if let Some(m) = &patch.wdr_mode {
+                body = replace_first_text(&body, "mode", m);
+            }
+            if let Some(v) = patch.wdr_level {
+                body = replace_first_text(&body, "WDRLevel", &clamp_pct(v).to_string());
+            }
+            self.isapi_request(Method::PUT, path, Some(body)).await?;
+        }
+        if let Some(enabled) = patch.blc_enabled {
+            let path = "/ISAPI/Image/channels/1/BLC";
+            let body = self.isapi_request(Method::GET, path, None).await?;
+            let body = replace_first_text(&body, "enabled", bool_text(enabled));
+            self.isapi_request(Method::PUT, path, Some(body)).await?;
+        }
+        if let Some(mode) = &patch.supplement_light_mode {
+            let path = "/ISAPI/Image/channels/1/supplementLight";
+            let body = self.isapi_request(Method::GET, path, None).await?;
+            let body = replace_first_text(&body, "supplementLightMode", mode);
+            self.isapi_request(Method::PUT, path, Some(body)).await?;
+        }
+        Ok(())
+    }
+
+    async fn list_io_outputs(&self) -> AppResult<Vec<IoOutput>> {
+        let xml = self
+            .isapi_request(Method::GET, IO_OUTPUTS_PATH, None)
+            .await?;
+        Ok(parse_io_outputs(&xml))
+    }
+
+    async fn set_io_output(&self, port: i64, active: bool) -> AppResult<()> {
+        if port < 1 {
+            return Err(AppError::BadRequest("output port must be >= 1".into()));
+        }
+        let state = if active { "high" } else { "low" };
+        let body = format!(
+            "<IOPortData version=\"2.0\" xmlns=\"{HIK_NS}\"><outputState>{state}</outputState></IOPortData>"
+        );
+        let path = format!("{IO_OUTPUTS_PATH}/{port}/trigger");
+        self.isapi_request(Method::PUT, &path, Some(body)).await?;
+        Ok(())
+    }
+
+    async fn supports_native_anpr(&self) -> bool {
+        // Probe the plate-results endpoint with an empty-window query: any 2xx means the on-board
+        // ANPR engine exists (a non-ANPR camera answers 4xx/notSupported).
+        let body = anpr_query_body("");
+        matches!(
+            self.isapi_request_raw(Method::POST, ANPR_PLATES_PATH, Some(body)).await,
+            Ok((status, _)) if status.is_success()
+        )
+    }
+
+    async fn fetch_anpr_plates(&self, after: &str) -> AppResult<Vec<NativePlateRead>> {
+        let xml = self
+            .isapi_request(Method::POST, ANPR_PLATES_PATH, Some(anpr_query_body(after)))
+            .await?;
+        Ok(parse_anpr_plates(&xml))
+    }
 }
 
 // ========================= ISAPI body parsing / building =========================
@@ -466,6 +614,66 @@ fn build_video_put_body(original: &str, cfg: &VideoConfig) -> AppResult<String> 
     out.push_str(&v);
     out.push_str(&original[ce..]);
     Ok(out)
+}
+
+/// Parse an `<IrcutFilter>` document into a [`DayNightConfig`].
+fn parse_day_night(xml: &str) -> DayNightConfig {
+    DayNightConfig {
+        mode: first_text(xml, "IrcutFilterType").unwrap_or_else(|| "auto".into()),
+        sensitivity: first_text(xml, "nightToDayFilterLevel").and_then(|s| s.parse().ok()),
+    }
+}
+
+/// Parse an `<IOOutputPortList>` document into the output ports.
+fn parse_io_outputs(xml: &str) -> Vec<IoOutput> {
+    elements(xml, "IOOutputPort")
+        .into_iter()
+        .filter_map(|(_open, inner)| {
+            let id: i64 = first_text(inner, "id")?.parse().ok()?;
+            Some(IoOutput {
+                id,
+                name: first_text(inner, "name"),
+                default_state: first_inner(inner, "PowerOnState")
+                    .and_then(|b| first_text(b, "defaultState"))
+                    .or_else(|| first_text(inner, "defaultState")),
+            })
+        })
+        .collect()
+}
+
+/// Build the `<AfterTime>` query body for the on-board ANPR plate-results endpoint. An empty
+/// cursor asks from the epoch of the device's buffer (a capability probe / first poll).
+fn anpr_query_body(after: &str) -> String {
+    let pic_time = if after.trim().is_empty() {
+        "20000101000000000".to_string()
+    } else {
+        xml_escape(after.trim())
+    };
+    format!(
+        "<AfterTime version=\"2.0\" xmlns=\"{HIK_NS}\"><picTime>{pic_time}</picTime></AfterTime>"
+    )
+}
+
+/// Parse a `<Plates>` response into plate reads. Reads without a plate number are dropped.
+fn parse_anpr_plates(xml: &str) -> Vec<NativePlateRead> {
+    elements(xml, "Plate")
+        .into_iter()
+        .filter_map(|(_open, inner)| {
+            let plate = first_text(inner, "plateNumber")?;
+            Some(NativePlateRead {
+                plate,
+                capture_time: first_text(inner, "captureTime").unwrap_or_default(),
+                direction: first_text(inner, "direction"),
+                pic_name: first_text(inner, "picName"),
+                country: first_text(inner, "country"),
+            })
+        })
+        .collect()
+}
+
+/// Clamp an image level to the 0–100 range ISAPI expects.
+fn clamp_pct(v: i64) -> i64 {
+    v.clamp(0, 100)
 }
 
 /// Parse a `<Time>` document into a [`TimeConfig`].
@@ -768,6 +976,53 @@ mod tests {
         );
         // Absent element -> unchanged.
         assert_eq!(replace_first_text(xml, "portNo", "123"), xml);
+    }
+
+    #[test]
+    fn parses_day_night() {
+        let xml =
+            "<IrcutFilter version=\"2.0\" xmlns=\"http://www.hikvision.com/ver20/XMLSchema\">\
+<IrcutFilterType>auto</IrcutFilterType><nightToDayFilterLevel>4</nightToDayFilterLevel>\
+<nightToDayFilterTime>5</nightToDayFilterTime></IrcutFilter>";
+        let c = parse_day_night(xml);
+        assert_eq!(c.mode, "auto");
+        assert_eq!(c.sensitivity, Some(4));
+    }
+
+    #[test]
+    fn parses_io_outputs() {
+        let xml = "<IOOutputPortList version=\"2.0\" xmlns=\"http://www.hikvision.com/ver20/XMLSchema\">\
+<IOOutputPort><id>1</id><name>Gate relay</name><PowerOnState><defaultState>low</defaultState></PowerOnState></IOOutputPort>\
+<IOOutputPort><id>2</id></IOOutputPort></IOOutputPortList>";
+        let ports = parse_io_outputs(xml);
+        assert_eq!(ports.len(), 2);
+        assert_eq!(ports[0].id, 1);
+        assert_eq!(ports[0].name.as_deref(), Some("Gate relay"));
+        assert_eq!(ports[0].default_state.as_deref(), Some("low"));
+        assert_eq!(ports[1].id, 2);
+        assert_eq!(ports[1].name, None);
+    }
+
+    #[test]
+    fn parses_anpr_plates_and_skips_plateless() {
+        let xml = "<Plates version=\"2.0\" xmlns=\"http://www.hikvision.com/ver20/XMLSchema\">\
+<Plate><captureTime>20260716093012456</captureTime><plateNumber>WXY8888</plateNumber>\
+<direction>forward</direction><picName>202607160930124560001</picName><country>MYS</country></Plate>\
+<Plate><captureTime>20260716093013000</captureTime></Plate></Plates>";
+        let plates = parse_anpr_plates(xml);
+        assert_eq!(plates.len(), 1, "the plateless read is dropped");
+        assert_eq!(plates[0].plate, "WXY8888");
+        assert_eq!(plates[0].capture_time, "20260716093012456");
+        assert_eq!(plates[0].direction.as_deref(), Some("forward"));
+        assert_eq!(plates[0].pic_name.as_deref(), Some("202607160930124560001"));
+    }
+
+    #[test]
+    fn anpr_query_body_defaults_and_escapes() {
+        assert!(anpr_query_body("").contains("<picTime>20000101000000000</picTime>"));
+        assert!(
+            anpr_query_body("20260716093012456").contains("<picTime>20260716093012456</picTime>")
+        );
     }
 
     #[test]

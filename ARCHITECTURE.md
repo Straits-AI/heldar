@@ -1965,3 +1965,38 @@ the configured interface via `/sys/class/net/<iface>` (dependency-free; TUN devi
 network interface is reported. This is the open-core boundary applied to connectivity: the
 platform-level, non-domain media path stays in the Apache-2.0 kernel; the hosted, multi-site
 signaling/TURN coordinator is the proprietary control plane.
+
+## 22. Camera device control, on-board ANPR, and gate actuation
+
+Heldar prefers a camera's **native capabilities** over reimplementing them server-side (the
+operator guide is `docs/CAMERA-CONTROLS.md`). Three layers, all capability-driven:
+
+**Device control (`services/camera_control.rs`, `routes/camera_control.rs`).** The existing
+vendor-agnostic `CameraConfigProvider` trait grew device-control surfaces — day/night (IR-cut),
+image/lighting (color, WDR, BLC, supplement light), alarm/relay outputs, and an on-board-ANPR
+probe — with default "unsupported" answers so a vendor impl only overrides what its device exposes
+(HikVision ISAPI today; every write is read-modify-write of the device XML). A best-effort probe
+persists a **normalized capability map** under `capabilities.device_control` on the camera row, and
+the dashboard's Device panel renders strictly from that map — nothing in the UI is vendor-coded,
+and a probe failure never touches streaming/recording. `pulse_output` is the actuation primitive:
+raise the port, hold, release — the release is always attempted and retried once so a failed pulse
+cannot leave a relay latched.
+
+**Camera-native ANPR (`services/native_anpr.rs`, migration `0007`).** For cameras with
+`native_anpr_enabled`, a supervised poller reads the device's own plate-recognition results
+(durable per-camera cursor in `camera_native_anpr_state`) and feeds them through
+`services/perception_ingest.rs` — the ingest core extracted from `routes/ai.rs::ingest`, so the
+HTTP worker path and the kernel-internal producer share one contract: outbox idempotency on
+`(camera_id, frame_id)`, an all-or-nothing detection transaction, and durable consumer fan-out.
+Native reads carry `attributes.source = "camera_native"`; the entry engine weights them to the full
+vote threshold (the device already consolidated frames), while worker-OCR reads still vote one at a
+time. The device picture name is the idempotency key, so replays after a crash never double-count.
+
+**Gate actuation (`heldar-entry/src/gate.rs`, entry migration `0003`).** Per-lane `gate_policies`
+(auto-open on `matched`, output port, pulse width) plus a global `gate_settings.kill_switch` that
+halts all actuation. The ANPR engine fires `GateActuator::auto_open` **after** the entry event is
+durably committed, fire-and-forget — a dead relay can never stall the perception pipeline. Manual
+guard-open (`POST /api/v1/entry/gate/open/{camera}`) is guard+ (`can_operate_gate`), bypasses only
+the auto flag, and is audited with the acting principal. Every actuation writes `gate_opened` /
+`gate_open_failed` to the kernel event log (webhook/email subscribable); there is deliberately no
+retry queue — a late pulse at a barrier is worse than none.

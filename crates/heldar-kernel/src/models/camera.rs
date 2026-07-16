@@ -48,6 +48,9 @@ pub struct Camera {
     /// Optional replay URL template for ANR ({start}/{end} placeholders); NULL = default Hikvision
     /// RTSP playback built from address+credentials.
     pub anr_replay_url_template: Option<String>,
+    /// Ingest plate reads from the camera's ON-BOARD ANPR engine (ISAPI poller) instead of relying
+    /// solely on the AI worker's server-side OCR. See `services::native_anpr`.
+    pub native_anpr_enabled: bool,
     pub enabled: bool,
     /// AI decode priority (higher = more important). The frame sampler favors high-priority cameras
     /// under fps-budget pressure and sheds low-priority ones first.
@@ -103,6 +106,7 @@ pub struct CameraView {
     pub mirror_enabled: bool,
     pub anr_enabled: bool,
     pub anr_replay_url_template: Option<String>,
+    pub native_anpr_enabled: bool,
     pub enabled: bool,
     pub priority: i64,
     pub live_warm: bool,
@@ -146,6 +150,7 @@ impl From<Camera> for CameraView {
             mirror_enabled: c.mirror_enabled,
             anr_enabled: c.anr_enabled,
             anr_replay_url_template: c.anr_replay_url_template,
+            native_anpr_enabled: c.native_anpr_enabled,
             enabled: c.enabled,
             priority: c.priority,
             live_warm: c.live_warm,
@@ -183,6 +188,7 @@ pub struct CameraCreate {
     pub mirror_enabled: Option<bool>,
     pub anr_enabled: Option<bool>,
     pub anr_replay_url_template: Option<String>,
+    pub native_anpr_enabled: Option<bool>,
     pub enabled: Option<bool>,
     pub live_warm: Option<bool>,
 }
@@ -217,6 +223,7 @@ pub struct CameraUpdate {
     pub mirror_enabled: Option<bool>,
     pub anr_enabled: Option<bool>,
     pub anr_replay_url_template: Option<String>,
+    pub native_anpr_enabled: Option<bool>,
     pub enabled: Option<bool>,
     pub priority: Option<i64>,
     pub live_warm: Option<bool>,

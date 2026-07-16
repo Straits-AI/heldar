@@ -18,6 +18,7 @@ import { Timeline } from "../components/Timeline";
 import { AiPanel } from "../components/AiPanel";
 import { ZonePanel } from "../components/ZonePanel";
 import { CameraConfigPanel } from "../components/CameraConfigPanel";
+import { DeviceControlPanel } from "../components/DeviceControlPanel";
 import {
   PlaybackSessionPanel,
   PtzPanel,
@@ -761,6 +762,14 @@ export function CameraDetail() {
           )}
 
           <PtzPanel cameraId={id} canManage={canManage} />
+
+          {cam && (
+            <DeviceControlPanel
+              camera={cam}
+              canManage={canManage}
+              onCameraUpdated={() => void camera.refresh()}
+            />
+          )}
 
           <CameraConfigPanel cameraId={id} canManage={canManage} />
 

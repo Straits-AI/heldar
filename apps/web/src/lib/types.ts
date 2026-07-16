@@ -63,6 +63,9 @@ export interface CameraView {
   /** Replay URL template for ANR re-fill ({start}/{end} placeholders, Hikvision time format);
    * null = default Hikvision RTSP playback built from address+credentials. */
   anr_replay_url_template?: string | null;
+  /** Ingest plate reads from the camera's ON-BOARD ANPR engine (kernel ISAPI poller) instead of
+   * relying solely on the AI worker's server-side OCR. */
+  native_anpr_enabled: boolean;
   enabled: boolean;
   /** Keep the live H.264 preview publisher running persistently (instant live view) instead of
    * on-demand-with-idle-reaping. */
@@ -96,11 +99,66 @@ export interface CameraCreate {
   mirror_enabled?: boolean;
   anr_enabled?: boolean;
   anr_replay_url_template?: string | null;
+  native_anpr_enabled?: boolean;
   enabled?: boolean;
   live_warm?: boolean;
 }
 
 export type CameraUpdate = Partial<Omit<CameraCreate, "id">>;
+
+/* ---- Camera device control (capability-driven Device panel) ---- */
+
+/** One alarm/relay output port reported by the device. */
+export interface IoOutput {
+  id: number;
+  name?: string | null;
+  default_state?: string | null;
+}
+
+/** Normalized per-camera device-control capability map (persisted by the kernel probe). */
+export interface DeviceControlCapabilities {
+  vendor?: string;
+  day_night?: boolean;
+  image?: boolean;
+  io_outputs?: IoOutput[];
+  native_anpr?: boolean;
+  ptz?: boolean;
+  probed_at?: string;
+}
+
+/** Day/night (IR-cut filter) configuration. */
+export interface DayNightConfig {
+  /** auto | day | night | schedule */
+  mode: string;
+  sensitivity?: number | null;
+}
+
+/** A camera's barrier-gate actuation policy (entry app, issue #44). */
+export interface GatePolicy {
+  camera_id: string;
+  /** Auto-open on `matched` entry events (manual guard-open works whenever a policy exists). */
+  enabled: boolean;
+  output_port: number;
+  pulse_ms: number;
+  updated_at: string;
+}
+
+/** Global gate state: kill-switch + every configured lane policy. */
+export interface GateState {
+  kill_switch: boolean;
+  policies: GatePolicy[];
+}
+
+/** Image/lighting configuration; absent fields are not exposed by the device. */
+export interface ImageConfig {
+  brightness?: number | null;
+  contrast?: number | null;
+  saturation?: number | null;
+  wdr_mode?: string | null;
+  wdr_level?: number | null;
+  blc_enabled?: boolean | null;
+  supplement_light_mode?: string | null;
+}
 
 /** Result of POST /api/v1/cameras/{id}/record-trigger (manual event-recording trigger, manager+). */
 export interface RecordTriggerResult {

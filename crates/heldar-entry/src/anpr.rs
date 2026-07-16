@@ -117,6 +117,9 @@ pub struct AnprEngine {
     cfg: Arc<Config>,
     /// Entry-app config — voting threshold.
     ecfg: Arc<crate::config::EntryConfig>,
+    /// Barrier actuator (issue #44): fired-and-forgotten after a committed `matched` event so a
+    /// slow/unreachable relay can never stall or fail event recording.
+    gate: crate::gate::GateActuator,
     state: Mutex<HashMap<String, TrackVoteState>>,
     /// Monotonic id stamped on each track-state instance. Lets a failed commit clear `committed`
     /// only on the SAME track it committed — never on a successor that reused the (track-id) key.
@@ -147,11 +150,14 @@ impl AnprEngine {
         pool: SqlitePool,
         cfg: Arc<Config>,
         ecfg: Arc<crate::config::EntryConfig>,
+        http: heldar_kernel::reqwest::Client,
     ) -> Arc<Self> {
+        let gate = crate::gate::GateActuator::new(pool.clone(), http, cfg.clone());
         Arc::new(Self {
             pool,
             cfg,
             ecfg,
+            gate,
             state: Mutex::new(HashMap::new()),
             next_uid: std::sync::atomic::AtomicU64::new(1),
         })
@@ -215,9 +221,18 @@ impl AnprEngine {
                 entry.last_seen = now;
 
                 if !plate_norm.is_empty() {
+                    // Weighted voting: a read from a camera's ON-BOARD ANPR engine
+                    // (`source = "camera_native"`, see the kernel's native_anpr poller) is
+                    // authoritative — the device already consolidated multiple frames itself —
+                    // so one read satisfies the vote threshold. Worker OCR reads stay at 1.
+                    let weight = if attr_str(attrs, "source") == Some("camera_native") {
+                        min_votes.max(1)
+                    } else {
+                        1
+                    };
                     let v = entry.votes.entry(plate_norm.clone()).or_default();
-                    v.count += 1;
-                    v.conf_sum += plate_conf.max(0.0);
+                    v.count += weight;
+                    v.conf_sum += plate_conf.max(0.0) * f64::from(weight);
                     if let Some(raw) = &plate_raw {
                         entry.raw_by_norm.insert(plate_norm.clone(), raw.clone());
                     }
@@ -382,6 +397,19 @@ impl AnprEngine {
             source = %resolution.source,
             "entry event"
         );
+
+        // Barrier actuation (issue #44): fire-and-forget AFTER the event is durably recorded, so a
+        // slow or unreachable relay never blocks the consumer or fails the entry event. The
+        // actuator itself re-checks policy/kill-switch and logs the outcome.
+        {
+            let gate = self.gate.clone();
+            let camera_id = job.camera_id.clone();
+            let auth_status = resolution.auth_status.clone();
+            let event_id = id.clone();
+            tokio::spawn(async move {
+                gate.auto_open(&camera_id, &event_id, &auth_status).await;
+            });
+        }
         true
     }
 
@@ -798,6 +826,96 @@ mod tests {
         assert!(!is_plausible_plate("ABCDE"));
         assert!(!is_plausible_plate("A1"));
         assert!(!is_plausible_plate("ABCDEFGHIJK1"));
+    }
+
+    async fn test_engine() -> (Arc<AnprEngine>, SqlitePool) {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        heldar_kernel::db::run_migrations(&pool).await.unwrap();
+        crate::schema::init(&pool).await.unwrap();
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO cameras (id, name, enabled, created_at, updated_at) VALUES (?,?,?,?,?)",
+        )
+        .bind("gate-cam")
+        .bind("gate-cam")
+        .bind(1)
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let cfg = Arc::new(heldar_kernel::config::Config::from_env());
+        // Default entry config: min_votes = 3, so a single worker read must NOT commit.
+        let ecfg = Arc::new(crate::config::EntryConfig {
+            anpr_min_votes: 3,
+            entry_retention_days: 365,
+        });
+        let engine = AnprEngine::new(
+            pool.clone(),
+            cfg,
+            ecfg,
+            heldar_kernel::reqwest::Client::new(),
+        );
+        (engine, pool)
+    }
+
+    fn detection(attrs: Value) -> DetectionIngest {
+        DetectionIngest {
+            label: Some("vehicle".into()),
+            confidence: Some(0.9),
+            bbox: None,
+            track_id: None,
+            attributes: Some(attrs),
+        }
+    }
+
+    /// A single CAMERA-NATIVE read (attributes.source = "camera_native") is authoritative: it
+    /// commits an entry event immediately, while a single worker-OCR read stays below the
+    /// 3-vote threshold.
+    #[tokio::test]
+    async fn native_read_commits_immediately_worker_read_does_not() {
+        let (engine, pool) = test_engine().await;
+
+        // One worker-OCR read: below min_votes — no event.
+        engine
+            .process(
+                "gate-cam",
+                None,
+                &[detection(
+                    json!({ "plate": "ABC1234", "plate_confidence": 0.8 }),
+                )],
+            )
+            .await;
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entry_events")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "one worker read must not commit at min_votes=3");
+
+        // One camera-native read: weighted to the threshold — commits.
+        engine
+            .process(
+                "gate-cam",
+                None,
+                &[detection(json!({
+                    "plate": "WXY8888",
+                    "source": "camera_native",
+                    "direction": "inbound",
+                }))],
+            )
+            .await;
+        let rows: Vec<(Option<String>, String)> =
+            sqlx::query_as("SELECT plate, auth_status FROM entry_events")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 1, "one native read commits immediately");
+        assert_eq!(rows[0].0.as_deref(), Some("WXY8888"));
+        assert_eq!(rows[0].1, "unmatched", "unknown plate resolves unmatched");
     }
 
     #[test]

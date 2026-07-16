@@ -65,6 +65,18 @@ detection per vehicle box per frame**, carrying a stable `track_id` and an
 `attributes` object. It **never fabricates a plate**: with no OCR backend it simply
 omits the plate field and emits vehicle attributes only.
 
+### 2.1b Camera-native ANPR reads (on-board recognition)
+
+Dedicated ANPR barrier cameras can feed the pipeline **directly from their on-board
+plate engine** instead of (or alongside) the worker: enable **On-board ANPR** on the
+camera's Device panel (`native_anpr_enabled`). The kernel's `native_anpr` poller
+turns each device read into the same `task_type = "anpr"` detection batch, tagged
+`attributes.source = "camera_native"` — the engine below weights such a read as
+**authoritative** (one read meets the vote threshold; the device already consolidated
+its own frames). Details, cursoring, and idempotency: [`CAMERA-CONTROLS.md`](CAMERA-CONTROLS.md) §3.
+When using camera-native on a lane, disable the camera's server-side `anpr` AI task
+to avoid double sources.
+
 ### 2.2 Core temporal voting (`services/anpr.rs`)
 
 `AnprEngine.process(camera_id, site_id, detections)` consolidates the noisy per-frame
@@ -401,6 +413,20 @@ user/key change, login, and entry confirm/reject appends a row
 
 ---
 
+## 7b. Barrier/gate actuation
+
+A `matched` entry can physically **open the barrier** by pulsing the alarm/relay
+output of the lane camera (most ANPR barrier cameras wire it to the boom). Configure
+per lane in the Entry module's **Gate** tab: auto-open on matched (on/off), relay
+output port, and pulse width; lanes start manual-only so wiring is verified with the
+guard's **Open gate** button first. A global **kill-switch** halts all actuation.
+Auto-actuation runs fire-and-forget *after* the entry event is recorded (a dead relay
+never stalls or loses an event); only `matched` auto-opens; manual open is guard+
+(`can_operate_gate`) and audited. Every actuation emits `gate_opened` /
+`gate_open_failed` to the kernel event log (webhook/email subscribable). External
+(non-camera) gate controllers instead subscribe a webhook to the entry events and
+actuate themselves. Full guide: [`CAMERA-CONTROLS.md`](CAMERA-CONTROLS.md) §4.
+
 ## 8. Retention
 
 `HELDAR_ENTRY_RETENTION_DAYS` (default **365**) governs the Stage 4 sweep inside the
@@ -495,6 +521,16 @@ normalized to the unique `plate_norm` key.
 | POST | `/ai/events` | ingest | Post detections; `task_type:"anpr"` feeds `AnprEngine.process()` |
 
 ---
+
+### Gate actuation endpoints
+
+| Method + path | Role required | Purpose |
+| --- | --- | --- |
+| `GET /entry/gate` | viewer | Kill-switch state + all lane policies |
+| `PUT /entry/gate/settings` | manager | Flip the global kill-switch |
+| `PUT /entry/gate/policies/{camera_id}` | manager | Upsert a lane policy (enabled, output_port, pulse_ms) |
+| `DELETE /entry/gate/policies/{camera_id}` | manager | Remove a lane policy |
+| `POST /entry/gate/open/{camera_id}` | guard | Manual open: pulse the lane's relay now (audited) |
 
 ## 10. Honest scope
 

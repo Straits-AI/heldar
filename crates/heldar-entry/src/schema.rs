@@ -21,6 +21,11 @@ const MIGRATIONS: &[AppMigration] = &[
         name: "read_contract",
         sql: include_str!("../migrations/0002_read_contract.sql"),
     },
+    AppMigration {
+        version: 3,
+        name: "gate",
+        sql: include_str!("../migrations/0003_gate.sql"),
+    },
 ];
 
 /// Apply the access-control migrations. Called by the composing server after the kernel migrations run.

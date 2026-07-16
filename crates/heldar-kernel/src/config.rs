@@ -178,6 +178,8 @@ pub struct Config {
     pub onvif_request_timeout_ms: u64,
     /// Per-request timeout for a HikVision ISAPI camera-config call (HTTP Digest) in milliseconds.
     pub isapi_request_timeout_ms: u64,
+    /// Poll cadence of the camera-native ANPR plate poller (per enabled camera) in milliseconds.
+    pub native_anpr_poll_ms: u64,
     // ---- Disk / array health (HA ops; see docs/HA.md) ----
     /// Run periodic SMART self-assessment checks (`smartctl -H`) inside the health loop. Off by
     /// default; needs `smartmontools` on PATH. Missing binary degrades to a one-time log + skip.
@@ -503,6 +505,7 @@ impl Config {
             onvif_discovery_timeout_ms: parse_or("HELDAR_ONVIF_DISCOVERY_TIMEOUT_MS", 2000),
             onvif_request_timeout_ms: parse_or("HELDAR_ONVIF_REQUEST_TIMEOUT_MS", 5000),
             isapi_request_timeout_ms: parse_or("HELDAR_ISAPI_REQUEST_TIMEOUT_MS", 8000),
+            native_anpr_poll_ms: parse_or("HELDAR_NATIVE_ANPR_POLL_MS", 1000),
             smart_check_enabled: parse_bool("HELDAR_SMART_CHECK_ENABLED", false),
             smart_devices: var("HELDAR_SMART_DEVICES")
                 .map(|v| {

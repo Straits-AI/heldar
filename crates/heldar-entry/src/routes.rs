@@ -52,6 +52,16 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/reports/entry-log", get(report_entry_log))
         .route("/api/v1/reports/exceptions", get(report_exceptions))
         .route("/api/v1/audit", get(list_audit))
+        .route("/api/v1/entry/gate", get(get_gate_state))
+        .route(
+            "/api/v1/entry/gate/settings",
+            axum::routing::put(put_gate_settings),
+        )
+        .route(
+            "/api/v1/entry/gate/policies/{camera_id}",
+            axum::routing::put(put_gate_policy).delete(delete_gate_policy),
+        )
+        .route("/api/v1/entry/gate/open/{camera_id}", post(gate_open))
 }
 
 /// The built entry module UI bundle, embedded at compile time (regenerate with `make module-bundles`
@@ -1083,4 +1093,174 @@ async fn list_audit(
     .fetch_all(&st.pool)
     .await?;
     Ok(Json(rows))
+}
+
+// ---- Gate actuation (issue #44) -------------------------------------------
+
+/// Full gate state: global settings + every configured lane policy. Any authenticated viewer.
+async fn get_gate_state(
+    State(st): State<AppState>,
+    principal: Principal,
+) -> AppResult<Json<Value>> {
+    principal.require(principal.can_view(), "view gate configuration")?;
+    let kill_switch = crate::gate::GateActuator::kill_switch(&st.pool).await;
+    let policies = sqlx::query_as::<_, crate::gate::GatePolicy>(
+        "SELECT * FROM gate_policies ORDER BY camera_id ASC",
+    )
+    .fetch_all(&st.pool)
+    .await?;
+    Ok(Json(
+        json!({ "kill_switch": kill_switch, "policies": policies }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct GateSettingsUpdate {
+    kill_switch: bool,
+}
+
+/// Flip the global kill-switch (halts ALL actuation, auto and manual). Manager+.
+async fn put_gate_settings(
+    State(st): State<AppState>,
+    principal: Principal,
+    Json(body): Json<GateSettingsUpdate>,
+) -> AppResult<Json<Value>> {
+    principal.require(principal.can_manage_registry(), "change gate settings")?;
+    sqlx::query("UPDATE gate_settings SET kill_switch = ?, updated_at = ? WHERE id = 1")
+        .bind(body.kill_switch)
+        .bind(Utc::now())
+        .execute(&st.pool)
+        .await?;
+    auth::audit(
+        &st.pool,
+        &principal,
+        "gate_put_settings",
+        "gate",
+        "global",
+        json!({ "kill_switch": body.kill_switch }),
+    )
+    .await;
+    Ok(Json(json!({ "kill_switch": body.kill_switch })))
+}
+
+#[derive(Debug, Deserialize)]
+struct GatePolicyUpdate {
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
+    output_port: Option<i64>,
+    #[serde(default)]
+    pulse_ms: Option<i64>,
+}
+
+/// Upsert a camera's gate policy (auto-open flag + relay port + pulse width). Manager+.
+async fn put_gate_policy(
+    State(st): State<AppState>,
+    Path(camera_id): Path<String>,
+    principal: Principal,
+    Json(body): Json<GatePolicyUpdate>,
+) -> AppResult<Json<crate::gate::GatePolicy>> {
+    principal.require(principal.can_manage_registry(), "configure gate policies")?;
+    // The camera must exist (a policy against a ghost camera can never actuate).
+    let known: Option<(String,)> = sqlx::query_as("SELECT id FROM cameras WHERE id = ?")
+        .bind(&camera_id)
+        .fetch_optional(&st.pool)
+        .await?;
+    if known.is_none() {
+        return Err(AppError::NotFound(format!("camera {camera_id} not found")));
+    }
+    let cur = crate::gate::GateActuator::policy(&st.pool, &camera_id).await;
+    let enabled = body
+        .enabled
+        .or(cur.as_ref().map(|p| p.enabled))
+        .unwrap_or(false);
+    let output_port = body
+        .output_port
+        .or(cur.as_ref().map(|p| p.output_port))
+        .unwrap_or(1)
+        .max(1);
+    let pulse_ms = body
+        .pulse_ms
+        .or(cur.as_ref().map(|p| p.pulse_ms))
+        .unwrap_or(1000)
+        .clamp(100, 30_000);
+    sqlx::query(
+        "INSERT INTO gate_policies (camera_id, enabled, output_port, pulse_ms, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(camera_id) DO UPDATE SET
+            enabled = excluded.enabled,
+            output_port = excluded.output_port,
+            pulse_ms = excluded.pulse_ms,
+            updated_at = excluded.updated_at",
+    )
+    .bind(&camera_id)
+    .bind(enabled)
+    .bind(output_port)
+    .bind(pulse_ms)
+    .bind(Utc::now())
+    .execute(&st.pool)
+    .await?;
+    auth::audit(
+        &st.pool,
+        &principal,
+        "gate_put_policy",
+        "camera",
+        &camera_id,
+        json!({ "enabled": enabled, "output_port": output_port, "pulse_ms": pulse_ms }),
+    )
+    .await;
+    let policy = crate::gate::GateActuator::policy(&st.pool, &camera_id)
+        .await
+        .ok_or_else(|| AppError::Other(anyhow::anyhow!("gate policy write not visible")))?;
+    Ok(Json(policy))
+}
+
+/// Remove a camera's gate policy entirely. Manager+.
+async fn delete_gate_policy(
+    State(st): State<AppState>,
+    Path(camera_id): Path<String>,
+    principal: Principal,
+) -> AppResult<StatusCode> {
+    principal.require(principal.can_manage_registry(), "remove gate policies")?;
+    let res = sqlx::query("DELETE FROM gate_policies WHERE camera_id = ?")
+        .bind(&camera_id)
+        .execute(&st.pool)
+        .await?;
+    if res.rows_affected() == 0 {
+        return Err(AppError::NotFound(format!(
+            "no gate policy for camera {camera_id}"
+        )));
+    }
+    auth::audit(
+        &st.pool,
+        &principal,
+        "gate_delete_policy",
+        "camera",
+        &camera_id,
+        json!({}),
+    )
+    .await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Manual guard-open (PHYSICAL-WORLD side effect): pulse the lane's configured relay now. Guard+
+/// (`can_operate_gate`); the kill-switch still wins; audited with the acting principal.
+async fn gate_open(
+    State(st): State<AppState>,
+    Path(camera_id): Path<String>,
+    principal: Principal,
+) -> AppResult<Json<Value>> {
+    principal.require(principal.can_operate_gate(), "open the gate")?;
+    let actuator = crate::gate::GateActuator::new(st.pool.clone(), st.http.clone(), st.cfg.clone());
+    let pulse_ms = actuator.manual_open(&camera_id, &principal.id).await?;
+    auth::audit(
+        &st.pool,
+        &principal,
+        "gate_manual_open",
+        "camera",
+        &camera_id,
+        json!({ "pulse_ms": pulse_ms }),
+    )
+    .await;
+    Ok(Json(json!({ "ok": true, "pulse_ms": pulse_ms })))
 }

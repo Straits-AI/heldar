@@ -40,7 +40,9 @@ import type {
   CameraUpdate,
   CameraView,
   ClipResult,
+  DayNightConfig,
   Detection,
+  DeviceControlCapabilities,
   DeviceInfo,
   DiscoverOptions,
   DiscoverResponse,
@@ -51,7 +53,11 @@ import type {
   EventTypeInfo,
   ExceptionReport,
   Gaps,
+  GatePolicy,
+  GateState,
+  ImageConfig,
   IncidentSummary,
+  IoOutput,
   LiveUrls,
   LoginResult,
   NtpConfig,
@@ -821,6 +827,68 @@ export const api = {
       "/api/v1/cameras/config/bulk",
       { method: "POST", body: JSON.stringify(body) },
       300000, // fleet-wide ISAPI ops are slow; override the default 30s client timeout
+    ),
+
+  // ---- Entry app: barrier-gate actuation (issue #44) ----
+  /** Global gate state: kill-switch + configured lane policies. */
+  getGateState: () => request<GateState>("/api/v1/entry/gate"),
+  /** Flip the global gate kill-switch (halts ALL actuation; manager+). */
+  putGateSettings: (killSwitch: boolean) =>
+    request<{ kill_switch: boolean }>("/api/v1/entry/gate/settings", {
+      method: "PUT",
+      body: JSON.stringify({ kill_switch: killSwitch }),
+    }),
+  /** Upsert a camera's gate policy (manager+). */
+  putGatePolicy: (
+    cameraId: string,
+    body: { enabled?: boolean; output_port?: number; pulse_ms?: number },
+  ) =>
+    request<GatePolicy>(`/api/v1/entry/gate/policies/${enc(cameraId)}`, {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  /** Remove a camera's gate policy (manager+). */
+  deleteGatePolicy: (cameraId: string) =>
+    request<void>(`/api/v1/entry/gate/policies/${enc(cameraId)}`, { method: "DELETE" }),
+  /** Manual guard-open: pulse the lane's configured relay NOW (guard+; physical side effect). */
+  gateOpen: (cameraId: string) =>
+    request<{ ok: boolean; pulse_ms: number }>(`/api/v1/entry/gate/open/${enc(cameraId)}`, {
+      method: "POST",
+    }, 60000),
+
+  // ---- Camera device control (capability-driven Device panel) ----
+  /** The persisted device-control capability map (a DB read; {} until probed). */
+  getCameraControlCapabilities: (id: string) =>
+    request<DeviceControlCapabilities>(`/api/v1/cameras/${enc(id)}/control/capabilities`),
+  /** Probe the device's control surfaces and refresh the capability map (manager+). */
+  probeCameraControl: (id: string) =>
+    request<DeviceControlCapabilities>(`/api/v1/cameras/${enc(id)}/control/probe`, {
+      method: "POST",
+    }),
+  getCameraDayNight: (id: string) =>
+    request<DayNightConfig>(`/api/v1/cameras/${enc(id)}/control/day_night`),
+  /** Set the day/night (IR-cut) mode/sensitivity (manager+). */
+  putCameraDayNight: (id: string, patch: Partial<DayNightConfig>) =>
+    request<DayNightConfig>(`/api/v1/cameras/${enc(id)}/control/day_night`, {
+      method: "PUT",
+      body: JSON.stringify(patch),
+    }),
+  getCameraImageConfig: (id: string) =>
+    request<ImageConfig>(`/api/v1/cameras/${enc(id)}/control/image`),
+  /** Set image/lighting settings — only present fields are written (manager+). */
+  putCameraImageConfig: (id: string, patch: ImageConfig) =>
+    request<ImageConfig>(`/api/v1/cameras/${enc(id)}/control/image`, {
+      method: "PUT",
+      body: JSON.stringify(patch),
+    }),
+  listCameraIoOutputs: (id: string) =>
+    request<IoOutput[]>(`/api/v1/cameras/${enc(id)}/control/io/outputs`),
+  /** Pulse a relay output — PHYSICAL side effect, e.g. a barrier test fire (manager+). */
+  pulseCameraIoOutput: (id: string, port: number, pulseMs?: number) =>
+    request<{ ok: boolean; port: number; pulse_ms: number }>(
+      `/api/v1/cameras/${enc(id)}/control/io/outputs/${enc(String(port))}/pulse`,
+      { method: "POST", body: JSON.stringify({ pulse_ms: pulseMs ?? 0 }) },
+      60000, // raise + hold + release against a live device
     ),
 
   // ---- Fleet: site identity + outbox ----

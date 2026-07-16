@@ -937,23 +937,215 @@ function K() {
 		})]
 	});
 }
-function q() {
+function q({ canOperate: e, canManage: t }) {
+	let n = S(() => g.getGateState(), 8e3), l = S(() => g.listCameras(), 0), [d, p] = r(null), [m, h] = r(null), [_, v] = r(null), [y, b] = r(""), [x, C] = r("1"), [E, D] = r("1000"), O = n.data, k = O?.policies ?? [], A = new Set(k.map((e) => e.camera_id)), j = (l.data ?? []).filter((e) => !A.has(e.id)), M = (e) => (l.data ?? []).find((t) => t.id === e)?.name ?? e;
+	async function N(e, t, r) {
+		p(e), h(null), v(null);
+		try {
+			await t(), await n.refresh(), r && v(r);
+		} catch (e) {
+			h(e instanceof i ? e.message : String(e));
+		} finally {
+			p(null);
+		}
+	}
+	async function L(e) {
+		e.preventDefault(), y && (await N("add", () => g.putGatePolicy(y, {
+			enabled: !1,
+			output_port: Number(x) || 1,
+			pulse_ms: Number(E) || 1e3
+		})), b(""));
+	}
+	return /* @__PURE__ */ T("div", {
+		className: "animate-rise space-y-4",
+		children: [/* @__PURE__ */ T(u, {
+			title: "Barrier Actuation",
+			subtitle: "Pulse the lane camera's relay output on a matched entry",
+			actions: O && /* @__PURE__ */ w(a, {
+				size: "sm",
+				variant: O.kill_switch ? "danger" : "default",
+				disabled: !t || d != null,
+				onClick: () => void N("kill", () => g.putGateSettings(!O.kill_switch), O.kill_switch ? "Actuation re-enabled." : "KILL SWITCH ON — all actuation halted."),
+				children: O.kill_switch ? "Kill switch: ON" : "Kill switch: off"
+			}),
+			children: [
+				m && /* @__PURE__ */ w(R, { children: m }),
+				_ && /* @__PURE__ */ w("p", {
+					className: "mb-3 font-mono text-[11px] text-fg-secondary",
+					children: _
+				}),
+				O?.kill_switch && /* @__PURE__ */ w("div", {
+					className: "mb-3 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 font-mono text-[11px] text-red-300",
+					children: "The global kill-switch is ON: no gate opens, automatic or manual, until a manager turns it off."
+				}),
+				O ? k.length === 0 ? /* @__PURE__ */ w(o, {
+					title: "No gate lanes configured",
+					hint: "Add a lane below: pick the ANPR camera watching the barrier and the relay output port wired to the boom."
+				}) : /* @__PURE__ */ w("div", {
+					className: "overflow-x-auto",
+					children: /* @__PURE__ */ T("table", {
+						className: "w-full min-w-[640px] border-separate border-spacing-0",
+						children: [/* @__PURE__ */ w("thead", { children: /* @__PURE__ */ T("tr", {
+							className: "border-b border-line",
+							children: [
+								/* @__PURE__ */ w(P, { children: "Camera" }),
+								/* @__PURE__ */ w(P, { children: "Auto-open" }),
+								/* @__PURE__ */ w(P, { children: "Output port" }),
+								/* @__PURE__ */ w(P, { children: "Pulse" }),
+								/* @__PURE__ */ w(P, {
+									className: "text-right",
+									children: "Actions"
+								})
+							]
+						}) }), /* @__PURE__ */ w("tbody", { children: k.map((n) => /* @__PURE__ */ T("tr", {
+							className: "border-b border-line/50",
+							children: [
+								/* @__PURE__ */ T(F, { children: [/* @__PURE__ */ w("span", {
+									className: "font-mono text-xs font-semibold text-fg",
+									children: M(n.camera_id)
+								}), /* @__PURE__ */ w("span", {
+									className: "ml-2 font-mono text-[10px] text-fg-muted",
+									children: n.camera_id
+								})] }),
+								/* @__PURE__ */ w(F, { children: /* @__PURE__ */ w(I, {
+									label: n.enabled ? "on matched" : "manual only",
+									color: n.enabled ? "#10b981" : "#71717a"
+								}) }),
+								/* @__PURE__ */ w(F, { children: /* @__PURE__ */ T("span", {
+									className: "font-mono text-xs text-fg-secondary",
+									children: ["#", n.output_port]
+								}) }),
+								/* @__PURE__ */ w(F, { children: /* @__PURE__ */ T("span", {
+									className: "font-mono text-xs text-fg-secondary",
+									children: [n.pulse_ms, " ms"]
+								}) }),
+								/* @__PURE__ */ w(F, {
+									className: "text-right",
+									children: /* @__PURE__ */ T("div", {
+										className: "flex justify-end gap-1.5",
+										children: [
+											/* @__PURE__ */ w(a, {
+												size: "sm",
+												variant: "primary",
+												disabled: !e || d != null || O.kill_switch,
+												title: "Pulse the relay now (audited).",
+												onClick: () => void N(`open:${n.camera_id}`, () => g.gateOpen(n.camera_id), `Gate opened at ${M(n.camera_id)}.`),
+												children: d === `open:${n.camera_id}` ? "Opening…" : "Open gate"
+											}),
+											/* @__PURE__ */ w(a, {
+												size: "sm",
+												disabled: !t || d != null,
+												onClick: () => void N(`toggle:${n.camera_id}`, () => g.putGatePolicy(n.camera_id, { enabled: !n.enabled })),
+												children: n.enabled ? "Disable auto" : "Enable auto"
+											}),
+											/* @__PURE__ */ w(a, {
+												size: "sm",
+												variant: "danger",
+												disabled: !t || d != null,
+												onClick: () => void N(`del:${n.camera_id}`, () => g.deleteGatePolicy(n.camera_id)),
+												children: "Remove"
+											})
+										]
+									})
+								})
+							]
+						}, n.camera_id)) })]
+					})
+				}) : /* @__PURE__ */ w(z, { label: "Loading gate state…" })
+			]
+		}), t && /* @__PURE__ */ T(u, {
+			title: "Add lane",
+			subtitle: "Bind a camera's relay output to the barrier",
+			children: [/* @__PURE__ */ T("form", {
+				onSubmit: L,
+				className: "flex flex-wrap items-end gap-3",
+				children: [
+					/* @__PURE__ */ w("div", {
+						className: "min-w-[220px] flex-1",
+						children: /* @__PURE__ */ w(s, {
+							label: "Camera",
+							htmlFor: "gate-cam",
+							children: /* @__PURE__ */ T(f, {
+								id: "gate-cam",
+								value: y,
+								onChange: (e) => b(e.target.value),
+								required: !0,
+								children: [/* @__PURE__ */ w("option", {
+									value: "",
+									children: "Select camera…"
+								}), j.map((e) => /* @__PURE__ */ T("option", {
+									value: e.id,
+									children: [
+										e.name,
+										" (",
+										e.id,
+										")"
+									]
+								}, e.id))]
+							})
+						})
+					}),
+					/* @__PURE__ */ w("div", {
+						className: "w-28",
+						children: /* @__PURE__ */ w(s, {
+							label: "Output port",
+							htmlFor: "gate-port",
+							children: /* @__PURE__ */ w(c, {
+								id: "gate-port",
+								type: "number",
+								min: 1,
+								value: x,
+								onChange: (e) => C(e.target.value)
+							})
+						})
+					}),
+					/* @__PURE__ */ w("div", {
+						className: "w-32",
+						children: /* @__PURE__ */ w(s, {
+							label: "Pulse (ms)",
+							htmlFor: "gate-pulse",
+							children: /* @__PURE__ */ w(c, {
+								id: "gate-pulse",
+								type: "number",
+								min: 100,
+								max: 3e4,
+								step: 100,
+								value: E,
+								onChange: (e) => D(e.target.value)
+							})
+						})
+					}),
+					/* @__PURE__ */ w(a, {
+						type: "submit",
+						variant: "primary",
+						disabled: d != null || !y,
+						children: "Add lane"
+					})
+				]
+			}), /* @__PURE__ */ w("p", {
+				className: "mt-3 font-mono text-[11px] text-fg-muted",
+				children: "Lanes start in manual-only mode. Verify the wiring with \"Open gate\", then enable auto-open. The relay ports a camera exposes are listed on its Device panel (Cameras → camera → Device)."
+			})]
+		})]
+	});
+}
+function J() {
 	let e = /* @__PURE__ */ new Date();
 	return (/* @__PURE__ */ new Date(e.getTime() - e.getTimezoneOffset() * 6e4)).toISOString().slice(0, 10);
 }
-var J = [
+var Y = [
 	"matched",
 	"exception",
 	"blocked",
 	"unmatched"
-], Y = {
+], X = {
 	matched: "good",
 	exception: "warn",
 	blocked: "bad",
 	unmatched: "default"
 };
-function X() {
-	let [e, t] = r(() => q()), n = S(() => g.reportEntryLog({ date: e }), 0, [e]), i = S(() => g.reportExceptions({ date: e }), 0, [e]), l = n.data?.by_auth_status ?? {}, d = n.data?.events ?? [];
+function Z() {
+	let [e, t] = r(() => J()), n = S(() => g.reportEntryLog({ date: e }), 0, [e]), i = S(() => g.reportExceptions({ date: e }), 0, [e]), l = n.data?.by_auth_status ?? {}, d = n.data?.events ?? [];
 	return /* @__PURE__ */ T("div", {
 		className: "stagger space-y-4",
 		children: [/* @__PURE__ */ T(u, {
@@ -970,7 +1162,7 @@ function X() {
 							id: "r-date",
 							type: "date",
 							value: e,
-							max: q(),
+							max: J(),
 							onChange: (e) => t(e.target.value)
 						})
 					})
@@ -994,12 +1186,12 @@ function X() {
 							value: n.data?.total ?? 0
 						})
 					}),
-					J.map((e) => /* @__PURE__ */ w("div", {
+					Y.map((e) => /* @__PURE__ */ w("div", {
 						className: "bg-panel px-4 py-3",
 						children: /* @__PURE__ */ w(m, {
 							label: e,
 							value: l[e] ?? 0,
-							tone: Y[e]
+							tone: X[e]
 						})
 					}, e)),
 					/* @__PURE__ */ w("div", {
@@ -1029,7 +1221,7 @@ function X() {
 		})]
 	});
 }
-function Z() {
+function Q() {
 	let e = S(() => g.listUsers(), 0), t = S(() => g.listApiKeys(), 0), [n, o] = r(""), [l, d] = r(""), [m, h] = r(""), [_, v] = r("guard"), [y, b] = r(!1), [E, D] = r(null), [O, k] = r(null);
 	async function A(t) {
 		if (t.preventDefault(), !n.trim() || !l) {
@@ -1359,7 +1551,7 @@ function Z() {
 		})]
 	});
 }
-function Q({ active: e, onClick: t, children: n }) {
+function $({ active: e, onClick: t, children: n }) {
 	return /* @__PURE__ */ w("button", {
 		type: "button",
 		onClick: t,
@@ -1367,7 +1559,7 @@ function Q({ active: e, onClick: t, children: n }) {
 		children: n
 	});
 }
-function $() {
+function ee() {
 	let [o, s] = r(null), [c, f] = r(!0), [m, h] = r(!1), [_, v] = r(null), [y, x] = r("live"), S = e(async () => {
 		f(!0), v(null);
 		try {
@@ -1398,6 +1590,10 @@ function $() {
 			{
 				key: "watchlist",
 				label: "Watchlist"
+			},
+			{
+				key: "gate",
+				label: "Gate"
 			},
 			{
 				key: "reports",
@@ -1475,7 +1671,7 @@ function $() {
 				})]
 			}), /* @__PURE__ */ w("div", {
 				className: "mt-5 flex flex-wrap gap-1 overflow-x-auto border-b border-line",
-				children: D.map((e) => /* @__PURE__ */ w(Q, {
+				children: D.map((e) => /* @__PURE__ */ w($, {
 					active: k === e.key,
 					onClick: () => x(e.key),
 					children: e.label
@@ -1488,14 +1684,18 @@ function $() {
 				k === "passes" && /* @__PURE__ */ w(W, {}),
 				k === "vehicles" && /* @__PURE__ */ w(G, {}),
 				k === "watchlist" && /* @__PURE__ */ w(K, {}),
-				k === "reports" && /* @__PURE__ */ w(X, {}),
-				k === "admin" && C && /* @__PURE__ */ w(Z, {})
+				k === "gate" && /* @__PURE__ */ w(q, {
+					canOperate: E,
+					canManage: o.role === "admin" || o.role === "manager"
+				}),
+				k === "reports" && /* @__PURE__ */ w(Z, {}),
+				k === "admin" && C && /* @__PURE__ */ w(Q, {})
 			]
 		})]
 	});
 }
 //#endregion
 //#region src/modules/entry/entry.tsx
-var ee = $;
+var te = ee;
 //#endregion
-export { ee as default };
+export { te as default };

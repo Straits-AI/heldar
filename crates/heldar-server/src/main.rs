@@ -127,13 +127,29 @@ async fn main() -> anyhow::Result<()> {
     let entry_cfg = Arc::new(heldar_entry::config::EntryConfig::from_env());
     let movement_cfg = Arc::new(heldar_movement::config::MovementConfig::from_env());
     let search_cfg = Arc::new(heldar_search::config::SearchConfig::from_env());
+    // Redirects are disabled on the shared egress client: following a 3xx is the SSRF bypass that
+    // defeats a target check (a public host 302s to an internal or cloud-metadata URL). None of its
+    // consumers (the local MediaMTX API, camera ISAPI/ONVIF, the sidecar reverse-proxy, webhook
+    // /test, rendezvous signaling, the entry app's gate actuator) rely on redirect-following.
+    // Built before the consumers: the ANPR engine's gate actuator drives camera relays over it.
+    let http = reqwest::Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .context("building http client")?;
     use services::consumer::DetectionConsumer;
     let mut consumers: Vec<Arc<dyn DetectionConsumer>> = vec![
         // Zone engine = kernel-open spatial primitive. Holds the recorder so a committed zone event
         // triggers event-mode recording (recorder is created above, before its consumers).
         services::zones::ZoneEngine::new(pool.clone(), cfg.clone(), recorder.clone()),
         // Access-control ANPR engine (open generic app), registered as a consumer over the seam.
-        heldar_entry::anpr::AnprEngine::new(pool.clone(), cfg.clone(), entry_cfg.clone()),
+        // Carries the egress client for barrier actuation (gate relay pulses on matched entries).
+        heldar_entry::anpr::AnprEngine::new(
+            pool.clone(),
+            cfg.clone(),
+            entry_cfg.clone(),
+            http.clone(),
+        ),
     ];
     // Module manifests, composed here so GET /api/v1/modules reflects exactly what this binary links.
     // The open generic apps register first; proprietary verticals add theirs via the seam (empty in the
@@ -153,15 +169,6 @@ async fn main() -> anyhow::Result<()> {
     modules.extend(wasm_modules);
     let consumers: Arc<Vec<Arc<dyn DetectionConsumer>>> = Arc::new(consumers);
     let modules = Arc::new(modules);
-    // Redirects are disabled on the shared egress client: following a 3xx is the SSRF bypass that
-    // defeats a target check (a public host 302s to an internal or cloud-metadata URL). None of its
-    // consumers (the local MediaMTX API, camera ISAPI/ONVIF, the sidecar reverse-proxy, webhook
-    // /test, rendezvous signaling) rely on server-side redirect-following.
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .context("building http client")?;
     // Plugin store catalog engine (bundled + signed remote registries).
     let catalog = Arc::new(services::registry::CatalogService::new(&cfg));
     // Kept for the durable fan-out drainer (consumers is moved into AppState below).
@@ -224,6 +231,15 @@ async fn main() -> anyhow::Result<()> {
                         tracing::warn!(error = %e, "db: background auto_vacuum conversion failed; will retry next boot")
                     }
                 }
+            });
+        }
+        // Camera-native ANPR poller (issue #43): polls the on-board plate engine of each camera
+        // with native_anpr_enabled and feeds reads through the shared ingest path. Self-idles when
+        // no camera opts in; per-camera failures are recorded as state, never fatal.
+        {
+            let st = state.clone();
+            spawn_supervised("native_anpr", move || {
+                services::native_anpr::run(st.clone())
             });
         }
         // Durable perception fan-out: replays detection batches whose consumer fan-out didn't

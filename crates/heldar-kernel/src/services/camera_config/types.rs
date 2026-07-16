@@ -133,6 +133,93 @@ pub struct RebootRequest {
     pub confirm: bool,
 }
 
+/// Day/night (IR-cut filter) configuration (`GET/PUT /ISAPI/Image/channels/1/ircutFilter`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DayNightConfig {
+    /// `auto` | `day` | `night` | `schedule` (verbatim ISAPI `IrcutFilterType`).
+    pub mode: String,
+    /// Auto-switch sensitivity where the device exposes one (typically 0–7).
+    #[serde(default)]
+    pub sensitivity: Option<i64>,
+}
+
+/// Partial update to a [`DayNightConfig`] (read-modify-write); every field is optional.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct DayNightPatch {
+    #[serde(default)]
+    pub mode: Option<String>,
+    #[serde(default)]
+    pub sensitivity: Option<i64>,
+}
+
+/// Image/lighting configuration, aggregated from the per-channel ISAPI image sub-resources
+/// (`/ISAPI/Image/channels/1/{color,WDR,BLC,supplementLight}`). Fields the device does not expose
+/// are `None` and are never written back.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct ImageConfig {
+    /// 0–100 (`color`).
+    #[serde(default)]
+    pub brightness: Option<i64>,
+    /// 0–100 (`color`).
+    #[serde(default)]
+    pub contrast: Option<i64>,
+    /// 0–100 (`color`).
+    #[serde(default)]
+    pub saturation: Option<i64>,
+    /// Wide dynamic range: `open` | `close` | `auto` (`WDR`).
+    #[serde(default)]
+    pub wdr_mode: Option<String>,
+    /// WDR strength 0–100 (`WDR`).
+    #[serde(default)]
+    pub wdr_level: Option<i64>,
+    /// Backlight compensation enabled (`BLC`).
+    #[serde(default)]
+    pub blc_enabled: Option<bool>,
+    /// Supplement (IR/white) light mode where exposed: e.g. `irLight` | `colorVuWhiteLight` |
+    /// `close` (`supplementLight/supplementLightMode`).
+    #[serde(default)]
+    pub supplement_light_mode: Option<String>,
+}
+
+/// Partial update to an [`ImageConfig`]; only present fields are written to the device.
+pub type ImageConfigPatch = ImageConfig;
+
+/// One alarm/relay output port (`GET /ISAPI/System/IO/outputs`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IoOutput {
+    pub id: i64,
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Idle/default state as the device reports it (e.g. `low`).
+    #[serde(default)]
+    pub default_state: Option<String>,
+}
+
+/// One plate read returned by the device's on-board ANPR engine
+/// (`POST /ISAPI/Traffic/channels/{n}/vehicleDetect/plates`).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct NativePlateRead {
+    /// Raw plate text as the camera read it.
+    pub plate: String,
+    /// The device's verbatim `captureTime` string (used as the poll cursor; format varies by
+    /// firmware — typically `yyyyMMddHHmmssSSS` digits).
+    pub capture_time: String,
+    /// `forward` | `reverse` | `unknown` (verbatim device direction).
+    #[serde(default)]
+    pub direction: Option<String>,
+    /// Device picture name — unique per read; used for idempotency when present.
+    #[serde(default)]
+    pub pic_name: Option<String>,
+    /// Country/region code where reported.
+    #[serde(default)]
+    pub country: Option<String>,
+}
+
 /// A single configuration action applied across one or more cameras.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]

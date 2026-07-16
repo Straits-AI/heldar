@@ -65,6 +65,12 @@ with a two-gate auth model where the kernel stays the sole RBAC authority. Opt-i
 [`docs/REMOTE-ACCESS.md`](docs/REMOTE-ACCESS.md); hardening for the public internet (auth, TLS, secrets,
 lockout, credential encryption, Turnstile): [`docs/PRODUCTION.md`](docs/PRODUCTION.md).
 
+**Camera device features** (day/night, lighting, relay outputs, PTZ) are dashboard-controlled via a
+per-camera capability probe, ANPR barrier cameras can feed their **on-board plate recognition**
+straight into the entry pipeline, and a matched entry can **open the barrier** by pulsing the lane
+camera's relay (per-lane policy + guard manual-open + global kill-switch):
+[`docs/CAMERA-CONTROLS.md`](docs/CAMERA-CONTROLS.md).
+
 Onboard a camera (you supply the address and credentials; the RTSP URL is built from the vendor
 template):
 

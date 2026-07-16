@@ -13,6 +13,7 @@
 
 pub mod anpr;
 pub mod config;
+pub mod gate;
 pub mod models;
 pub mod retention;
 pub mod routes;

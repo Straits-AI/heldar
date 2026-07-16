@@ -933,6 +933,7 @@ mod tests {
             mirror_enabled: false,
             anr_enabled: false,
             anr_replay_url_template: None,
+            native_anpr_enabled: false,
             enabled: true,
             priority: 100,
             live_warm: false,

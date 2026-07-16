@@ -433,147 +433,26 @@ async fn list_detections(
     Ok(Json(rows))
 }
 
-/// Max detections accepted in a single ingest request (DoS / write-amplification bound).
-const MAX_INGEST_DETECTIONS: usize = 1000;
-
 /// Hard cap on the ingest request body, enforced by the framework BEFORE deserialization (defense
 /// in depth vs the post-parse count guard). 8 MiB comfortably fits MAX_INGEST_DETECTIONS detections
 /// with bounding boxes + attributes, while refusing a body crafted to exhaust memory.
 const INGEST_BODY_LIMIT_BYTES: usize = 8 * 1024 * 1024;
 
-/// Columns bound per detection row in the batched INSERT in [`ingest`].
-const DETECTION_INSERT_COLS: usize = 11;
-/// SQLite's compile-time bound-variable ceiling (SQLITE_MAX_VARIABLE_NUMBER). The batched insert is
-/// chunked so a single statement never exceeds it, even at [`MAX_INGEST_DETECTIONS`].
-const SQLITE_MAX_BIND_VARS: usize = 999;
-/// Detection rows per INSERT statement (≈90), keeping bound variables under [`SQLITE_MAX_BIND_VARS`].
-const DETECTION_INSERT_CHUNK: usize = SQLITE_MAX_BIND_VARS / DETECTION_INSERT_COLS;
-
-/// Ingest detections (and an optional event) posted by an AI worker. Detections are written in a
-/// single transaction so a batch is all-or-nothing.
+/// Ingest detections (and an optional event) posted by an AI worker. The persist + fan-out
+/// contract (outbox idempotency, all-or-nothing transaction, durable consumer fan-out) lives in
+/// [`crate::services::perception_ingest`], shared with kernel-internal producers such as the
+/// camera-native ANPR poller; this handler owns only the HTTP/RBAC surface.
 async fn ingest(
     State(st): State<AppState>,
     principal: crate::auth::Principal,
     Json(body): Json<AiIngest>,
 ) -> AppResult<Json<Value>> {
     principal.require(principal.can_ingest(), "ingest perception events")?;
-    let cam = load_camera(&st.pool, &body.camera_id).await?;
-    if body.task_type.trim().is_empty() {
-        return Err(AppError::BadRequest("`task_type` is required".into()));
-    }
-    if body.detections.len() > MAX_INGEST_DETECTIONS {
-        return Err(AppError::BadRequest(format!(
-            "too many detections in one request ({}); max {MAX_INGEST_DETECTIONS}",
-            body.detections.len()
-        )));
-    }
-    let ts = parse_opt_ts(&body.timestamp, "timestamp")?.unwrap_or_else(Utc::now);
-
-    let mut inserted = 0u64;
-    let mut tx = st.pool.begin().await?;
-    // Idempotency + atomic capture: record the batch in the outbox FIRST, in the same transaction.
-    // A duplicate (camera_id, frame_id) — i.e. an at-least-once redelivery — conflicts and inserts 0
-    // rows; we then skip both the detection writes and the consumer fan-out, so a replayed batch can
-    // never double-count ANPR votes or corrupt zone state. With no frame_id every batch is accepted.
-    let outbox_res = sqlx::query(
-        "INSERT INTO outbox (topic, camera_id, site_id, frame_id, task_type, detection_count, created_at)
-         VALUES ('detections', ?, ?, ?, ?, ?, ?)
-         ON CONFLICT DO NOTHING",
-    )
-    .bind(&body.camera_id)
-    .bind(&cam.site_id)
-    .bind(&body.frame_id)
-    .bind(&body.task_type)
-    .bind(body.detections.len() as i64)
-    .bind(Utc::now())
-    .execute(&mut *tx)
-    .await?;
-    if outbox_res.rows_affected() == 0 {
-        // Duplicate frame already ingested — no-op (idempotent).
-        tx.commit().await?;
+    let outcome = crate::services::perception_ingest::ingest_batch(&st, &body).await?;
+    if outcome.duplicate {
         return Ok(Json(json!({ "detections_ingested": 0, "duplicate": true })));
     }
-    // Batched multi-row insert: one INSERT per chunk instead of one statement per detection. Same
-    // columns, values, and semantics as the prior per-row loop, still inside the transaction. We
-    // chunk so a single statement's bound-variable count stays under SQLite's limit even at
-    // MAX_INGEST_DETECTIONS.
-    for chunk in body.detections.chunks(DETECTION_INSERT_CHUNK) {
-        let tuples = vec!["(?,?,?,?,?,?,?,?,?,?,?)"; chunk.len()].join(",");
-        let sql = format!(
-            "INSERT INTO detections
-               (id, camera_id, task_type, timestamp, label, confidence, bbox, track_id, attributes, frame_id, created_at)
-             VALUES {tuples}"
-        );
-        let mut q = sqlx::query(&sql);
-        for d in chunk {
-            let bbox = d.bbox.clone().map(SqlxJson);
-            let attrs = SqlxJson(d.attributes.clone().unwrap_or_else(|| json!({})));
-            q = q
-                .bind(format!("det_{}", Uuid::new_v4().simple()))
-                .bind(&body.camera_id)
-                .bind(&body.task_type)
-                .bind(ts)
-                .bind(&d.label)
-                .bind(d.confidence)
-                .bind(bbox)
-                .bind(&d.track_id)
-                .bind(attrs)
-                .bind(&body.frame_id)
-                .bind(Utc::now());
-        }
-        inserted += q.execute(&mut *tx).await?.rows_affected();
-    }
-    tx.commit().await?;
-
-    // Fan the committed batch out to registered perception consumers (zones, ANPR/entry, future
-    // apps). The kernel does not know or branch on which apps exist — each consumer self-selects by
-    // task_type. Engines that need trustworthy timing use server time, not the worker timestamp.
-    //
-    // Durability: fan-out happens after commit, so a crash here would otherwise drop the consumer
-    // notification. `fan_out` claims each (consumer, frame) at-most-once; on success we mark the
-    // outbox batch fanned, and the `fanout` drainer replays any batch left un-fanned by a crash.
-    let batch = crate::services::consumer::DetectionBatch {
-        camera_id: &body.camera_id,
-        site_id: cam.site_id.as_deref(),
-        task_type: &body.task_type,
-        detections: &body.detections,
-        timestamp: ts,
-    };
-    let fanned = crate::services::consumer::fan_out(
-        &st.pool,
-        &st.consumers,
-        &batch,
-        body.frame_id.as_deref(),
-    )
-    .await;
-    if fanned {
-        if let Some(fid) = body.frame_id.as_deref() {
-            let _ = sqlx::query(
-                "UPDATE outbox SET fanned_out_at = ? \
-                 WHERE topic = 'detections' AND camera_id = ? AND frame_id = ? AND fanned_out_at IS NULL",
-            )
-            .bind(Utc::now())
-            .bind(&body.camera_id)
-            .bind(fid)
-            .execute(&st.pool)
-            .await;
-        }
-    }
-
-    if let Some(ev) = &body.event {
-        let severity = ev.severity.clone().unwrap_or_else(|| "info".into());
-        let payload = ev.payload.clone().unwrap_or_else(|| json!({}));
-        crate::repo::log_event(
-            &st.pool,
-            Some(&body.camera_id),
-            &ev.event_type,
-            &severity,
-            payload,
-        )
-        .await?;
-    }
-
-    Ok(Json(json!({ "detections_ingested": inserted })))
+    Ok(Json(json!({ "detections_ingested": outcome.inserted })))
 }
 
 fn parse_opt_ts(s: &Option<String>, field: &str) -> AppResult<Option<chrono::DateTime<Utc>>> {
@@ -639,7 +518,10 @@ mod tests {
 
     #[test]
     fn max_ingest_detections_bound_is_stable() {
-        assert_eq!(MAX_INGEST_DETECTIONS, 1000);
+        assert_eq!(
+            crate::services::perception_ingest::MAX_INGEST_DETECTIONS,
+            1000
+        );
     }
 
     async fn test_state() -> AppState {

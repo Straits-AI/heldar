@@ -26,3 +26,8 @@ pub mod routes;
 pub mod services;
 pub mod state;
 pub mod util;
+
+/// Re-exported for app crates (entry/movement/search) that hold the kernel's shared egress client
+/// (e.g. the gate actuator) — keeps them pinned to the kernel's reqwest version without declaring
+/// their own dependency.
+pub use reqwest;
