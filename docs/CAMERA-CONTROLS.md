@@ -91,6 +91,13 @@ the low-CPU alternative to server-side zones where the hardware supports it:
   don't touch keep their device state). **Motion** exposes the arm switch + sensitivity
   (`GET/PUT .../control/motion`); the motion grid layout itself stays on-device (full-frame by
   default). Coordinates are normalized 0..1 in our API; the device speaks 0..1000.
+- **Firmware truths (verified live on a DS-2CD3T56WDV3-L, encoded in the error messages):**
+  intrusion regions must have **exactly 4 vertices**; single-scene models
+  (`isSupportMultiScene=false`) accept region geometry only on **slot 1** (all four line slots
+  work); and the per-rule `enabled` flag is cosmetic on such firmware — the **master** arm switch
+  (what the Device panel chips toggle) plus valid geometry is what arms a rule (confirmed: a drawn
+  line fired a real `camera_line_crossing` event through the ingestion pipeline with the per-rule
+  flag still reading false).
 - **Ingest events** (per-camera `native_events_enabled`, the "Ingest events" toggle): the kernel
   keeps one connection to the device's event notification stream
   (`/ISAPI/Event/notification/alertStream`) per opted-in camera (`services/camera_events.rs`).
