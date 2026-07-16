@@ -1125,6 +1125,16 @@ origin inherits the suppression instead of restarting the clock and firing a fre
 creation is idempotent per (camera, name) — a provisioning re-POST returns the existing zone rather
 than stacking a duplicate that doubles every event.
 
+**Stage-3 completions (2026-07, #39/#40).** The sampler allocator grants `(fps, width)` pairs: a
+**resolution ladder** steps pressured cameras down (floor fps at 75%/50% width, quadratically
+scaled budget cost, ≥320px) before any camera is shed — degraded sight beats blindness; extreme
+scarcity sheds from the bottom of the priority order. Zones gained a **`line` kind** (2-point
+polyline, directional `cross_ab`/`cross_ba` events via proper segment-intersection on the ground-
+point movement, `config.direction` filter), **live occupancy** (`zone_occupancy` write-behind
+table + `GET /zones/occupancy`), **bucketed aggregates** (`GET /zone-events/aggregates`), a
+`track_id` filter, and `segment_id` on zone-event listings (query-time correlation to the recorded
+timeline for playback links). Homography stays out of scope pending a calibration UX.
+
 ### 16.3 Event emission + evidence (`ZoneEngine::emit`)
 
 For each transition the engine writes **two** records and (on entry) captures
