@@ -297,12 +297,19 @@ async fn resolve_token(
                 tracing::error!(api_key = %id, role = %role, "auth: api key has unparseable role; denying");
                 return Ok(None);
             };
-            // Best-effort last-used stamp (does not gate the request).
-            let _ = sqlx::query("UPDATE api_keys SET last_used_at = ? WHERE id = ?")
-                .bind(now)
-                .bind(&id)
-                .execute(pool)
-                .await;
+            // Best-effort last-used stamp (does not gate the request). Debounced to once a
+            // minute per key: the AI worker authenticates every request with its key, and an
+            // unconditional UPDATE put a write on SQLite's single writer for every poll —
+            // observed live stalling 1–2s each under recorder/ingest write load.
+            let _ = sqlx::query(
+                "UPDATE api_keys SET last_used_at = ?
+                 WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)",
+            )
+            .bind(now)
+            .bind(&id)
+            .bind(now - Duration::minutes(1))
+            .execute(pool)
+            .await;
             return Ok(Some(Principal {
                 id,
                 name,
@@ -339,11 +346,16 @@ async fn resolve_token(
             tracing::error!(user = %r.uid, role = %r.role, "auth: user has unparseable role; denying");
             return Ok(None);
         };
-        let _ = sqlx::query("UPDATE sessions SET last_used_at = ? WHERE id = ?")
-            .bind(now)
-            .bind(&r.sid)
-            .execute(pool)
-            .await;
+        // Debounced like the api-key stamp (idle timeouts are measured in minutes, so 1-minute
+        // granularity on last_used_at is lossless for the idle check and spares the SQLite writer).
+        let _ = sqlx::query(
+            "UPDATE sessions SET last_used_at = ?
+             WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)",
+        )
+        .bind(now)
+        .bind(&r.sid)
+        .execute(pool)
+        .await;
         return Ok(Some(Principal {
             id: r.uid,
             name: r.display_name.unwrap_or_default(),
