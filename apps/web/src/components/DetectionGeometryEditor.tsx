@@ -312,7 +312,7 @@ export function IntrusionEditor({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <span className="font-mono text-[10px] uppercase tracking-micro text-fg-muted">
           Intrusion — click to add points for region {sel?.id} ({draft.length} pt
-          {draft.length === 1 ? "" : "s"}), then Finish
+          {draft.length === 1 ? "" : "s"}), then Finish — most models require exactly 4
         </span>
         <div className="flex gap-1">
           {cfg.regions.map((r, i) => (
