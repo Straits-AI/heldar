@@ -1128,9 +1128,15 @@ frame → YOLO boxes → ByteTrack track_id             (per task thread, state 
 ```
 
 - **Stride + dedup semantics.** A per-track monotonic-clock gate on the instance
-  embeds each track on first sight and then every `stride_seconds` (default 10);
-  entries idle for more than 10 minutes are pruned. **Untracked boxes are
-  skipped** — without a track identity there is nothing to stride against.
+  embeds each track on first sight and then every `stride_seconds` (default 10) —
+  **but only while it moves**: once the stride elapses, a track whose bbox has
+  shifted less than `static_epsilon` since its last embed is skipped (static
+  suppression, mirroring the zone engine's knob), so a parked car doesn't accrete
+  thousands of near-identical vectors and thumbs per day. Even a static track is
+  re-embedded every `static_refresh_seconds` (default 1 h) so a permanently
+  parked object stays in the index after its older rows age out on the retention
+  TTL. Idle gate entries are pruned. **Untracked boxes are skipped** — without a
+  track identity there is nothing to stride against.
   Redelivery dedup is kernel-side via the unique `(camera, frame_id, track_id)`
   index (§5.6), so retries never double-index a crop.
 - **Posts NO detections — by design.** `analyze()` returns an empty detection
@@ -1153,6 +1159,9 @@ Per-task `config` keys (all optional):
 | `conf` | `0.35` | min box confidence to consider a crop |
 | `classes` | `[1, 2, 3, 5, 7]` | COCO classes to embed — bicycle/car/motorcycle/bus/truck. **Person (0) is deliberately excluded by default** (privacy posture; person/face re-id embeddings are an explicit v1 non-goal) |
 | `stride_seconds` | `10` | re-embed cadence per track |
+| `static_suppression` | `true` | skip the stride refresh while the track hasn't moved (max abs bbox delta < `static_epsilon`) |
+| `static_epsilon` | `0.02` | normalized-bbox movement threshold for "static" (same default as zones) |
+| `static_refresh_seconds` | `3600` | slow re-embed floor for static tracks (keeps them in the index across the retention TTL) |
 | `min_box_px` | `24` | skip boxes narrower/shorter than this many pixels (tiny crops embed to noise) |
 | `clip_model` | `ViT-B-32` | open_clip architecture |
 | `clip_pretrained` | `openai` | open_clip pretrained tag |

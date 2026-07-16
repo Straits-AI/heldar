@@ -54,8 +54,9 @@ posts results back.
   default — person embedding is deliberately **off** as a privacy posture; opt
   in via `classes`), crops each tracked box, and embeds the crops with
   [open_clip](https://github.com/mlfoundations/open_clip) in **one batched
-  forward pass** — on first sight of a track and every `stride_seconds`
-  thereafter. Vectors (plus a small JPEG thumb for the UI) are POSTed to
+  forward pass** — on first sight of a track and, while it keeps moving, every
+  `stride_seconds` thereafter (a static object is not re-embedded until it moves
+  again, apart from a slow hourly refresh — `static_suppression`, on by default). Vectors (plus a small JPEG thumb for the UI) are POSTed to
   `POST {API}/api/v1/ai/embeddings`; the analyzer emits **no detections**, so
   indexing never double-fires zone/entry consumers — pair it with a
   `detection` task if you also want boxes. One CLIP model is shared
@@ -170,6 +171,9 @@ The `embedding` analyzer (`EmbeddingAnalyzer`) reads these keys (all optional):
 | `conf` | `0.35` | Minimum box confidence to consider a crop |
 | `classes` | `[1, 2, 3, 5, 7]` | Classes to embed (bicycle/car/motorcycle/bus/truck; person deliberately excluded — opt in explicitly) |
 | `stride_seconds` | `10` | Re-embed each track this often (always embeds on first sight) |
+| `static_suppression` | `true` | Skip the stride refresh while a track hasn't moved (bbox delta < `static_epsilon`) |
+| `static_epsilon` | `0.02` | Normalized bbox-movement threshold below which a track counts as static |
+| `static_refresh_seconds` | `3600` | Re-embed even a static track this often (survives retention TTL) |
 | `min_box_px` | `24` | Skip boxes narrower or shorter than this many pixels |
 | `clip_model` | `ViT-B-32` | open_clip architecture |
 | `clip_pretrained` | `openai` | open_clip pretrained tag |

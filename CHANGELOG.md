@@ -46,7 +46,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   similarity-ranked detection crops (score, label, camera, timestamp, crop thumb) with a one-click
   Playback deep-link (±60 s around the hit — Playback now auto-opens from URL params). Under it: a new
   `embedding` worker task (own YOLO+ByteTrack; vehicles by default, the person class deliberately
-  excluded) embeds tracked detection crops through open_clip (ViT-B/32) on a per-track stride and
+  excluded) embeds tracked detection crops through open_clip (ViT-B/32) on a per-track stride —
+  with static-object suppression (`static_suppression`/`static_epsilon`/`static_refresh_seconds`,
+  mirroring the zone engine) so a parked car doesn't accrete near-identical vectors every stride — and
   POSTs them to a new kernel store (`POST /api/v1/ai/embeddings`, migration `0010`, idempotent per
   (camera, frame, track), crop thumbs served from `/media/snapshots/`); query vectors ride a
   **pull-only** `embed_queries` queue the worker polls ~1 s (`GET /api/v1/ai/embed-queries` + a result

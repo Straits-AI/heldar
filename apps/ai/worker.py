@@ -79,6 +79,7 @@ import base64
 import io
 import json
 import logging
+import math
 import os
 import random
 import signal
@@ -89,7 +90,7 @@ import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
 
 import numpy as np
@@ -1244,6 +1245,14 @@ class EmbeddingAnalyzer(Analyzer):
       * ``classes``         — class names/indices to embed (default ``[1, 2, 3, 5, 7]`` =
                               bicycle/car/motorcycle/bus/truck; person deliberately excluded).
       * ``stride_seconds``  — re-embed cadence per track (default ``10``).
+      * ``static_suppression`` — skip the stride refresh while a track hasn't moved (default
+                              ``True``; mirrors the zone engine's knob). A parked car otherwise
+                              burns thousands of near-identical vectors + thumbs per day.
+      * ``static_epsilon``  — normalized bbox movement (max |Δ| over x/y/w/h) below which a
+                              track counts as static (default ``0.02``, same as zones).
+      * ``static_refresh_seconds`` — even a static track is re-embedded this often (default
+                              ``3600``) so a permanently parked object re-enters the index
+                              after its old rows age out on the retention TTL.
       * ``min_box_px``      — skip boxes narrower/shorter than this many pixels (default ``24``).
       * ``clip_model``      — open_clip architecture (default ``ViT-B-32``).
       * ``clip_pretrained`` — open_clip pretrained tag (default ``openai``).
@@ -1294,9 +1303,30 @@ class EmbeddingAnalyzer(Analyzer):
                     "no resolvable `classes` for the embedding task; refusing to embed every class"
                 )
         self.stride_seconds = max(0.0, float(self.config.get("stride_seconds", 10)))
+        self.static_suppression = bool(self.config.get("static_suppression", True))
+        eps = self.config.get("static_epsilon", 0.02)
+        try:
+            eps = float(eps)
+        except (TypeError, ValueError):
+            eps = 0.02
+        self.static_epsilon = eps if math.isfinite(eps) and eps > 0 else 0.02
+        self.static_epsilon = min(max(self.static_epsilon, 0.001), 0.5)
+        # A static track still refreshes on this slow floor: without it, a permanently parked
+        # object's only embeddings would age out on the retention TTL and it would silently
+        # disappear from semantic search.
+        refresh = self.config.get("static_refresh_seconds", 3600)
+        try:
+            refresh = float(refresh)
+        except (TypeError, ValueError):
+            refresh = 3600.0
+        if not math.isfinite(refresh) or refresh <= 0:
+            refresh = 3600.0
+        self.static_refresh_seconds = max(self.stride_seconds, refresh)
         # The stride gate's idle eviction must outlast the stride itself, or a continuously
         # visible track with a long stride would be re-embedded every eviction instead.
-        self._track_idle_s = max(self._TRACK_IDLE_S, 2.0 * self.stride_seconds)
+        self._track_idle_s = max(
+            self._TRACK_IDLE_S, 2.0 * self.stride_seconds, 2.0 * self.static_refresh_seconds
+        )
         self.min_box_px = float(self.config.get("min_box_px", 24))
         self.thumb_max_px = int(self.config.get("thumb_max_px", 320))
         self.clip = _get_clip_backend(
@@ -1304,7 +1334,9 @@ class EmbeddingAnalyzer(Analyzer):
             str(self.config.get("clip_pretrained", "openai")),
             self.device,
         )
-        self._last_embedded: Dict[str, float] = {}  # track_id -> monotonic time of last embed
+        # track_id -> (monotonic time of last embed, bbox at last embed) — the stride gate plus
+        # the static-suppression reference position.
+        self._last_embedded: Dict[str, Tuple[float, Optional[List[float]]]] = {}
         self.log.info(
             "embedding loaded weights=%s device=%s clip=%s stride=%.0fs classes=%s",
             self.weights,
@@ -1348,14 +1380,27 @@ class EmbeddingAnalyzer(Analyzer):
                 if box.id is None:
                     continue  # untracked box: no identity to stride-gate on
                 track_id = str(int(box.id.item()))
-                last = self._last_embedded.get(track_id)
-                if last is not None and now - last < self.stride_seconds:
+                state = self._last_embedded.get(track_id)
+                if state is not None and now - state[0] < self.stride_seconds:
                     continue
                 x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
                 if x2 - x1 < self.min_box_px or y2 - y1 < self.min_box_px:
                     continue  # too small for a useful embedding
                 bbox = norm_bbox(x1, y1, x2, y2, ow, oh)
                 if bbox is None:
+                    continue
+                # Static suppression (mirrors the zone engine): the stride has elapsed, but if
+                # the box hasn't moved since the last embed there is nothing new to index — a
+                # parked car must not accrete near-identical vectors every stride. The slow
+                # refresh floor keeps even a permanently static object present in the index
+                # after its older rows age out on the retention TTL.
+                if (
+                    self.static_suppression
+                    and state is not None
+                    and state[1] is not None
+                    and now - state[0] < self.static_refresh_seconds
+                    and max(abs(a - b) for a, b in zip(bbox, state[1])) < self.static_epsilon
+                ):
                     continue
                 cls_idx = int(box.cls.item())
                 label = self.names.get(cls_idx, str(cls_idx))
@@ -1370,7 +1415,7 @@ class EmbeddingAnalyzer(Analyzer):
         vecs = self.clip.encode_images([crop for crop, _, _, _ in due])
         items: List[EmbeddingItem] = []
         for (crop, label, bbox, track_id), vec in zip(due, vecs):
-            self._last_embedded[track_id] = now
+            self._last_embedded[track_id] = (now, bbox)
             items.append(
                 EmbeddingItem(
                     vec=vec,
@@ -1399,7 +1444,9 @@ class EmbeddingAnalyzer(Analyzer):
 
     def _prune_stride_gate(self, now: float) -> None:
         stale = [
-            tid for tid, ts in self._last_embedded.items() if now - ts > self._track_idle_s
+            tid
+            for tid, (ts, _bbox) in self._last_embedded.items()
+            if now - ts > self._track_idle_s
         ]
         for tid in stale:
             del self._last_embedded[tid]

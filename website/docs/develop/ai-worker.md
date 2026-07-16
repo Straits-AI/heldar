@@ -240,7 +240,8 @@ post its results, and write a consumer for it (see
 
 The reference worker also ships an `embedding` analyzer (YOLO + ByteTrack +
 open_clip; vehicle classes only by default - person is deliberately excluded)
-that embeds each track on first sight and then every `stride_seconds`, and
+that embeds each track on first sight and then every `stride_seconds` while it
+moves (static objects are suppressed until they move again), and
 posts the vectors through the optional endpoints above instead of
 `/api/v1/ai/events` - it emits no detections, so it never double-fires the
 zone or access-control consumers. A companion `EmbedQueryWorker` thread polls

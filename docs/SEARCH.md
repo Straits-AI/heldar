@@ -491,7 +491,9 @@ semantic search gets **no identity loophole**.
   placeholder and every semantic search answers **503**.
 - **An `embedding` AI task** on each camera to index. The analyzer runs its own
   YOLO + ByteTrack, embeds each track's crop on first sight and then every
-  `stride_seconds` (default 10 s), and posts vectors + JPEG crop thumbs to the kernel.
+  `stride_seconds` (default 10 s) **while it moves** — static objects are not
+  re-embedded until they move again (hourly refresh floor) — and posts vectors +
+  JPEG crop thumbs to the kernel.
   Default classes are **vehicles only** — person crops are deliberately not embedded
   (privacy posture).
 - **Warm-up:** CLIP loads lazily on the first query, so **the first semantic search after
