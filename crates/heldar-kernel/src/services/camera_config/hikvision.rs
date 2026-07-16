@@ -713,16 +713,28 @@ impl CameraConfigProvider for HikVisionIsapiClient {
             .isapi_request(Method::PUT, FIELD_DETECTION_PATH, Some(body))
             .await;
         if let Err(e) = res {
-            // Single-scene firmwares (isSupportMultiScene=false) refuse geometry on slots > 1
-            // with a bare "Invalid XML Content" — translate to something an operator can act on.
-            if e.to_string().contains("Invalid XML Content")
-                && cfg.regions.iter().any(|r| r.id > 1 && !r.points.is_empty())
-            {
-                return Err(AppError::BadRequest(
-                    "the device rejected the region write — this camera supports a single \
-                     intrusion region (slot 1); draw there instead"
-                        .into(),
-                ));
+            // Firmwares reject geometry they can't hold with a bare "Invalid XML Content".
+            // Verified live on a DS-2CD3T56WDV3-L: regions must have EXACTLY 4 vertices, and
+            // single-scene models (isSupportMultiScene=false) accept geometry only on slot 1.
+            // Translate to something an operator can act on.
+            if e.to_string().contains("Invalid XML Content") {
+                let mut hints: Vec<&str> = Vec::new();
+                if cfg
+                    .regions
+                    .iter()
+                    .any(|r| !r.points.is_empty() && r.points.len() != 4)
+                {
+                    hints.push("this model requires exactly 4-point regions");
+                }
+                if cfg.regions.iter().any(|r| r.id > 1 && !r.points.is_empty()) {
+                    hints.push("single-scene models only support region slot 1");
+                }
+                if !hints.is_empty() {
+                    return Err(AppError::BadRequest(format!(
+                        "the device rejected the region geometry — {}",
+                        hints.join("; ")
+                    )));
+                }
             }
             return Err(e);
         }
