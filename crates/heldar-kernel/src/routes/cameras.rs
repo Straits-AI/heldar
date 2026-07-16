@@ -433,6 +433,19 @@ async fn delete_camera(
         .bind(&id)
         .execute(&st.pool)
         .await;
+    // Unlink this camera's embedding crop thumbs BEFORE the cameras delete: the embeddings rows
+    // cascade away with the camera, and the rows are the only reference to the thumb files.
+    let emb_evidence: Vec<(Option<String>,)> =
+        sqlx::query_as("SELECT evidence_path FROM embeddings WHERE camera_id = ?")
+            .bind(&id)
+            .fetch_all(&st.pool)
+            .await
+            .unwrap_or_default();
+    for (ev,) in &emb_evidence {
+        if let Some(name) = ev.as_deref().and_then(|u| u.rsplit('/').next()) {
+            let _ = tokio::fs::remove_file(st.cfg.snapshots_dir.join(name)).await;
+        }
+    }
     sqlx::query("DELETE FROM cameras WHERE id = ?")
         .bind(&id)
         .execute(&st.pool)

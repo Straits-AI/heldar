@@ -16,6 +16,10 @@ pub enum AppError {
     Unauthorized(String),
     #[error("{0}")]
     Forbidden(String),
+    /// A required backend is temporarily missing (e.g. no embedding worker answering) — 503 with
+    /// a Retry-After hint, like the DB-busy mapping below.
+    #[error("{0}")]
+    Unavailable(String),
     #[error(transparent)]
     Db(#[from] sqlx::Error),
     #[error(transparent)]
@@ -32,6 +36,7 @@ impl IntoResponse for AppError {
             AppError::Conflict(m) => (StatusCode::CONFLICT, m),
             AppError::Unauthorized(m) => (StatusCode::UNAUTHORIZED, m),
             AppError::Forbidden(m) => (StatusCode::FORBIDDEN, m),
+            AppError::Unavailable(m) => (StatusCode::SERVICE_UNAVAILABLE, m),
             AppError::Db(sqlx::Error::RowNotFound) => {
                 (StatusCode::NOT_FOUND, "resource not found".to_string())
             }

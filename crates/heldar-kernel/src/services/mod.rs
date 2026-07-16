@@ -10,6 +10,7 @@ pub mod db_maintenance;
 pub mod discovery;
 #[cfg(feature = "smtp")]
 pub mod email;
+pub mod embeddings;
 pub mod fanout;
 pub mod fleet_register;
 pub mod health;

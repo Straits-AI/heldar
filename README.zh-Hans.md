@@ -39,6 +39,8 @@ scripts/run_stack.sh                 # MediaMTX + 核心服务 (http://localhost
 
 **远程访问**（在任意网络下，无需应用程序，即使在 CGNAT 之后）：设备主动向外拨出 WebRTC 会合连接，完整仪表盘在浏览器中运行 —— 包括实时多路摄像头、录像回放和配置管理 —— 采用双重认证门控模型，内核始终是唯一的 RBAC 权威。选用说明与设计详见 [`docs/REMOTE-ACCESS.md`](docs/REMOTE-ACCESS.md)；面向公网的加固措施（认证、TLS、密钥、封锁、凭证加密、Turnstile）详见 [`docs/PRODUCTION.md`](docs/PRODUCTION.md)。
 
+**语义搜索**：按语义检索已存储的录像 —— 输入一段文字描述（例如“红色皮卡”）或拖入一张照片，即可获得按相似度排序的检测裁剪图，并可一键跳转到对应回放。排序基于 AI 工作进程计算的 CLIP 嵌入向量（可选安装 `requirements-embed.txt` 附加依赖）—— 完全本地运行，不依赖云端：[`docs/SEARCH.md`](docs/SEARCH.md)。
+
 接入摄像头（提供地址和凭证；RTSP URL 由厂商模板自动构建）：
 
 ```bash

@@ -16,9 +16,14 @@
 //!
 //! It is a read-only query layer over stored kernel/app data — not a DetectionConsumer; it owns only a
 //! small query log (audit/history) and its routes, and is composed by the server. Identity-bearing
-//! queries are audited. Open-vocabulary VLM enrichment + event/clip embedding vector-retrieval are a
-//! documented future seam (they need an embedding/VLM worker); this stage ships the deterministic
-//! structured + NL-plan + proof core.
+//! queries are audited.
+//!
+//! **Semantic retrieval (issue #38).** `POST /api/v1/search/semantic` ranks the kernel's stored
+//! detection-crop embeddings (CLIP, produced by the AI worker's `embedding` task) by cosine
+//! similarity to a text or image query — the query itself is embedded via the kernel's pull-only
+//! `embed_queries` job queue, so no worker means a clean 503, never a fabricated answer. Results
+//! are explicitly similarity-ranked retrievals, not facts, and the proof layer says so.
+//! Open-vocabulary VLM interpretation over retrieved moments remains a documented future seam.
 
 pub mod config;
 pub mod planner;
@@ -27,6 +32,7 @@ pub mod query;
 pub mod retention;
 pub mod routes;
 pub mod schema;
+pub mod semantic;
 
 /// This app's module manifest (served at `GET /api/v1/modules` so the dashboard renders its nav).
 pub fn manifest() -> heldar_kernel::modules::ModuleManifest {

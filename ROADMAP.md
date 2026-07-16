@@ -3,7 +3,7 @@
 > **Thesis:** Camera streams become structured events → events become workflows → workflows become operational intelligence.
 > We build the **media kernel first**, then AI as plugins on top, then vertical apps. The long arc is to turn continuous video into a **compressed, queryable, verifiable world memory** of a physical space — so analytical intent can be defined *after* collection, not before.
 
-> **Status (2026-07):** Stages **0–7 are all shipped (✅ DONE)** — the media kernel, observability, the AI frame sampler, detection/tracking/zones, Access Control, BakerySense, Movement intelligence, and Semantic search. What remains is the **post-Stage-7 platform work** below (WebRTC remote-access deploy steps, control-plane Phases 4–5), the research frontier (Level 4–5), and the per-stage accuracy benchmarking gated on local footage.
+> **Status (2026-07):** Stages **0–7 are all shipped (✅ DONE)** — the media kernel, observability, the AI frame sampler, detection/tracking/zones, Access Control, BakerySense, Movement intelligence, and Semantic search — and Stage 7's headline deferral has since shipped too: **CLIP embedding vector retrieval** (search by free text or image over detection-crop embeddings, #38). What remains is the **post-Stage-7 platform work** below (WebRTC remote-access deploy steps, control-plane Phases 4–5), the research frontier (Level 4–5), the remaining Stage-7 deferrals (VLM interpretation, ANN indexes, person/face embeddings), and the per-stage accuracy benchmarking gated on local footage.
 
 ---
 
@@ -395,8 +395,9 @@ is unbenchmarked on local footage — the human review gate is the safeguard (se
 Built as a fourth **vertical app**
 (`crates/heldar-search`) — and the most "composed, not welded" of all: **not** a
 `DetectionConsumer` and **not** even a background loop, but a **read-only query layer over
-kernel facts** (three HTTP routes + one query log) reading the tables Stages 3/4/6 already
-wrote (`entry_events`, `zone_events`, `breach_alerts`). One governing principle: **the LLM
+kernel facts** (four HTTP routes + one query log) reading the tables Stages 3/4/6 already
+wrote (`entry_events`, `zone_events`, `breach_alerts`) — plus, since #38, the kernel's
+`embeddings` store for the semantic route. One governing principle: **the LLM
 is a query PLANNER, never the source of truth** — answers are the executed query's rows.
 Operator/integrator guide: [`docs/SEARCH.md`](docs/SEARCH.md); implementation:
 `ARCHITECTURE.md` §20.
@@ -416,14 +417,24 @@ Operator/integrator guide: [`docs/SEARCH.md`](docs/SEARCH.md); implementation:
   `POST /api/v1/search/nl` + a `POST /api/v1/search/plan` dry-run. (`planner.rs`,
   `routes.rs`)
 - [x] **Proof layer** — every answer decomposed into claim levels
-  (observation → track → event → aggregate → inference) with evidence + confidence; the
-  NL→plan reading is the **single** step marked `fallible: true`; no layer asserts identity
+  (observation → track → event → aggregate → inference) with evidence + confidence; each
+  route marks at most **one** step `fallible: true` — the NL→plan reading (on the semantic
+  route: the similarity ranking; structured queries have none); no layer asserts identity
   or causation. (`proof.rs`)
-- [ ] **Search by vehicle image · by person crop** — **deferred** (needs event/clip
-  embeddings; see below).
+- [x] **Search by vehicle image** — shipped: an image (or free-text) query is embedded by the
+  worker's CLIP towers via a pull-only `embed_queries` queue and ranked by brute-force cosine
+  over the stored detection-crop embeddings; `POST /api/v1/search/semantic`, surfaced as the
+  dashboard's **Semantic** tab with playback deep-links. (`crates/heldar-search/src/semantic.rs`,
+  `services/embeddings.rs`, `apps/ai/worker.py`)
+- [ ] **Search by person crop** — **deferred** (privacy posture: the embedding task excludes
+  the person class by default, so no person embeddings exist to rank against; see below).
 - [ ] **VLM-based report interpretation** — **deferred** (by design; see below).
-- [ ] **Open-vocabulary enrichment + event/clip embeddings (vector retrieval)** —
-  **deferred** (a seam, not built; see below).
+- [x] **Event/clip embeddings (vector retrieval)** — shipped: the seam got its worker — an
+  `embedding` task (same `Analyzer`-style contract) embeds tracked detection crops (open_clip
+  ViT-B/32, per-track stride) into a kernel `embeddings` store (`POST /api/v1/ai/embeddings`,
+  migration `0010`), pruned on the detections TTL and shed **before** detections by the DB size
+  cap. **Open-vocabulary VLM enrichment stays deferred** (see below). (`services/embeddings.rs`,
+  `apps/ai/worker.py`)
 
 **Done when (status):** ✅ **Met.** An operator (or integration key) with `view` can ask a
 question in natural language — *"unknown white cars entering Gate B after 6pm last week"*,
@@ -434,21 +445,34 @@ filters are available as a structured `QueryPlan`, and `/search/plan` dry-runs t
 interpretation with no execution. The design (read-only query over already-stored kernel
 tables, a default 7-day window + a fetch cap, one small query log, no ingest path / no loop /
 no decode) means a slow or failing search can affect only that request. The rule parser runs
-**fully offline**; the LLM is optional and only ever plans. **Open:** the embedding/VLM
-retrieval seam (search-by-image) is documented, not built (see deferrals).
+**fully offline**; the LLM is optional and only ever plans. The embedding retrieval seam has
+since been **built** — `POST /api/v1/search/semantic` ranks stored detection-crop embeddings by
+cosine against a text or image query, and answers `503` when no embedding-capable worker is
+running. **Open:** VLM interpretation, ANN indexes, and person/face embeddings stay deliberate
+deferrals (see below).
 
 **Deferred (honest scope):**
 
-- [ ] **Open-vocabulary VLM enrichment + event/clip EMBEDDINGS + vector retrieval** — a
-  documented **seam, not built.** They need an **embedding/VLM worker** (the same
-  `Analyzer`-style contract as the detection worker) to write embeddings the query layer
-  could rank against. This stage ships the deterministic structured + NL-plan + proof core
-  only.
-- [ ] **Search by image / vehicle crop / person crop** — depends on those embeddings, so
-  **not available**; today's search is by structured *attributes*, not visual similarity.
+- [x] **Event/clip EMBEDDINGS + vector retrieval** — shipped: the **embedding worker** the
+  seam called for exists (an `embedding` task behind the same `Analyzer`-style contract as the
+  detection worker), writing CLIP detection-crop embeddings the query layer ranks against by
+  brute-force cosine (top-k heap, 100k-candidate scan cap surfaced as `truncated`); query
+  vectors ride a pull-only `embed_queries` queue the worker polls (~1 s).
+  (`services/embeddings.rs`, `crates/heldar-search/src/semantic.rs`, `apps/ai/worker.py`)
+- [x] **Search by image / vehicle crop** — shipped: `POST /api/v1/search/semantic` takes free
+  text **or** an image and returns similarity-ranked crops with evidence thumbs + playback
+  pointers; the proof ladder marks the **ranking** as the fallible inference, and the UI frames
+  results as similarity-ranked, never facts. **Person-crop search stays deferred** — the
+  embedding task excludes the person class by default (privacy posture; adding person
+  embeddings needs the same explicit legal/consent basis as Stage 6, not just engineering).
+- [ ] **Open-vocabulary VLM enrichment** — still **not built**: no VLM writes open-vocabulary
+  attributes or captions onto events; retrieval is CLIP similarity over detection crops only.
 - [ ] **VLM-based report interpretation** — intentionally absent: the proof layer reports
   deterministic aggregates, **not** generated prose (the LLM plans, it never narrates the
   answer).
+- [ ] **ANN indexes** — deliberately absent: ranking is a plain brute-force cosine scan,
+  measured first; an ANN index is warranted only when scan latency on real deployments
+  demands it.
 - [ ] **LLM planner is optional and untested without a live endpoint** — exercised only when
   `HELDAR_SEARCH_LLM_URL` is configured; the default and fallback path is the rule parser.
 - [ ] **Rule parser is best-effort** — it recognizes its keyword patterns (colour/type/
@@ -464,19 +488,22 @@ retrieval seam (search-by-image) is documented, not built (see deferrals).
 | Searchable visual event memory (who/what/where/when) | ✅ | `query.rs` structured + NL search over `entry_events`/`zone_events`/`breach_alerts` |
 | Natural-language search, **LLM as query planner** | ✅ | `planner.rs` (offline rules default + optional LLM seam, falls back) |
 | Search by plate / object attributes | ✅ | `QueryPlan` filters + deterministic executor |
-| Search by vehicle/person image | ◻ deferred | needs event/clip embeddings (embedding/VLM worker) |
+| Search by vehicle/person image | ◑ image/vehicle shipped; person crop deferred (privacy) | `semantic.rs` (`POST /api/v1/search/semantic`); worker `embedding` task excludes the person class |
 | VLM-based report interpretation | ◻ deferred | by design — proof reports deterministic aggregates, not prose |
-| Open-vocab enrichment + embeddings / vector retrieval | ◻ deferred | a seam; needs an embedding/VLM worker |
-| Proof layer (claim levels + evidence + confidence) | ✅ | `proof.rs` (obs→track→event→aggregate→inference; NL→plan = the only fallible step) |
+| Open-vocab enrichment + embeddings / vector retrieval | ◑ embeddings + cosine vector retrieval shipped; VLM enrichment deferred | `services/embeddings.rs` (store + top-k), `semantic.rs`, worker `embedding` task |
+| Proof layer (claim levels + evidence + confidence) | ✅ | `proof.rs` (obs→track→event→aggregate→inference; NL→plan / semantic ranking = the only fallible step) |
 
-> **Engineering is production-grade; the embedding/VLM retrieval layer is a deliberate
-> seam.** Same posture as Stages 3–6: the systems work (the `QueryPlan`, the deterministic
-> time-bounded executor, the offline rule parser + optional LLM planner-with-fallback, the
-> proof/claim ladder, the search log + identity-query audit, the RBAC-gated routes) is
-> complete; visual/embedding retrieval is documented future work needing an embedding/VLM
-> worker. This is **Level 3 → 4** (event memory → latent world memory): a typed,
-> evidence-backed, deterministic query layer whose **only** inference — reading the question
-> — is surfaced, fallible, and decoupled from the answer.
+> **Engineering is production-grade; the embedding retrieval seam is now built; the VLM
+> layer stays a deliberate deferral.** Same posture as Stages 3–6: the systems work (the
+> `QueryPlan`, the deterministic time-bounded executor, the offline rule parser + optional
+> LLM planner-with-fallback, the proof/claim ladder, the search log + identity-query audit,
+> the RBAC-gated routes — and now the CLIP embedding store, the pull-only query queue, and
+> the brute-force cosine ranker) is complete; VLM interpretation, ANN indexes, and
+> person/face embeddings are documented future work, and retrieval *accuracy* on local
+> footage is the same unbenchmarked evaluation task as every stage before it. This is
+> **Level 3 → 4** (event memory → latent world memory): a typed, evidence-backed query layer
+> whose inferences — the question-reading, and now the similarity ranking — are surfaced,
+> fallible, and decoupled from the stored facts.
 
 ---
 
@@ -498,6 +525,7 @@ The staged plan above ends at semantic search, but the platform kept moving. The
 | **Kernel-owned live transcode** (supervised publisher, per-camera `live_warm`, runtime engine setting `GET`/`PUT /api/v1/system/transcode`) | ✅ DONE | `services/live_publisher.rs`, `migrations/0006_live_warm.sql`, `routes/system.rs` |
 | **Self-bounding DB size cap** (`HELDAR_MAX_DB_GB` + background `auto_vacuum` conversion, dashboard-managed) | ✅ DONE (takes effect on box redeploy) | `services/retention.rs`, `docs/PRODUCTION.md` |
 | **Worker sharding** (`GET /api/v1/ai/tasks?worker_id=`, poll-as-heartbeat lease) | ✅ DONE | `routes/ai.rs`, `migrations/0004_ai_workers.sql`, `docs/AI-WORKERS.md` §5.1 |
+| **CLIP semantic retrieval** (#38: worker `embedding` task over detection crops, kernel embeddings store + pull-only `embed_queries` queue, brute-force cosine `POST /api/v1/search/semantic`, dashboard Semantic tab) — closes Stage 7's embedding deferral | ✅ DONE | `services/embeddings.rs`, `migrations/0010_embeddings.sql`, `crates/heldar-search/src/semantic.rs`, `apps/ai/worker.py` |
 
 ---
 

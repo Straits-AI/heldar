@@ -4,24 +4,30 @@ This is the definitive guide to **Semantic Search** **as actually built** in
 `crates/heldar-search`: turn the platform's accumulated event facts into a queryable
 **visual-event memory** — *who / what / where / when / confidence / evidence* — answered
 by **structured search**, by **natural-language search** (a question is *planned* into a
-structured query, the plan is executed, the rows are the answer), and a **plan dry-run**,
-with a **proof layer** that decomposes every answer into claim levels with evidence and
-confidence.
+structured query, the plan is executed, the rows are the answer), by **semantic
+similarity search** (a text or example-image query, cosine-ranked over the kernel's CLIP
+embeddings of detection crops — issue #38), and a **plan dry-run**, with a **proof layer**
+that decomposes every answer into claim levels with evidence and confidence.
 
 Implementation: `query.rs` (the [`QueryPlan`](#3-the-queryplan-schema-queryrs) + the
 [deterministic executor](#4-the-deterministic-executor-queryrs)), `planner.rs` (the
 [rule parser](#5-the-rule-based-planner-the-offline-default-plannerrs) + the
 [optional LLM seam](#6-the-optional-llm-planner-the-seam-plannerrs)), `proof.rs` (the
-[claim ladder](#7-the-proof-layer-proofrs)), `routes.rs` (the
+[claim ladder](#7-the-proof-layer-proofrs)), `semantic.rs` (the
+[semantic vector search](#11-semantic-search-semanticrs)), `routes.rs` (the
 [HTTP surface](#9-http-api-surface-routesrs) + audit + log), `config.rs`
 ([env](#10-configuration-configrs)), `schema.sql` (the one query-log table), `lib.rs`
 (the governing principle). The kernel architecture is in
 [`ARCHITECTURE.md`](../ARCHITECTURE.md) §20.
 
 Stage 7 builds **entirely on stored kernel + app data** (`entry_events`, `zone_events`,
-`breach_alerts`) and adds **no ingest path, no decode, no background loop, and no new fact
-table**. It is **not** a `DetectionConsumer` and **not** a `spawn_supervised` service — it
-is a **read-only query layer over the kernel's facts**: three HTTP routes plus one small
+`breach_alerts`, and — for semantic search — the kernel's `embeddings` vectors) and adds
+**no ingest path, no decode, no background loop, and no new fact table in this app**. The
+embedding pipeline is **kernel-owned**: the `embeddings` and `embed_queries` tables live
+in a kernel migration (`0010_embeddings.sql`), and embedding ingest is the kernel's
+`POST /api/v1/ai/embeddings` (fed by the AI worker) — the semantic route only *reads* the
+result. Search is **not** a `DetectionConsumer` and **not** a `spawn_supervised` service —
+it is a **read-only query layer over the kernel's facts**: four HTTP routes plus one small
 query log (history + accountability). The kernel is unaware it exists.
 
 ---
@@ -67,10 +73,12 @@ step is **decoupled** from the data it selects.
      entry_events    — one canonical ANPR event per vehicle (plate, subject attrs, auth_status, evidence)
      zone_events     — enter/exit/dwell on polygon zones (joined to zones for `kind`)
      breach_alerts   — worked red-zone incidents (subject correlated to a plate when known)
+     embeddings      — CLIP vectors of detection crops (KERNEL-owned; written by the AI worker
+                       via POST /api/v1/ai/embeddings — search never writes them)
         │
         │  ── search READS these tables; it never sees RTSP, frames, or the ingest batch ──
         ▼
-   heldar-search (three HTTP routes, no loop, no consumer)
+   heldar-search (four HTTP routes, no loop, no consumer)
 
    POST /api/v1/search/events   structured ─┐
                                             ├─► QueryPlan ─► execute() ─► rows ─► proof ─► response
@@ -80,6 +88,13 @@ step is **decoupled** from the data it selects.
 
    POST /api/v1/search/plan      question ─► plan_llm()/parse_rules() ─► {plan}   (dry-run: NO execution, NO data)
 
+   POST /api/v1/search/semantic  text|image ─► embed_queries row (kernel queue)
+                                                    │  claimed + embedded by the AI worker
+                                                    │  (CLIP, dedicated ~1 s poll)
+                                                    ▼
+                                 cosine top-k over embeddings (kernel, brute-force)
+                                                    └─► ranked hits ─► proof ─► response
+
         │
         ▼
    every search → search_log row;  plate-targeted query → kernel audit_log
@@ -88,7 +103,10 @@ step is **decoupled** from the data it selects.
 The flow for a question (`/search/nl`) is exactly: **plan → execute → prove**. `plan_llm`
 is tried first **only when an LLM URL is configured**; otherwise (and on any LLM failure)
 `parse_rules` runs. Either way `query::execute` runs the plan deterministically, and
-`proof::build` wraps the rows in the claim ladder.
+`proof::build` wraps the rows in the claim ladder. A semantic query (`/search/semantic`)
+takes the fourth road — no plan, no planner: the query itself is embedded (by the AI
+worker, through the kernel's pull-only queue) and cosine-ranked against the stored crop
+embeddings — see [§11](#11-semantic-search-semanticrs).
 
 ---
 
@@ -292,30 +310,32 @@ Two records are written for accountability. **`schema.sql`** owns exactly one ta
 CREATE TABLE IF NOT EXISTS search_log (
     id           TEXT PRIMARY KEY,        -- sl_<uuid>
     actor        TEXT,                    -- principal id
-    mode         TEXT NOT NULL,           -- 'nl' | 'structured'
-    query_text   TEXT,                    -- the NL question (nl mode only)
+    mode         TEXT NOT NULL,           -- 'nl' | 'structured' | 'semantic'
+    query_text   TEXT,                    -- the NL question, or the semantic text / '[image]'
     plan         TEXT NOT NULL DEFAULT '{}',  -- the executed plan (JSON)
-    planner      TEXT,                    -- 'rules' | 'llm' | 'structured'
+    planner      TEXT,                    -- 'rules' | 'llm' | 'structured' | 'clip'
     result_count INTEGER NOT NULL DEFAULT 0,
     created_at   TEXT NOT NULL
 );  -- + idx_search_log_created
 ```
 
-- **Every search is logged** to `search_log` (`/search/events` and `/search/nl`) — actor,
-  mode, the verbatim question (nl), the executed plan, the planner that produced it, and the
-  result count. This is the search history + a record of what each operator asked.
+- **Every search is logged** to `search_log` (`/search/events`, `/search/nl`, and
+  `/search/semantic`) — actor, mode, the verbatim question (nl/semantic text; `"[image]"`
+  for image queries — never the base64), the executed plan, the planner that produced it,
+  and the result count. This is the search history + a record of what each operator asked.
 - **Identity-bearing queries are audited** to the kernel `audit_log`. A query is
   identity-bearing when it **targets a specific plate** (`plan.plate.is_some()`, the main
   re-identifying handle here). For those, `auth::audit(...)` writes a
   `search_identity_query` action against the `plate` target, with `{ mode, query }` —
-  the same immutable audit trail as the Stage 6 plate-trail searches. The `/search/plan`
-  dry-run executes nothing, so it neither logs nor audits.
+  the same immutable audit trail as the Stage 6 plate-trail searches. (A semantic *text*
+  query that normalizes to a plate is audited the same way — [§11](#11-semantic-search-semanticrs).)
+  The `/search/plan` dry-run executes nothing, so it neither logs nor audits.
 
 ---
 
 ## 9. HTTP API surface (`routes.rs`)
 
-All three routes require the Stage 4 RBAC **`view`** capability
+All four routes require the Stage 4 RBAC **`view`** capability
 (`principal.require(principal.can_view(), …)`). The router takes `SearchConfig` as an
 `Extension` and is `merge`d into the server in `main.rs`.
 
@@ -324,6 +344,7 @@ All three routes require the Stage 4 RBAC **`view`** capability
 | POST | `/api/v1/search/events` | `view` | a `QueryPlan` (JSON) | **Structured search.** Execute a plan directly; logged as `mode=structured`, `planner=structured`. No inference level in the proof. |
 | POST | `/api/v1/search/nl` | `view` | `{ "query": "<question>" }` | **Natural-language search.** Plan (LLM if configured, else rules) → execute → prove; logged as `mode=nl`. Empty `query` ⇒ 400. |
 | POST | `/api/v1/search/plan` | `view` | `{ "query": "<question>" }` | **Plan dry-run.** Returns `{ query, planner, plan }` only — **no execution, no data, no log, no audit.** Use it to inspect how a question is read (trust/debug). |
+| POST | `/api/v1/search/semantic` | `view` | `{ text \| image_b64, …filters, k }` | **Semantic similarity search** ([§11](#11-semantic-search-semanticrs)). The query is embedded by the AI worker and cosine-ranked over the kernel's crop embeddings; logged as `mode=semantic`, and a plate-like text query is audited exactly like a plate search. **503** when no embedding worker is available. |
 
 The `/events` and `/nl` responses share one shape:
 
@@ -341,7 +362,9 @@ The `/events` and `/nl` responses share one shape:
 The plan and planner are **always** echoed, so the caller can see exactly what ran. To pull
 footage for any hit, take its timestamp window to the kernel clip API
 (`POST /api/v1/cameras/{camera_id}/clip`) and read its `evidence_path` snapshot — the proof
-layer's `event` level spells this out per hit.
+layer's `event` level spells this out per hit. The fourth route, `/search/semantic`,
+carries its own request/response envelope — documented in
+[§11](#11-semantic-search-semanticrs).
 
 ---
 
@@ -356,10 +379,133 @@ to run fully offline on the rule parser** (the default).
 | `HELDAR_SEARCH_LLM_API_KEY` | *(unset)* | Bearer token sent to that endpoint, if it requires one. |
 | `HELDAR_SEARCH_LLM_MODEL` | `gpt-4o-mini` | Model name passed to the endpoint. |
 | `HELDAR_SEARCH_MAX_RESULTS` | `200` (clamped `1…5000`) | Hard cap on hits returned per search; also drives the executor's internal `fetch_cap`. |
+| `HELDAR_SEARCH_EMBED_TIMEOUT_MS` | `3000` (clamped `250…30000`) | How long `/search/semantic` waits for the AI worker to embed the query before answering **503** ([§11](#11-semantic-search-semanticrs)). |
 
 ---
 
-## 11. How it composes (composed, not welded)
+## 11. Semantic search (`semantic.rs`)
+
+`POST /api/v1/search/semantic` finds moments by **visual similarity** instead of stored
+attributes: describe what you are looking for (`"red pickup truck"`) or supply an example
+image, and get back the closest **detection crops** the AI worker has embedded. It is the
+one route that searches the **latent** memory (CLIP vectors) rather than the event facts —
+and the ownership rule from the intro still holds: the `embeddings` table and the
+`embed_queries` job queue are **kernel-owned** (migration `0010_embeddings.sql`), and
+embedding ingest is the kernel's `POST /api/v1/ai/embeddings`, fed continuously by the AI
+worker. heldar-search only **reads** — it never embeds, decodes, or ingests anything
+itself.
+
+**The flow.** The route cannot embed the query itself (CLIP lives in the Python worker),
+so it goes through the kernel's pull-only queue:
+
+```
+   text | image ─► embed_queries row (kernel queue, status=pending)
+                        │   claimed by the AI worker's dedicated ~1 s poll
+                        │   (GET /api/v1/ai/embed-queries — NOT the ~10 s tasks poll)
+                        ▼
+                 CLIP text/image tower ─► POST /api/v1/ai/embed-queries/{id}/result
+                        │
+                        ▼
+   kernel brute-force cosine top-k over `embeddings`
+     (SQL prefilter: cameras / label / time window / model / dim;
+      newest-first stream, k-sized heap, 100k-candidate scan cap)
+                        │
+                        ▼
+   ranked hits (+ detection metadata joined where the detection still exists) ─► proof ─► 200
+```
+
+The route polls the queue row every 100 ms up to
+[`HELDAR_SEARCH_EMBED_TIMEOUT_MS`](#10-configuration-configrs) (default **3000 ms**). On
+timeout, a worker-side error, or no worker at all it answers **503**
+`{"error": "embedding worker offline or not ready"}` with `Retry-After: 1` — it never
+blocks a request indefinitely and never fakes an answer.
+
+**Request** (`view` cap; 12 MiB body limit; **exactly one** of `text` / `image_b64`):
+
+```jsonc
+{
+  "text": "red pickup truck",      // OR:
+  "image_b64": "<base64 image>",   // ≤ 10,000,000 b64 chars; a data:-URL prefix is tolerated
+  "from": "2026-07-15T00:00:00Z",  // optional RFC3339 — default window: last 7 days
+  "to":   "2026-07-16T00:00:00Z",  // optional
+  "cameras": ["cam1"],             // optional camera-id filter
+  "label": "car",                  // optional exact label filter
+  "k": 24                          // top-k; clamped 1…100, default 24
+}
+```
+
+**Response:**
+
+```jsonc
+{
+  "query": "red pickup truck",     // "[image]" for image queries
+  "mode": "semantic",
+  "model": "open_clip/ViT-B-32/openai",
+  "count": 17,
+  "truncated": false,              // true ⇒ the candidate scan hit its 100k-row cap —
+                                   //   the ranking covers the newest 100k candidates, not all
+  "hits": [
+    {
+      "id": "emb_...",
+      "score": 0.31,               // cosine similarity — higher = closer; NOT a probability
+      "camera_id": "cam1",
+      "timestamp": "2026-07-16T09:58:11Z",   // the observation time — feed it to playback
+      "label": "car",
+      "track_id": "7",
+      "bbox": [0.1, 0.2, 0.3, 0.4],
+      "evidence_path": "/media/snapshots/emb_....jpg",  // crop thumb; may be null
+      "detection": { "confidence": 0.87, "attributes": { ... } }  // may be null (pruned/unlinked)
+    }
+  ],
+  "proof": { ... }                 // the same claim-ladder envelope as every other route
+}
+```
+
+The dashboard's Search module drives this as its **Semantic** tab (text or image query,
+camera/time/`k` filters, ranked crop cards) and deep-links every hit to Playback with a
+±60 s window around `timestamp`.
+
+**Ranked, not facts.** This is the crucial framing difference from `/events` and `/nl`:
+a structured or NL hit is a **stored event fact**; a semantic hit is a **similarity
+ranking** — "these crops are *closest* to your query in CLIP space", nothing more. The
+`truncated` flag keeps even the ranking honest (a capped scan is disclosed, never hidden),
+and the [proof ladder](#7-the-proof-layer-proofrs) treats the **ranking itself as the
+fallible inference**: where an NL answer marks *reading the question* fallible, a semantic
+answer marks *the similarity ranking* fallible. Verify with the evidence crops; never
+treat a score as an assertion.
+
+**Log & audit — plate-search parity.** Every semantic search writes a `search_log` row
+with `mode = "semantic"` and `planner = "clip"`; `query_text` is the verbatim text, or the
+literal `"[image]"` for image queries — **the image base64 is never logged**. It exists
+only as a transient `embed_queries` row while the request is waiting, is deleted the moment
+the search returns (an hourly sweep is the backstop), and never touches `search_log` or
+`audit_log`. If the query
+text normalizes to a plate, it is audited to the kernel `audit_log` as a
+`search_identity_query`, exactly like a plate-targeted structured/NL search (§8) —
+semantic search gets **no identity loophole**.
+
+**What it needs to run (operators):**
+
+- **An AI worker with the embedding extra:** `pip install -r requirements-embed.txt` in
+  `apps/ai` (adds `open_clip_torch`). Without it, embedding tasks degrade to the safe
+  placeholder and every semantic search answers **503**.
+- **An `embedding` AI task** on each camera to index. The analyzer runs its own
+  YOLO + ByteTrack, embeds each track's crop on first sight and then every
+  `stride_seconds` (default 10 s), and posts vectors + JPEG crop thumbs to the kernel.
+  Default classes are **vehicles only** — person crops are deliberately not embedded
+  (privacy posture).
+- **Warm-up:** CLIP loads lazily on the first query, so **the first semantic search after
+  a worker (re)start may 503 while the model warms** — retry after a few seconds.
+- **Self-bounding, like everything else:** embeddings ride the detections TTL
+  (`HELDAR_DETECTION_RETENTION_HOURS`, default 168 h; crop thumbs unlinked with the rows),
+  query rows are deleted as soon as their search returns (at most 16 may be in flight —
+  extra searches get a retryable 503), and the DB size-cap sheds **transient query rows,
+  then oldest embeddings, then detections** — disposable data always goes first. The
+  semantic memory can never grow without bound.
+
+---
+
+## 12. How it composes (composed, not welded)
 
 Search is wired in `crates/heldar-server/src/main.rs` purely as a bundled app: its
 schema is applied after the kernel migrations (`heldar_search::schema::init`), its config
@@ -368,29 +514,37 @@ is **absent from the `consumers` vec** (not a `DetectionConsumer`) and has **no
 `spawn_supervised` loop** — it touches the ingest/recording/live-view path nowhere. A slow
 or failing search request can only affect that request. Adding search was a schema-init +
 a `merge` with **zero** change to the kernel — the same "kernel-open, apps-bundled" seam as
-every vertical, now as a read-only query layer over the facts the others wrote.
+every vertical, now as a read-only query layer over the facts the others wrote. Semantic
+search kept that dependency direction honest: the embedding pipeline (tables, ingest
+route, query queue, cosine top-k) was added to the **kernel** as a general capability, and
+the search app still only merges a router and reads.
 
 ---
 
-## 12. Honest scope — what's built, what's a seam
+## 13. Honest scope — what's built, what's a seam
 
 **Built and production-grade:** the `QueryPlan` schema, the deterministic time-bounded
 executor over the three kernel fact tables with the default 7-day window + Rust field
 filters + sort/limit, the transparent offline rule parser, the optional LLM planner seam
 (with sanitize + fallback), the proof/claim-ladder layer, the search log + identity-query
-audit, the RBAC-gated HTTP surface, and the structured / NL / dry-run routes.
+audit, the RBAC-gated HTTP surface, the structured / NL / dry-run routes — and, since
+issue #38, **embeddings + vector retrieval + search by image**: the `/search/semantic`
+route (§11), backed by the kernel-owned embedding pipeline (AI-worker CLIP embeddings of
+detection crops via `POST /api/v1/ai/embeddings`, the pull-only query-embedding queue,
+and a brute-force cosine top-k with the `truncated` honesty flag).
 
 **Deliberately deferred (a documented seam, not built):**
 
-- **Open-vocabulary VLM enrichment + event/clip EMBEDDINGS + vector retrieval** are a
-  **seam, not built.** They need an **embedding/VLM worker** (the same `Analyzer`-style
-  contract as the detection worker) to write embeddings the query layer could rank against.
-  This stage ships the deterministic structured + NL-plan + proof core only.
-- **Search by image / vehicle crop / person crop** depends on those embeddings and is
-  therefore **not available** — today's search is by structured *attributes* (plate, colour,
-  type, subject, auth, source, event, zone, time, camera, text), not by visual similarity.
-- **VLM-based report interpretation** (natural-language synthesis of findings) is **not**
-  here by design — the proof layer reports deterministic aggregates, not generated prose.
+- **VLM interpretation over retrieved moments** (natural-language synthesis of findings,
+  open-vocabulary enrichment of hits) is **not** here by design — the proof layer reports
+  deterministic aggregates and an honestly-flagged similarity ranking, not generated
+  prose.
+- **ANN indexes are not built.** Retrieval is a plain brute-force cosine scan
+  (newest-first, 100k-candidate cap, disclosed via `truncated`) — measure it on real
+  fleets first; an approximate index is complexity to be earned, not assumed.
+- **Person/face re-id embeddings are excluded.** The embedding analyzer's default classes
+  are vehicles only — person crops are not embedded by default (privacy posture), and no
+  face or re-id model ships.
 - **The LLM planner is optional and untested without a live endpoint.** It is exercised
   only when `HELDAR_SEARCH_LLM_URL` is configured; the default path is the rule parser.
 - **The rule parser is best-effort.** It recognizes the patterns in §5 and leaves the rest
@@ -399,7 +553,6 @@ audit, the RBAC-gated HTTP surface, and the structured / NL / dry-run routes.
   send a structured `QueryPlan` directly for full control.
 
 This applies the event-memory-to-latent-world-memory progression to search:
-a typed, evidence-backed, deterministic query layer where the **only** inference is reading
-the question, and that inference is surfaced, fallible, and decoupled from the answer.
-</content>
-</invoke>
+a typed, evidence-backed, deterministic query layer — now with a similarity-ranked latent
+memory beside it — where every inference (reading the question, ranking by similarity) is
+surfaced, marked fallible, and decoupled from the stored facts.

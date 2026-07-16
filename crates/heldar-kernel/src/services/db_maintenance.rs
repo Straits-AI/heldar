@@ -65,13 +65,79 @@ pub async fn prune_oldest_detections(pool: &SqlitePool, batch: u32) -> anyhow::R
     Ok(n)
 }
 
-/// Outcome of one `enforce_db_cap` pass.
+/// Delete the oldest `batch` embedding rows (by `created_at`) AND unlink their crop-thumb files.
+/// Embeddings are ~2 KB BLOBs, so they are shed BEFORE detections when the DB is over cap — they
+/// are derived data, and per byte they free far more space. The thumbs must be unlinked here: the
+/// age-based retention sweep discovers thumb files only through these rows, so a row deleted with
+/// its file still on disk would leak that file forever. Returns rows deleted.
+pub async fn prune_oldest_embeddings(
+    pool: &SqlitePool,
+    cfg: &Config,
+    batch: u32,
+) -> anyhow::Result<u64> {
+    let rows: Vec<(String, Option<String>)> =
+        sqlx::query_as("SELECT id, evidence_path FROM embeddings ORDER BY created_at ASC LIMIT ?")
+            .bind(batch)
+            .fetch_all(pool)
+            .await
+            .context("select oldest embeddings")?;
+    if rows.is_empty() {
+        return Ok(0);
+    }
+    for (_id, evidence) in &rows {
+        if let Some(name) = evidence.as_deref().and_then(|u| u.rsplit('/').next()) {
+            let _ = tokio::fs::remove_file(cfg.snapshots_dir.join(name)).await;
+        }
+    }
+    let placeholders = vec!["?"; rows.len()].join(",");
+    let sql = format!("DELETE FROM embeddings WHERE id IN ({placeholders})");
+    let mut q = sqlx::query(&sql);
+    for (id, _) in &rows {
+        q = q.bind(id);
+    }
+    let n = q
+        .execute(pool)
+        .await
+        .context("prune oldest embeddings")?
+        .rows_affected();
+    Ok(n)
+}
+
+/// Delete the oldest `batch` query-queue rows. These are transient request payloads (a query image
+/// can be multiple MB of base64), already deleted when their search completes and swept hourly —
+/// but if they ARE what pushed the DB over cap, they must be shed FIRST, before any real
+/// embedding/detection data is sacrificed. Returns rows deleted.
+pub async fn prune_oldest_embed_queries(pool: &SqlitePool, batch: u32) -> anyhow::Result<u64> {
+    let n = sqlx::query(
+        "DELETE FROM embed_queries WHERE id IN \
+         (SELECT id FROM embed_queries ORDER BY created_at ASC LIMIT ?)",
+    )
+    .bind(batch)
+    .execute(pool)
+    .await
+    .context("prune oldest embed queries")?
+    .rows_affected();
+    Ok(n)
+}
+
+/// Outcome of one `enforce_db_cap` pass. The shed classes are reported separately — telling an
+/// operator that detections were destroyed when only derived embeddings (or transient queue rows)
+/// were shed would materially misreport what the box sacrificed.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct DbCapReport {
+    pub embed_queries_deleted: u64,
+    pub embeddings_deleted: u64,
     pub detections_deleted: u64,
     pub final_bytes: u64,
     /// True if the DB is still over cap after we stopped (only protected data left, or no reclaim).
     pub over_cap: bool,
+}
+
+impl DbCapReport {
+    /// Total rows shed across all classes.
+    pub fn total_deleted(&self) -> u64 {
+        self.embed_queries_deleted + self.embeddings_deleted + self.detections_deleted
+    }
 }
 
 /// How many pages to try to reclaim per incremental_vacuum call — bounded so the write-lock hold stays short.
@@ -95,25 +161,33 @@ pub async fn enforce_db_cap(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<D
     checkpoint_wal(pool).await?;
     incremental_vacuum(pool, VACUUM_PAGES).await?;
     let mut size = db_size_bytes(pool).await?;
-    let mut deleted: u64 = 0;
+    let mut rep = DbCapReport::default();
 
     while size > max {
-        let n = prune_oldest_detections(pool, PRUNE_BATCH).await?;
+        // Shed disposable data first: transient query payloads, then derived embeddings, and only
+        // then the primary detections.
+        let mut n = prune_oldest_embed_queries(pool, PRUNE_BATCH).await?;
+        rep.embed_queries_deleted += n;
+        if n == 0 {
+            n = prune_oldest_embeddings(pool, cfg, PRUNE_BATCH).await?;
+            rep.embeddings_deleted += n;
+        }
+        if n == 0 {
+            n = prune_oldest_detections(pool, PRUNE_BATCH).await?;
+            rep.detections_deleted += n;
+        }
         if n == 0 {
             tracing::warn!(
                 bytes = size,
                 cap = max,
-                "db retention: over cap but no deletable detections remain (protected data only)"
+                "db retention: over cap but no deletable queue/embedding/detection rows remain (protected data only)"
             );
-            return Ok(DbCapReport {
-                detections_deleted: deleted,
-                final_bytes: size,
-                over_cap: true,
-            });
+            rep.final_bytes = size;
+            rep.over_cap = true;
+            return Ok(rep);
         }
         incremental_vacuum(pool, VACUUM_PAGES).await?;
         let new_size = db_size_bytes(pool).await?;
-        deleted += n;
         if new_size >= size {
             // No progress — reclaim can't shrink the file yet (e.g. auto_vacuum not converted).
             tracing::warn!(
@@ -121,19 +195,14 @@ pub async fn enforce_db_cap(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<D
                 cap = max,
                 "db retention: prune made no progress on file size; stopping (reclaim inactive?)"
             );
-            return Ok(DbCapReport {
-                detections_deleted: deleted,
-                final_bytes: new_size,
-                over_cap: true,
-            });
+            rep.final_bytes = new_size;
+            rep.over_cap = true;
+            return Ok(rep);
         }
         size = new_size;
     }
-    Ok(DbCapReport {
-        detections_deleted: deleted,
-        final_bytes: size,
-        over_cap: false,
-    })
+    rep.final_bytes = size;
+    Ok(rep)
 }
 
 /// Outcome of the pre-conversion free-disk check. A conversion `VACUUM` rewrites the whole DB into a
@@ -272,6 +341,20 @@ mod tests {
         sqlx::query("VACUUM").execute(&pool).await.unwrap();
         sqlx::query(
             "CREATE TABLE detections (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, blob TEXT)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        // enforce_db_cap sheds queue rows and embeddings before detections; give it the
+        // (empty) tables with the columns it touches.
+        sqlx::query(
+            "CREATE TABLE embeddings (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, vec BLOB, evidence_path TEXT)",
+        )
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "CREATE TABLE embed_queries (id TEXT PRIMARY KEY, created_at TEXT NOT NULL, payload TEXT)",
         )
         .execute(&pool)
         .await

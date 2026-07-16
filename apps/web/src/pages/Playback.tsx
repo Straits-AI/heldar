@@ -1,6 +1,6 @@
 import Hls from "hls.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { api } from "../lib/api";
 import { usePoll } from "../lib/usePoll";
 import type { PlaybackSession } from "../lib/types";
@@ -34,10 +34,33 @@ export function Playback() {
   const cameras = usePoll(() => api.listCameras(), 30000);
   const camList = cameras.data ?? [];
 
+  // Deep-link prefill (?camera=<id>&from=<iso>&to=<iso> — e.g. a semantic-search hit's "Playback"
+  // button): seed the manual controls and auto-open the session once on mount. With no (or
+  // invalid) params this is null and the page behaves exactly as before. Read once — later URL
+  // churn must not re-seed or re-open.
+  const [searchParams] = useSearchParams();
+  const deepLink = useMemo(() => {
+    const camera = searchParams.get("camera");
+    const fromP = searchParams.get("from");
+    const toP = searchParams.get("to");
+    if (!camera || !fromP || !toP) return null;
+    const fromD = new Date(fromP);
+    const toD = new Date(toP);
+    if (isNaN(fromD.getTime()) || isNaN(toD.getTime()) || fromD >= toD) return null;
+    // datetime-local fields are minute-granular: `from` floors via toLocalInput; ceil `to` to the
+    // next whole minute so the linked instant's trailing footage is never truncated away.
+    return { camera, from: fromD, to: new Date(Math.ceil(toD.getTime() / 60_000) * 60_000) };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   const now = useMemo(() => new Date(), []);
-  const [from, setFrom] = useState(() => toLocalInput(new Date(now.getTime() - 30 * 60_000)));
-  const [to, setTo] = useState(() => toLocalInput(now));
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [from, setFrom] = useState(() =>
+    toLocalInput(deepLink ? deepLink.from : new Date(now.getTime() - 30 * 60_000)),
+  );
+  const [to, setTo] = useState(() => toLocalInput(deepLink ? deepLink.to : now));
+  const [selected, setSelected] = useState<Set<string>>(
+    () => new Set(deepLink ? [deepLink.camera] : []),
+  );
 
   const [sessions, setSessions] = useState<PlaybackSession[] | null>(null);
   const [opening, setOpening] = useState(false);
@@ -134,6 +157,16 @@ export function Playback() {
       setOpening(false);
     }
   }
+
+  // Auto-open a deep-linked session exactly once, exactly as the manual Open button would —
+  // state was seeded from the URL above, so `open()` sees the same inputs a user would submit.
+  const autoOpened = useRef(false);
+  useEffect(() => {
+    if (!deepLink || autoOpened.current) return;
+    autoOpened.current = true;
+    void open();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Attach an hls.js VOD player to each session's <video> once they render.
   useEffect(() => {

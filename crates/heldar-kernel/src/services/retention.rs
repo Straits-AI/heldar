@@ -666,6 +666,52 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
             "retention: pruned old consumer-fanout rows"
         );
     }
+    // Prune crop embeddings on the SAME TTL as the detections they derive from (issue #38), and
+    // delete their crop-thumb evidence files. Batched like delete_aged_in_batches, but each batch
+    // unlinks its evidence before deleting the rows (the zone_events pattern below, bounded).
+    let mut emb_pruned = 0u64;
+    loop {
+        let batch: Vec<(String, Option<String>)> = sqlx::query_as(
+            "SELECT id, evidence_path FROM embeddings WHERE created_at < ? LIMIT 5000",
+        )
+        .bind(det_cutoff)
+        .fetch_all(pool)
+        .await?;
+        if batch.is_empty() {
+            break;
+        }
+        for (_id, evidence) in &batch {
+            if let Some(name) = evidence.as_deref().and_then(|u| u.rsplit('/').next()) {
+                let _ = tokio::fs::remove_file(cfg.snapshots_dir.join(name)).await;
+            }
+        }
+        let last = batch.len() < 5000;
+        for chunk in batch.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!("DELETE FROM embeddings WHERE id IN ({placeholders})");
+            let mut q = sqlx::query(&sql);
+            for (id, _) in chunk {
+                q = q.bind(id);
+            }
+            emb_pruned += q.execute(pool).await?.rows_affected();
+        }
+        if last {
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    if emb_pruned > 0 {
+        tracing::info!(
+            deleted = emb_pruned,
+            "retention: pruned old embeddings + crop thumbs"
+        );
+    }
+    // Prune the transient query-embedding queue (payloads can be multi-MB images; rows are useless
+    // minutes after the enqueuing search returned).
+    let q_pruned = crate::services::embeddings::prune_queries(pool).await?;
+    if q_pruned > 0 {
+        tracing::info!(deleted = q_pruned, "retention: pruned old embed queries");
+    }
 
     // 6) Prune old zone events and delete their evidence frames (same TTL as detections).
     let old_zone_events: Vec<(String, Option<String>)> =
@@ -818,9 +864,11 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
     //     the WAL, reclaim, and if the DB file is still over its cap shed the oldest detections
     //     (events/audit are protected). Self-bounds heldar.db the way step 3 bounds recordings.
     match crate::services::db_maintenance::enforce_db_cap(pool, cfg).await {
-        Ok(rep) if rep.detections_deleted > 0 => {
+        Ok(rep) if rep.total_deleted() > 0 => {
             tracing::info!(
-                deleted = rep.detections_deleted,
+                embed_queries_deleted = rep.embed_queries_deleted,
+                embeddings_deleted = rep.embeddings_deleted,
+                detections_deleted = rep.detections_deleted,
                 bytes = rep.final_bytes,
                 over_cap = rep.over_cap,
                 "retention: db size-cap prune"
@@ -830,7 +878,13 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
                 None,
                 "db_retention",
                 if rep.over_cap { "warning" } else { "info" },
-                json!({ "detections_deleted": rep.detections_deleted, "db_bytes": rep.final_bytes, "over_cap": rep.over_cap }),
+                json!({
+                    "embed_queries_deleted": rep.embed_queries_deleted,
+                    "embeddings_deleted": rep.embeddings_deleted,
+                    "detections_deleted": rep.detections_deleted,
+                    "db_bytes": rep.final_bytes,
+                    "over_cap": rep.over_cap
+                }),
             )
             .await;
         }
@@ -1314,6 +1368,68 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(kept, 1, "the recent detection must be retained");
+    }
+
+    /// The embeddings prune (issue #38) shares the detections TTL, unlinks crop-thumb evidence,
+    /// and the embed-queries queue is swept on its own 1 h TTL.
+    #[tokio::test]
+    async fn sweep_prunes_old_embeddings_with_thumbs_and_stale_queries() {
+        let pool = mem_pool().await;
+        let mut cfg = test_cfg(); // detection_retention_hours = 168
+        let snaps = unique_path("heldar-emb-ret");
+        tokio::fs::create_dir_all(&snaps).await.unwrap();
+        cfg.snapshots_dir = snaps.clone();
+
+        insert_camera(&pool, "cam_e", 24, None).await;
+        let now = Utc::now();
+        let thumb = snaps.join("emb_old.jpg");
+        tokio::fs::write(&thumb, b"jpeg").await.unwrap();
+        for (id, age_h, evidence) in [
+            ("emb_old", 200_i64, Some("/media/snapshots/emb_old.jpg")),
+            ("emb_new", 1, None),
+        ] {
+            sqlx::query(
+                "INSERT INTO embeddings (id, camera_id, ts, model, dim, vec, evidence_path, created_at)
+                 VALUES (?, 'cam_e', ?, 'm', 2, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(now - chrono::Duration::hours(age_h))
+            .bind(crate::services::embeddings::encode_vec(&[1.0, 0.0]))
+            .bind(evidence)
+            .bind(now - chrono::Duration::hours(age_h))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        // One stale queue row (over the 1 h queue TTL) and one fresh one.
+        for (id, age_min) in [("embq_old", 90_i64), ("embq_new", 1)] {
+            sqlx::query(
+                "INSERT INTO embed_queries (id, kind, payload, status, created_at) VALUES (?, 'text', 'q', 'done', ?)",
+            )
+            .bind(id)
+            .bind(now - chrono::Duration::minutes(age_min))
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        sweep(&pool, &cfg).await.unwrap();
+
+        let kept: Vec<String> = sqlx::query_scalar("SELECT id FROM embeddings")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(kept, vec!["emb_new".to_string()]);
+        assert!(
+            !thumb.exists(),
+            "the pruned embedding's crop thumb must be unlinked"
+        );
+        let queries: Vec<String> = sqlx::query_scalar("SELECT id FROM embed_queries")
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+        assert_eq!(queries, vec!["embq_new".to_string()]);
+        let _ = tokio::fs::remove_dir_all(&snaps).await;
     }
 
     // ----- sweep: DB size-cap (step 10) ------------------------------------

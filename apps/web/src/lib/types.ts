@@ -1284,6 +1284,53 @@ export interface SearchPlanResponse {
   plan: QueryPlan;
 }
 
+/** Body for POST /api/v1/search/semantic — exactly one of `text` | `image_b64` (issue #38). */
+export interface SemanticSearchRequest {
+  text?: string;
+  /** Base64 image payload (data-URL prefix stripped), <= 10,000,000 b64 chars. */
+  image_b64?: string;
+  from?: string;
+  to?: string;
+  cameras?: string[];
+  label?: string;
+  /** Top-k, clamped server-side to 1..=100 (default 24). */
+  k?: number;
+}
+
+/** One similarity-ranked embedding match (a detection crop, NOT a verified fact). */
+export interface SemanticHit {
+  id: string;
+  /** Cosine similarity — higher = closer. Relative rank, not a probability. */
+  score: number;
+  camera_id: string;
+  /** == embeddings.ts (observation time) — feed to playback. */
+  timestamp: string;
+  label?: string | null;
+  track_id?: string | null;
+  bbox?: number[] | null;
+  evidence_path?: string | null;
+  detection?: {
+    confidence?: number | null;
+    attributes?: Record<string, unknown> | null;
+  } | null;
+}
+
+export interface SemanticSearchResponse {
+  /** Echo of the text query, or "[image]" for image queries. */
+  query: string;
+  mode: string;
+  /** Embedding model id; null only in degenerate cases (e.g. legacy rows with no model echo). */
+  model: string | null;
+  count: number;
+  /** True if the candidate scan hit its cap — narrow the window/filters. */
+  truncated: boolean;
+  hits: SemanticHit[];
+  proof: {
+    claim_levels: Array<Record<string, unknown>>;
+    note: string;
+  };
+}
+
 // ---- Backup subsystem: destinations, policies, jobs, archive export ----
 
 /** Transport for a backup destination. `local` copies via fs (NAS mounts); the rest use rclone. */

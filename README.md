@@ -71,6 +71,11 @@ straight into the entry pipeline, and a matched entry can **open the barrier** b
 camera's relay (per-lane policy + guard manual-open + global kill-switch):
 [`docs/CAMERA-CONTROLS.md`](docs/CAMERA-CONTROLS.md).
 
+**Semantic search** finds stored footage by meaning: type a description ("red pickup truck") or drop
+in a photo and get similarity-ranked detection crops with jump-to-playback. Ranking runs on CLIP
+embeddings computed by the AI worker (optional `requirements-embed.txt` extra) — fully local, no
+cloud: [`docs/SEARCH.md`](docs/SEARCH.md).
+
 Onboard a camera (you supply the address and credentials; the RTSP URL is built from the vendor
 template):
 

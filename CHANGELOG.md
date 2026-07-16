@@ -41,6 +41,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CLIP semantic retrieval — search by free text or image (#38).** The Search module gains a
+  **Semantic** tab: describe a moment ("red pickup truck") or drop in an image and get back
+  similarity-ranked detection crops (score, label, camera, timestamp, crop thumb) with a one-click
+  Playback deep-link (±60 s around the hit — Playback now auto-opens from URL params). Under it: a new
+  `embedding` worker task (own YOLO+ByteTrack; vehicles by default, the person class deliberately
+  excluded) embeds tracked detection crops through open_clip (ViT-B/32) on a per-track stride and
+  POSTs them to a new kernel store (`POST /api/v1/ai/embeddings`, migration `0010`, idempotent per
+  (camera, frame, track), crop thumbs served from `/media/snapshots/`); query vectors ride a
+  **pull-only** `embed_queries` queue the worker polls ~1 s (`GET /api/v1/ai/embed-queries` + a result
+  POST — the existing tasks poll is untouched, so deployed workers keep working);
+  `POST /api/v1/search/semantic` (heldar-search) awaits the vector and the kernel ranks by brute-force
+  cosine (SQL camera/label/time prefilter, top-k heap, 100k-candidate scan cap surfaced as
+  `truncated`), logging to the search log (never the image bytes) and auditing plate-like text queries
+  like any other identity query — results are explicitly framed as **similarity-ranked, not facts**
+  (the proof ladder marks the ranking as the fallible inference). Self-bounding: embeddings ride the
+  detections retention TTL (crop thumbs unlinked with the rows — also on size-cap sheds and camera
+  deletes), query rows are deleted when their search returns (max 16 in flight; excess enqueues get a
+  retryable 503), and the DB size cap sheds transient query rows, then embeddings, then detections
+  (disposable data first). The
+  CLIP stack is an optional extra (`apps/ai/requirements-embed.txt`); without an embedding-capable
+  worker running, embedding tasks degrade to the safe placeholder and semantic search answers
+  `503` + `Retry-After` ("embedding worker offline") instead of pretending.
 - **Per-camera "Keep live warm" (`live_warm`, migration `0006`).** A warm camera's live publisher runs
   persistently instead of on-demand, so live view starts instantly — the product replacement for
   box-side warming scripts (no more editing an `.sh` to change which cameras are warm). Dashboard: a

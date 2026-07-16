@@ -7,7 +7,8 @@ sidebar_position: 2
 
 # Build an AI worker
 
-A Heldar AI worker is any process that can speak four HTTP endpoints. The kernel
+A Heldar AI worker is any process that can speak four core HTTP endpoints
+(plus three optional semantic-embedding endpoints — see below). The kernel
 samples frames and stores results; your worker is a pure HTTP client that
 discovers work, pulls frames, runs a model, and posts detections back. Because
 the contract is HTTP, a crashing or slow worker can never stall ingest or
@@ -132,6 +133,33 @@ Per-camera sampler state (`connecting` / `sampling` / `offline` / `error` /
 `stopped`) and the effective budgeted fps. Useful for dashboards and for
 confirming the kernel is actually producing frames.
 
+### 5. Optional - semantic embeddings
+
+Three additive endpoints back the semantic-search pipeline. A worker that never
+runs an `embedding` task can ignore them, and `GET /api/v1/ai/tasks` is
+**unchanged** (still a bare array), so existing workers keep working.
+
+- `POST /api/v1/ai/embeddings` - post a batch of crop embeddings for one
+  camera: `{ camera_id, model, dim (1..4096), frame_id?, items: [...] }` with
+  1-128 items, each `{ vec (exactly dim finite floats), track_id?, label?,
+  bbox?, timestamp?, thumb_b64? }` (`thumb_b64` is an optional JPEG crop for
+  the search UI, capped at ~96 KB of base64). `frame_id` is an idempotency key:
+  rows dedupe on `(camera_id, frame_id, track_id)`, so a redelivered batch is
+  skipped silently and the `{ "embeddings_ingested": N }` response counts only
+  rows actually inserted.
+- `GET /api/v1/ai/embed-queries?worker_id=<id>` - atomically claim up to 4
+  pending search queries (text or base64 image) to embed. Returns an object,
+  `{ "queries": [ { "id", "kind", "payload" } ] }`, not a bare array. Poll it
+  fast (the reference worker polls every ~1 s): a semantic search holds the
+  operator's request open for only ~3 s waiting for the query vector, which
+  the ~10 s tasks poll could never meet - that is why this is a separate
+  endpoint rather than a piggyback on `/ai/tasks`. Idle polls are read-only,
+  and queries older than 60 s expire undelivered.
+- `POST /api/v1/ai/embed-queries/{id}/result` - post the query vector back
+  (`{ vec, model, dim }`) or `{ "error": "..." }` so the waiting search fails
+  fast instead of timing out. First result wins; a late duplicate is a `200`
+  no-op (`{ "updated": false }`).
+
 ## The bbox convention
 
 `bbox` is `[x, y, w, h]` **normalized to 0..1**, top-left origin. Normalizing
@@ -205,9 +233,23 @@ register("detection", YoloAnalyzer)   # replaces the placeholder for "detection"
 
 The kernel never touches your model. It only routes results to consumers by
 `task_type`: `detection` results with track ids drive the zone engine, `anpr`
-results feed the access-control engine, and so on. To add a new pipeline, pick a
-new `task_type`, post its results, and write a consumer for it (see
+results feed the access-control engine, `embedding` tasks index crop vectors
+for semantic search, and so on. To add a new pipeline, pick a new `task_type`,
+post its results, and write a consumer for it (see
 [Build a module](./build-a-module.md)).
+
+The reference worker also ships an `embedding` analyzer (YOLO + ByteTrack +
+open_clip; vehicle classes only by default - person is deliberately excluded)
+that embeds each track on first sight and then every `stride_seconds`, and
+posts the vectors through the optional endpoints above instead of
+`/api/v1/ai/events` - it emits no detections, so it never double-fires the
+zone or access-control consumers. A companion `EmbedQueryWorker` thread polls
+the query queue (~1 s, `HELDAR_AI_EMBED_POLL_INTERVAL`) and answers search
+queries with the CLIP text or image tower. Both need the optional CLIP extra
+(`pip install -r requirements-embed.txt`, model via `HELDAR_AI_CLIP_MODEL` /
+`HELDAR_AI_CLIP_PRETRAINED`, defaults `ViT-B-32` / `openai`); without it,
+embedding tasks fall back to the placeholder and semantic searches return a
+fast `503` instead of hanging.
 
 ## Running the reference worker
 

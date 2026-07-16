@@ -32,6 +32,25 @@ The contract (served by the kernel; see crates/heldar-kernel/src/routes/ai.rs)
        }
    `bbox` is [x, y, w, h] normalized to 0..1.
 
+4. Semantic retrieval (issue #38) — the "embedding" task type indexes CLIP
+   vectors of tracked detection crops, and a fast side-channel answers query
+   embeddings for the kernel's /search/semantic route:
+       POST {API}/api/v1/ai/embeddings
+       {
+         "camera_id": "...",
+         "model":     "open_clip/ViT-B-32/openai",
+         "dim":       512,
+         "frame_id":  "<task>:<captured_at>",       # optional idempotency key
+         "items":     [{ "track_id", "detection_id", "label", "timestamp",
+                         "bbox":[x,y,w,h], "vec":[f32...], "thumb_b64" }]
+       }                                            # 1..=128 items per POST
+       GET  {API}/api/v1/ai/embed-queries?worker_id=...
+   -> { "queries": [{ "id", "kind": "text"|"image", "payload" }] }
+       POST {API}/api/v1/ai/embed-queries/{id}/result
+       { "vec": [f32...], "model": "...", "dim": N }    # or {"error": "..."}
+   A 404 on either endpoint means an old kernel: the worker logs once and
+   disables that path — it never crash-loops against a core that predates it.
+
 Design
 ------
 * One supervisor thread polls /ai/tasks every `poll_interval` seconds and
@@ -39,6 +58,9 @@ Design
   restart changed).
 * Each task thread runs its own loop at the task's `fps`: pull frame ->
   run its `Analyzer` -> POST results.
+* A separate daemon thread (EmbedQueryWorker) fast-polls /ai/embed-queries
+  (default 1s) and answers semantic-search query embeddings through the same
+  shared CLIP backend the "embedding" analyzers use.
 * HTTP calls retry with capped exponential backoff + jitter; 4xx (client)
   errors are not retried.
 * SIGINT/SIGTERM trigger a graceful, prompt shutdown (sleeps are
@@ -53,6 +75,7 @@ model must be wired in.
 from __future__ import annotations
 
 import argparse
+import base64
 import io
 import json
 import logging
@@ -98,6 +121,12 @@ class Settings:
     # every task. Defaults to "<hostname>:<pid>", so two workers on one host get distinct ids and split
     # the load automatically; a single worker gets the whole set.
     worker_id: str
+    # Semantic retrieval (issue #38): the /ai/embed-queries poll cadence and the CLIP checkpoint the
+    # query worker answers with — it must match what the "embedding" tasks index with, or the
+    # kernel's cosine scores compare vectors from different spaces.
+    embed_poll_interval: float
+    clip_model: str
+    clip_pretrained: str
 
 
 def _default_worker_id() -> str:
@@ -172,6 +201,24 @@ def parse_settings(argv: Optional[List[str]] = None) -> Settings:
         help="Stable worker identity for task sharding across multiple workers on one node "
         "(env HELDAR_AI_WORKER_ID; default <hostname>:<pid>).",
     )
+    parser.add_argument(
+        "--embed-poll-interval",
+        type=float,
+        default=float(_env("HELDAR_AI_EMBED_POLL_INTERVAL", "1.0")),
+        help="Seconds between /ai/embed-queries polls — kept fast because semantic-search "
+        "requests block on the answer (env HELDAR_AI_EMBED_POLL_INTERVAL).",
+    )
+    parser.add_argument(
+        "--clip-model",
+        default=_env("HELDAR_AI_CLIP_MODEL", "ViT-B-32"),
+        help="open_clip architecture used to answer embed queries (env HELDAR_AI_CLIP_MODEL).",
+    )
+    parser.add_argument(
+        "--clip-pretrained",
+        default=_env("HELDAR_AI_CLIP_PRETRAINED", "openai"),
+        help="open_clip pretrained tag used to answer embed queries "
+        "(env HELDAR_AI_CLIP_PRETRAINED).",
+    )
     ns = parser.parse_args(argv)
     return Settings(
         api=ns.api.rstrip("/"),
@@ -186,6 +233,11 @@ def parse_settings(argv: Optional[List[str]] = None) -> Settings:
         log_format=ns.log_format,
         api_key=ns.api_key.strip() or None,
         worker_id=ns.worker_id.strip() or _default_worker_id(),
+        # Floor at 0.2s: this endpoint is polled forever by design, so a 0/negative interval
+        # (env typo) would hammer Core in a tight loop.
+        embed_poll_interval=max(0.2, ns.embed_poll_interval),
+        clip_model=ns.clip_model.strip() or "ViT-B-32",
+        clip_pretrained=ns.clip_pretrained.strip() or "openai",
     )
 
 
@@ -349,13 +401,53 @@ class Event:
 
 
 @dataclass
+class EmbeddingItem:
+    """One CLIP vector of a tracked detection crop, destined for POST /api/v1/ai/embeddings.
+
+    ``model`` is carried per item but sent once at the batch level (every item from one analyzer
+    instance shares it); the wire-level ``dim`` is derived as ``len(vec)``. ``vec`` holds plain
+    python floats straight from the CLIP output tensor — deliberately NOT normalized, the kernel
+    computes full cosine similarity itself.
+    """
+
+    vec: List[float]
+    model: str  # e.g. "open_clip/ViT-B-32/openai"
+    label: Optional[str] = None
+    bbox: Optional[List[float]] = None  # [x, y, w, h] normalized 0..1
+    track_id: Optional[str] = None
+    detection_id: Optional[str] = None
+    timestamp: Optional[str] = None  # RFC3339 observation time; kernel defaults to now
+    thumb_b64: Optional[str] = None  # small JPEG crop, base64 (no data: prefix)
+
+    def to_json(self) -> Dict[str, Any]:
+        out: Dict[str, Any] = {"vec": [float(v) for v in self.vec]}
+        if self.track_id is not None:
+            out["track_id"] = self.track_id
+        if self.detection_id is not None:
+            out["detection_id"] = self.detection_id
+        if self.label is not None:
+            out["label"] = self.label
+        if self.timestamp is not None:
+            out["timestamp"] = self.timestamp
+        if self.bbox is not None:
+            out["bbox"] = [float(v) for v in self.bbox]
+        if self.thumb_b64 is not None:
+            out["thumb_b64"] = self.thumb_b64
+        return out
+
+
+@dataclass
 class AnalysisResult:
     detections: List[Detection] = field(default_factory=list)
     event: Optional[Event] = None
+    # Semantic-index vectors (issue #38). Deliberately separate from `detections`: an embedding
+    # task returns vectors WITHOUT detections, so indexing never double-fires the zone/entry
+    # consumers that watch /ai/events.
+    embeddings: List[EmbeddingItem] = field(default_factory=list)
 
     @property
     def is_empty(self) -> bool:
-        return not self.detections and self.event is None
+        return not self.detections and not self.embeddings and self.event is None
 
 
 def safe_weights(config: Dict[str, Any]) -> str:
@@ -538,6 +630,32 @@ _PERSON_CLASSES = frozenset({"person"})
 _VEHICLE_CLASSES = frozenset({"bicycle", "car", "motorcycle", "bus", "truck", "train"})
 
 
+def _resolve_class_filter(
+    raw: Any, names: Dict[int, str], log: logging.LoggerAdapter
+) -> Optional[List[int]]:
+    """Map a mixed list of class names/indices to model class indices (the `classes` config key
+    shared by the YOLO-backed analyzers)."""
+    if not raw:
+        return None
+    name_to_idx = {name.lower(): idx for idx, name in names.items()}
+    out: List[int] = []
+    for item in raw:
+        if isinstance(item, bool):  # guard: bool is an int subclass
+            continue
+        if isinstance(item, int):
+            if item in names:
+                out.append(item)
+            continue
+        key = str(item).strip().lower()
+        if key.isdigit() and int(key) in names:
+            out.append(int(key))
+        elif key in name_to_idx:
+            out.append(name_to_idx[key])
+        else:
+            log.warning("ignoring unknown class filter %r", item)
+    return sorted(set(out)) or None
+
+
 class YoloAnalyzer(Analyzer):
     """Real object detector + tracker: Ultralytics YOLOv8 (nano) + ByteTrack.
 
@@ -590,7 +708,9 @@ class YoloAnalyzer(Analyzer):
         self.names: Dict[int, str] = dict(self.model.names)
 
         # Optional class allowlist: accept names and/or integer indices.
-        self.classes: Optional[List[int]] = self._resolve_classes(self.config.get("classes"))
+        self.classes: Optional[List[int]] = _resolve_class_filter(
+            self.config.get("classes"), self.names, self.log
+        )
 
         # Optional alert event configuration.
         self.emit_events = bool(self.config.get("emit_events", True))
@@ -607,28 +727,6 @@ class YoloAnalyzer(Analyzer):
             self.conf,
             self.classes if self.classes is not None else "all",
         )
-
-    def _resolve_classes(self, raw: Any) -> Optional[List[int]]:
-        """Map a mixed list of class names/indices to COCO class indices."""
-        if not raw:
-            return None
-        name_to_idx = {name.lower(): idx for idx, name in self.names.items()}
-        out: List[int] = []
-        for item in raw:
-            if isinstance(item, bool):  # guard: bool is an int subclass
-                continue
-            if isinstance(item, int):
-                if item in self.names:
-                    out.append(item)
-                continue
-            key = str(item).strip().lower()
-            if key.isdigit() and int(key) in self.names:
-                out.append(int(key))
-            elif key in name_to_idx:
-                out.append(name_to_idx[key])
-            else:
-                self.log.warning("ignoring unknown class filter %r", item)
-        return sorted(set(out)) or None
 
     def analyze(self, frame: FrameContext) -> AnalysisResult:
         img = frame.image().convert("RGB")
@@ -1066,13 +1164,256 @@ class AnprAnalyzer(Analyzer):
         return AnalysisResult(detections=detections)
 
 
+# Process-wide CLIP cache: N camera tasks + the embed-query worker share ONE loaded model per
+# (architecture, pretrained tag, device) instead of each loading a ~350 MB copy.
+_CLIP_LOCK = threading.Lock()
+_CLIP_BACKENDS: Dict[tuple, "_ClipBackend"] = {}
+
+
+class _ClipBackend:
+    """One loaded open_clip model + its preprocess/tokenizer. Obtain via
+    :func:`_get_clip_backend` — instances are shared process-wide, and ``encode_*`` serializes
+    access (one forward pass at a time keeps CPU inference from oversubscribing threads when
+    several tasks share the model)."""
+
+    def __init__(self, model_name: str, pretrained: str, device: Any):
+        # Lazy heavy imports: callers construct this from their own __init__ / first use, so a
+        # missing open_clip/torch degrades (placeholder analyzer, disabled query worker) instead
+        # of crashing the worker.
+        import open_clip
+        import torch
+
+        self.torch = torch
+        self.model_name = model_name
+        self.pretrained = pretrained
+        self.device = device
+        #: Wire-level model id (embeddings.model in the kernel), e.g. "open_clip/ViT-B-32/openai".
+        self.model_id = f"open_clip/{model_name}/{pretrained}"
+        model, _, preprocess = open_clip.create_model_and_transforms(
+            model_name, pretrained=pretrained
+        )
+        self.model = model.eval().to(device)
+        self.preprocess = preprocess
+        self.tokenizer = open_clip.get_tokenizer(model_name)
+        self._lock = threading.Lock()
+
+    def encode_images(self, images: List["Image.Image"]) -> List[List[float]]:
+        """Embed RGB PIL images in ONE batched forward pass. Returns rows of plain python
+        floats, deliberately NOT normalized — the kernel computes full cosine itself."""
+        with self._lock, self.torch.no_grad():
+            batch = self.torch.stack([self.preprocess(im) for im in images]).to(self.device)
+            feats = self.model.encode_image(batch)
+            return feats.cpu().float().tolist()
+
+    def encode_text(self, text: str) -> List[float]:
+        """Embed one text query through the CLIP text tower (plain floats, not normalized)."""
+        with self._lock, self.torch.no_grad():
+            tokens = self.tokenizer([text]).to(self.device)
+            feats = self.model.encode_text(tokens)
+            return feats.cpu().float().tolist()[0]
+
+
+def _get_clip_backend(model_name: str, pretrained: str, device: Any) -> _ClipBackend:
+    """The process-wide CLIP singleton, keyed by (model, pretrained, device). Loading happens
+    inside the lock so concurrent first users wait for one load instead of racing a second."""
+    key = (model_name, pretrained, str(device))
+    with _CLIP_LOCK:
+        backend = _CLIP_BACKENDS.get(key)
+        if backend is None:
+            backend = _ClipBackend(model_name, pretrained, device)
+            _CLIP_BACKENDS[key] = backend
+        return backend
+
+
+class EmbeddingAnalyzer(Analyzer):
+    """CLIP semantic-retrieval indexer (issue #38).
+
+    Detects + tracks objects with YOLOv8 + ByteTrack (same backbone as :class:`YoloAnalyzer`,
+    restricted to vehicle classes by default — person embedding is deliberately OFF as a privacy
+    posture; opt in explicitly via ``classes``), crops each tracked box, and embeds the crops with
+    open_clip in one batched forward pass. Each track is embedded on FIRST SIGHT and then every
+    ``stride_seconds`` (untracked boxes are skipped — without a track identity there is nothing to
+    stride-gate on). The vectors ride :attr:`AnalysisResult.embeddings` and are POSTed to
+    ``/api/v1/ai/embeddings``; the analyzer returns NO detections — this is an indexing task, and
+    detections here would double-fire the zone/entry consumers already fed by a ``detection``
+    task on the same camera.
+
+    Per-task ``config`` keys (all optional):
+      * ``weights``         — YOLO weights (default ``yolov8n.pt``; safe_weights-guarded).
+      * ``conf``            — min box confidence to consider a crop (default ``0.35``).
+      * ``classes``         — class names/indices to embed (default ``[1, 2, 3, 5, 7]`` =
+                              bicycle/car/motorcycle/bus/truck; person deliberately excluded).
+      * ``stride_seconds``  — re-embed cadence per track (default ``10``).
+      * ``min_box_px``      — skip boxes narrower/shorter than this many pixels (default ``24``).
+      * ``clip_model``      — open_clip architecture (default ``ViT-B-32``).
+      * ``clip_pretrained`` — open_clip pretrained tag (default ``openai``).
+      * ``device``          — force a device (default auto: CUDA if available else CPU).
+      * ``thumb_max_px``    — max dimension of the JPEG crop thumb sent for the UI
+                              (default ``320``; ``0`` disables thumbs).
+      * ``imgsz``           — YOLO inference image size (default model native).
+    """
+
+    name = "embedding"
+
+    #: Drop a track's stride-gate entry after this much idle time (the track is long gone).
+    _TRACK_IDLE_S = 600.0
+    #: Kernel cap on one thumb's base64 length (an over-cap thumb 400s the whole batch) —
+    #: past it we keep the vector and drop the thumb.
+    _THUMB_B64_MAX = 131072
+
+    def __init__(self, config: Dict[str, Any], log: logging.LoggerAdapter):
+        super().__init__(config, log)
+        import torch
+        from ultralytics import YOLO
+
+        self.weights = safe_weights(self.config)
+        self.conf = float(self.config.get("conf", 0.35))
+        self.imgsz = self.config.get("imgsz")
+        device = self.config.get("device")
+        if device is None or device == "auto":
+            device = 0 if torch.cuda.is_available() else "cpu"
+        self.device = device
+        self.model = YOLO(self.weights)
+        self.names: Dict[int, str] = dict(self.model.names)
+        raw_classes = self.config.get("classes", [1, 2, 3, 5, 7])
+        self.classes: Optional[List[int]] = _resolve_class_filter(
+            raw_classes, self.names, self.log
+        )
+        if self.classes is None:
+            # Privacy posture: this analyzer must never silently widen to "all classes" (which
+            # includes person). An unresolvable `classes` config drops back to the vehicle
+            # default; if even that is absent from the model's classes, refuse to construct
+            # (build_analyzer then installs the safe placeholder).
+            self.log.warning(
+                "embedding `classes` %r resolved to nothing; using the vehicle default",
+                raw_classes,
+            )
+            self.classes = _resolve_class_filter([1, 2, 3, 5, 7], self.names, self.log)
+            if self.classes is None:
+                raise ValueError(
+                    "no resolvable `classes` for the embedding task; refusing to embed every class"
+                )
+        self.stride_seconds = max(0.0, float(self.config.get("stride_seconds", 10)))
+        # The stride gate's idle eviction must outlast the stride itself, or a continuously
+        # visible track with a long stride would be re-embedded every eviction instead.
+        self._track_idle_s = max(self._TRACK_IDLE_S, 2.0 * self.stride_seconds)
+        self.min_box_px = float(self.config.get("min_box_px", 24))
+        self.thumb_max_px = int(self.config.get("thumb_max_px", 320))
+        self.clip = _get_clip_backend(
+            str(self.config.get("clip_model", "ViT-B-32")),
+            str(self.config.get("clip_pretrained", "openai")),
+            self.device,
+        )
+        self._last_embedded: Dict[str, float] = {}  # track_id -> monotonic time of last embed
+        self.log.info(
+            "embedding loaded weights=%s device=%s clip=%s stride=%.0fs classes=%s",
+            self.weights,
+            self.device,
+            self.clip.model_id,
+            self.stride_seconds,
+            self.classes if self.classes is not None else "all",
+        )
+
+    def analyze(self, frame: FrameContext) -> AnalysisResult:
+        img = frame.image().convert("RGB")
+        width, height = img.size
+        track_kwargs: Dict[str, Any] = {
+            "persist": True,
+            "tracker": "bytetrack.yaml",
+            "conf": self.conf,
+            "device": self.device,
+            "verbose": False,
+        }
+        if self.classes is not None:
+            track_kwargs["classes"] = self.classes
+        if self.imgsz:
+            track_kwargs["imgsz"] = self.imgsz
+
+        results = self.model.track(img, **track_kwargs)
+        if not results:
+            return AnalysisResult()
+        result = results[0]
+        oh, ow = getattr(result, "orig_shape", (height, width))
+        ow = ow or width
+        oh = oh or height
+
+        now = time.monotonic()
+        self._prune_stride_gate(now)
+
+        # Collect the crops due for embedding: first sight of a track, then every stride_seconds.
+        due: List[tuple] = []  # (crop, label, bbox, track_id)
+        boxes = result.boxes
+        if boxes is not None:
+            for box in boxes:
+                if box.id is None:
+                    continue  # untracked box: no identity to stride-gate on
+                track_id = str(int(box.id.item()))
+                last = self._last_embedded.get(track_id)
+                if last is not None and now - last < self.stride_seconds:
+                    continue
+                x1, y1, x2, y2 = (float(v) for v in box.xyxy[0].tolist())
+                if x2 - x1 < self.min_box_px or y2 - y1 < self.min_box_px:
+                    continue  # too small for a useful embedding
+                bbox = norm_bbox(x1, y1, x2, y2, ow, oh)
+                if bbox is None:
+                    continue
+                cls_idx = int(box.cls.item())
+                label = self.names.get(cls_idx, str(cls_idx))
+                crop = img.crop((int(x1), int(y1), int(x2), int(y2)))
+                due.append((crop, label, bbox, track_id))
+
+        if not due:
+            return AnalysisResult()
+
+        # ONE batched CLIP forward pass for every due crop on this frame. The stride gate is only
+        # advanced afterwards, so a failed encode retries on the next frame.
+        vecs = self.clip.encode_images([crop for crop, _, _, _ in due])
+        items: List[EmbeddingItem] = []
+        for (crop, label, bbox, track_id), vec in zip(due, vecs):
+            self._last_embedded[track_id] = now
+            items.append(
+                EmbeddingItem(
+                    vec=vec,
+                    model=self.clip.model_id,
+                    label=label,
+                    bbox=bbox,
+                    track_id=track_id,
+                    timestamp=frame.captured_at,
+                    thumb_b64=self._thumb_b64(crop),
+                )
+            )
+        self.log.debug("embedded %d crop(s) dim=%d", len(items), len(vecs[0]))
+        # Indexing task: NO detections — a paired "detection" task feeds the zone/entry consumers.
+        return AnalysisResult(embeddings=items)
+
+    def _thumb_b64(self, crop: "Image.Image") -> Optional[str]:
+        """Small JPEG of the crop for the UI's ranked results (base64, no data: prefix)."""
+        if self.thumb_max_px <= 0:
+            return None
+        thumb = crop.copy()
+        thumb.thumbnail((self.thumb_max_px, self.thumb_max_px))
+        buf = io.BytesIO()
+        thumb.save(buf, format="JPEG", quality=70)
+        b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+        return b64 if len(b64) <= self._THUMB_B64_MAX else None
+
+    def _prune_stride_gate(self, now: float) -> None:
+        stale = [
+            tid for tid, ts in self._last_embedded.items() if now - ts > self._track_idle_s
+        ]
+        for tid in stale:
+            del self._last_embedded[tid]
+
+
 # Registry: task_type -> Analyzer subclass. Stage 3 wires the real YOLO model
-# in for "detection" (and the explicit "yolo" alias); Stage 4 adds "anpr"; motion stays available.
+# in for "detection" (and the explicit "yolo" alias); Stage 4 adds "anpr"; issue #38 adds
+# "embedding"; motion stays available.
 ANALYZERS: Dict[str, type] = {
     "motion": MotionAnalyzer,
     "detection": YoloAnalyzer,
     "yolo": YoloAnalyzer,
     "anpr": AnprAnalyzer,
+    "embedding": EmbeddingAnalyzer,
 }
 
 
@@ -1244,6 +1585,76 @@ class CoreClient:
         except (ValueError, AttributeError, TypeError):
             return 0
 
+    # Kernel per-request cap on POST /ai/embeddings items (contract: 1..=128 per batch).
+    EMBED_BATCH_MAX = 128
+
+    def post_embeddings(
+        self, task: Task, items: List[EmbeddingItem], frame_id: Optional[str] = None
+    ) -> Optional[int]:
+        """POST embedding vectors for one frame, split into <=128-item batches (kernel cap).
+
+        Returns the total ingested, or None when the kernel 404s the endpoint (a core that
+        predates issue #38) so the caller can log once and stop posting for the task. Redelivered
+        rows are deduped server-side on (camera_id, frame_id, track_id) and simply not counted.
+        """
+        total = 0
+        url = f"{self.s.api}/api/v1/ai/embeddings"
+        for start in range(0, len(items), self.EMBED_BATCH_MAX):
+            batch = items[start : start + self.EMBED_BATCH_MAX]
+            body: Dict[str, Any] = {
+                "camera_id": task.camera_id,
+                "model": batch[0].model,
+                "dim": len(batch[0].vec),
+                "items": [item.to_json() for item in batch],
+            }
+            if frame_id is not None:
+                body["frame_id"] = frame_id
+            resp = self._request("POST", url, json=body, allow_404=True)
+            if resp is None:
+                return None
+            try:
+                val = resp.json().get("embeddings_ingested", 0)
+                total += int(val) if val is not None else 0
+            except (ValueError, AttributeError, TypeError):
+                pass
+        return total
+
+    def fetch_embed_queries(self) -> Optional[List[Dict[str, Any]]]:
+        """Claim pending query-embedding jobs (the kernel hands out a small batch atomically).
+
+        Returns None when the kernel 404s the endpoint (old core) so the poller can stop for
+        good; otherwise the (possibly empty) claimed list ``[{id, kind, payload}]``."""
+        url = (
+            f"{self.s.api}/api/v1/ai/embed-queries"
+            f"?worker_id={quote(self.s.worker_id, safe='')}"
+        )
+        resp = self._request("GET", url, allow_404=True)
+        if resp is None:
+            return None
+        try:
+            queries = resp.json().get("queries", [])
+        except (ValueError, AttributeError):
+            return []
+        return [q for q in queries if isinstance(q, dict)]
+
+    def post_embed_query_result(
+        self,
+        query_id: str,
+        *,
+        vec: Optional[List[float]] = None,
+        model: Optional[str] = None,
+        error: Optional[str] = None,
+    ) -> None:
+        """Report one embed-query outcome: a vector on success, ``{"error": ...}`` on failure (so
+        the /search/semantic request blocked on it fails fast instead of timing out). First result
+        wins server-side; late duplicates are a 200 no-op, and a 404 (query pruned) is ignored."""
+        if error is not None:
+            body: Dict[str, Any] = {"error": error}
+        else:
+            body = {"vec": [float(v) for v in vec or []], "model": model, "dim": len(vec or [])}
+        url = f"{self.s.api}/api/v1/ai/embed-queries/{quote(str(query_id), safe='')}/result"
+        self._request("POST", url, json=body, allow_404=True)
+
 
 # --------------------------------------------------------------------------- #
 # Per-task worker thread
@@ -1257,6 +1668,9 @@ class TaskRunner(threading.Thread):
         self.analyzer = build_analyzer(task, self.log)
         self._stop = threading.Event()
         self._last_captured: Optional[str] = None
+        # Set on the first 404 from POST /ai/embeddings (a kernel that predates issue #38):
+        # log once, then drop embeddings for this task instead of warning on every frame.
+        self._embeddings_unsupported = False
 
     def stop(self) -> None:
         self._stop.set()
@@ -1292,13 +1706,34 @@ class TaskRunner(threading.Thread):
         frame_id = (
             f"{self.task.id}:{frame.captured_at}" if frame.captured_at else None
         )
-        ingested = self.client.post_results(self.task, result, frame_id=frame_id)
-        self.log.info(
-            "posted %d detection(s)%s",
-            len(result.detections),
-            f" + event '{result.event.event_type}'" if result.event else "",
+        # Detections/events and embeddings travel on separate endpoints; an embedding task
+        # returns ONLY embeddings, so each POST happens iff there is something to say.
+        if result.detections or result.event is not None:
+            ingested = self.client.post_results(self.task, result, frame_id=frame_id)
+            self.log.info(
+                "posted %d detection(s)%s",
+                len(result.detections),
+                f" + event '{result.event.event_type}'" if result.event else "",
+            )
+            self.log.debug("server ingested=%d", ingested)
+        if result.embeddings:
+            self._post_embeddings(result, frame_id)
+
+    def _post_embeddings(self, result: AnalysisResult, frame_id: Optional[str]) -> None:
+        if self._embeddings_unsupported:
+            return
+        ingested = self.client.post_embeddings(
+            self.task, result.embeddings, frame_id=frame_id
         )
-        self.log.debug("server ingested=%d", ingested)
+        if ingested is None:
+            self._embeddings_unsupported = True
+            self.log.warning(
+                "kernel has no /ai/embeddings endpoint (predates semantic search); "
+                "dropping embeddings for this task — upgrade Heldar Core to index them"
+            )
+            return
+        self.log.info("posted %d embedding(s)", len(result.embeddings))
+        self.log.debug("server embeddings_ingested=%d", ingested)
 
     def run(self) -> None:
         self.log.info(
@@ -1398,6 +1833,136 @@ class Supervisor:
 
 
 # --------------------------------------------------------------------------- #
+# Embed-query worker (semantic search, issue #38)
+# --------------------------------------------------------------------------- #
+class EmbedQueryWorker(threading.Thread):
+    """Daemon thread that answers query-embedding jobs for /search/semantic.
+
+    The kernel's semantic-search route enqueues one job per query and blocks (~3s) on the
+    answer, so this poller runs FAST (default 1s, ``--embed-poll-interval``) and independently
+    of the task supervisor. Each claimed job goes through the shared CLIP backend — kind "text"
+    via the text tower, kind "image" via base64 -> PIL -> the image tower — and its result is
+    POSTed back; any failure is reported as ``{"error": ...}`` so the search fails fast instead
+    of timing out.
+
+    Degrades cleanly on every axis:
+      * old kernel (404 on the endpoint) — log once, stop polling;
+      * open_clip/torch not installed (ImportError) — answer the claimed jobs with "clip
+        backend unavailable", warn once, stop polling;
+      * transient backend-load failure (e.g. a checkpoint download blip) — answer the claimed
+        jobs with an error so their searches fail fast, keep polling, and retry the load on
+        the next claimed query.
+    """
+
+    def __init__(self, client: CoreClient, settings: Settings):
+        super().__init__(name="embed-queries", daemon=True)
+        self.client = client
+        self.s = settings
+        self.log = logging.getLogger("worker.embed")
+        self._clip: Optional[_ClipBackend] = None
+        self._backend_warned = False
+
+    def _backend(self) -> _ClipBackend:
+        """Load the shared CLIP backend lazily on the first claimed query, so deployments that
+        never issue a semantic search never pay the model load."""
+        if self._clip is None:
+            import torch
+
+            device = 0 if torch.cuda.is_available() else "cpu"
+            self._clip = _get_clip_backend(self.s.clip_model, self.s.clip_pretrained, device)
+        return self._clip
+
+    def _answer(self, query: Dict[str, Any]) -> bool:
+        """Embed one claimed query and POST its result. Returns False only when the CLIP backend
+        cannot exist on this host (missing deps) — the caller then stops the thread."""
+        query_id = str(query.get("id") or "")
+        if not query_id:
+            return True
+        try:
+            clip = self._backend()
+        except ImportError as exc:
+            # Deps genuinely absent — they will not appear this run; stop for good.
+            if not self._backend_warned:
+                self._backend_warned = True
+                self.log.warning(
+                    "CLIP backend unavailable (%s); semantic search needs "
+                    "`pip install -r requirements-embed.txt` — disabling query embedding",
+                    exc,
+                )
+            self._post_error(query_id, "clip backend unavailable")
+            return False
+        except Exception as exc:  # noqa: BLE001 - e.g. a transient checkpoint-download failure
+            # Fail THIS query fast, but keep the thread alive — the load is retried on the next
+            # claimed query, so a network blip doesn't disable semantic search until restart.
+            self.log.warning("CLIP backend load failed (will retry): %s", exc)
+            self._post_error(query_id, f"clip backend load failed: {exc}")
+            return True
+        kind = str(query.get("kind") or "")
+        payload = query.get("payload") or ""
+        try:
+            if kind == "text":
+                vec = clip.encode_text(str(payload))
+            elif kind == "image":
+                img = Image.open(io.BytesIO(base64.b64decode(payload))).convert("RGB")
+                vec = clip.encode_images([img])[0]
+            else:
+                raise ValueError(f"unknown embed-query kind {kind!r}")
+        except Exception as exc:  # noqa: BLE001 - one bad query must not kill the poller
+            self.log.warning("embed query %s failed: %s", query_id, exc)
+            self._post_error(query_id, str(exc) or type(exc).__name__)
+            return True
+        try:
+            self.client.post_embed_query_result(query_id, vec=vec, model=clip.model_id)
+            self.log.info("answered embed query %s kind=%s dim=%d", query_id, kind, len(vec))
+        except WorkerHTTPError as exc:
+            self.log.error("failed to post embed-query result %s: %s", query_id, exc)
+        return True
+
+    def _post_error(self, query_id: str, message: str) -> None:
+        try:
+            self.client.post_embed_query_result(query_id, error=message)
+        except WorkerHTTPError as exc:
+            self.log.debug("could not report embed-query error for %s: %s", query_id, exc)
+
+    def run(self) -> None:
+        self.log.info(
+            "embed-query worker polling every %.1fs (clip=%s/%s, loaded on first query)",
+            self.s.embed_poll_interval,
+            self.s.clip_model,
+            self.s.clip_pretrained,
+        )
+        while not SHUTDOWN.is_set():
+            try:
+                queries = self.client.fetch_embed_queries()
+                if queries is None:
+                    # Old kernel: the endpoint doesn't exist and won't appear this run. Not an
+                    # error — semantic search just isn't available until Core is upgraded.
+                    self.log.info(
+                        "kernel has no embed-queries endpoint; disabling query embedding"
+                    )
+                    return
+                backend_missing = False
+                for query in queries:
+                    if SHUTDOWN.is_set():
+                        return
+                    # No break on failure: every claimed job gets its error POSTed (the search
+                    # requests blocked on them fail fast), then the thread stops for good.
+                    if not self._answer(query):
+                        backend_missing = True
+                if backend_missing:
+                    return
+            except WorkerShutdown:
+                break
+            except WorkerHTTPError as exc:
+                self.log.error("embed-query poll failed: %s", exc)
+            except Exception:  # noqa: BLE001 - the poller must survive anything
+                self.log.exception("unexpected error in embed-query worker")
+            if SHUTDOWN.wait(self.s.embed_poll_interval):
+                break
+        self.log.info("embed-query worker stopped")
+
+
+# --------------------------------------------------------------------------- #
 # Entrypoint
 # --------------------------------------------------------------------------- #
 def _install_signal_handlers() -> None:
@@ -1416,9 +1981,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     log.info("Heldar AI worker starting (api=%s)", settings.api)
 
     client = CoreClient(settings)
+    # Fast side-channel for semantic-search query embeddings (issue #38). Independent of the
+    # task supervisor: it must answer within the search route's ~3s budget even while frames
+    # are being analyzed. Stops itself against an old kernel or without the CLIP extra.
+    embed_queries = EmbedQueryWorker(client, settings)
+    embed_queries.start()
     try:
         Supervisor(client, settings).run()
     finally:
+        embed_queries.join(timeout=settings.http_timeout + 2)
         client.close()
     log.info("Heldar AI worker stopped")
     return 0

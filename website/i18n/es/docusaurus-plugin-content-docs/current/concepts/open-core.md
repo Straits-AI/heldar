@@ -37,7 +37,10 @@ El repositorio público `heldar` contiene:
   - **`heldar-search`** - búsqueda semántica. Una capa de consulta de solo
     lectura que convierte una pregunta en lenguaje natural en un plan
     estructurado, lo ejecuta de forma determinista sobre hechos de eventos
-    almacenados y devuelve las filas como respuesta.
+    almacenados y devuelve las filas como respuesta. Ahora incluye también
+    recuperación por similitud CLIP (consultas de texto e imagen) sobre
+    embeddings de recortes almacenados en el kernel — sigue siendo de solo
+    lectura, sin respuestas generadas por el modelo.
 - **`heldar-server`** - el binario de composición de referencia que enlaza el
   kernel y las aplicaciones genéricas.
 - **`apps/ai`** - el trabajador de IA de referencia en Python.

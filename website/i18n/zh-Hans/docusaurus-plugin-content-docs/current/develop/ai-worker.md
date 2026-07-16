@@ -163,6 +163,28 @@ register("detection", YoloAnalyzer)   # replaces the placeholder for "detection"
 内核从不接触你的模型。它仅按 `task_type` 将结果路由至相应消费者：带有 track id 的 `detection` 结果驱动区域引擎，`anpr` 结果输送至访问控制引擎，以此类推。若要添加新的处理流水线，只需选择一个新的 `task_type`，提交其结果，并为其编写一个消费者（请参阅
 [构建模块](./build-a-module.md)）。
 
+## 语义嵌入（可选）
+
+参考 Worker 还实现了仪表板语义搜索背后的语义检索路径（对已存储检测裁剪图的文本或图像相似度检索）。这是接口约定的可选扩展——额外三个端点——未安装相应依赖时会平滑降级。
+
+**索引侧 - `task_type: "embedding"`。** `EmbeddingAnalyzer` 运行自己的 YOLO + ByteTrack 跟踪器（默认类别为车辆 `[1, 2, 3, 5, 7]`——出于隐私考虑，person 类别默认被有意排除），裁剪每个被跟踪的边界框，并通过 CLIP（默认 `ViT-B-32` / `openai`）在单次批量前向传播中生成裁剪图嵌入。每条轨迹在首次出现时嵌入一次，之后每 `stride_seconds`（默认 10 秒）嵌入一次。该分析器**不提交任何检测结果**——它不能重复触发区域或门禁消费者——其嵌入通过 `POST /api/v1/ai/embeddings` 提交（每批最多 128 条，以帧级键实现幂等，因此重复投递的批次会被内核跳过）。每条嵌入可附带一张 JPEG 裁剪缩略图（`thumb_max_px`，默认 320；`0` 表示禁用），即仪表板展示的排序裁剪图。
+
+嵌入任务的 `config` 键：`weights`、`conf`（默认 0.35）、`classes`、`stride_seconds`（10）、`min_box_px`（24）、`clip_model`、`clip_pretrained`、`device`、`thumb_max_px`（320）、`imgsz`。
+
+**查询侧 - `GET /api/v1/ai/embed-queries`。** 一个专用守护线程约每秒轮询一次
+`GET /api/v1/ai/embed-queries?worker_id=<id>`（`--embed-poll-interval` /
+`HELDAR_AI_EMBED_POLL_INTERVAL`，默认 `1.0`）——这是一条独立的快速轮询路径，而非约 10 秒一次的任务轮询，因为一次语义搜索只会等待约 3 秒来获取其查询嵌入。每次轮询最多认领 4 条待处理查询；`text` 查询走 CLIP 文本塔，`image` 查询（base64）走图像塔，每条结果——或错误——通过 `POST /api/v1/ai/embed-queries/{id}/result` 回传。面对没有该端点的旧版内核，首次 `404` 会使该线程干净地停止。
+
+CLIP 模型按需延迟加载，并在进程范围内共享（所有摄像头任务与查询线程共用同一份副本），由 `HELDAR_AI_CLIP_MODEL` / `HELDAR_AI_CLIP_PRETRAINED`（默认 `ViT-B-32` / `openai`）决定。
+
+**安装。** CLIP 依赖为可选项：
+
+```bash
+pip install -r requirements-embed.txt   # open_clip_torch
+```
+
+未安装时，`embedding` 任务降级为安全的占位分析器，语义搜索返回 `503`——Worker 的其他部分不受影响。
+
 ## 运行参考 Worker
 
 ```bash

@@ -21,6 +21,13 @@ posts results back.
    `{API}/api/v1/ai/events`.
 4. It **re-polls** `/ai/tasks` every `--poll-interval` seconds to pick up new,
    changed, or removed tasks (reconciling the set of per-task threads).
+5. A separate daemon thread **fast-polls**
+   `GET {API}/api/v1/ai/embed-queries?worker_id=...` (default every `1 s`,
+   `--embed-poll-interval`) and answers **semantic-search query embeddings**
+   through CLIP — see the `embedding` analyzer below. On a kernel without that
+   endpoint it logs once and stops (old cores keep working); without the CLIP
+   extra installed it reports `{"error": "clip backend unavailable"}` so
+   searches fail fast instead of timing out.
 
 ### Analyzers
 
@@ -42,6 +49,19 @@ posts results back.
   `ultralytics` dependency (see GPU note below); if that import or the model
   load fails, the worker logs the reason and falls back to the safe placeholder
   rather than crashing.
+- **`embedding`** — **CLIP semantic-retrieval indexer** (issue #38). Tracks
+  objects with the same YOLOv8 + ByteTrack backbone (vehicle classes only by
+  default — person embedding is deliberately **off** as a privacy posture; opt
+  in via `classes`), crops each tracked box, and embeds the crops with
+  [open_clip](https://github.com/mlfoundations/open_clip) in **one batched
+  forward pass** — on first sight of a track and every `stride_seconds`
+  thereafter. Vectors (plus a small JPEG thumb for the UI) are POSTed to
+  `POST {API}/api/v1/ai/embeddings`; the analyzer emits **no detections**, so
+  indexing never double-fires zone/entry consumers — pair it with a
+  `detection` task if you also want boxes. One CLIP model is shared
+  process-wide across all embedding tasks and the query thread. Requires the
+  optional `requirements-embed.txt` extra; without it the task degrades to the
+  safe placeholder.
 - **anything else** — a **safe placeholder**. It pulls and decodes the frame
   (exercising the full frame-pull/heartbeat path) but emits **no detections**
   and logs, rate-limited, that a real model must be wired in. It never
@@ -73,6 +93,11 @@ pip install -r requirements.txt
 # (optional) enable ANPR plate reading — adds an OCR backend:
 #   pip install -r requirements-anpr.txt
 # Without it, "anpr" tasks emit vehicles without a plate (never a fabricated one).
+# (optional) enable semantic retrieval — adds open_clip for the "embedding"
+# task type and query embedding:
+#   pip install -r requirements-embed.txt
+# Without it, "embedding" tasks fall back to the safe placeholder and semantic
+# search reports "embedding worker offline".
 
 # 3. Run (point it at a running Heldar Core)
 python worker.py --api http://localhost:8000
@@ -104,6 +129,16 @@ which override the built-in defaults.
 | `--backoff-cap` | `HELDAR_HTTP_BACKOFF_CAP` | `15` | Max backoff (s) |
 | `--log-level` | `HELDAR_LOG_LEVEL` | `INFO` | `DEBUG`/`INFO`/`WARNING`/`ERROR` |
 | `--log-format` | `HELDAR_LOG_FORMAT` | `text` | `text` or `json` |
+| `--api-key` | `HELDAR_API_KEY` | _(none)_ | Integration API key sent as `X-API-Key` when Core auth is enabled |
+| `--worker-id` | `HELDAR_AI_WORKER_ID` | `<hostname>:<pid>` | Stable identity for task sharding across co-located workers |
+| `--embed-poll-interval` | `HELDAR_AI_EMBED_POLL_INTERVAL` | `1.0` | Seconds between `/ai/embed-queries` polls by the embed-query thread (kept fast — semantic-search requests block on the answer) |
+| `--clip-model` | `HELDAR_AI_CLIP_MODEL` | `ViT-B-32` | open_clip architecture the embed-query thread answers with |
+| `--clip-pretrained` | `HELDAR_AI_CLIP_PRETRAINED` | `openai` | open_clip pretrained tag the embed-query thread answers with |
+
+The last three configure the **embed-query polling thread** (semantic search).
+The query-side CLIP checkpoint must match what the `embedding` tasks index
+with (their `clip_model`/`clip_pretrained` config keys), or the kernel ends up
+comparing vectors from different embedding spaces.
 
 ### Per-task `config` (from the task's `config` JSON)
 
@@ -126,6 +161,21 @@ The `detection`/`yolo` analyzer (`YoloAnalyzer`) reads these keys (all optional)
 | `device` | `auto` | Force a device (`"cpu"`, `0`, …); `auto` = GPU if CUDA else CPU |
 | `emit_events` | `true` | Emit an `object_detected` event for person/vehicle classes |
 | `alert_classes` | person + vehicles | Class names that trigger the alert event |
+
+The `embedding` analyzer (`EmbeddingAnalyzer`) reads these keys (all optional):
+
+| Key | Default | Meaning |
+|-----|---------|---------|
+| `weights` | `yolov8n.pt` | YOLO weights for the crop detector/tracker |
+| `conf` | `0.35` | Minimum box confidence to consider a crop |
+| `classes` | `[1, 2, 3, 5, 7]` | Classes to embed (bicycle/car/motorcycle/bus/truck; person deliberately excluded — opt in explicitly) |
+| `stride_seconds` | `10` | Re-embed each track this often (always embeds on first sight) |
+| `min_box_px` | `24` | Skip boxes narrower or shorter than this many pixels |
+| `clip_model` | `ViT-B-32` | open_clip architecture |
+| `clip_pretrained` | `openai` | open_clip pretrained tag |
+| `device` | `auto` | Force a device (`"cpu"`, `0`, …); `auto` = GPU if CUDA else CPU |
+| `thumb_max_px` | `320` | Max dimension of the JPEG crop thumb sent for the UI (`0` disables thumbs) |
+| `imgsz` | model default | YOLO inference image size |
 
 The placeholder analyzer reads `log_interval_s` (default `60`) to rate-limit its
 "no real model" warning.

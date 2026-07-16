@@ -209,6 +209,58 @@ alimentan el motor de control de acceso, y así sucesivamente. Para añadir una 
 nuevo `task_type`, publica sus resultados y escribe un consumidor para él (consulta
 [Crear un módulo](./build-a-module.md)).
 
+## Embeddings semánticos (opcional)
+
+El worker de referencia también implementa la ruta de recuperación semántica que
+hay detrás de la búsqueda semántica del panel de control (similitud de texto o
+imagen sobre recortes de detección almacenados). Es una extensión opcional del
+contrato — tres endpoints adicionales — y se degrada limpiamente cuando no está
+instalada.
+
+**Indexación - `task_type: "embedding"`.** El `EmbeddingAnalyzer` ejecuta su
+propio rastreador YOLO + ByteTrack (clases de vehículos `[1, 2, 3, 5, 7]` por
+defecto — la clase person está deliberadamente excluida, una postura de
+privacidad), recorta cada cuadro rastreado y genera los embeddings de los
+recortes mediante CLIP (`ViT-B-32` / `openai` por defecto) en una única pasada
+por lotes. Cada pista se embebe la primera vez que se ve y luego cada
+`stride_seconds` (por defecto 10). El analizador **no publica ninguna
+detección** — no debe disparar por duplicado los consumidores de zonas ni de
+control de acceso — sus embeddings van a `POST /api/v1/ai/embeddings` (hasta
+128 por lote, idempotente mediante una clave por fotograma, de modo que el
+kernel omite los lotes reenviados). Una miniatura JPEG del recorte
+(`thumb_max_px`, por defecto 320; `0` la desactiva) acompaña a cada embedding y
+se convierte en el recorte clasificado que muestra el panel.
+
+Claves de `config` de la tarea: `weights`, `conf` (por defecto 0.35),
+`classes`, `stride_seconds` (10), `min_box_px` (24), `clip_model`,
+`clip_pretrained`, `device`, `thumb_max_px` (320), `imgsz`.
+
+**Lado de consulta - `GET /api/v1/ai/embed-queries`.** Un hilo daemon dedicado
+sondea `GET /api/v1/ai/embed-queries?worker_id=<id>` aproximadamente una vez
+por segundo (`--embed-poll-interval` / `HELDAR_AI_EMBED_POLL_INTERVAL`, por
+defecto `1.0`) — un sondeo rápido separado, no el sondeo de tareas de ~10 s,
+porque una búsqueda semántica espera unos 3 s por el embedding de su consulta.
+Cada sondeo reclama hasta 4 consultas pendientes; las consultas `text` pasan
+por la torre de texto de CLIP, las `image` (base64) por la torre de imagen, y
+cada resultado — o un error — se publica de vuelta en
+`POST /api/v1/ai/embed-queries/{id}/result`. Contra un kernel antiguo sin el
+endpoint, el primer `404` detiene el hilo limpiamente.
+
+El modelo CLIP se carga de forma diferida y se comparte en todo el proceso
+(una sola copia entre todas las tareas de cámara y el hilo de consultas),
+determinado por `HELDAR_AI_CLIP_MODEL` / `HELDAR_AI_CLIP_PRETRAINED` (por
+defecto `ViT-B-32` / `openai`).
+
+**Instalación.** La dependencia de CLIP es opcional:
+
+```bash
+pip install -r requirements-embed.txt   # open_clip_torch
+```
+
+Sin ella, las tareas `embedding` se degradan al marcador de posición seguro y
+las búsquedas semánticas responden `503` — nada más en el worker se ve
+afectado.
+
 ## Ejecutar el worker de referencia
 
 ```bash

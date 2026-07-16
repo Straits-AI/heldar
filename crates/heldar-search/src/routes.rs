@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use axum::extract::{Extension, State};
+use axum::extract::{DefaultBodyLimit, Extension, State};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -25,6 +25,14 @@ pub fn router(cfg: Arc<SearchConfig>) -> Router<AppState> {
         .route("/api/v1/search/events", post(search_events))
         .route("/api/v1/search/nl", post(search_nl))
         .route("/api/v1/search/plan", post(plan_only))
+        // Similarity retrieval over stored crop embeddings (issue #38). The body can carry a query
+        // image as base64, so this route gets its own pre-deserialization cap.
+        .route(
+            "/api/v1/search/semantic",
+            post(crate::semantic::search_semantic).layer(DefaultBodyLimit::max(
+                crate::semantic::SEMANTIC_BODY_LIMIT_BYTES,
+            )),
+        )
         .route("/api/v1/modules/search/ui/index.js", get(serve_ui))
         .layer(Extension(cfg))
 }
@@ -77,7 +85,7 @@ fn identity_plate(plan: &QueryPlan) -> Option<String> {
     None
 }
 
-async fn log_search(
+pub(crate) async fn log_search(
     st: &AppState,
     principal: &Principal,
     mode: &str,

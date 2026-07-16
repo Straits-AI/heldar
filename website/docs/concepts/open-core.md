@@ -32,7 +32,10 @@ The public `heldar` repository contains:
     supervised background loops over already-stored kernel facts.
   - **`heldar-search`** - semantic search. A read-only query layer that turns a
     natural-language question into a structured plan, executes it deterministically
-    against stored event facts, and returns the rows as the answer.
+    against stored event facts, and returns the rows as the answer. Now also
+    includes CLIP similarity retrieval (text and image queries) over
+    kernel-stored crop embeddings — still read-only, still no model-generated
+    answers.
 - **`heldar-server`** - the reference composing binary that links the kernel and
   the generic apps.
 - **`apps/ai`** - the reference Python AI worker.

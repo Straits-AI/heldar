@@ -35,6 +35,8 @@ import type {
   QueryPlan,
   SearchPlanResponse,
   SearchResponse,
+  SemanticSearchRequest,
+  SemanticSearchResponse,
   CameraStatus,
   CameraTestResult,
   CameraUpdate,
@@ -587,6 +589,12 @@ export const api = {
     request<SearchPlanResponse>("/api/v1/search/plan", {
       method: "POST",
       body: JSON.stringify({ query }),
+    }),
+  /** CLIP semantic retrieval over embedded detection crops (issue #38) — text or image query. */
+  searchSemantic: (body: SemanticSearchRequest) =>
+    request<SemanticSearchResponse>("/api/v1/search/semantic", {
+      method: "POST",
+      body: JSON.stringify(body),
     }),
 
   // ---- Evidence lock + incident tagging (DVR) ----

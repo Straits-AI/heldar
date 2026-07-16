@@ -231,7 +231,7 @@ PATCH /api/v1/ai-tasks/ai_3f2a9c1b4d5e4f6a8b0c1d2e3f405162
 
 ## 5. The worker contract
 
-A worker needs only these four endpoints. All live under `/api/v1` and return
+A worker needs only these four core endpoints (the semantic-embedding endpoints in §5.6–§5.8 are optional). All live under `/api/v1` and return
 JSON (except the frame, which is `image/jpeg`).
 
 ### 5.1 Discover — `GET /api/v1/ai/tasks`
@@ -399,6 +399,125 @@ GET /api/v1/cameras/gate_a_01/detections?label=person&limit=50
   }
 ]
 ```
+
+The three endpoints below (§§5.6–5.8) were added for **semantic retrieval**
+(§14). They are strictly **additive**: a worker that never runs an `embedding`
+task can ignore them, and `GET /api/v1/ai/tasks` (§5.1) is **UNCHANGED** — it
+still returns a bare array, so deployed workers keep working. Query embeddings
+deliberately do **not** piggyback on the tasks poll: tasks are re-discovered
+roughly every 10 s, but the semantic-search route holds the operator's HTTP
+request open for only ~3 s waiting for the query vector — so the worker runs a
+separate **fast (~1 s) poll** against §5.7 instead. All three require the same
+ingest capability as §5.3.
+
+### 5.6 Post embeddings — `POST /api/v1/ai/embeddings`
+
+The worker posts a batch of crop **embeddings** for one camera — the write half
+of semantic retrieval, produced by the `embedding` analyzer (§14). Body limit
+24 MiB.
+
+Request:
+
+```json
+{
+  "camera_id": "gate_a_01",
+  "model": "open_clip/ViT-B-32/openai",
+  "dim": 512,
+  "frame_id": "ai_3f2a9c1b...:2026-07-16T10:00:00Z",
+  "items": [
+    {
+      "track_id": "t17",
+      "detection_id": null,
+      "label": "car",
+      "timestamp": "2026-07-16T10:00:00Z",
+      "bbox": [0.31, 0.40, 0.22, 0.30],
+      "vec": [0.0132, -0.0871, 0.0455],
+      "thumb_b64": "<base64 JPEG crop>"
+    }
+  ]
+}
+```
+
+Field rules (`services/embeddings.rs`):
+
+- `camera_id` (**required**) must exist, else `404`.
+- `model` (**required**, non-empty) names the embedding space the vectors live in
+  (e.g. `open_clip/ViT-B-32/openai`); search only ranks vectors against a query
+  from the same space.
+- `dim` (**required**, 1…4096). Every item's `vec` must be **exactly `dim`
+  finite floats**, else `400`.
+- `items` — 1…128 per request (`400` beyond that; the reference worker chunks
+  larger sets client-side).
+- `frame_id` — optional **idempotency key** shared by the whole batch (the
+  reference worker uses `"{task_id}:{captured_at}"`). Rows insert
+  `ON CONFLICT DO NOTHING` against a unique `(camera_id, frame_id, track_id)`
+  index, so a **redelivered batch is deduped silently** — the same at-least-once
+  posting semantics as §5.3.
+- Per item, `track_id`, `detection_id`, `label`, `bbox` (normalized `[x,y,w,h]`,
+  §7), and `timestamp` (RFC3339; default server `now()`) are all optional.
+- `thumb_b64` — optional JPEG crop thumb, ≤ 131 072 base64 chars (~96 KB, `400`
+  beyond). Decoded and written to the snapshots dir as `emb_<id>.jpg` **only for
+  rows actually inserted**, served at `/media/snapshots/emb_<id>.jpg` — these
+  are the ranked crops the search UI shows. Invalid base64 skips the thumb but
+  keeps the row.
+
+Response `200 OK`:
+
+```json
+{ "embeddings_ingested": 2 }
+```
+
+The count is rows **actually inserted** — deduped redeliveries are not counted.
+
+### 5.7 Claim query embeddings — `GET /api/v1/ai/embed-queries?worker_id=<id>`
+
+The pull-only **query queue**. When an operator runs a semantic search, the
+kernel enqueues the query text/image and blocks the search request (~3 s,
+`HELDAR_SEARCH_EMBED_TIMEOUT_MS`) waiting for a worker to embed it — which is
+why the worker polls this endpoint **fast** (default every 1 s, §14.3): the
+~10 s §5.1 cadence could never answer inside that window.
+
+- Atomically **claims** up to 4 pending queries (`pending → claimed`, stamping
+  `claimed_at` / `claimed_by = worker_id`).
+- **Read-only when the queue is empty** — the overwhelmingly common idle poll
+  performs no write.
+- Queries older than 60 s are expired and never delivered (the searcher long
+  since got its `503`).
+
+`200 OK` — an **object**, not a bare array, so the shape can grow:
+
+```json
+{ "queries": [ { "id": "embq_7c1f...", "kind": "text", "payload": "red pickup truck" } ] }
+```
+
+`kind` is `text` (payload = the query string) or `image` (payload = a base64
+JPEG/PNG).
+
+### 5.8 Answer a query — `POST /api/v1/ai/embed-queries/{id}/result`
+
+Post the query vector back (body limit 1 MiB) — or an error, so the waiting
+search fails fast instead of timing out:
+
+```json
+{ "vec": [0.0132, -0.0871, 0.0455], "model": "open_clip/ViT-B-32/openai", "dim": 512 }
+```
+
+```json
+{ "error": "clip backend unavailable" }
+```
+
+`vec` is validated like ingest (length == `dim`, all finite, `dim` 1…4096), and a
+success result **must name its `model`** (400 without it): same-dim vectors from
+different CLIP checkpoints are incomparable spaces, and the model id is the search
+prefilter that keeps them apart.
+**First result wins**: the update applies only while the query is still
+`pending`/`claimed`; a late duplicate is a `200` no-op. Response:
+
+```json
+{ "updated": true }
+```
+
+(`false` when another worker already answered or the row expired.)
 
 ---
 
@@ -589,6 +708,7 @@ The **worker** side (`apps/ai/worker.py`) is configured separately: `HELDAR_API`
 | High-res snapshot on trigger | ◑ | not in the sampler; a worker can use the Stage 0 `GET /api/v1/cameras/{id}/snapshot` for a main-stream grab on trigger. Per-task `stream_profile=main` is stored/validated but the sampler currently always samples the sub-stream |
 | Worker contract (discover/pull/post/query) | ✅ | full `routes/ai.rs` surface, this guide |
 | Detection / tracking / zone models | ⬜ | **Stage 3** — slots into the `Analyzer` seam (§8) |
+| Semantic embeddings + retrieval (issue #38) | ✅ (added post-Stage 4) | three **additive** endpoints — `POST /ai/embeddings` + the `embed-queries` claim/result queue (§§5.6–5.8) — plus the `embedding` analyzer and query worker (§14); the §5.1 tasks response is untouched. VLM interpretation, ANN indexes, and person/face re-id embeddings are **deliberately deferred** (§14) |
 
 **Success criterion met:** the sampler is a separate set of supervised ffmpeg
 processes decoding only the sub-stream at a bounded total fps, with crash/backoff
@@ -977,3 +1097,129 @@ already consumes — and by policy those are SECONDARY assist only (a mismatch a
 raises a guard-review exception, never an auto-reject), so imperfect weights degrade to extra
 reviews, not wrong gate decisions. The benchmark's `--make-model-onnx/--make-model-labels` flags
 run the same classifier during collection so its accuracy is measured before it is trusted.
+
+---
+
+## 14. Semantic retrieval — the embedding analyzer + query worker (issue #38)
+
+Semantic retrieval adds an `embedding` task type and registers a real `Analyzer`
+for it (`EmbeddingAnalyzer` in `apps/ai/worker.py`) — again **with no change to
+§§1–10's frame path**: the worker still discovers tasks and pulls `latest.jpg`.
+Unlike every previous analyzer, though, it does **not** POST to
+`/api/v1/ai/events` — it posts vectors through the three §§5.6–5.8 endpoints.
+The kernel indexes them (the `embeddings` table, pruned on the detections TTL
+and shed first by the DB size-cap), and `heldar-search` ranks them at query time
+(`POST /api/v1/search/semantic`, brute-force cosine top-k). This section is the
+**worker** half: the write path (14.1) and the query-answer path (14.3).
+
+### 14.1 The detect → crop → CLIP pipeline
+
+`EmbeddingAnalyzer` shares the Stage 3 backbone (**YOLOv8 + ByteTrack**,
+`model.track(persist=True)`, state on `self` per task thread) and, once per
+`(track, stride bucket)`, crops the box and embeds it with **open_clip**:
+
+```
+frame → YOLO boxes → ByteTrack track_id             (per task thread, state on self)
+            │
+            ├─ stride gate  = embed on FIRST sight of a track, then every stride_seconds
+            ├─ crop → CLIP image encoder             (all due crops in ONE batched forward pass)
+            └─ JPEG thumb (≤ thumb_max_px, quality 70)  — the ranked crop the search UI shows
+        POST /api/v1/ai/embeddings { model, dim, frame_id, items: [{track_id, label, bbox, vec, thumb_b64}] }
+```
+
+- **Stride + dedup semantics.** A per-track monotonic-clock gate on the instance
+  embeds each track on first sight and then every `stride_seconds` (default 10);
+  entries idle for more than 10 minutes are pruned. **Untracked boxes are
+  skipped** — without a track identity there is nothing to stride against.
+  Redelivery dedup is kernel-side via the unique `(camera, frame_id, track_id)`
+  index (§5.6), so retries never double-index a crop.
+- **Posts NO detections — by design.** `analyze()` returns an empty detection
+  list: embedding is an *indexing* task, and a second analyzer re-posting the
+  same boxes through §5.3 would double-fire the zone/entry consumers (§11.2).
+  Embeddings ride a separate `embeddings` list on `AnalysisResult`, which the
+  task runner POSTs via `CoreClient.post_embeddings` — mirroring `post_results`:
+  ≤ 128 items per batch, `frame_id` idempotency, 4xx not retried, and a `404`
+  from an old kernel (no embeddings endpoint) is logged once and posting is
+  disabled for the task.
+- **One CLIP per process.** Model instances are shared through a locked
+  process-wide singleton keyed `(clip_model, clip_pretrained, device)`, so N
+  camera tasks plus the query worker (14.3) load a single copy.
+
+Per-task `config` keys (all optional):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `weights` | `yolov8n.pt` | detector weights (safe-path-guarded, as everywhere) |
+| `conf` | `0.35` | min box confidence to consider a crop |
+| `classes` | `[1, 2, 3, 5, 7]` | COCO classes to embed — bicycle/car/motorcycle/bus/truck. **Person (0) is deliberately excluded by default** (privacy posture; person/face re-id embeddings are an explicit v1 non-goal) |
+| `stride_seconds` | `10` | re-embed cadence per track |
+| `min_box_px` | `24` | skip boxes narrower/shorter than this many pixels (tiny crops embed to noise) |
+| `clip_model` | `ViT-B-32` | open_clip architecture |
+| `clip_pretrained` | `openai` | open_clip pretrained tag |
+| `device` | auto | torch device |
+| `thumb_max_px` | `320` | max dimension of the JPEG crop thumb; `0` disables thumbs |
+| `imgsz` | model default | detector inference size |
+
+`clip_model`/`clip_pretrained` must match the query side (14.3): the kernel only
+ranks stored vectors from the query's embedding space, so mismatched checkpoints
+mean empty results, not wrong ones.
+
+### 14.2 CLIP is OPTIONAL (and degrades safely)
+
+`open_clip` (and the torch it shares with ultralytics) is an **optional** extra —
+`apps/ai/requirements-embed.txt`:
+
+```bash
+pip install -r requirements.txt -r requirements-embed.txt
+```
+
+The imports are lazy (`import torch, open_clip` in `__init__`). Without them:
+
+- `embedding` tasks degrade to the **`PlaceholderAnalyzer`** (§8) — no vectors
+  indexed, nothing fabricated;
+- the query worker (14.3) answers any claimed query with
+  `{"error": "clip backend unavailable"}`, warns once, and stops polling — so
+  `POST /api/v1/search/semantic` returns a fast `503` ("embedding worker
+  offline") instead of hanging the dashboard.
+
+The default checkpoint (`ViT-B-32`/`openai`, ~350 MB) downloads on first use.
+
+### 14.3 The `EmbedQueryWorker` thread — answering searches
+
+`main` starts a second daemon thread alongside the Supervisor (§8). It polls
+`GET /api/v1/ai/embed-queries?worker_id=...` (§5.7) every
+`HELDAR_AI_EMBED_POLL_INTERVAL` seconds (default `1.0`,
+`--embed-poll-interval`; the wait is shutdown-interruptible). The poll is fast
+on purpose: the semantic-search route holds the operator's request open for
+only ~3 s, which the ~10 s tasks poll could never meet (§5.6 intro).
+
+- `kind: "text"` → CLIP **text tower** (tokenizer); `kind: "image"` →
+  base64-decode → PIL → CLIP **image tower**. The vector is POSTed back via
+  §5.8; **any** failure POSTs `{"error": ...}` instead, so the search fails
+  fast rather than timing out.
+- CLIP loads lazily on the first query, through the same shared singleton as
+  14.1, using `HELDAR_AI_CLIP_MODEL` / `HELDAR_AI_CLIP_PRETRAINED` (defaults
+  `ViT-B-32` / `openai`) for the query side.
+- **Keep the checkpoints in sync.** The search prefilters stored embeddings by
+  the query result's `model` id, so a task whose `clip_model`/`clip_pretrained`
+  config differs from the worker's query-side envs indexes vectors that no
+  query will ever match — searches then honestly return zero hits. If you
+  override one, override the other; after switching checkpoints, old vectors
+  age out on the detections TTL rather than polluting results.
+- The first `404` means the kernel predates the embed-queries endpoint: the
+  thread info-logs once and stops cleanly (old-kernel compatibility). A
+  transient CLIP load failure (e.g. a checkpoint-download blip) only fails the
+  queries in hand and is retried on the next claim; only a genuine
+  `ImportError` (deps not installed) stops the thread for the run.
+
+Worker-side knobs (env / CLI): `HELDAR_AI_EMBED_POLL_INTERVAL` /
+`--embed-poll-interval` (1.0 s), `HELDAR_AI_CLIP_MODEL` / `--clip-model`
+(`ViT-B-32`), `HELDAR_AI_CLIP_PRETRAINED` / `--clip-pretrained` (`openai`).
+
+> **Deliberate v1 deferrals.** VLM interpretation over retrieved moments, ANN
+> indexes (the brute-force cosine scan is measured first — it streams
+> newest-first under a 100k-candidate cap and reports `truncated` honestly),
+> and person/face re-id embeddings (person class excluded by default) are out
+> of scope for v1. Semantic hits are **similarity-ranked candidates, not
+> facts** — the search response records the ranking as a fallible inference,
+> and the UI frames it the same way.

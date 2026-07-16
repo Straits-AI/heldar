@@ -39,6 +39,8 @@ El core sirve el panel de control compilado en `http://localhost:8000` cuando `H
 
 **Acceso remoto** (desde cualquier red, sin aplicación, incluso detrás de CGNAT): el dispositivo establece una conexión SALIENTE hacia un punto de encuentro WebRTC y el panel de control completo se ejecuta en un navegador — vista en vivo de múltiples cámaras, reproducción grabada y configuración — con un modelo de autenticación de dos niveles donde el núcleo permanece como la única autoridad RBAC. Configuración opcional y diseño: [`docs/REMOTE-ACCESS.md`](docs/REMOTE-ACCESS.md); refuerzo para internet público (autenticación, TLS, secretos, bloqueo, cifrado de credenciales, Turnstile): [`docs/PRODUCTION.md`](docs/PRODUCTION.md).
 
+**Búsqueda semántica**: encuentra las grabaciones almacenadas por su significado — escribe una descripción («camioneta pickup roja») o suelta una foto y obtén recortes de detección ordenados por similitud, con salto directo a la reproducción. El ranking se basa en embeddings CLIP calculados por el worker de IA (extra opcional `requirements-embed.txt`) — totalmente local, sin nube: [`docs/SEARCH.md`](docs/SEARCH.md).
+
 Añade una cámara (tú proporcionas la dirección y las credenciales; la URL RTSP se construye a partir de la plantilla del fabricante):
 
 ```bash

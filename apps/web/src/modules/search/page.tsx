@@ -5,8 +5,9 @@
 // inference) is always shown back, and a proof ladder spells out that the results are facts and the
 // interpretation is the only uncertain step. Auth-gated via /auth/me (reads need can_view).
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
+import { useNavigate } from "react-router-dom";
 // A runtime module imports the shell surface from @heldar/shell (shared at runtime via the import map),
 // never from ../lib or ../components — so this file has no dependency on the shell's internal layout.
 import {
@@ -30,11 +31,15 @@ import {
   localInputToIso,
 } from "@heldar/shell";
 import type {
+  CameraView,
   Principal,
   QueryPlan,
   SearchHit,
   SearchPlanResponse,
   SearchResponse,
+  SemanticHit,
+  SemanticSearchRequest,
+  SemanticSearchResponse,
 } from "@heldar/shell";
 
 /* ====================================================================== */
@@ -617,7 +622,400 @@ function StructuredForm({
 }
 
 /* ====================================================================== */
-/* Page shell: auth gate + search console.                                */
+/* Semantic tab — CLIP similarity retrieval over embedded crops (#38).    */
+/* Ranked lookalikes, NOT facts: the NL console's proof framing must not  */
+/* bleed in here — every match is an inference the operator verifies.     */
+/* ====================================================================== */
+
+const K_CHOICES = [12, 24, 48] as const;
+
+/** Ranked crop thumb — larger EvidenceThumb, click-to-open (ZonePanel pattern). */
+function CropThumb({ path, alt }: { path: string; alt: string }) {
+  const [err, setErr] = useState(false);
+  if (err) return null;
+  return (
+    <a
+      href={path}
+      target="_blank"
+      rel="noreferrer"
+      className="group shrink-0 self-start"
+      title="Open crop"
+    >
+      <img
+        src={path}
+        alt={alt}
+        loading="lazy"
+        onError={() => setErr(true)}
+        className="h-28 w-40 rounded-md border border-line bg-black object-cover transition-colors duration-150 group-hover:border-accent"
+      />
+    </a>
+  );
+}
+
+function SemanticHitCard({
+  hit,
+  rank,
+  nameFor,
+  onPlayback,
+}: {
+  hit: SemanticHit;
+  rank: number;
+  nameFor: NameFor;
+  onPlayback: (hit: SemanticHit) => void;
+}) {
+  return (
+    <div className="flex gap-3 rounded-md border border-line bg-panel2/40 p-3 transition-colors duration-150 hover:border-[#34373e]">
+      {hit.evidence_path && <CropThumb path={hit.evidence_path} alt={hit.label ?? "match"} />}
+      <div className="flex min-w-0 flex-1 flex-col">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="font-mono text-[10px] tabular-nums text-fg-muted">#{rank}</span>
+          <Pill label={`${(hit.score * 100).toFixed(0)}%`} color="#a78bfa" />
+          <span className="ml-auto whitespace-nowrap font-mono text-[10px] text-fg-muted">
+            {formatClock(hit.timestamp)}
+          </span>
+        </div>
+        <div className="mt-2 truncate font-mono text-sm text-fg">{hit.label ?? "—"}</div>
+        <div className="mt-1 flex flex-wrap gap-x-3 gap-y-0.5 font-mono text-[10px] text-fg-muted">
+          <span>
+            camera:&nbsp;<span className="text-fg-secondary">{nameFor(hit.camera_id)}</span>
+          </span>
+          {hit.track_id && (
+            <span>
+              track:&nbsp;<span className="text-fg-secondary">#{hit.track_id}</span>
+            </span>
+          )}
+          {hit.detection?.confidence != null && (
+            <span>
+              det&nbsp;conf:&nbsp;
+              <span className="text-fg-secondary">{hit.detection.confidence.toFixed(2)}</span>
+            </span>
+          )}
+        </div>
+        <div className="mt-auto pt-2">
+          <Button size="sm" onClick={() => onPlayback(hit)}>
+            Playback
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+type SemanticBusy = "semantic" | null;
+
+function SemanticConsole({ nameFor, cameras }: { nameFor: NameFor; cameras: CameraView[] }) {
+  const navigate = useNavigate();
+  const fileRef = useRef<HTMLInputElement>(null);
+
+  const [text, setText] = useState("");
+  const [imageB64, setImageB64] = useState<string | null>(null);
+  const [imageName, setImageName] = useState<string | null>(null);
+  const [imagePreview, setImagePreview] = useState<string | null>(null);
+  const [from, setFrom] = useState("");
+  const [to, setTo] = useState("");
+  const [camera, setCamera] = useState("");
+  const [k, setK] = useState(24);
+
+  const [busy, setBusy] = useState<SemanticBusy>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [result, setResult] = useState<SemanticSearchResponse | null>(null);
+  const [searched, setSearched] = useState(false);
+
+  const hasText = text.trim().length > 0;
+
+  // Raw-file bound chosen so the base64 payload (~4/3×) stays under the server's 10M-char cap.
+  const MAX_IMAGE_BYTES = 7 * 1024 * 1024;
+
+  function onFile(f: File | null | undefined) {
+    if (!f) return;
+    // Guard here, not just on the inputs: files also arrive via drag-drop and the field label.
+    if (hasText) return;
+    if (!f.type.startsWith("image/")) {
+      setError(`"${f.name}" is not an image — drop a JPEG, PNG, WebP, or GIF.`);
+      return;
+    }
+    if (f.size === 0) {
+      setError(`"${f.name}" is empty.`);
+      return;
+    }
+    if (f.size > MAX_IMAGE_BYTES) {
+      setError(
+        `"${f.name}" is ${(f.size / (1024 * 1024)).toFixed(1)} MB — the limit is 7 MB. Resize or crop it first.`,
+      );
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = typeof reader.result === "string" ? reader.result : "";
+      const comma = dataUrl.indexOf(",");
+      if (comma < 0) {
+        setError("Could not read that file as an image.");
+        return;
+      }
+      // The wire format is raw base64 inside JSON — strip the "data:...;base64," prefix.
+      setImageB64(dataUrl.slice(comma + 1));
+      setImagePreview(dataUrl);
+      setImageName(f.name);
+      setError(null);
+    };
+    reader.onerror = () => setError("Could not read that file as an image.");
+    reader.readAsDataURL(f);
+  }
+
+  function clearImage() {
+    setImageB64(null);
+    setImageName(null);
+    setImagePreview(null);
+    if (fileRef.current) fileRef.current.value = "";
+  }
+
+  async function run(e: FormEvent) {
+    e.preventDefault();
+    const q = text.trim();
+    if (!q && !imageB64) return;
+    setBusy("semantic");
+    setError(null);
+    // The API takes exactly one of text | image_b64 — text wins if both are somehow set
+    // (the two inputs disable each other, but be explicit).
+    const body: SemanticSearchRequest = q ? { text: q } : { image_b64: imageB64! };
+    const f = localInputToIso(from);
+    if (f) body.from = f;
+    const t = localInputToIso(to);
+    if (t) body.to = t;
+    if (camera) body.cameras = [camera];
+    body.k = k;
+    try {
+      const r = await api.searchSemantic(body);
+      setResult(r);
+      setSearched(true);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 503) {
+        setError(
+          "Embedding worker offline — semantic search needs a running AI worker with the CLIP extra installed.",
+        );
+      } else {
+        setError(err instanceof ApiError ? err.message : String(err));
+      }
+      setResult(null);
+      setSearched(true);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  // Deep-link into synchronized playback: the hit's camera, ±60 s around the observation.
+  function toPlayback(hit: SemanticHit) {
+    const ts = new Date(hit.timestamp).getTime();
+    const fromIso = new Date(ts - 60_000).toISOString();
+    const toIso = new Date(ts + 60_000).toISOString();
+    navigate(
+      `/playback?camera=${encodeURIComponent(hit.camera_id)}&from=${encodeURIComponent(fromIso)}&to=${encodeURIComponent(toIso)}`,
+    );
+  }
+
+  return (
+    <div className="stagger space-y-4">
+      <IntelNote>
+        <span className="text-fg">Similarity-ranked, not verified.</span> These results are CLIP
+        embedding matches — detection crops ranked by how visually close they are to your text or
+        example image. A score is a relative rank,{" "}
+        <span className="text-fg">not a probability and not a stored fact</span> — confirm anything
+        that matters in Playback before acting on it.
+      </IntelNote>
+
+      <Panel title="Find" subtitle="Describe what you're looking for, or match an example image">
+        <form onSubmit={run} className="space-y-4">
+          <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+            <Field label="Describe it" htmlFor="sem-text">
+              <Input
+                id="sem-text"
+                value={text}
+                onChange={(e) => setText(e.target.value)}
+                placeholder="red pickup truck"
+                autoComplete="off"
+                disabled={imageB64 != null}
+              />
+            </Field>
+            <Field label="Or match an image" htmlFor="sem-image">
+              <input
+                ref={fileRef}
+                id="sem-image"
+                type="file"
+                accept="image/*"
+                className="hidden"
+                // Disabled alongside the drop-zone: the field label targets this input, and a
+                // label click on a disabled input is a no-op — otherwise it would bypass the
+                // disabled picker and set an image while text is the active query.
+                disabled={busy !== null || hasText}
+                onChange={(e) => {
+                  onFile(e.target.files?.[0]);
+                  e.target.value = "";
+                }}
+              />
+              {imageB64 ? (
+                <div className="flex items-center gap-2 rounded-md border border-line bg-panel2 px-2 py-1.5">
+                  {imagePreview && (
+                    <img
+                      src={imagePreview}
+                      alt={imageName ?? "query image"}
+                      className="h-9 w-14 shrink-0 rounded border border-line bg-black object-cover"
+                    />
+                  )}
+                  <span className="min-w-0 flex-1 truncate font-mono text-[11px] text-fg-secondary">
+                    {imageName}
+                  </span>
+                  <Button size="sm" onClick={clearImage} disabled={busy !== null}>
+                    Clear
+                  </Button>
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => fileRef.current?.click()}
+                  disabled={busy !== null || hasText}
+                  onDragOver={(e) => e.preventDefault()}
+                  onDrop={(e) => {
+                    e.preventDefault();
+                    if (!hasText) onFile(e.dataTransfer.files?.[0]);
+                  }}
+                  className="flex w-full items-center justify-center gap-2 rounded-md border border-dashed border-line bg-panel2 px-3 py-2 font-mono text-[11px] text-fg-muted transition-colors duration-150 hover:border-accent/50 hover:text-fg-secondary disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <svg
+                    viewBox="0 0 16 16"
+                    width="12"
+                    height="12"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M8 10.5V3" />
+                    <path d="M5 5.5l3-3 3 3" />
+                    <path d="M2.5 10.5v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2" />
+                  </svg>
+                  {hasText ? "Text query set — clear it to use an image" : "Drop an image or click to browse"}
+                </button>
+              )}
+            </Field>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+            <Field label="From" htmlFor="sem-from">
+              <Input
+                id="sem-from"
+                type="datetime-local"
+                step={1}
+                value={from}
+                onChange={(e) => setFrom(e.target.value)}
+              />
+            </Field>
+            <Field label="To" htmlFor="sem-to">
+              <Input
+                id="sem-to"
+                type="datetime-local"
+                step={1}
+                value={to}
+                onChange={(e) => setTo(e.target.value)}
+              />
+            </Field>
+            <Field label="Camera" htmlFor="sem-camera">
+              <Select id="sem-camera" value={camera} onChange={(e) => setCamera(e.target.value)}>
+                <option value="">All cameras</option>
+                {cameras.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Results" htmlFor="sem-k">
+              <Select id="sem-k" value={k} onChange={(e) => setK(Number(e.target.value))}>
+                {K_CHOICES.map((n) => (
+                  <option key={n} value={n}>
+                    Top {n}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+          </div>
+
+          <div className="flex justify-end">
+            <Button
+              type="submit"
+              variant="primary"
+              disabled={busy !== null || (!hasText && !imageB64)}
+            >
+              {busy === "semantic" ? (
+                <>
+                  <Spinner size={14} />
+                  Searching…
+                </>
+              ) : (
+                "Search by similarity"
+              )}
+            </Button>
+          </div>
+        </form>
+
+        {error && (
+          <div className="mt-3">
+            <ErrorNote>{error}</ErrorNote>
+          </div>
+        )}
+      </Panel>
+
+      {result && (
+        <Panel
+          title="Ranked matches"
+          subtitle={`Crops ranked by similarity to "${result.query}"${result.model ? ` · ${result.model}` : ""}`}
+          actions={
+            <span className="font-mono text-[11px] tabular-nums text-fg-muted">{result.count}</span>
+          }
+        >
+          {result.truncated && (
+            <p className="mb-3 flex items-start gap-1.5 rounded border border-connecting/30 bg-connecting/[0.06] px-2 py-1.5 font-mono text-[10px] leading-relaxed text-connecting">
+              <WarnIcon className="mt-0.5 shrink-0" />
+              <span>
+                The candidate scan hit its cap before covering the whole window — narrow the time
+                range or camera filter for a complete ranking.
+              </span>
+            </p>
+          )}
+          {result.hits.length === 0 ? (
+            <EmptyState
+              title="No similar crops found"
+              hint="Nothing embedded in this window resembles the query. Widen the time range, check the camera filter, or confirm an embedding AI task is running for these cameras."
+            />
+          ) : (
+            <div className="grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3">
+              {result.hits.map((h, i) => (
+                <SemanticHitCard
+                  key={h.id}
+                  hit={h}
+                  rank={i + 1}
+                  nameFor={nameFor}
+                  onPlayback={toPlayback}
+                />
+              ))}
+            </div>
+          )}
+        </Panel>
+      )}
+
+      {!searched && (
+        <EmptyState
+          title="Search by what it looks like"
+          hint="Type a description ('red pickup truck') or drop an example image. Crops from the embedding index are ranked by visual similarity — a recall tool for finding footage, not a source of verified facts."
+        />
+      )}
+    </div>
+  );
+}
+
+/* ====================================================================== */
+/* Page shell: auth gate + tabs.                                          */
 /* ====================================================================== */
 
 type Busy = "nl" | "plan" | "structured" | null;
@@ -877,11 +1275,39 @@ function SearchConsole({ nameFor }: { nameFor: NameFor }) {
   );
 }
 
+type TabKey = "query" | "semantic";
+
+function TabButton({
+  active,
+  onClick,
+  children,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cx(
+        "relative -mb-px whitespace-nowrap border-b-2 px-3.5 py-2.5 font-mono text-[11px] font-semibold uppercase tracking-micro transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-canvas",
+        active
+          ? "border-accent text-fg"
+          : "border-transparent text-fg-muted hover:text-fg-secondary",
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
 export function Search() {
   const [principal, setPrincipal] = useState<Principal | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [needsLogin, setNeedsLogin] = useState(false);
   const [authError, setAuthError] = useState<string | null>(null);
+  const [tab, setTab] = useState<TabKey>("query");
 
   const loadMe = useCallback(async () => {
     setAuthLoading(true);
@@ -926,6 +1352,11 @@ export function Search() {
     setPrincipal(null);
     setNeedsLogin(true);
   }
+
+  const tabs: { key: TabKey; label: string }[] = [
+    { key: "query", label: "Query" },
+    { key: "semantic", label: "Semantic" },
+  ];
 
   // ---- Gate states ----
   if (needsLogin) {
@@ -991,10 +1422,23 @@ export function Search() {
             )}
           </div>
         </div>
+
+        {/* Tab bar */}
+        <div className="mt-5 flex flex-wrap gap-1 overflow-x-auto border-b border-line">
+          {tabs.map((t) => (
+            <TabButton key={t.key} active={tab === t.key} onClick={() => setTab(t.key)}>
+              {t.label}
+            </TabButton>
+          ))}
+        </div>
       </header>
 
       <div className="mt-5">
-        <SearchConsole nameFor={nameFor} />
+        {tab === "query" ? (
+          <SearchConsole nameFor={nameFor} />
+        ) : (
+          <SemanticConsole nameFor={nameFor} cameras={cameraList} />
+        )}
       </div>
     </div>
   );

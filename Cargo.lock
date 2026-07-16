@@ -813,6 +813,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "axum",
+ "base64",
  "chrono",
  "heldar-kernel",
  "reqwest",

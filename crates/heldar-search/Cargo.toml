@@ -31,5 +31,8 @@ uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 anyhow = "1"
+# Validates query-image payloads before they enter the embed queue (already resolved in Cargo.lock
+# via the kernel; adds zero new compiled crates).
+base64 = "0.22"
 # Background query-log retention loop.
 tokio = { version = "1", features = ["time"] }

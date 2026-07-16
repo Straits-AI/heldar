@@ -39,6 +39,18 @@ pub fn router() -> Router<AppState> {
             "/api/v1/ai/events",
             post(ingest).layer(DefaultBodyLimit::max(INGEST_BODY_LIMIT_BYTES)),
         )
+        // Semantic-retrieval worker surface (issue #38): batched crop-embedding ingest, plus the
+        // pull-only query-embedding queue (fast claim poll + result post). Embedding batches carry
+        // f32 vectors and optional JPEG thumbs, so this route gets its own, larger body cap.
+        .route(
+            "/api/v1/ai/embeddings",
+            post(ingest_embeddings).layer(DefaultBodyLimit::max(EMBED_INGEST_BODY_LIMIT_BYTES)),
+        )
+        .route("/api/v1/ai/embed-queries", get(claim_embed_queries))
+        .route(
+            "/api/v1/ai/embed-queries/{id}/result",
+            post(embed_query_result).layer(DefaultBodyLimit::max(EMBED_RESULT_BODY_LIMIT_BYTES)),
+        )
         .route("/api/v1/cameras/{id}/frame", get(latest_frame))
         .route("/api/v1/cameras/{id}/detections", get(list_detections))
 }
@@ -453,6 +465,60 @@ async fn ingest(
         return Ok(Json(json!({ "detections_ingested": 0, "duplicate": true })));
     }
     Ok(Json(json!({ "detections_ingested": outcome.inserted })))
+}
+
+/// Body cap for `POST /api/v1/ai/embeddings`, enforced before deserialization. Sized for
+/// [`crate::services::embeddings::MAX_INGEST_EMBEDDINGS`] items each carrying a 512-d f32 vector
+/// as JSON floats (~6 KB) plus an optional crop thumbnail (≤ ~128 KB base64).
+const EMBED_INGEST_BODY_LIMIT_BYTES: usize = 24 * 1024 * 1024;
+
+/// Body cap for a single query-embedding result (one vector + model id).
+const EMBED_RESULT_BODY_LIMIT_BYTES: usize = 1024 * 1024;
+
+/// Ingest a batch of crop embeddings posted by an AI worker's `embedding` task. Validation,
+/// idempotency, and thumbnail persistence live in [`crate::services::embeddings::ingest_batch`];
+/// this handler owns only the HTTP/RBAC surface (mirroring `ingest` above).
+async fn ingest_embeddings(
+    State(st): State<AppState>,
+    principal: crate::auth::Principal,
+    Json(body): Json<crate::services::embeddings::EmbeddingIngest>,
+) -> AppResult<Json<Value>> {
+    principal.require(principal.can_ingest(), "ingest embeddings")?;
+    let inserted = crate::services::embeddings::ingest_batch(&st, &body).await?;
+    Ok(Json(json!({ "embeddings_ingested": inserted })))
+}
+
+#[derive(Deserialize)]
+struct EmbedQueriesQuery {
+    worker_id: Option<String>,
+}
+
+/// Hand pending query embeddings to a worker (claiming them). Polled fast (~1 s) by workers with
+/// a CLIP backend, so the underlying claim is read-only when the queue is empty — see
+/// [`crate::services::embeddings::claim_queries`]. Requires ingest capability: query payloads are
+/// operator search text/images, not something every viewer principal should be handed.
+async fn claim_embed_queries(
+    State(st): State<AppState>,
+    principal: crate::auth::Principal,
+    Query(q): Query<EmbedQueriesQuery>,
+) -> AppResult<Json<Value>> {
+    principal.require(principal.can_ingest(), "claim embedding queries")?;
+    let worker = q.worker_id.as_deref().unwrap_or("unknown");
+    let queries = crate::services::embeddings::claim_queries(&st.pool, worker).await?;
+    Ok(Json(json!({ "queries": queries })))
+}
+
+/// Record a worker's answer (vector or error) for a claimed query. First result wins; late
+/// duplicates return `updated: false`.
+async fn embed_query_result(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    principal: crate::auth::Principal,
+    Json(body): Json<crate::services::embeddings::QueryResult>,
+) -> AppResult<Json<Value>> {
+    principal.require(principal.can_ingest(), "answer embedding queries")?;
+    let updated = crate::services::embeddings::submit_query_result(&st.pool, &id, &body).await?;
+    Ok(Json(json!({ "updated": updated })))
 }
 
 fn parse_opt_ts(s: &Option<String>, field: &str) -> AppResult<Option<chrono::DateTime<Utc>>> {

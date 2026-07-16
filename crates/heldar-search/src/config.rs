@@ -13,6 +13,9 @@ pub struct SearchConfig {
     pub max_results: i64,
     /// How long the `search_log` query-history/audit rows are kept before retention prunes them.
     pub query_log_retention_days: i64,
+    /// How long `POST /api/v1/search/semantic` waits for an AI worker to embed the query before
+    /// answering 503 ("embedding worker offline"). Workers poll the queue about once a second.
+    pub embed_timeout_ms: u64,
 }
 
 impl SearchConfig {
@@ -31,6 +34,8 @@ impl SearchConfig {
             max_results: parse_or::<i64>("HELDAR_SEARCH_MAX_RESULTS", 200).clamp(1, 5000),
             query_log_retention_days: parse_or::<i64>("HELDAR_SEARCH_QUERY_LOG_RETENTION_DAYS", 90)
                 .max(1),
+            embed_timeout_ms: parse_or::<u64>("HELDAR_SEARCH_EMBED_TIMEOUT_MS", 3000)
+                .clamp(250, 30_000),
         }
     }
 }
