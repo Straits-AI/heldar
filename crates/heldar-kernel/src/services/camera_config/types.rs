@@ -210,6 +210,65 @@ pub struct BuiltinDetection {
     pub enabled: Option<bool>,
 }
 
+/// One line-crossing rule slot on the device (`/ISAPI/Smart/LineDetection/1` `LineItem`). Devices
+/// expose a fixed set of slots (4 on the verified DS-2CD3T56WDV3-L); an unused slot is `enabled:
+/// false` with a degenerate line. Coordinates are normalized 0..1 in our API (the device speaks
+/// 0..1000).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SmartLine {
+    pub id: i64,
+    pub enabled: bool,
+    /// 1–100.
+    pub sensitivity: i64,
+    /// `any` | `left-right` | `right-left` (verbatim device tokens).
+    pub direction: String,
+    /// Exactly two endpoints, normalized 0..1.
+    pub points: Vec<[f64; 2]>,
+}
+
+/// The device's line-crossing configuration: a master arm switch + the rule slots.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct LineCrossingConfig {
+    pub enabled: bool,
+    pub lines: Vec<SmartLine>,
+}
+
+/// One intrusion (field-detection) region slot (`/ISAPI/Smart/FieldDetection/1`
+/// `FieldDetectionRegion`). An unconfigured slot carries NO coordinates on the device.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct SmartRegion {
+    pub id: i64,
+    pub enabled: bool,
+    /// 1–100.
+    pub sensitivity: i64,
+    /// Seconds a target must stay inside before the alarm fires (device `timeThreshold`).
+    pub time_threshold: i64,
+    /// Polygon vertices, normalized 0..1 (empty = slot unconfigured).
+    pub points: Vec<[f64; 2]>,
+}
+
+/// The device's intrusion-detection configuration: a master arm switch + the region slots.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct IntrusionConfig {
+    pub enabled: bool,
+    pub regions: Vec<SmartRegion>,
+}
+
+/// The device's basic motion-detection configuration. The grid layout itself is left on-device
+/// (a full-frame grid is the common default); only the arm switch + sensitivity are exposed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct MotionConfig {
+    pub enabled: bool,
+    /// 0–100 where exposed (`MotionDetectionLayout/sensitivityLevel`).
+    #[serde(default)]
+    pub sensitivity: Option<i64>,
+}
+
 /// One alarm/relay output port (`GET /ISAPI/System/IO/outputs`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

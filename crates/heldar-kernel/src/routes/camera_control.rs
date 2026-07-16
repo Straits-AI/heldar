@@ -18,7 +18,8 @@ use crate::auth::{self, Principal};
 use crate::error::AppResult;
 use crate::routes::cameras::load_camera;
 use crate::services::camera_config::types::{
-    DayNightConfig, DayNightPatch, ImageConfig, ImageConfigPatch, IoOutput,
+    DayNightConfig, DayNightPatch, ImageConfig, ImageConfigPatch, IntrusionConfig, IoOutput,
+    LineCrossingConfig, MotionConfig,
 };
 use crate::services::camera_config::{self, CameraConfigProvider};
 use crate::services::camera_control;
@@ -42,6 +43,18 @@ pub fn router() -> Router<AppState> {
         .route(
             "/api/v1/cameras/{id}/control/detections/{kind}",
             axum::routing::put(put_detection),
+        )
+        .route(
+            "/api/v1/cameras/{id}/control/line_crossing",
+            get(get_line_crossing).put(put_line_crossing),
+        )
+        .route(
+            "/api/v1/cameras/{id}/control/intrusion",
+            get(get_intrusion).put(put_intrusion),
+        )
+        .route(
+            "/api/v1/cameras/{id}/control/motion",
+            get(get_motion).put(put_motion),
         )
         .route("/api/v1/cameras/{id}/control/io/outputs", get(list_outputs))
         .route(
@@ -216,6 +229,125 @@ async fn put_detection(
     Ok(Json(
         json!({ "ok": true, "kind": kind, "enabled": body.enabled }),
     ))
+}
+
+// ========================= Detection geometry (line / intrusion / motion) =========================
+
+async fn get_line_crossing(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    principal: Principal,
+) -> AppResult<Json<LineCrossingConfig>> {
+    principal.require(principal.can_view(), "view line-crossing rules")?;
+    let provider = provider_for(&st, &id).await?;
+    Ok(Json(provider.get_line_crossing().await?))
+}
+
+/// Write line-crossing rules (geometry drawn in the Device panel over the camera frame).
+async fn put_line_crossing(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    principal: Principal,
+    Json(cfg): Json<LineCrossingConfig>,
+) -> AppResult<Json<LineCrossingConfig>> {
+    principal.require(
+        principal.can_manage_registry(),
+        "configure line-crossing rules",
+    )?;
+    let provider = provider_for(&st, &id).await?;
+    provider.put_line_crossing(&cfg).await?;
+    let updated = provider.get_line_crossing().await?;
+    auth::audit(
+        &st.pool,
+        &principal,
+        "camera_control_put_line_crossing",
+        "camera",
+        &id,
+        json!({
+            "enabled": updated.enabled,
+            "armed_lines": updated.lines.iter().filter(|l| l.enabled).count(),
+        }),
+    )
+    .await;
+    camera_control::spawn_probe(&st, &id);
+    Ok(Json(updated))
+}
+
+async fn get_intrusion(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    principal: Principal,
+) -> AppResult<Json<IntrusionConfig>> {
+    principal.require(principal.can_view(), "view intrusion regions")?;
+    let provider = provider_for(&st, &id).await?;
+    Ok(Json(provider.get_intrusion().await?))
+}
+
+/// Write intrusion regions (geometry drawn in the Device panel over the camera frame).
+async fn put_intrusion(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    principal: Principal,
+    Json(cfg): Json<IntrusionConfig>,
+) -> AppResult<Json<IntrusionConfig>> {
+    principal.require(
+        principal.can_manage_registry(),
+        "configure intrusion regions",
+    )?;
+    let provider = provider_for(&st, &id).await?;
+    provider.put_intrusion(&cfg).await?;
+    let updated = provider.get_intrusion().await?;
+    auth::audit(
+        &st.pool,
+        &principal,
+        "camera_control_put_intrusion",
+        "camera",
+        &id,
+        json!({
+            "enabled": updated.enabled,
+            "armed_regions": updated.regions.iter().filter(|r| r.enabled).count(),
+        }),
+    )
+    .await;
+    camera_control::spawn_probe(&st, &id);
+    Ok(Json(updated))
+}
+
+async fn get_motion(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    principal: Principal,
+) -> AppResult<Json<MotionConfig>> {
+    principal.require(principal.can_view(), "view motion detection settings")?;
+    let provider = provider_for(&st, &id).await?;
+    Ok(Json(provider.get_motion().await?))
+}
+
+/// Write motion arm switch + sensitivity (the grid layout stays on-device).
+async fn put_motion(
+    State(st): State<AppState>,
+    Path(id): Path<String>,
+    principal: Principal,
+    Json(cfg): Json<MotionConfig>,
+) -> AppResult<Json<MotionConfig>> {
+    principal.require(
+        principal.can_manage_registry(),
+        "configure motion detection",
+    )?;
+    let provider = provider_for(&st, &id).await?;
+    provider.put_motion(&cfg).await?;
+    let updated = provider.get_motion().await?;
+    auth::audit(
+        &st.pool,
+        &principal,
+        "camera_control_put_motion",
+        "camera",
+        &id,
+        json!({ "enabled": updated.enabled, "sensitivity": updated.sensitivity }),
+    )
+    .await;
+    camera_control::spawn_probe(&st, &id);
+    Ok(Json(updated))
 }
 
 // ========================= IO outputs =========================

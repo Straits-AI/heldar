@@ -82,7 +82,15 @@ the low-CPU alternative to server-side zones where the hardware supports it:
 
 - **Arm/disarm from the Device panel**: the "Built-in detections" chips are toggles for the kinds
   that carry a device config resource (`PUT /api/v1/cameras/{id}/control/detections/{kind}`,
-  manager+, audited). Zone/line geometry is drawn in the camera's own web UI for now.
+  manager+, audited).
+- **Geometry editors (Device panel → Configure)**: draw **line-crossing lines** (up to the device's
+  slot count, two clicks per line, direction + sensitivity per line) and **intrusion regions**
+  (click-to-add polygon, dwell threshold + sensitivity per region) directly on the camera frame —
+  written to the device via `GET/PUT .../control/line_crossing` and `.../control/intrusion`
+  (read-modify-write: the item list is rebuilt inside the device's own document shell; slots you
+  don't touch keep their device state). **Motion** exposes the arm switch + sensitivity
+  (`GET/PUT .../control/motion`); the motion grid layout itself stays on-device (full-frame by
+  default). Coordinates are normalized 0..1 in our API; the device speaks 0..1000.
 - **Ingest events** (per-camera `native_events_enabled`, the "Ingest events" toggle): the kernel
   keeps one connection to the device's event notification stream
   (`/ISAPI/Event/notification/alertStream`) per opted-in camera (`services/camera_events.rs`).

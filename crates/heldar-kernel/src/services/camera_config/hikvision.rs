@@ -18,8 +18,8 @@ use reqwest::{Method, StatusCode};
 
 use super::types::{
     BuiltinDetection, DayNightConfig, DayNightPatch, DeviceInfo, ImageConfig, ImageConfigPatch,
-    IoOutput, NativePlateRead, NtpConfig, OnvifSettings, OnvifUserType, OsdConfig, TimeConfig,
-    VideoConfig,
+    IntrusionConfig, IoOutput, LineCrossingConfig, MotionConfig, NativePlateRead, NtpConfig,
+    OnvifSettings, OnvifUserType, OsdConfig, SmartLine, SmartRegion, TimeConfig, VideoConfig,
 };
 use super::CameraConfigProvider;
 use crate::camera_url;
@@ -40,6 +40,14 @@ const IO_OUTPUTS_PATH: &str = "/ISAPI/System/IO/outputs";
 const ANPR_PLATES_PATH: &str = "/ISAPI/Traffic/channels/1/vehicleDetect/plates";
 /// On-camera event notification stream (multipart XML long-poll).
 const ALERT_STREAM_PATH: &str = "/ISAPI/Event/notification/alertStream";
+/// Line-crossing rule configuration (channel 1).
+const LINE_DETECTION_PATH: &str = "/ISAPI/Smart/LineDetection/1";
+/// Intrusion (field-detection) region configuration (channel 1).
+const FIELD_DETECTION_PATH: &str = "/ISAPI/Smart/FieldDetection/1";
+/// Basic motion detection (channel 1).
+const MOTION_DETECTION_PATH: &str = "/ISAPI/System/Video/inputs/channels/1/motionDetection";
+/// Device coordinate space for smart-event geometry (normalizedScreenSize).
+const DEVICE_COORD_SPACE: f64 = 1000.0;
 /// Smart-event capability flags (`/ISAPI/Smart/capabilities` `isSupportX` element → stable kind
 /// token → optional config resource whose `<enabled>` gives the current arm state).
 const SMART_DETECTIONS: &[(&str, &str, Option<&str>)] = &[
@@ -646,6 +654,92 @@ impl CameraConfigProvider for HikVisionIsapiClient {
         Ok(())
     }
 
+    async fn get_line_crossing(&self) -> AppResult<LineCrossingConfig> {
+        let xml = self
+            .isapi_request(Method::GET, LINE_DETECTION_PATH, None)
+            .await?;
+        Ok(parse_line_detection(&xml))
+    }
+
+    async fn put_line_crossing(&self, cfg: &LineCrossingConfig) -> AppResult<()> {
+        validate_lines(cfg)?;
+        let original = self
+            .isapi_request(Method::GET, LINE_DETECTION_PATH, None)
+            .await?;
+        // Merge payload slots over the device's current slots by id, then rebuild the whole
+        // LineItemList (unset firmware quirks aside, we captured the exact item schema live).
+        let mut current = parse_line_detection(&original);
+        for line in &cfg.lines {
+            if let Some(slot) = current.lines.iter_mut().find(|l| l.id == line.id) {
+                *slot = line.clone();
+            }
+        }
+        let items: String = current.lines.iter().map(build_line_item).collect();
+        let mut body = splice_list_inner(&original, "LineItemList", &items).ok_or_else(|| {
+            AppError::Other(anyhow::anyhow!("LineDetection: no <LineItemList> block"))
+        })?;
+        body = replace_first_text(&body, "enabled", bool_text(cfg.enabled));
+        self.isapi_request(Method::PUT, LINE_DETECTION_PATH, Some(body))
+            .await?;
+        Ok(())
+    }
+
+    async fn get_intrusion(&self) -> AppResult<IntrusionConfig> {
+        let xml = self
+            .isapi_request(Method::GET, FIELD_DETECTION_PATH, None)
+            .await?;
+        Ok(parse_field_detection(&xml))
+    }
+
+    async fn put_intrusion(&self, cfg: &IntrusionConfig) -> AppResult<()> {
+        validate_regions(cfg)?;
+        let original = self
+            .isapi_request(Method::GET, FIELD_DETECTION_PATH, None)
+            .await?;
+        let mut current = parse_field_detection(&original);
+        for region in &cfg.regions {
+            if let Some(slot) = current.regions.iter_mut().find(|r| r.id == region.id) {
+                *slot = region.clone();
+            }
+        }
+        let items: String = current.regions.iter().map(build_region_item).collect();
+        let mut body = splice_list_inner(&original, "FieldDetectionRegionList", &items)
+            .ok_or_else(|| {
+                AppError::Other(anyhow::anyhow!(
+                    "FieldDetection: no <FieldDetectionRegionList> block"
+                ))
+            })?;
+        body = replace_first_text(&body, "enabled", bool_text(cfg.enabled));
+        self.isapi_request(Method::PUT, FIELD_DETECTION_PATH, Some(body))
+            .await?;
+        Ok(())
+    }
+
+    async fn get_motion(&self) -> AppResult<MotionConfig> {
+        let xml = self
+            .isapi_request(Method::GET, MOTION_DETECTION_PATH, None)
+            .await?;
+        Ok(MotionConfig {
+            enabled: first_text(&xml, "enabled")
+                .map(|s| parse_bool_text(&s))
+                .unwrap_or(false),
+            sensitivity: first_text(&xml, "sensitivityLevel").and_then(|s| s.parse().ok()),
+        })
+    }
+
+    async fn put_motion(&self, cfg: &MotionConfig) -> AppResult<()> {
+        let original = self
+            .isapi_request(Method::GET, MOTION_DETECTION_PATH, None)
+            .await?;
+        let mut body = replace_first_text(&original, "enabled", bool_text(cfg.enabled));
+        if let Some(sens) = cfg.sensitivity {
+            body = replace_first_text(&body, "sensitivityLevel", &clamp_pct(sens).to_string());
+        }
+        self.isapi_request(Method::PUT, MOTION_DETECTION_PATH, Some(body))
+            .await?;
+        Ok(())
+    }
+
     async fn open_event_stream(
         &self,
         stream_http: &reqwest::Client,
@@ -860,6 +954,193 @@ fn parse_anpr_plates(xml: &str) -> Vec<NativePlateRead> {
             })
         })
         .collect()
+}
+
+/// Parse `<Coordinates>`/`<RegionCoordinates>` children into normalized 0..1 points.
+fn parse_points(xml: &str, elem: &str) -> Vec<[f64; 2]> {
+    elements(xml, elem)
+        .into_iter()
+        .filter_map(|(_open, inner)| {
+            let x: f64 = first_text(inner, "positionX")?.parse().ok()?;
+            let y: f64 = first_text(inner, "positionY")?.parse().ok()?;
+            Some([x / DEVICE_COORD_SPACE, y / DEVICE_COORD_SPACE])
+        })
+        .collect()
+}
+
+/// Device coordinate (0..1000, clamped) from a normalized 0..1 value.
+fn device_coord(v: f64) -> i64 {
+    ((v * DEVICE_COORD_SPACE).round() as i64).clamp(0, DEVICE_COORD_SPACE as i64)
+}
+
+/// Parse a `LineDetection` document (verbatim schema captured from a live DS-2CD3T56WDV3-L).
+fn parse_line_detection(xml: &str) -> LineCrossingConfig {
+    LineCrossingConfig {
+        enabled: first_text(xml, "enabled")
+            .map(|s| parse_bool_text(&s))
+            .unwrap_or(false),
+        lines: elements(xml, "LineItem")
+            .into_iter()
+            .filter_map(|(_open, inner)| {
+                Some(SmartLine {
+                    id: first_text(inner, "id")?.parse().ok()?,
+                    enabled: first_text(inner, "enabled")
+                        .map(|s| parse_bool_text(&s))
+                        .unwrap_or(false),
+                    sensitivity: first_text(inner, "sensitivityLevel")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(50),
+                    direction: first_text(inner, "directionSensitivity")
+                        .unwrap_or_else(|| "any".into()),
+                    points: parse_points(inner, "Coordinates"),
+                })
+            })
+            .collect(),
+    }
+}
+
+/// Parse a `FieldDetection` document. Unconfigured region slots have no coordinates at all.
+fn parse_field_detection(xml: &str) -> IntrusionConfig {
+    IntrusionConfig {
+        enabled: first_text(xml, "enabled")
+            .map(|s| parse_bool_text(&s))
+            .unwrap_or(false),
+        regions: elements(xml, "FieldDetectionRegion")
+            .into_iter()
+            .filter_map(|(_open, inner)| {
+                Some(SmartRegion {
+                    id: first_text(inner, "id")?.parse().ok()?,
+                    enabled: first_text(inner, "enabled")
+                        .map(|s| parse_bool_text(&s))
+                        .unwrap_or(false),
+                    sensitivity: first_text(inner, "sensitivityLevel")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(50),
+                    time_threshold: first_text(inner, "timeThreshold")
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0),
+                    points: parse_points(inner, "RegionCoordinates"),
+                })
+            })
+            .collect(),
+    }
+}
+
+/// Build one `<LineItem>` in the exact shape the device emits.
+fn build_line_item(line: &SmartLine) -> String {
+    let coords: String = line
+        .points
+        .iter()
+        .map(|p| {
+            format!(
+                "<Coordinates><positionX>{}</positionX><positionY>{}</positionY></Coordinates>",
+                device_coord(p[0]),
+                device_coord(p[1])
+            )
+        })
+        .collect();
+    format!(
+        "<LineItem><id>{}</id><enabled>{}</enabled><sensitivityLevel>{}</sensitivityLevel><directionSensitivity>{}</directionSensitivity><CoordinatesList>{}</CoordinatesList></LineItem>",
+        line.id,
+        bool_text(line.enabled),
+        line.sensitivity.clamp(1, 100),
+        xml_escape(&line.direction),
+        coords
+    )
+}
+
+/// Build one `<FieldDetectionRegion>` in the exact shape the device emits (a slot without points
+/// carries no coordinates list, mirroring the device's own representation of an unset slot).
+fn build_region_item(region: &SmartRegion) -> String {
+    let coords = if region.points.is_empty() {
+        String::new()
+    } else {
+        let pts: String = region
+            .points
+            .iter()
+            .map(|p| {
+                format!(
+                    "<RegionCoordinates><positionX>{}</positionX><positionY>{}</positionY></RegionCoordinates>",
+                    device_coord(p[0]),
+                    device_coord(p[1])
+                )
+            })
+            .collect();
+        format!("<RegionCoordinatesList>{pts}</RegionCoordinatesList>")
+    };
+    format!(
+        "<FieldDetectionRegion version=\"2.0\" xmlns=\"{HIK_NS}\"><id>{}</id><enabled>{}</enabled><sensitivityLevel>{}</sensitivityLevel><timeThreshold>{}</timeThreshold>{}</FieldDetectionRegion>",
+        region.id,
+        bool_text(region.enabled),
+        region.sensitivity.clamp(1, 100),
+        region.time_threshold.clamp(0, 100),
+        coords
+    )
+}
+
+/// Replace the inner XML of the first `<list_tag …>…</list_tag>` block, preserving the opening tag
+/// (it may carry attributes like `size="4"`). Returns None when the block is absent.
+fn splice_list_inner(xml: &str, list_tag: &str, new_inner: &str) -> Option<String> {
+    let (_lt, gt, self_closing) = find_open(xml, list_tag, 0)?;
+    if self_closing {
+        return None;
+    }
+    let cs = gt + 1;
+    let close_rel = find_close(&xml[cs..], list_tag)?;
+    let ce = cs + close_rel;
+    let mut out = String::with_capacity(xml.len() + new_inner.len());
+    out.push_str(&xml[..cs]);
+    out.push_str(new_inner);
+    out.push_str(&xml[ce..]);
+    Some(out)
+}
+
+/// A line rule must have exactly two endpoints in 0..1 and a known direction token.
+fn validate_lines(cfg: &LineCrossingConfig) -> AppResult<()> {
+    for line in &cfg.lines {
+        if line.points.len() != 2 {
+            return Err(AppError::BadRequest(format!(
+                "line {} must have exactly 2 points",
+                line.id
+            )));
+        }
+        if !matches!(line.direction.as_str(), "any" | "left-right" | "right-left") {
+            return Err(AppError::BadRequest(
+                "`direction` must be any|left-right|right-left".into(),
+            ));
+        }
+        validate_norm_points(&line.points)?;
+    }
+    Ok(())
+}
+
+/// A region must be empty (clearing the slot) or a 3..=10 vertex polygon in 0..1.
+fn validate_regions(cfg: &IntrusionConfig) -> AppResult<()> {
+    for region in &cfg.regions {
+        if !region.points.is_empty() && !(3..=10).contains(&region.points.len()) {
+            return Err(AppError::BadRequest(format!(
+                "region {} must have 3–10 points (or none to clear it)",
+                region.id
+            )));
+        }
+        validate_norm_points(&region.points)?;
+    }
+    Ok(())
+}
+
+fn validate_norm_points(points: &[[f64; 2]]) -> AppResult<()> {
+    for p in points {
+        if !(p[0].is_finite()
+            && p[1].is_finite()
+            && (0.0..=1.0).contains(&p[0])
+            && (0.0..=1.0).contains(&p[1]))
+        {
+            return Err(AppError::BadRequest(
+                "points must be normalized coordinates in 0..1".into(),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Clamp an image level to the 0–100 range ISAPI expects.
@@ -1303,6 +1584,143 @@ mod tests {
             .map(|(_, kind, _)| *kind)
             .collect();
         assert_eq!(supported, vec!["line_crossing", "intrusion"]);
+    }
+
+    /// Condensed verbatim LineDetection doc from the live DS-2CD3T56WDV3-L (2 of the 4 slots).
+    const LINE_DOC: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<LineDetection>\n<id>1</id>\n<enabled>false</enabled>\n\
+<normalizedScreenSize>\n<normalizedScreenWidth>1000</normalizedScreenWidth>\n<normalizedScreenHeight>1000</normalizedScreenHeight>\n</normalizedScreenSize>\n\
+<LineItemList size=\"4\" >\n\
+<LineItem>\n<id>1</id>\n<enabled>false</enabled>\n<sensitivityLevel>50</sensitivityLevel>\n<directionSensitivity>any</directionSensitivity>\n\
+<CoordinatesList>\n<Coordinates>\n<positionX>0</positionX>\n<positionY>1000</positionY>\n</Coordinates>\n\
+<Coordinates>\n<positionX>0</positionX>\n<positionY>1000</positionY>\n</Coordinates>\n</CoordinatesList>\n</LineItem>\n\
+<LineItem>\n<id>2</id>\n<enabled>false</enabled>\n<sensitivityLevel>50</sensitivityLevel>\n<directionSensitivity>any</directionSensitivity>\n\
+<CoordinatesList>\n<Coordinates>\n<positionX>0</positionX>\n<positionY>1000</positionY>\n</Coordinates>\n\
+<Coordinates>\n<positionX>0</positionX>\n<positionY>1000</positionY>\n</Coordinates>\n</CoordinatesList>\n</LineItem>\n\
+</LineItemList>\n<isSupportMultiScene>false</isSupportMultiScene>\n<recogRuleType>vectorMode</recogRuleType>\n</LineDetection>";
+
+    /// Condensed verbatim FieldDetection doc: slot 1 has coordinates, slot 2 has NONE (unset).
+    const FIELD_DOC: &str = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<FieldDetection version=\"2.0\" xmlns=\"http://www.hikvision.com/ver20/XMLSchema\">\n\
+<id>1</id>\n<enabled>false</enabled>\n<enableDualVca>false</enableDualVca>\n<startTriggerTime>500</startTriggerTime>\n<endTriggerTime>500</endTriggerTime>\n\
+<normalizedScreenSize>\n<normalizedScreenWidth>1000</normalizedScreenWidth>\n<normalizedScreenHeight>1000</normalizedScreenHeight>\n</normalizedScreenSize>\n\
+<FieldDetectionRegionList size=\"4\" >\n\
+<FieldDetectionRegion version=\"2.0\" xmlns=\"http://www.hikvision.com/ver20/XMLSchema\">\n<id>1</id>\n<enabled>false</enabled>\n\
+<sensitivityLevel>50</sensitivityLevel>\n<timeThreshold>0</timeThreshold>\n\
+<RegionCoordinatesList>\n<RegionCoordinates>\n<positionX>50</positionX>\n<positionY>750</positionY>\n</RegionCoordinates>\n\
+<RegionCoordinates>\n<positionX>50</positionX>\n<positionY>0</positionY>\n</RegionCoordinates>\n\
+<RegionCoordinates>\n<positionX>950</positionX>\n<positionY>0</positionY>\n</RegionCoordinates>\n\
+<RegionCoordinates>\n<positionX>950</positionX>\n<positionY>750</positionY>\n</RegionCoordinates>\n</RegionCoordinatesList>\n</FieldDetectionRegion>\n\
+<FieldDetectionRegion version=\"2.0\" xmlns=\"http://www.hikvision.com/ver20/XMLSchema\">\n<id>2</id>\n<enabled>false</enabled>\n\
+<sensitivityLevel>50</sensitivityLevel>\n<timeThreshold>0</timeThreshold>\n</FieldDetectionRegion>\n\
+</FieldDetectionRegionList>\n<isSupportMultiScene>false</isSupportMultiScene>\n</FieldDetection>";
+
+    #[test]
+    fn parses_line_detection_doc() {
+        let cfg = parse_line_detection(LINE_DOC);
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.lines.len(), 2);
+        assert_eq!(cfg.lines[0].id, 1);
+        assert_eq!(cfg.lines[0].direction, "any");
+        assert_eq!(cfg.lines[0].points, vec![[0.0, 1.0], [0.0, 1.0]]);
+    }
+
+    #[test]
+    fn parses_field_detection_doc_including_unset_slot() {
+        let cfg = parse_field_detection(FIELD_DOC);
+        assert!(!cfg.enabled);
+        assert_eq!(cfg.regions.len(), 2);
+        assert_eq!(cfg.regions[0].points.len(), 4);
+        assert_eq!(cfg.regions[0].points[0], [0.05, 0.75]);
+        assert!(cfg.regions[1].points.is_empty(), "unset slot has no coords");
+    }
+
+    /// The write path: merge a payload slot, rebuild the list, splice into the original document —
+    /// the result must re-parse to the merged config and keep untouched document parts intact.
+    #[test]
+    fn line_write_round_trips_through_rebuild_and_splice() {
+        let mut cfg = parse_line_detection(LINE_DOC);
+        cfg.enabled = true;
+        cfg.lines[0] = SmartLine {
+            id: 1,
+            enabled: true,
+            sensitivity: 70,
+            direction: "left-right".into(),
+            points: vec![[0.25, 0.4], [0.75, 0.6]],
+        };
+        let items: String = cfg.lines.iter().map(build_line_item).collect();
+        let body = splice_list_inner(LINE_DOC, "LineItemList", &items).expect("spliced");
+        let body = replace_first_text(&body, "enabled", bool_text(cfg.enabled));
+
+        let reread = parse_line_detection(&body);
+        assert!(reread.enabled);
+        assert_eq!(reread.lines.len(), 2);
+        assert_eq!(reread.lines[0].points, vec![[0.25, 0.4], [0.75, 0.6]]);
+        assert_eq!(reread.lines[0].direction, "left-right");
+        assert_eq!(reread.lines[0].sensitivity, 70);
+        // Untouched slot + document furniture preserved.
+        assert_eq!(reread.lines[1].points, vec![[0.0, 1.0], [0.0, 1.0]]);
+        assert!(body.contains("<recogRuleType>vectorMode</recogRuleType>"));
+        assert!(
+            body.contains("<LineItemList size=\"4\" >"),
+            "list open tag + attrs kept"
+        );
+    }
+
+    /// Writing a polygon into a previously-unset region slot inserts its coordinates list.
+    #[test]
+    fn region_write_inserts_coordinates_into_unset_slot() {
+        let mut cfg = parse_field_detection(FIELD_DOC);
+        cfg.regions[1] = SmartRegion {
+            id: 2,
+            enabled: true,
+            sensitivity: 60,
+            time_threshold: 2,
+            points: vec![[0.1, 0.1], [0.9, 0.1], [0.5, 0.9]],
+        };
+        let items: String = cfg.regions.iter().map(build_region_item).collect();
+        let body =
+            splice_list_inner(FIELD_DOC, "FieldDetectionRegionList", &items).expect("spliced");
+        let reread = parse_field_detection(&body);
+        assert_eq!(reread.regions[1].points.len(), 3);
+        assert!(reread.regions[1].enabled);
+        assert_eq!(reread.regions[1].time_threshold, 2);
+        // Slot 1's original polygon untouched.
+        assert_eq!(reread.regions[0].points.len(), 4);
+        assert!(body.contains("<startTriggerTime>500</startTriggerTime>"));
+    }
+
+    #[test]
+    fn geometry_validation_rejects_bad_shapes() {
+        let line = |points: Vec<[f64; 2]>, direction: &str| LineCrossingConfig {
+            enabled: true,
+            lines: vec![SmartLine {
+                id: 1,
+                enabled: true,
+                sensitivity: 50,
+                direction: direction.into(),
+                points,
+            }],
+        };
+        assert!(validate_lines(&line(vec![[0.1, 0.1], [0.9, 0.9]], "any")).is_ok());
+        assert!(validate_lines(&line(vec![[0.1, 0.1]], "any")).is_err());
+        assert!(validate_lines(&line(vec![[0.1, 0.1], [1.5, 0.9]], "any")).is_err());
+        assert!(validate_lines(&line(vec![[0.1, 0.1], [0.9, 0.9]], "sideways")).is_err());
+
+        let region = |points: Vec<[f64; 2]>| IntrusionConfig {
+            enabled: true,
+            regions: vec![SmartRegion {
+                id: 1,
+                enabled: true,
+                sensitivity: 50,
+                time_threshold: 0,
+                points,
+            }],
+        };
+        assert!(
+            validate_regions(&region(vec![])).is_ok(),
+            "empty clears the slot"
+        );
+        assert!(validate_regions(&region(vec![[0.1, 0.1], [0.9, 0.1], [0.5, 0.9]])).is_ok());
+        assert!(validate_regions(&region(vec![[0.1, 0.1], [0.9, 0.1]])).is_err());
     }
 
     #[test]

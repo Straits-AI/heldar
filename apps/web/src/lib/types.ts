@@ -137,6 +137,43 @@ export interface DeviceControlCapabilities {
   probed_at?: string;
 }
 
+/** One line-crossing rule slot on the device (coordinates normalized 0..1). */
+export interface SmartLine {
+  id: number;
+  enabled: boolean;
+  /** 1-100 */
+  sensitivity: number;
+  /** any | left-right | right-left */
+  direction: string;
+  /** Exactly two endpoints. */
+  points: [number, number][];
+}
+
+export interface LineCrossingConfig {
+  enabled: boolean;
+  lines: SmartLine[];
+}
+
+/** One intrusion region slot (empty points = slot unconfigured). */
+export interface SmartRegion {
+  id: number;
+  enabled: boolean;
+  sensitivity: number;
+  /** Seconds a target must stay inside before the alarm fires. */
+  time_threshold: number;
+  points: [number, number][];
+}
+
+export interface IntrusionConfig {
+  enabled: boolean;
+  regions: SmartRegion[];
+}
+
+export interface MotionConfig {
+  enabled: boolean;
+  sensitivity?: number | null;
+}
+
 /** Day/night (IR-cut filter) configuration. */
 export interface DayNightConfig {
   /** auto | day | night | schedule */

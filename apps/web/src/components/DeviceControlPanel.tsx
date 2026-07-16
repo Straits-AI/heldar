@@ -16,6 +16,7 @@ import type {
   ImageConfig,
 } from "../lib/types";
 import { Button, Field, Panel, Spinner } from "./ui";
+import { IntrusionEditor, LineCrossingEditor, MotionEditor } from "./DetectionGeometryEditor";
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -428,6 +429,7 @@ function BuiltinDetectionsSection({
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [editor, setEditor] = useState<"motion" | "line_crossing" | "intrusion" | null>(null);
 
   async function toggleDetection(kind: string, enabled: boolean) {
     setBusy(kind);
@@ -504,10 +506,54 @@ function BuiltinDetectionsSection({
           {busy === "ingest" ? "…" : camera.native_events_enabled ? "Ingesting" : "Ingest events"}
         </Button>
       </div>
-      <p className="mt-2 font-mono text-[10px] text-fg-muted">
-        Detection zones/lines are drawn in the camera's own web UI for now; arm/disarm and
-        ingestion live here.
-      </p>
+      <div className="mt-2 flex flex-wrap items-center gap-1.5">
+        <span className={SECTION_LABEL}>Configure:</span>
+        {detections.some((d) => d.kind === "motion") && (
+          <Button size="sm" variant={editor === "motion" ? "primary" : "ghost"} onClick={() => setEditor(editor === "motion" ? null : "motion")}>
+            Motion
+          </Button>
+        )}
+        {detections.some((d) => d.kind === "line_crossing") && (
+          <Button size="sm" variant={editor === "line_crossing" ? "primary" : "ghost"} onClick={() => setEditor(editor === "line_crossing" ? null : "line_crossing")}>
+            Lines
+          </Button>
+        )}
+        {detections.some((d) => d.kind === "intrusion") && (
+          <Button size="sm" variant={editor === "intrusion" ? "primary" : "ghost"} onClick={() => setEditor(editor === "intrusion" ? null : "intrusion")}>
+            Regions
+          </Button>
+        )}
+      </div>
+      {editor === "motion" && (
+        <MotionEditor
+          cameraId={camera.id}
+          canManage={canManage}
+          onClose={() => {
+            setEditor(null);
+            setTimeout(() => onDetectionChanged(), 2500);
+          }}
+        />
+      )}
+      {editor === "line_crossing" && (
+        <LineCrossingEditor
+          cameraId={camera.id}
+          canManage={canManage}
+          onClose={() => {
+            setEditor(null);
+            setTimeout(() => onDetectionChanged(), 2500);
+          }}
+        />
+      )}
+      {editor === "intrusion" && (
+        <IntrusionEditor
+          cameraId={camera.id}
+          canManage={canManage}
+          onClose={() => {
+            setEditor(null);
+            setTimeout(() => onDetectionChanged(), 2500);
+          }}
+        />
+      )}
     </div>
   );
 }

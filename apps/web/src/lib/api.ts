@@ -54,6 +54,9 @@ import type {
   ExceptionReport,
   Gaps,
   GatePolicy,
+  IntrusionConfig,
+  LineCrossingConfig,
+  MotionConfig,
   GateState,
   ImageConfig,
   IncidentSummary,
@@ -888,6 +891,30 @@ export const api = {
       { method: "PUT", body: JSON.stringify({ enabled }) },
       30000,
     ),
+  getCameraLineCrossing: (id: string) =>
+    request<LineCrossingConfig>(`/api/v1/cameras/${enc(id)}/control/line_crossing`),
+  /** Write line-crossing rules (manager+). */
+  putCameraLineCrossing: (id: string, cfg: LineCrossingConfig) =>
+    request<LineCrossingConfig>(`/api/v1/cameras/${enc(id)}/control/line_crossing`, {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }, 30000),
+  getCameraIntrusion: (id: string) =>
+    request<IntrusionConfig>(`/api/v1/cameras/${enc(id)}/control/intrusion`),
+  /** Write intrusion regions (manager+). */
+  putCameraIntrusion: (id: string, cfg: IntrusionConfig) =>
+    request<IntrusionConfig>(`/api/v1/cameras/${enc(id)}/control/intrusion`, {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }, 30000),
+  getCameraMotion: (id: string) =>
+    request<MotionConfig>(`/api/v1/cameras/${enc(id)}/control/motion`),
+  /** Write motion arm switch + sensitivity (manager+). */
+  putCameraMotion: (id: string, cfg: MotionConfig) =>
+    request<MotionConfig>(`/api/v1/cameras/${enc(id)}/control/motion`, {
+      method: "PUT",
+      body: JSON.stringify(cfg),
+    }, 30000),
   listCameraIoOutputs: (id: string) =>
     request<IoOutput[]>(`/api/v1/cameras/${enc(id)}/control/io/outputs`),
   /** Pulse a relay output — PHYSICAL side effect, e.g. a barrier test fire (manager+). */

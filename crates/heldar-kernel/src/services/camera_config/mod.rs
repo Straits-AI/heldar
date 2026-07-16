@@ -14,8 +14,8 @@ use crate::error::{AppError, AppResult};
 use crate::models::Camera;
 use types::{
     BuiltinDetection, DayNightConfig, DayNightPatch, DeviceInfo, ImageConfig, ImageConfigPatch,
-    IoOutput, NativePlateRead, NtpConfig, OnvifSettings, OnvifUserType, OsdConfig, TimeConfig,
-    VideoConfig,
+    IntrusionConfig, IoOutput, LineCrossingConfig, MotionConfig, NativePlateRead, NtpConfig,
+    OnvifSettings, OnvifUserType, OsdConfig, TimeConfig, VideoConfig,
 };
 
 /// The default answer for a device-control surface the vendor implementation does not provide.
@@ -125,6 +125,38 @@ pub trait CameraConfigProvider: Send + Sync {
     /// Arm/disarm one built-in detection (`motion` | `line_crossing` | `intrusion`) on the device.
     async fn set_builtin_detection(&self, _kind: &str, _enabled: bool) -> AppResult<()> {
         unsupported("built-in detections")
+    }
+
+    /// The device's line-crossing rules (master switch + line slots).
+    async fn get_line_crossing(&self) -> AppResult<LineCrossingConfig> {
+        unsupported("line-crossing detection")
+    }
+
+    /// Write the line-crossing rules (read-modify-write; slots absent from the payload keep their
+    /// device state).
+    async fn put_line_crossing(&self, _cfg: &LineCrossingConfig) -> AppResult<()> {
+        unsupported("line-crossing detection")
+    }
+
+    /// The device's intrusion (field-detection) regions.
+    async fn get_intrusion(&self) -> AppResult<IntrusionConfig> {
+        unsupported("intrusion detection")
+    }
+
+    /// Write the intrusion regions (read-modify-write; slots absent from the payload keep their
+    /// device state).
+    async fn put_intrusion(&self, _cfg: &IntrusionConfig) -> AppResult<()> {
+        unsupported("intrusion detection")
+    }
+
+    /// The device's basic motion-detection config (arm switch + sensitivity).
+    async fn get_motion(&self) -> AppResult<MotionConfig> {
+        unsupported("motion detection")
+    }
+
+    /// Write the motion-detection config (grid layout stays on-device).
+    async fn put_motion(&self, _cfg: &MotionConfig) -> AppResult<()> {
+        unsupported("motion detection")
     }
 
     /// Open the device's live event-notification stream (an endless multipart response consumed
