@@ -6,7 +6,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use chrono::Utc;
 use serde::Deserialize;
-use serde_json::json;
+use serde_json::{json, Value};
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
@@ -27,18 +27,50 @@ pub fn router() -> Router<AppState> {
             axum::routing::patch(update_zone).delete(delete_zone),
         )
         .route("/api/v1/cameras/{id}/zone-events", get(list_zone_events))
+        .route(
+            "/api/v1/cameras/{id}/zone-events/aggregates",
+            get(zone_event_aggregates),
+        )
+        .route("/api/v1/cameras/{id}/zones/occupancy", get(zone_occupancy))
 }
 
 const MAX_POLYGON_VERTICES: usize = 512;
 
 fn validate_polygon(v: &serde_json::Value) -> AppResult<()> {
+    validate_points(v, 3)
+}
+
+fn validate_kind(kind: &str) -> AppResult<()> {
+    if matches!(kind, "region" | "presence" | "line") {
+        Ok(())
+    } else {
+        Err(AppError::BadRequest(
+            "`kind` must be one of region|presence|line".into(),
+        ))
+    }
+}
+
+/// A `kind = "line"` zone's geometry is a 2-point polyline (A→B), not a polygon.
+fn validate_line(v: &serde_json::Value) -> AppResult<()> {
     let arr = v
         .as_array()
         .ok_or_else(|| AppError::BadRequest("`polygon` must be an array of [x,y] points".into()))?;
-    if arr.len() < 3 {
+    if arr.len() != 2 {
         return Err(AppError::BadRequest(
-            "`polygon` must have at least 3 points".into(),
+            "a line zone's `polygon` must have exactly 2 points (A and B)".into(),
         ));
+    }
+    validate_points(v, 2)
+}
+
+fn validate_points(v: &serde_json::Value, min: usize) -> AppResult<()> {
+    let arr = v
+        .as_array()
+        .ok_or_else(|| AppError::BadRequest("`polygon` must be an array of [x,y] points".into()))?;
+    if arr.len() < min {
+        return Err(AppError::BadRequest(format!(
+            "`polygon` must have at least {min} points"
+        )));
     }
     if arr.len() > MAX_POLYGON_VERTICES {
         return Err(AppError::BadRequest(format!(
@@ -119,13 +151,18 @@ async fn create_zone(
     if body.name.trim().is_empty() {
         return Err(AppError::BadRequest("`name` is required".into()));
     }
-    validate_polygon(&body.polygon)?;
+    let kind = body.kind.unwrap_or_else(|| "region".into());
+    validate_kind(&kind)?;
+    if kind == "line" {
+        validate_line(&body.polygon)?;
+    } else {
+        validate_polygon(&body.polygon)?;
+    }
     if let Some(l) = &body.labels {
         validate_labels(l)?;
     }
     let severity = body.severity.unwrap_or_else(|| "info".into());
     validate_severity(&severity)?;
-    let kind = body.kind.unwrap_or_else(|| "region".into());
     let dwell = body.dwell_seconds.unwrap_or(0.0).max(0.0);
     let labels = SqlxJson(body.labels.unwrap_or_else(|| json!([])));
     let config = SqlxJson(body.config.unwrap_or_else(|| json!({})));
@@ -200,14 +237,27 @@ async fn update_zone(
 
     let name = body.name.unwrap_or(cur.name);
     let kind = body.kind.unwrap_or(cur.kind);
+    validate_kind(&kind)?;
     let severity = body.severity.unwrap_or(cur.severity);
     validate_severity(&severity)?;
     let polygon = match body.polygon {
         Some(p) => {
-            validate_polygon(&p)?;
+            if kind == "line" {
+                validate_line(&p)?;
+            } else {
+                validate_polygon(&p)?;
+            }
             SqlxJson(p)
         }
-        None => cur.polygon,
+        None => {
+            // Kind flips must keep geometry consistent (a 2-point line can't become a region).
+            if kind == "line" {
+                validate_line(&cur.polygon.0)?;
+            } else {
+                validate_polygon(&cur.polygon.0)?;
+            }
+            cur.polygon
+        }
     };
     let dwell = body
         .dwell_seconds
@@ -284,7 +334,18 @@ struct ZoneEventQuery {
     to: Option<String>,
     zone_id: Option<String>,
     event_type: Option<String>,
+    track_id: Option<String>,
     limit: Option<i64>,
+}
+
+/// A zone event enriched with the recorded segment covering its timestamp (when the indexer has
+/// caught up) — the UI turns it into a playback link.
+#[derive(Debug, serde::Serialize, sqlx::FromRow)]
+struct ZoneEventView {
+    #[sqlx(flatten)]
+    #[serde(flatten)]
+    event: ZoneEvent,
+    segment_id: Option<String>,
 }
 
 async fn list_zone_events(
@@ -292,7 +353,7 @@ async fn list_zone_events(
     principal: Principal,
     Path(id): Path<String>,
     Query(q): Query<ZoneEventQuery>,
-) -> AppResult<Json<Vec<ZoneEvent>>> {
+) -> AppResult<Json<Vec<ZoneEventView>>> {
     principal.require(principal.can_view(), "list zone events")?;
     let _ = load_camera(&st.pool, &id).await?;
     let limit = q.limit.unwrap_or(200).clamp(1, 5000);
@@ -306,14 +367,20 @@ async fn list_zone_events(
     };
     let from = parse(&q.from, "from")?;
     let to = parse(&q.to, "to")?;
-    let rows = sqlx::query_as::<_, ZoneEvent>(
-        "SELECT * FROM zone_events
-         WHERE camera_id = ?
-           AND (? IS NULL OR timestamp >= ?)
-           AND (? IS NULL OR timestamp <= ?)
-           AND (? IS NULL OR zone_id = ?)
-           AND (? IS NULL OR event_type = ?)
-         ORDER BY timestamp DESC LIMIT ?",
+    let rows = sqlx::query_as::<_, ZoneEventView>(
+        "SELECT ze.*,
+                (SELECT s.id FROM segments s
+                  WHERE s.camera_id = ze.camera_id
+                    AND s.start_time <= ze.timestamp AND s.end_time >= ze.timestamp
+                  LIMIT 1) AS segment_id
+         FROM zone_events ze
+         WHERE ze.camera_id = ?
+           AND (? IS NULL OR ze.timestamp >= ?)
+           AND (? IS NULL OR ze.timestamp <= ?)
+           AND (? IS NULL OR ze.zone_id = ?)
+           AND (? IS NULL OR ze.event_type = ?)
+           AND (? IS NULL OR ze.track_id = ?)
+         ORDER BY ze.timestamp DESC LIMIT ?",
     )
     .bind(&id)
     .bind(from)
@@ -324,8 +391,107 @@ async fn list_zone_events(
     .bind(&q.zone_id)
     .bind(&q.event_type)
     .bind(&q.event_type)
+    .bind(&q.track_id)
+    .bind(&q.track_id)
     .bind(limit)
     .fetch_all(&st.pool)
     .await?;
     Ok(Json(rows))
+}
+
+#[derive(Debug, Deserialize)]
+struct AggregateQuery {
+    from: Option<String>,
+    to: Option<String>,
+    /// Bucket width in minutes (default 60, clamped 1..=1440).
+    bucket_minutes: Option<i64>,
+}
+
+/// Server-side zone-event aggregates: per (zone, event_type, time bucket) counts — the data
+/// behind occupancy/throughput charts (line-crossing tallies, enters per hour) without shipping
+/// raw events to the client.
+async fn zone_event_aggregates(
+    State(st): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Query(q): Query<AggregateQuery>,
+) -> AppResult<Json<Value>> {
+    principal.require(principal.can_view(), "aggregate zone events")?;
+    let _ = load_camera(&st.pool, &id).await?;
+    let bucket_minutes = q.bucket_minutes.unwrap_or(60).clamp(1, 1440);
+    let parse = |s: &Option<String>, field: &str| -> AppResult<Option<chrono::DateTime<Utc>>> {
+        match s {
+            Some(v) => crate::util::parse_rfc3339(v)
+                .map(Some)
+                .ok_or_else(|| AppError::BadRequest(format!("invalid `{field}` timestamp"))),
+            None => Ok(None),
+        }
+    };
+    let to = parse(&q.to, "to")?.unwrap_or_else(Utc::now);
+    let from = parse(&q.from, "from")?.unwrap_or_else(|| to - chrono::Duration::hours(24));
+    let bucket_secs = bucket_minutes * 60;
+    // Bucket by epoch-seconds divided into fixed windows (SQLite: unixepoch on the RFC3339 text).
+    let rows: Vec<(String, String, String, i64, i64)> = sqlx::query_as(
+        "SELECT ze.zone_id, ze.zone_name, ze.event_type,
+                (CAST(strftime('%s', ze.timestamp) AS INTEGER) / ?) * ? AS bucket_start,
+                COUNT(*) AS n
+         FROM zone_events ze
+         WHERE ze.camera_id = ? AND ze.timestamp >= ? AND ze.timestamp <= ?
+         GROUP BY ze.zone_id, ze.event_type, bucket_start
+         ORDER BY bucket_start ASC",
+    )
+    .bind(bucket_secs)
+    .bind(bucket_secs)
+    .bind(&id)
+    .bind(from)
+    .bind(to)
+    .fetch_all(&st.pool)
+    .await?;
+    let buckets: Vec<Value> = rows
+        .into_iter()
+        .map(|(zone_id, zone_name, event_type, bucket_start, n)| {
+            json!({
+                "zone_id": zone_id,
+                "zone_name": zone_name,
+                "event_type": event_type,
+                "bucket_start": chrono::DateTime::<Utc>::from_timestamp(bucket_start, 0)
+                    .map(|t| t.to_rfc3339()),
+                "count": n,
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "from": from.to_rfc3339(),
+        "to": to.to_rfc3339(),
+        "bucket_minutes": bucket_minutes,
+        "buckets": buckets,
+    })))
+}
+
+/// Live per-zone occupancy (tracks currently inside), maintained by the zone engine as a
+/// write-behind aggregate. `updated_at` tells the reader how fresh each count is (engine state is
+/// in-memory and resets on restart).
+async fn zone_occupancy(
+    State(st): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+) -> AppResult<Json<Value>> {
+    principal.require(principal.can_view(), "view zone occupancy")?;
+    let _ = load_camera(&st.pool, &id).await?;
+    let rows: Vec<(String, i64, String)> = sqlx::query_as(
+        "SELECT zo.zone_id, zo.count, zo.updated_at
+         FROM zone_occupancy zo JOIN zones z ON z.id = zo.zone_id
+         WHERE zo.camera_id = ? AND z.enabled = 1
+         ORDER BY zo.zone_id",
+    )
+    .bind(&id)
+    .fetch_all(&st.pool)
+    .await?;
+    let out: Vec<Value> = rows
+        .into_iter()
+        .map(|(zone_id, count, updated_at)| {
+            json!({ "zone_id": zone_id, "count": count, "updated_at": updated_at })
+        })
+        .collect();
+    Ok(Json(json!({ "zones": out })))
 }

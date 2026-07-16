@@ -60,6 +60,8 @@ struct TrackZoneState {
     /// The one-time `zone_static_suppressed` notice was already emitted (inherited by reborn
     /// tracks at the same position, so flicker can't re-announce).
     static_evented: bool,
+    /// Previous observation's ground point (for line-crossing tests on `kind = "line"` zones).
+    last_point: Option<[f64; 2]>,
 }
 
 /// Outcome of the per-observation static-suppression update (see `update_static`).
@@ -124,6 +126,52 @@ pub struct ZoneEngine {
     /// in `event` / `scheduled_event` mode — [`RecorderManager::trigger`] guards on the mode).
     recorder: Arc<RecorderManager>,
     state: Mutex<HashMap<String, TrackZoneState>>,
+    /// Last occupancy written per zone (write-behind cache: `zone_occupancy` rows are upserted
+    /// only when a zone's live count changes, keeping the hot path off the SQLite writer).
+    occupancy: Mutex<HashMap<String, i64>>,
+}
+
+/// 2D cross product of (b-a) × (c-a): sign tells which side of line a→b the point c lies on.
+fn cross_sign(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
+    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+}
+
+/// Whether segment p1→p2 properly intersects segment q1→q2 (shared endpoints/colinear overlaps do
+/// not count — a ground point sitting exactly ON the line must not fire on jitter).
+fn segments_cross(p1: [f64; 2], p2: [f64; 2], q1: [f64; 2], q2: [f64; 2]) -> bool {
+    let d1 = cross_sign(q1, q2, p1);
+    let d2 = cross_sign(q1, q2, p2);
+    let d3 = cross_sign(p1, p2, q1);
+    let d4 = cross_sign(p1, p2, q2);
+    ((d1 > 0.0 && d2 < 0.0) || (d1 < 0.0 && d2 > 0.0))
+        && ((d3 > 0.0 && d4 < 0.0) || (d3 < 0.0 && d4 > 0.0))
+}
+
+/// Directional crossing test for a `kind = "line"` zone (polyline A→B): did the track's ground
+/// point move across the line between `prev` and `cur`, and in which direction? Returns
+/// `Some("cross_ab")` when the movement crosses with A→B's LEFT side first (i.e. travelling from
+/// the left of A→B to its right), `Some("cross_ba")` for the opposite, `None` when no crossing.
+fn line_crossing(prev: [f64; 2], cur: [f64; 2], a: [f64; 2], b: [f64; 2]) -> Option<&'static str> {
+    if !segments_cross(prev, cur, a, b) {
+        return None;
+    }
+    // Side of the line the movement STARTED on decides the direction label.
+    if cross_sign(a, b, prev) > 0.0 {
+        Some("cross_ab")
+    } else {
+        Some("cross_ba")
+    }
+}
+
+/// The direction filter of a line zone: `any` (default) | `ab` | `ba` (`config.direction`).
+fn line_direction_filter(zone: &Zone) -> String {
+    zone.config
+        .0
+        .get("direction")
+        .and_then(|v| v.as_str())
+        .filter(|d| matches!(*d, "any" | "ab" | "ba"))
+        .unwrap_or("any")
+        .to_string()
 }
 
 fn point_in_polygon(p: [f64; 2], poly: &[[f64; 2]]) -> bool {
@@ -266,6 +314,7 @@ impl ZoneEngine {
             cfg,
             recorder,
             state: Mutex::new(HashMap::new()),
+            occupancy: Mutex::new(HashMap::new()),
         })
     }
 
@@ -365,6 +414,7 @@ impl ZoneEngine {
                                 max_displacement: 0.0,
                                 suppressed,
                                 static_evented,
+                                last_point: None,
                             },
                         );
                     }
@@ -402,6 +452,26 @@ impl ZoneEngine {
                             StaticTransition::None => {}
                         }
                     }
+
+                    // Line zones: directional crossing test on the movement segment, no
+                    // membership/dwell machinery (a line has no interior).
+                    if zone.kind == "line" {
+                        if let (Some(prev), [a, b, ..]) = (entry.last_point, poly.as_slice()) {
+                            if let Some(dir) = line_crossing(prev, point, *a, *b) {
+                                if !entry.suppressed {
+                                    let filter = line_direction_filter(zone);
+                                    if filter == "any" || dir.ends_with(filter.as_str()) {
+                                        emits.push(make_evt(
+                                            camera_id, zone, track, dir, label, None,
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                        entry.last_point = Some(point);
+                        continue;
+                    }
+                    entry.last_point = Some(point);
 
                     // Debounce: require `confirm` consecutive observations to flip membership.
                     if raw_inside == entry.inside {
@@ -481,6 +551,62 @@ impl ZoneEngine {
         for e in &emits {
             self.emit(e, now).await;
         }
+
+        self.flush_occupancy(now).await;
+    }
+
+    /// Recompute live per-zone occupancy from track state (inside, not static-suppressed, seen
+    /// recently) and upsert only the zones whose count CHANGED — a write-behind aggregate for
+    /// `GET /api/v1/cameras/{id}/zones/occupancy` that stays off the hot path when steady.
+    async fn flush_occupancy(&self, now: DateTime<Utc>) {
+        let fresh_cutoff = now - Duration::seconds(STATE_TTL_SECS);
+        let mut counts: HashMap<(String, String), i64> = HashMap::new();
+        {
+            let state = self.state.lock().await;
+            for (key, s) in state.iter() {
+                if s.inside && !s.suppressed && s.last_seen >= fresh_cutoff {
+                    let camera_id = key.split('|').next().unwrap_or("").to_string();
+                    *counts.entry((camera_id, s.zone_id.clone())).or_insert(0) += 1;
+                }
+            }
+        }
+        let mut cache = self.occupancy.lock().await;
+        // Zones that had a nonzero cached count but no inside tracks now drop to 0.
+        let mut changed: Vec<(String, String, i64)> = Vec::new();
+        for ((camera_id, zone_id), count) in &counts {
+            if cache.get(zone_id).copied().unwrap_or(0) != *count {
+                changed.push((camera_id.clone(), zone_id.clone(), *count));
+            }
+        }
+        let zeroed: Vec<String> = cache
+            .iter()
+            .filter(|(z, c)| **c != 0 && !counts.keys().any(|(_, zid)| zid == *z))
+            .map(|(z, _)| z.clone())
+            .collect();
+        for (camera_id, zone_id, count) in changed {
+            let _ = sqlx::query(
+                "INSERT INTO zone_occupancy (zone_id, camera_id, count, updated_at)
+                 VALUES (?, ?, ?, ?)
+                 ON CONFLICT(zone_id) DO UPDATE SET count = excluded.count, updated_at = excluded.updated_at",
+            )
+            .bind(&zone_id)
+            .bind(&camera_id)
+            .bind(count)
+            .bind(now)
+            .execute(&self.pool)
+            .await;
+            cache.insert(zone_id, count);
+        }
+        for zone_id in zeroed {
+            let _ = sqlx::query(
+                "UPDATE zone_occupancy SET count = 0, updated_at = ? WHERE zone_id = ?",
+            )
+            .bind(now)
+            .bind(&zone_id)
+            .execute(&self.pool)
+            .await;
+            cache.insert(zone_id, 0);
+        }
     }
 
     async fn emit(&self, evt: &ZoneEvt, now: DateTime<Utc>) {
@@ -506,7 +632,8 @@ impl ZoneEngine {
             return;
         }
         let id = format!("zev_{}", Uuid::new_v4().simple());
-        let evidence = if evt.event_type == "enter" {
+        // Evidence frame for the event types that start an episode (enters + line crossings).
+        let evidence = if matches!(evt.event_type, "enter" | "cross_ab" | "cross_ba") {
             self.copy_evidence(&evt.camera_id, &id).await
         } else {
             None
@@ -672,6 +799,7 @@ mod tests {
             max_displacement: 0.0,
             suppressed: false,
             static_evented: false,
+            last_point: None,
         }
     }
 
@@ -793,6 +921,50 @@ mod tests {
                 json!({ "static_epsilon": -1.0, "static_after_seconds": 0 })
             )),
             Some((0.02, 120))
+        );
+    }
+
+    /// Directional line crossing (#40): vertical line A(0.5,0)→B(0.5,1); movement left→right
+    /// starts on A→B's positive side → cross_ab; right→left → cross_ba; parallel movement and
+    /// movement that stops short never fire.
+    #[test]
+    fn line_crossing_directions() {
+        let a = [0.5, 0.0];
+        let b = [0.5, 1.0];
+        assert_eq!(
+            line_crossing([0.3, 0.5], [0.7, 0.5], a, b),
+            Some("cross_ab")
+        );
+        assert_eq!(
+            line_crossing([0.7, 0.5], [0.3, 0.5], a, b),
+            Some("cross_ba")
+        );
+        assert_eq!(
+            line_crossing([0.3, 0.2], [0.4, 0.8], a, b),
+            None,
+            "stops short"
+        );
+        assert_eq!(
+            line_crossing([0.6, 0.2], [0.8, 0.8], a, b),
+            None,
+            "same side"
+        );
+        // Movement crossing the line's EXTENSION (beyond B) does not fire.
+        assert_eq!(line_crossing([0.3, 1.5], [0.7, 1.5], a, b), None);
+        // Jitter exactly on the line does not fire (proper intersection only).
+        assert_eq!(line_crossing([0.5, 0.4], [0.5, 0.6], a, b), None);
+    }
+
+    #[test]
+    fn line_direction_filter_parses_config() {
+        assert_eq!(line_direction_filter(&zone_with_config(json!({}))), "any");
+        assert_eq!(
+            line_direction_filter(&zone_with_config(json!({"direction": "ab"}))),
+            "ab"
+        );
+        assert_eq!(
+            line_direction_filter(&zone_with_config(json!({"direction": "sideways"}))),
+            "any"
         );
     }
 
