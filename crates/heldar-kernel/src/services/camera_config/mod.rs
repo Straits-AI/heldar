@@ -106,6 +106,13 @@ pub trait CameraConfigProvider: Send + Sync {
         unsupported("image configuration")
     }
 
+    /// The supplement-light modes this device supports (from its capability document), e.g.
+    /// `["eventIntelligence", "colorVuWhiteLight", "irLight", "close"]` on a hybrid-light camera
+    /// or `["irLight", "close"]` on an IR-only one. Empty when the device has no supplement light.
+    async fn supplement_light_modes(&self) -> AppResult<Vec<String>> {
+        unsupported("supplement light")
+    }
+
     /// The device's alarm/relay output ports.
     async fn list_io_outputs(&self) -> AppResult<Vec<IoOutput>> {
         unsupported("IO outputs")

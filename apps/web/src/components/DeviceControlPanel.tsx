@@ -15,7 +15,7 @@ import type {
   DeviceControlCapabilities,
   ImageConfig,
 } from "../lib/types";
-import { Button, Field, Input, Panel, Spinner } from "./ui";
+import { Button, Field, Panel, Spinner } from "./ui";
 
 function errMsg(e: unknown): string {
   return e instanceof Error ? e.message : String(e);
@@ -91,7 +91,13 @@ export function DeviceControlPanel({
       )}
 
       {map.day_night && <DayNightSection cameraId={cameraId} canManage={canManage} />}
-      {map.image && <ImageSection cameraId={cameraId} canManage={canManage} />}
+      {map.image && (
+        <ImageSection
+          cameraId={cameraId}
+          canManage={canManage}
+          supplementModes={map.supplement_light_modes ?? []}
+        />
+      )}
       {outputs.length > 0 && (
         <OutputsSection cameraId={cameraId} canManage={canManage} outputs={outputs} />
       )}
@@ -164,7 +170,23 @@ function DayNightSection({ cameraId, canManage }: { cameraId: string; canManage:
 
 /* ------------------------------ image / lighting ------------------------------ */
 
-function ImageSection({ cameraId, canManage }: { cameraId: string; canManage: boolean }) {
+/** Friendly labels for the vendor supplement-light mode tokens ("smart night mode" etc.). */
+const SUPPLEMENT_MODE_LABELS: Record<string, string> = {
+  eventIntelligence: "Smart night (white light on events)",
+  colorVuWhiteLight: "White light (full-color night)",
+  irLight: "Infrared (black & white)",
+  close: "Off",
+};
+
+function ImageSection({
+  cameraId,
+  canManage,
+  supplementModes,
+}: {
+  cameraId: string;
+  canManage: boolean;
+  supplementModes: string[];
+}) {
   const [cfg, setCfg] = useState<ImageConfig | null>(null);
   const [draft, setDraft] = useState<ImageConfig>({});
   const [busy, setBusy] = useState(false);
@@ -201,8 +223,15 @@ function ImageSection({ cameraId, canManage }: { cameraId: string; canManage: bo
   const dirty = cfg != null && JSON.stringify(cfg) !== JSON.stringify(draft);
 
   function level(
-    key: "brightness" | "contrast" | "saturation" | "wdr_level",
+    key:
+      | "brightness"
+      | "contrast"
+      | "saturation"
+      | "wdr_level"
+      | "white_light_brightness"
+      | "ir_light_brightness",
     label: string,
+    disabled = false,
   ) {
     const v = draft[key];
     if (v == null) return null; // device doesn't expose it
@@ -217,7 +246,7 @@ function ImageSection({ cameraId, canManage }: { cameraId: string; canManage: bo
           min={0}
           max={100}
           value={v}
-          disabled={!canManage || busy}
+          disabled={!canManage || busy || disabled}
           onChange={(e) => setDraft((d) => ({ ...d, [key]: Number(e.target.value) }))}
           className="mt-1 w-full accent-[var(--accent,#6ee7b7)]"
         />
@@ -266,18 +295,55 @@ function ImageSection({ cameraId, canManage }: { cameraId: string; canManage: bo
               <span className="font-mono text-xs text-fg-secondary">Backlight compensation</span>
             </label>
           )}
-          {draft.supplement_light_mode != null && (
-            <Field label="Supplement light" htmlFor="img-suplight">
-              <Input
-                id="img-suplight"
-                value={draft.supplement_light_mode}
-                disabled={!canManage || busy}
-                onChange={(e) =>
-                  setDraft((d) => ({ ...d, supplement_light_mode: e.target.value }))
-                }
-                placeholder="irLight | colorVuWhiteLight | close"
-              />
-            </Field>
+          {draft.supplement_light_mode != null && supplementModes.length > 0 && (
+            <>
+              <Field label="Night light (supplement light)" htmlFor="img-suplight">
+                <select
+                  id="img-suplight"
+                  className={SELECT_CLS}
+                  value={draft.supplement_light_mode}
+                  disabled={!canManage || busy}
+                  onChange={(e) =>
+                    setDraft((d) => ({ ...d, supplement_light_mode: e.target.value }))
+                  }
+                >
+                  {supplementModes.map((m) => (
+                    <option key={m} value={m}>
+                      {SUPPLEMENT_MODE_LABELS[m] ?? m}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              {draft.supplement_brightness_mode != null && (
+                <Field label="Light brightness control" htmlFor="img-suplight-reg">
+                  <select
+                    id="img-suplight-reg"
+                    className={SELECT_CLS}
+                    value={draft.supplement_brightness_mode}
+                    disabled={!canManage || busy}
+                    onChange={(e) =>
+                      setDraft((d) => ({ ...d, supplement_brightness_mode: e.target.value }))
+                    }
+                  >
+                    <option value="auto">Auto</option>
+                    <option value="manual">Manual</option>
+                  </select>
+                </Field>
+              )}
+              {/* IR-only models still report a whiteLightBrightness field — only offer the
+                  slider when the capability list actually includes a white-light mode. */}
+              {supplementModes.some((m) => m === "colorVuWhiteLight" || m === "eventIntelligence") &&
+                level(
+                  "white_light_brightness",
+                  "White light brightness",
+                  draft.supplement_brightness_mode === "auto",
+                )}
+              {level(
+                "ir_light_brightness",
+                "IR light brightness",
+                draft.supplement_brightness_mode === "auto",
+              )}
+            </>
           )}
           <div className="flex gap-2 pt-1">
             <Button

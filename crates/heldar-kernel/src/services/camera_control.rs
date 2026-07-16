@@ -51,6 +51,10 @@ pub async fn refresh_capabilities(st: &AppState, camera_id: &str) -> AppResult<V
         "io_outputs": [],
         "native_anpr": false,
         "ptz": false,
+        // Supported supplement-light modes from the device's capability document (empty = no
+        // supplement light). Hybrid-light models report e.g. eventIntelligence ("smart night
+        // mode": IR normally, white light on events) + colorVuWhiteLight + irLight + close.
+        "supplement_light_modes": [],
         "probed_at": Utc::now().to_rfc3339(),
     });
 
@@ -84,6 +88,9 @@ async fn probe_surfaces(provider: &dyn CameraConfigProvider, map: &mut Value) {
     }
     if let Ok(outputs) = provider.list_io_outputs().await {
         map["io_outputs"] = json!(outputs);
+    }
+    if let Ok(modes) = provider.supplement_light_modes().await {
+        map["supplement_light_modes"] = json!(modes);
     }
     if provider.supports_native_anpr().await {
         map["native_anpr"] = json!(true);

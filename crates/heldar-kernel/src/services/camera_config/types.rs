@@ -178,10 +178,22 @@ pub struct ImageConfig {
     /// Backlight compensation enabled (`BLC`).
     #[serde(default)]
     pub blc_enabled: Option<bool>,
-    /// Supplement (IR/white) light mode where exposed: e.g. `irLight` | `colorVuWhiteLight` |
-    /// `close` (`supplementLight/supplementLightMode`).
+    /// Supplement-light mode where exposed (`supplementLight/supplementLightMode`). Verified live
+    /// values: `irLight` (infrared B/W), `colorVuWhiteLight` (white light, full-color night),
+    /// `eventIntelligence` ("smart" — IR normally, white light on detected events), `close`.
+    /// The camera's actual option list is in the capability map (`supplement_light_modes`).
     #[serde(default)]
     pub supplement_light_mode: Option<String>,
+    /// White-light brightness 0–100 (white-light-capable models only).
+    #[serde(default)]
+    pub white_light_brightness: Option<i64>,
+    /// IR-light brightness 0–100.
+    #[serde(default)]
+    pub ir_light_brightness: Option<i64>,
+    /// Supplement-light brightness regulation: `auto` | `manual` (brightness sliders apply in
+    /// `manual`; in `auto` the camera manages them).
+    #[serde(default)]
+    pub supplement_brightness_mode: Option<String>,
 }
 
 /// Partial update to an [`ImageConfig`]; only present fields are written to the device.

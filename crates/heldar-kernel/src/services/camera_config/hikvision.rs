@@ -474,6 +474,11 @@ impl CameraConfigProvider for HikVisionIsapiClient {
         {
             if status.is_success() {
                 cfg.supplement_light_mode = first_text(&sl, "supplementLightMode");
+                cfg.supplement_brightness_mode = first_text(&sl, "mixedLightBrightnessRegulatMode");
+                cfg.white_light_brightness =
+                    first_text(&sl, "whiteLightBrightness").and_then(|s| s.parse().ok());
+                cfg.ir_light_brightness =
+                    first_text(&sl, "irLightBrightness").and_then(|s| s.parse().ok());
             }
         }
         Ok(cfg)
@@ -513,13 +518,42 @@ impl CameraConfigProvider for HikVisionIsapiClient {
             let body = replace_first_text(&body, "enabled", bool_text(enabled));
             self.isapi_request(Method::PUT, path, Some(body)).await?;
         }
-        if let Some(mode) = &patch.supplement_light_mode {
+        if patch.supplement_light_mode.is_some()
+            || patch.supplement_brightness_mode.is_some()
+            || patch.white_light_brightness.is_some()
+            || patch.ir_light_brightness.is_some()
+        {
             let path = "/ISAPI/Image/channels/1/supplementLight";
-            let body = self.isapi_request(Method::GET, path, None).await?;
-            let body = replace_first_text(&body, "supplementLightMode", mode);
+            let mut body = self.isapi_request(Method::GET, path, None).await?;
+            if let Some(mode) = &patch.supplement_light_mode {
+                body = replace_first_text(&body, "supplementLightMode", mode);
+            }
+            if let Some(m) = &patch.supplement_brightness_mode {
+                body = replace_first_text(&body, "mixedLightBrightnessRegulatMode", m);
+            }
+            if let Some(v) = patch.white_light_brightness {
+                body = replace_first_text(&body, "whiteLightBrightness", &clamp_pct(v).to_string());
+            }
+            if let Some(v) = patch.ir_light_brightness {
+                body = replace_first_text(&body, "irLightBrightness", &clamp_pct(v).to_string());
+            }
             self.isapi_request(Method::PUT, path, Some(body)).await?;
         }
         Ok(())
+    }
+
+    async fn supplement_light_modes(&self) -> AppResult<Vec<String>> {
+        let (status, xml) = self
+            .isapi_request_raw(
+                Method::GET,
+                "/ISAPI/Image/channels/1/supplementLight/capabilities",
+                None,
+            )
+            .await?;
+        if !status.is_success() {
+            return Ok(Vec::new()); // no supplement light on this device
+        }
+        Ok(parse_supplement_light_modes(&xml))
     }
 
     async fn list_io_outputs(&self) -> AppResult<Vec<IoOutput>> {
@@ -674,6 +708,49 @@ fn parse_anpr_plates(xml: &str) -> Vec<NativePlateRead> {
 /// Clamp an image level to the 0–100 range ISAPI expects.
 fn clamp_pct(v: i64) -> i64 {
     v.clamp(0, 100)
+}
+
+/// Parse the supported supplement-light modes from a capability document: the `opt` attribute of
+/// `<supplementLightMode opt="eventIntelligence,colorVuWhiteLight,irLight,close">` (verified live
+/// on DS-2CD3T56WDV3-L; an IR-only DS-2CD3356WDV3-I reports `opt="irLight,close"`).
+fn parse_supplement_light_modes(xml: &str) -> Vec<String> {
+    let Some((lt, gt, _)) = find_open(xml, "supplementLightMode", 0) else {
+        return Vec::new();
+    };
+    let open_tag = &xml[lt..=gt];
+    attr_in_tag(open_tag, "opt")
+        .map(|opts| {
+            opts.split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Extract the value of attribute `name` from an opening tag string
+/// (e.g. `<supplementLightMode opt="irLight,close">`). Mirrors `services/onvif.rs`.
+fn attr_in_tag(tag: &str, name: &str) -> Option<String> {
+    let bytes = tag.as_bytes();
+    let mut i = 0;
+    while let Some(rel) = tag[i..].find(name) {
+        let pos = i + rel;
+        let before_ok = pos == 0
+            || matches!(bytes.get(pos - 1), Some(b) if b.is_ascii_whitespace() || *b == b'<');
+        let after = &tag[pos + name.len()..];
+        let after_trim = after.trim_start();
+        if before_ok && after_trim.starts_with('=') {
+            let rest = after_trim[1..].trim_start();
+            let quote = rest.chars().next()?;
+            if quote == '"' || quote == '\'' {
+                let val = &rest[1..];
+                let end = val.find(quote)?;
+                return Some(xml_unescape(&val[..end]));
+            }
+        }
+        i = pos + name.len();
+    }
+    None
 }
 
 /// Parse a `<Time>` document into a [`TimeConfig`].
@@ -1015,6 +1092,33 @@ mod tests {
         assert_eq!(plates[0].capture_time, "20260716093012456");
         assert_eq!(plates[0].direction.as_deref(), Some("forward"));
         assert_eq!(plates[0].pic_name.as_deref(), Some("202607160930124560001"));
+    }
+
+    /// Verbatim capability document from a live DS-2CD3T56WDV3-L (hybrid white-light model).
+    #[test]
+    fn parses_supplement_light_modes_hybrid() {
+        let xml = "<SupplementLight>\
+<supplementLightMode opt=\"eventIntelligence,colorVuWhiteLight,irLight,close\">irLight</supplementLightMode>\
+<mixedLightBrightnessRegulatMode opt=\"auto,manual\">auto</mixedLightBrightnessRegulatMode>\
+<whiteLightBrightness min=\"0\" max=\"100\">100</whiteLightBrightness>\
+</SupplementLight>";
+        assert_eq!(
+            parse_supplement_light_modes(xml),
+            vec!["eventIntelligence", "colorVuWhiteLight", "irLight", "close"]
+        );
+    }
+
+    /// Verbatim from a live DS-2CD3356WDV3-I (IR-only model): no white-light modes.
+    #[test]
+    fn parses_supplement_light_modes_ir_only() {
+        let xml =
+            "<SupplementLight version=\"2.0\" xmlns=\"http://www.hikvision.com/ver20/XMLSchema\">\
+<supplementLightMode opt=\"irLight,close\">irLight</supplementLightMode>\
+<irLightBrightness min=\"0\" max=\"100\">100</irLightBrightness>\
+</SupplementLight>";
+        assert_eq!(parse_supplement_light_modes(xml), vec!["irLight", "close"]);
+        // No supplementLightMode element at all -> empty (device without a supplement light).
+        assert!(parse_supplement_light_modes("<SupplementLight/>").is_empty());
     }
 
     #[test]

@@ -123,6 +123,10 @@ export interface DeviceControlCapabilities {
   io_outputs?: IoOutput[];
   native_anpr?: boolean;
   ptz?: boolean;
+  /** Supplement-light modes the device supports (empty = no supplement light). e.g.
+   * eventIntelligence (smart: IR normally, white light on events), colorVuWhiteLight,
+   * irLight, close. */
+  supplement_light_modes?: string[];
   probed_at?: string;
 }
 
@@ -158,6 +162,10 @@ export interface ImageConfig {
   wdr_level?: number | null;
   blc_enabled?: boolean | null;
   supplement_light_mode?: string | null;
+  white_light_brightness?: number | null;
+  ir_light_brightness?: number | null;
+  /** auto | manual — brightness sliders apply in manual. */
+  supplement_brightness_mode?: string | null;
 }
 
 /** Result of POST /api/v1/cameras/{id}/record-trigger (manual event-recording trigger, manager+). */
