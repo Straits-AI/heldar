@@ -17,8 +17,9 @@ use async_trait::async_trait;
 use reqwest::{Method, StatusCode};
 
 use super::types::{
-    DayNightConfig, DayNightPatch, DeviceInfo, ImageConfig, ImageConfigPatch, IoOutput,
-    NativePlateRead, NtpConfig, OnvifSettings, OnvifUserType, OsdConfig, TimeConfig, VideoConfig,
+    BuiltinDetection, DayNightConfig, DayNightPatch, DeviceInfo, ImageConfig, ImageConfigPatch,
+    IoOutput, NativePlateRead, NtpConfig, OnvifSettings, OnvifUserType, OsdConfig, TimeConfig,
+    VideoConfig,
 };
 use super::CameraConfigProvider;
 use crate::camera_url;
@@ -37,6 +38,30 @@ const IRCUT_PATH: &str = "/ISAPI/Image/channels/1/ircutFilter";
 const IO_OUTPUTS_PATH: &str = "/ISAPI/System/IO/outputs";
 /// On-board ANPR plate-results endpoint (traffic cameras / ANPR barrier cameras).
 const ANPR_PLATES_PATH: &str = "/ISAPI/Traffic/channels/1/vehicleDetect/plates";
+/// Smart-event capability flags (`/ISAPI/Smart/capabilities` `isSupportX` element → stable kind
+/// token → optional config resource whose `<enabled>` gives the current arm state).
+const SMART_DETECTIONS: &[(&str, &str, Option<&str>)] = &[
+    (
+        "isSupportLineDetection",
+        "line_crossing",
+        Some("/ISAPI/Smart/LineDetection/1"),
+    ),
+    (
+        "isSupportFieldDetection",
+        "intrusion",
+        Some("/ISAPI/Smart/FieldDetection/1"),
+    ),
+    ("isSupportRegionEntrance", "region_entrance", None),
+    ("isSupportRegionExiting", "region_exiting", None),
+    ("isSupportLoitering", "loitering", None),
+    ("isSupportFaceDetect", "face_detection", None),
+    ("isSupportAudioDetection", "audio_detection", None),
+    ("isSupportSceneChangeDetection", "scene_change", None),
+    ("isSupportDefocusDetection", "defocus", None),
+    ("isSupportRapidMove", "rapid_move", None),
+    ("isSupportParking", "parking", None),
+    ("isSupportUnattendedBaggage", "unattended_baggage", None),
+];
 
 /// A HikVision camera reached over ISAPI with HTTP Digest authentication.
 pub struct HikVisionIsapiClient {
@@ -554,6 +579,57 @@ impl CameraConfigProvider for HikVisionIsapiClient {
             return Ok(Vec::new()); // no supplement light on this device
         }
         Ok(parse_supplement_light_modes(&xml))
+    }
+
+    async fn list_builtin_detections(&self) -> AppResult<Vec<BuiltinDetection>> {
+        let mut out = Vec::new();
+        // Basic motion detection lives outside the Smart service; presence of the endpoint = support.
+        if let Ok((status, xml)) = self
+            .isapi_request_raw(
+                Method::GET,
+                "/ISAPI/System/Video/inputs/channels/1/motionDetection",
+                None,
+            )
+            .await
+        {
+            if status.is_success() {
+                out.push(BuiltinDetection {
+                    kind: "motion".into(),
+                    enabled: first_text(&xml, "enabled").map(|s| parse_bool_text(&s)),
+                });
+            }
+        }
+        // Smart-event support flags. For the two common zone-style events we also read the arm
+        // state from their config resource; the rest are reported support-only.
+        if let Ok((status, cap)) = self
+            .isapi_request_raw(Method::GET, "/ISAPI/Smart/capabilities", None)
+            .await
+        {
+            if status.is_success() {
+                for (flag, kind, state_path) in SMART_DETECTIONS {
+                    let supported = first_text(&cap, flag)
+                        .map(|s| parse_bool_text(&s))
+                        .unwrap_or(false);
+                    if !supported {
+                        continue;
+                    }
+                    let mut enabled = None;
+                    if let Some(path) = state_path {
+                        if let Ok((st, xml)) = self.isapi_request_raw(Method::GET, path, None).await
+                        {
+                            if st.is_success() {
+                                enabled = first_text(&xml, "enabled").map(|s| parse_bool_text(&s));
+                            }
+                        }
+                    }
+                    out.push(BuiltinDetection {
+                        kind: (*kind).into(),
+                        enabled,
+                    });
+                }
+            }
+        }
+        Ok(out)
     }
 
     async fn list_io_outputs(&self) -> AppResult<Vec<IoOutput>> {
@@ -1119,6 +1195,33 @@ mod tests {
         assert_eq!(parse_supplement_light_modes(xml), vec!["irLight", "close"]);
         // No supplementLightMode element at all -> empty (device without a supplement light).
         assert!(parse_supplement_light_modes("<SupplementLight/>").is_empty());
+    }
+
+    /// Verbatim `/ISAPI/Smart/capabilities` from a live DS-2CD3T56WDV3-L: the support-flag table
+    /// must select exactly line_crossing + intrusion (face/loitering/etc. are false).
+    #[test]
+    fn smart_cap_flags_select_supported_detections() {
+        let xml = "<SmartCap version=\"2.0\" xmlns=\"http://www.hikvision.com/ver20/XMLSchema\">\
+<isSupportROI>true</isSupportROI><isSupportFaceDetect>false</isSupportFaceDetect>\
+<isSupportDefocusDetection>false</isSupportDefocusDetection><isSupportAudioDetection>false</isSupportAudioDetection>\
+<isSupportSceneChangeDetection>false</isSupportSceneChangeDetection><isSupportIntelliTrace>false</isSupportIntelliTrace>\
+<isSupportFieldDetection>true</isSupportFieldDetection><isSupportLineDetection>true</isSupportLineDetection>\
+<isSupportRegionEntrance>false</isSupportRegionEntrance><isSupportRegionExiting>false</isSupportRegionExiting>\
+<isSupportLoitering>false</isSupportLoitering><isSupportGroup>false</isSupportGroup>\
+<isSupportRapidMove>false</isSupportRapidMove><isSupportParking>false</isSupportParking>\
+<isSupportUnattendedBaggage>false</isSupportUnattendedBaggage><isSupportAttendedBaggage>false</isSupportAttendedBaggage>\
+<isSupportSmartCalibration>true</isSupportSmartCalibration><isSupportStorageDetection>false</isSupportStorageDetection>\
+</SmartCap>";
+        let supported: Vec<&str> = SMART_DETECTIONS
+            .iter()
+            .filter(|(flag, _, _)| {
+                first_text(xml, flag)
+                    .map(|s| parse_bool_text(&s))
+                    .unwrap_or(false)
+            })
+            .map(|(_, kind, _)| *kind)
+            .collect();
+        assert_eq!(supported, vec!["line_crossing", "intrusion"]);
     }
 
     #[test]

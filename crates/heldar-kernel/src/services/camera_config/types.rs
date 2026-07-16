@@ -199,6 +199,17 @@ pub struct ImageConfig {
 /// Partial update to an [`ImageConfig`]; only present fields are written to the device.
 pub type ImageConfigPatch = ImageConfig;
 
+/// One built-in (on-camera) detection feature reported by the device's smart-event capability
+/// document. `kind` is a stable snake_case token (`motion`, `line_crossing`, `intrusion`, …);
+/// `enabled` is the device's current arm state where it can be read cheaply (None = not read).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub struct BuiltinDetection {
+    pub kind: String,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
 /// One alarm/relay output port (`GET /ISAPI/System/IO/outputs`).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

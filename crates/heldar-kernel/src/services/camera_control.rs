@@ -55,6 +55,9 @@ pub async fn refresh_capabilities(st: &AppState, camera_id: &str) -> AppResult<V
         // supplement light). Hybrid-light models report e.g. eventIntelligence ("smart night
         // mode": IR normally, white light on events) + colorVuWhiteLight + irLight + close.
         "supplement_light_modes": [],
+        // The camera's OWN smart-event detections (motion, line_crossing, intrusion, …) with
+        // their arm state where readable — distinct from Heldar's server-side zone engine.
+        "built_in_detections": [],
         "probed_at": Utc::now().to_rfc3339(),
     });
 
@@ -92,6 +95,9 @@ async fn probe_surfaces(provider: &dyn CameraConfigProvider, map: &mut Value) {
     if let Ok(modes) = provider.supplement_light_modes().await {
         map["supplement_light_modes"] = json!(modes);
     }
+    if let Ok(detections) = provider.list_builtin_detections().await {
+        map["built_in_detections"] = json!(detections);
+    }
     if provider.supports_native_anpr().await {
         map["native_anpr"] = json!(true);
     }
@@ -112,6 +118,20 @@ async fn persist_device_control(st: &AppState, camera_id: &str, map: &Value) -> 
         .execute(&st.pool)
         .await?;
     Ok(())
+}
+
+/// Fire-and-forget capability probe (camera add / credential change): the dashboard should learn
+/// what a camera supports WITHOUT anyone pressing a button, but a slow or unreachable device must
+/// never block the mutation that triggered it. Failures are logged at debug (the camera may
+/// legitimately lack address/credentials at this point; "Re-detect" in the UI covers it later).
+pub fn spawn_probe(st: &AppState, camera_id: &str) {
+    let st = st.clone();
+    let camera_id = camera_id.to_string();
+    tokio::spawn(async move {
+        if let Err(e) = refresh_capabilities(&st, &camera_id).await {
+            tracing::debug!(%camera_id, error = %e, "camera_control: background capability probe failed (non-fatal)");
+        }
+    });
 }
 
 /// The persisted capability map for a camera (`{}` when never probed) — a DB read, no device call.

@@ -13,8 +13,9 @@ use async_trait::async_trait;
 use crate::error::{AppError, AppResult};
 use crate::models::Camera;
 use types::{
-    DayNightConfig, DayNightPatch, DeviceInfo, ImageConfig, ImageConfigPatch, IoOutput,
-    NativePlateRead, NtpConfig, OnvifSettings, OnvifUserType, OsdConfig, TimeConfig, VideoConfig,
+    BuiltinDetection, DayNightConfig, DayNightPatch, DeviceInfo, ImageConfig, ImageConfigPatch,
+    IoOutput, NativePlateRead, NtpConfig, OnvifSettings, OnvifUserType, OsdConfig, TimeConfig,
+    VideoConfig,
 };
 
 /// The default answer for a device-control surface the vendor implementation does not provide.
@@ -111,6 +112,14 @@ pub trait CameraConfigProvider: Send + Sync {
     /// or `["irLight", "close"]` on an IR-only one. Empty when the device has no supplement light.
     async fn supplement_light_modes(&self) -> AppResult<Vec<String>> {
         unsupported("supplement light")
+    }
+
+    /// The device's built-in (on-camera) detection features — motion, line-crossing,
+    /// intrusion/field detection, etc. — with their current arm state where cheaply readable.
+    /// These are the camera's OWN smart events (configured on-device today), distinct from
+    /// Heldar's server-side zone engine.
+    async fn list_builtin_detections(&self) -> AppResult<Vec<BuiltinDetection>> {
+        unsupported("built-in detections")
     }
 
     /// The device's alarm/relay output ports.

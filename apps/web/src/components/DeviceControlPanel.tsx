@@ -6,7 +6,7 @@
 // surface shows just the "Detect features" probe button, and probe failures never affect
 // streaming/recording (the map is advisory).
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../lib/api";
 import { usePoll } from "../lib/usePoll";
 import type {
@@ -57,8 +57,26 @@ export function DeviceControlPanel({
   const map: DeviceControlCapabilities = caps.data ?? {};
   const probed = Boolean(map.probed_at);
   const outputs = map.io_outputs ?? [];
+  const detections = map.built_in_detections ?? [];
   const hasAny =
-    Boolean(map.day_night) || Boolean(map.image) || outputs.length > 0 || Boolean(map.native_anpr);
+    Boolean(map.day_night) ||
+    Boolean(map.image) ||
+    outputs.length > 0 ||
+    detections.length > 0 ||
+    Boolean(map.native_anpr);
+
+  // Auto-detect on first view: a camera that has never been probed (added before background
+  // probing existed, or whose probe failed at add time) is probed once automatically, so the
+  // panel populates without anyone pressing the button. Manual "Re-detect" stays for refreshes.
+  const autoProbedRef = useRef(false);
+  useEffect(() => {
+    if (!caps.data || autoProbedRef.current || probing) return;
+    if (!caps.data.probed_at && canManage) {
+      autoProbedRef.current = true;
+      void probe();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [caps.data, canManage]);
 
   return (
     <Panel
@@ -98,6 +116,7 @@ export function DeviceControlPanel({
           supplementModes={map.supplement_light_modes ?? []}
         />
       )}
+      {detections.length > 0 && <BuiltinDetectionsSection detections={detections} />}
       {outputs.length > 0 && (
         <OutputsSection cameraId={cameraId} canManage={canManage} outputs={outputs} />
       )}
@@ -360,6 +379,56 @@ function ImageSection({
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ------------------------------ built-in detections ------------------------------ */
+
+/** Friendly labels for the camera's own smart-event detection kinds. */
+const DETECTION_LABELS: Record<string, string> = {
+  motion: "Motion detection",
+  line_crossing: "Line crossing",
+  intrusion: "Intrusion (area)",
+  region_entrance: "Region entrance",
+  region_exiting: "Region exiting",
+  loitering: "Loitering",
+  face_detection: "Face detection",
+  audio_detection: "Audio exception",
+  scene_change: "Scene change",
+  defocus: "Defocus",
+  rapid_move: "Rapid movement",
+  parking: "Parking",
+  unattended_baggage: "Unattended object",
+};
+
+function BuiltinDetectionsSection({
+  detections,
+}: {
+  detections: NonNullable<DeviceControlCapabilities["built_in_detections"]>;
+}) {
+  return (
+    <div className="mt-4 border-t border-line pt-3">
+      <div className={`${SECTION_LABEL} mb-2`}>Built-in detections (on-camera)</div>
+      <div className="flex flex-wrap gap-1.5">
+        {detections.map((d) => (
+          <span
+            key={d.kind}
+            className="inline-flex items-center gap-1.5 rounded-md border border-line bg-canvas px-2 py-1 font-mono text-[11px] text-fg-secondary"
+          >
+            {DETECTION_LABELS[d.kind] ?? d.kind}
+            {d.enabled != null && (
+              <span className={d.enabled ? "text-emerald-400" : "text-fg-muted"}>
+                {d.enabled ? "on" : "off"}
+              </span>
+            )}
+          </span>
+        ))}
+      </div>
+      <p className="mt-2 font-mono text-[10px] text-fg-muted">
+        The camera's own smart events, currently configured on the device. Heldar's server-side
+        zones (Zones panel above) work on any camera; ingesting these on-camera events is planned.
+      </p>
     </div>
   );
 }

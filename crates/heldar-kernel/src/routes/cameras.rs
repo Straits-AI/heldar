@@ -241,6 +241,10 @@ async fn create_camera(
         m.reconcile(&id).await;
     }
     st.live.reconcile(&id).await;
+    // Discover the device's control capabilities in the background (day/night, lighting, relay
+    // outputs, built-in detections, on-board ANPR) so the dashboard's Device panel is populated
+    // without anyone pressing "Detect features". Best-effort: never blocks or fails the create.
+    crate::services::camera_control::spawn_probe(&st, &id);
     let cam = load_camera(&st.pool, &id).await?;
     auth::audit(
         &st.pool,
@@ -381,6 +385,9 @@ async fn update_camera(
     st.sampler.reconcile().await;
     // …and the live preview publisher (warm toggle, enable/disable, credential/URL change).
     st.live.reconcile(&id).await;
+    // Re-discover device capabilities in the background — an address/credential/vendor change can
+    // change what the camera exposes. Cheap (a few LAN calls) and best-effort.
+    crate::services::camera_control::spawn_probe(&st, &id);
     auth::audit(
         &st.pool,
         &principal,

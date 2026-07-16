@@ -127,6 +127,9 @@ export interface DeviceControlCapabilities {
    * eventIntelligence (smart: IR normally, white light on events), colorVuWhiteLight,
    * irLight, close. */
   supplement_light_modes?: string[];
+  /** The camera's OWN smart-event detections (motion, line_crossing, intrusion, …) with their
+   * arm state where readable — distinct from Heldar's server-side zone engine. */
+  built_in_detections?: { kind: string; enabled?: boolean | null }[];
   probed_at?: string;
 }
 

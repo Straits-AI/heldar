@@ -25,12 +25,30 @@ kernel persists under the `device_control` key of `cameras.capabilities`:
   "io_outputs": [{ "id": 1, "name": "Gate relay", "default_state": "low" }],
   "native_anpr": true,
   "ptz": false,
+  "supplement_light_modes": ["eventIntelligence", "colorVuWhiteLight", "irLight", "close"],
+  "built_in_detections": [
+    { "kind": "motion", "enabled": true },
+    { "kind": "line_crossing", "enabled": false },
+    { "kind": "intrusion", "enabled": false }
+  ],
   "probed_at": "2026-07-16T04:12:00Z"
 }
 ```
 
-- `POST /api/v1/cameras/{id}/control/probe` (manager+) probes each surface against the live device
-  and refreshes the map — the **"Detect features"** button on the camera's Device panel.
+`supplement_light_modes` is the device's own option list (a hybrid-light model reports the four
+modes above — `eventIntelligence` is the "smart night" mode: IR normally, white light on events;
+an IR-only model reports just `irLight`/`close`). `built_in_detections` are the camera's OWN
+smart-event features (motion / line-crossing / intrusion / …) with their arm state where readable —
+shown informationally on the Device panel today; configuring them and ingesting their events into
+the kernel is tracked as a follow-up (they are distinct from Heldar's server-side zone engine,
+which works on any camera).
+
+- **Probing is automatic**: the kernel fires a best-effort background probe when a camera is
+  created or updated (address/credential changes), and the Device panel auto-probes once on first
+  view if the camera has never been probed — so features appear without anyone pressing a button.
+  `POST /api/v1/cameras/{id}/control/probe` (manager+) is the same probe on demand — the
+  **"Re-detect"** button. Probing asks the device itself (capability documents), not a model-name
+  lookup table, so it stays correct across firmware variants.
 - `GET /api/v1/cameras/{id}/control/capabilities` returns the persisted map (a DB read; the UI
   never talks to the device just to render).
 - Probes are best-effort per surface: an endpoint that errors leaves its capability `false`; a
