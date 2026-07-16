@@ -696,22 +696,36 @@ impl CameraConfigProvider for HikVisionIsapiClient {
         let original = self
             .isapi_request(Method::GET, FIELD_DETECTION_PATH, None)
             .await?;
-        let mut current = parse_field_detection(&original);
+        // Per-slot IN-PLACE edits of the device's own document (verified live: this firmware
+        // accepts its own doc with a slot's fields/coords edited, but rejects a rebuilt region
+        // list — and single-scene models reject coordinates on any slot but the first).
+        let mut body = original;
         for region in &cfg.regions {
-            if let Some(slot) = current.regions.iter_mut().find(|r| r.id == region.id) {
-                *slot = region.clone();
-            }
-        }
-        let items: String = current.regions.iter().map(build_region_item).collect();
-        let mut body = splice_list_inner(&original, "FieldDetectionRegionList", &items)
-            .ok_or_else(|| {
-                AppError::Other(anyhow::anyhow!(
-                    "FieldDetection: no <FieldDetectionRegionList> block"
+            body = edit_region_in_place(&body, region).ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "FieldDetection: region slot {} not found on the device",
+                    region.id
                 ))
             })?;
+        }
         body = replace_first_text(&body, "enabled", bool_text(cfg.enabled));
-        self.isapi_request(Method::PUT, FIELD_DETECTION_PATH, Some(body))
-            .await?;
+        let res = self
+            .isapi_request(Method::PUT, FIELD_DETECTION_PATH, Some(body))
+            .await;
+        if let Err(e) = res {
+            // Single-scene firmwares (isSupportMultiScene=false) refuse geometry on slots > 1
+            // with a bare "Invalid XML Content" — translate to something an operator can act on.
+            if e.to_string().contains("Invalid XML Content")
+                && cfg.regions.iter().any(|r| r.id > 1 && !r.points.is_empty())
+            {
+                return Err(AppError::BadRequest(
+                    "the device rejected the region write — this camera supports a single \
+                     intrusion region (slot 1); draw there instead"
+                        .into(),
+                ));
+            }
+            return Err(e);
+        }
         Ok(())
     }
 
@@ -1049,12 +1063,54 @@ fn build_line_item(line: &SmartLine) -> String {
     )
 }
 
-/// Build one `<FieldDetectionRegion>` in the exact shape the device emits (a slot without points
-/// carries no coordinates list, mirroring the device's own representation of an unset slot).
-fn build_region_item(region: &SmartRegion) -> String {
-    let coords = if region.points.is_empty() {
-        String::new()
-    } else {
+/// Edit one `<FieldDetectionRegion>` block (matched by `<id>N</id>`) in place inside the device's
+/// own document: replace enabled/sensitivity/threshold text and replace-or-insert its coordinates
+/// list (an empty payload polygon removes it, mirroring the device's unset-slot shape). Returns
+/// None when no such slot exists.
+fn edit_region_in_place(xml: &str, region: &SmartRegion) -> Option<String> {
+    // Locate the region block whose <id> matches.
+    let mut from = 0;
+    let (block_start, block_end) = loop {
+        let (_lt, gt, self_closing) = find_open(xml, "FieldDetectionRegion", from)?;
+        if self_closing {
+            from = gt + 1;
+            continue;
+        }
+        let cs = gt + 1;
+        let close_rel = find_close(&xml[cs..], "FieldDetectionRegion")?;
+        let ce = cs + close_rel;
+        let inner = &xml[cs..ce];
+        if first_text(inner, "id").and_then(|s| s.parse::<i64>().ok()) == Some(region.id) {
+            break (cs, ce);
+        }
+        from = ce;
+    };
+
+    let inner = &xml[block_start..block_end];
+    let mut new_inner = replace_first_text(inner, "enabled", bool_text(region.enabled));
+    new_inner = replace_first_text(
+        &new_inner,
+        "sensitivityLevel",
+        &region.sensitivity.clamp(1, 100).to_string(),
+    );
+    new_inner = replace_first_text(
+        &new_inner,
+        "timeThreshold",
+        &region.time_threshold.clamp(0, 100).to_string(),
+    );
+
+    // Coordinates: strip any existing list, then append the new one (when non-empty).
+    if let Some((lt, gt, self_closing)) = find_open(&new_inner, "RegionCoordinatesList", 0) {
+        let end = if self_closing {
+            gt + 1
+        } else {
+            let cs = gt + 1;
+            let close_rel = find_close(&new_inner[cs..], "RegionCoordinatesList")?;
+            cs + close_rel + "</RegionCoordinatesList>".len()
+        };
+        new_inner = format!("{}{}", &new_inner[..lt], &new_inner[end..]);
+    }
+    if !region.points.is_empty() {
         let pts: String = region
             .points
             .iter()
@@ -1066,16 +1122,16 @@ fn build_region_item(region: &SmartRegion) -> String {
                 )
             })
             .collect();
-        format!("<RegionCoordinatesList>{pts}</RegionCoordinatesList>")
-    };
-    format!(
-        "<FieldDetectionRegion version=\"2.0\" xmlns=\"{HIK_NS}\"><id>{}</id><enabled>{}</enabled><sensitivityLevel>{}</sensitivityLevel><timeThreshold>{}</timeThreshold>{}</FieldDetectionRegion>",
-        region.id,
-        bool_text(region.enabled),
-        region.sensitivity.clamp(1, 100),
-        region.time_threshold.clamp(0, 100),
-        coords
-    )
+        new_inner.push_str(&format!(
+            "<RegionCoordinatesList>{pts}</RegionCoordinatesList>"
+        ));
+    }
+
+    let mut out = String::with_capacity(xml.len() + new_inner.len());
+    out.push_str(&xml[..block_start]);
+    out.push_str(&new_inner);
+    out.push_str(&xml[block_end..]);
+    Some(out)
 }
 
 /// Replace the inner XML of the first `<list_tag …>…</list_tag>` block, preserving the opening tag
@@ -1665,27 +1721,73 @@ mod tests {
         );
     }
 
-    /// Writing a polygon into a previously-unset region slot inserts its coordinates list.
+    /// The in-place region editor (the strategy this firmware accepts): inserting a polygon into
+    /// a previously-unset slot, editing an existing slot's polygon, and clearing a slot.
     #[test]
-    fn region_write_inserts_coordinates_into_unset_slot() {
-        let mut cfg = parse_field_detection(FIELD_DOC);
-        cfg.regions[1] = SmartRegion {
-            id: 2,
-            enabled: true,
-            sensitivity: 60,
-            time_threshold: 2,
-            points: vec![[0.1, 0.1], [0.9, 0.1], [0.5, 0.9]],
-        };
-        let items: String = cfg.regions.iter().map(build_region_item).collect();
-        let body =
-            splice_list_inner(FIELD_DOC, "FieldDetectionRegionList", &items).expect("spliced");
+    fn region_edit_in_place_insert_update_clear() {
+        // Insert into unset slot 2.
+        let body = edit_region_in_place(
+            FIELD_DOC,
+            &SmartRegion {
+                id: 2,
+                enabled: true,
+                sensitivity: 60,
+                time_threshold: 2,
+                points: vec![[0.1, 0.1], [0.9, 0.1], [0.5, 0.9]],
+            },
+        )
+        .expect("slot found");
         let reread = parse_field_detection(&body);
         assert_eq!(reread.regions[1].points.len(), 3);
         assert!(reread.regions[1].enabled);
         assert_eq!(reread.regions[1].time_threshold, 2);
-        // Slot 1's original polygon untouched.
+        // Slot 1 + document furniture untouched.
         assert_eq!(reread.regions[0].points.len(), 4);
         assert!(body.contains("<startTriggerTime>500</startTriggerTime>"));
+
+        // Update slot 1's polygon in place.
+        let body2 = edit_region_in_place(
+            &body,
+            &SmartRegion {
+                id: 1,
+                enabled: true,
+                sensitivity: 70,
+                time_threshold: 1,
+                points: vec![[0.2, 0.2], [0.8, 0.2], [0.8, 0.8], [0.2, 0.8]],
+            },
+        )
+        .expect("slot found");
+        let reread2 = parse_field_detection(&body2);
+        assert_eq!(reread2.regions[0].points[0], [0.2, 0.2]);
+        assert_eq!(reread2.regions[0].sensitivity, 70);
+        assert_eq!(reread2.regions[1].points.len(), 3, "slot 2 preserved");
+
+        // Clear slot 1 (empty points removes its coordinates list, like the device's unset shape).
+        let body3 = edit_region_in_place(
+            &body2,
+            &SmartRegion {
+                id: 1,
+                enabled: false,
+                sensitivity: 50,
+                time_threshold: 0,
+                points: vec![],
+            },
+        )
+        .expect("slot found");
+        let reread3 = parse_field_detection(&body3);
+        assert!(reread3.regions[0].points.is_empty());
+        // Unknown slot -> None.
+        assert!(edit_region_in_place(
+            &body3,
+            &SmartRegion {
+                id: 9,
+                enabled: false,
+                sensitivity: 50,
+                time_threshold: 0,
+                points: vec![]
+            }
+        )
+        .is_none());
     }
 
     #[test]
