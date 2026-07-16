@@ -1111,6 +1111,20 @@ The engine evaluates against the **batch timestamp `ts`** passed from ingest (th
 ingest envelope's `timestamp`, else server `now()`), so dwell math is anchored to
 capture time, not wall-clock arrival.
 
+**False-alarm hardening (2026-07, validated live).** Two gates protect zone state from detector
+noise. (1) A per-zone **confidence floor** (`config.min_confidence`, default 0.5): detections below
+it are invisible to the zone — near-threshold output is noise far more often than signal. (2)
+**Static-object suppression** (`config.static_suppression`, default on; `static_epsilon` 0.02 /
+`static_after_seconds` 120): a track whose ground point never strays beyond epsilon from where it
+first appeared for the configured time is a static object (the live case: laundry on a fence line
+detected as a 0.26–0.62 "person" for hours), not a subject — one `zone_static_suppressed` info
+event is logged, then its zone events are muted until it actually moves (movement re-announces via
+a fresh `enter`; the displacement watermark means it can never re-suppress). Track-id churn from
+confidence flicker is folded back: a new track appearing within epsilon of a suppressed sibling's
+origin inherits the suppression instead of restarting the clock and firing a fresh `enter`. Zone
+creation is idempotent per (camera, name) — a provisioning re-POST returns the existing zone rather
+than stacking a duplicate that doubles every event.
+
 ### 16.3 Event emission + evidence (`ZoneEngine::emit`)
 
 For each transition the engine writes **two** records and (on entry) captures

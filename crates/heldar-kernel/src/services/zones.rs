@@ -26,9 +26,15 @@ const STATE_TTL_SECS: i64 = 120;
 const DEFAULT_CONFIRM_FRAMES: u32 = 2;
 /// Default per-zone confidence floor (see `min_confidence`).
 const DEFAULT_MIN_CONFIDENCE: f64 = 0.5;
+/// Static-object suppression defaults (see `static_params`): a track whose ground point never
+/// strays more than `EPSILON` (normalized units) from where it first appeared for
+/// `AFTER_SECS` is not a moving subject — suppress its zone events until it actually moves.
+const DEFAULT_STATIC_EPSILON: f64 = 0.02;
+const DEFAULT_STATIC_AFTER_SECS: i64 = 120;
 
-/// Per-zone precomputed evaluation parameters: polygon, label filter, confirm-frames, confidence floor.
-type ZoneParams = (Vec<[f64; 2]>, Vec<String>, u32, f64);
+/// Per-zone precomputed evaluation parameters: polygon, label filter, confirm-frames, confidence
+/// floor, static-suppression (epsilon, after-seconds) when enabled.
+type ZoneParams = (Vec<[f64; 2]>, Vec<String>, u32, f64, Option<(f64, i64)>);
 
 #[derive(Debug, Clone)]
 struct TrackZoneState {
@@ -42,6 +48,61 @@ struct TrackZoneState {
     last_seen: DateTime<Utc>,
     candidate: Option<bool>,
     candidate_count: u32,
+    // ---- static-object suppression (issue #47) ----
+    /// When this state entry was created (server time).
+    first_seen: DateTime<Utc>,
+    /// Ground point at first sight — displacement is measured from here.
+    origin: [f64; 2],
+    /// Watermark of the largest displacement from `origin` ever observed.
+    max_displacement: f64,
+    /// Static suppression active: membership is still tracked, but no events are emitted.
+    suppressed: bool,
+    /// The one-time `zone_static_suppressed` notice was already emitted (inherited by reborn
+    /// tracks at the same position, so flicker can't re-announce).
+    static_evented: bool,
+}
+
+/// Outcome of the per-observation static-suppression update (see `update_static`).
+#[derive(Debug, PartialEq, Eq)]
+enum StaticTransition {
+    None,
+    /// The track just crossed the static threshold: suppress + announce once.
+    BecameStatic,
+    /// A suppressed track moved beyond epsilon: unsuppress (and re-announce presence).
+    BecameActive,
+}
+
+/// Update a state entry's displacement watermark and suppression flag for one observation.
+/// Pure state-machine step, factored out for unit testing.
+fn update_static(
+    entry: &mut TrackZoneState,
+    point: [f64; 2],
+    now: DateTime<Utc>,
+    epsilon: f64,
+    after_secs: i64,
+) -> StaticTransition {
+    let dx = point[0] - entry.origin[0];
+    let dy = point[1] - entry.origin[1];
+    let dist = (dx * dx + dy * dy).sqrt();
+    if dist > entry.max_displacement {
+        entry.max_displacement = dist;
+    }
+    if entry.suppressed {
+        if entry.max_displacement >= epsilon {
+            entry.suppressed = false;
+            return StaticTransition::BecameActive;
+        }
+        return StaticTransition::None;
+    }
+    if !entry.static_evented
+        && entry.max_displacement < epsilon
+        && (now - entry.first_seen).num_seconds() >= after_secs
+    {
+        entry.suppressed = true;
+        entry.static_evented = true;
+        return StaticTransition::BecameStatic;
+    }
+    StaticTransition::None
 }
 
 /// A zone event to persist + log (resolved fields, so prune-time exits need no Zone lookup).
@@ -123,6 +184,39 @@ fn min_confidence(zone: &Zone) -> f64 {
         .filter(|v| v.is_finite())
         .unwrap_or(DEFAULT_MIN_CONFIDENCE)
         .clamp(0.0, 1.0)
+}
+
+/// Per-zone static-object suppression parameters, or `None` when disabled. A track that has never
+/// moved more than `epsilon` (normalized units, Euclidean on the ground point) from where it first
+/// appeared, for at least `after_secs`, is treated as a static object (laundry on a line, a parked
+/// object, a poster): its zone events are suppressed until it actually moves. Verified live: a
+/// detector-confused static object re-alarms a presence zone indefinitely, and confidence floors
+/// cannot catch it when its score peaks with the light. Defaults on; disable per zone via
+/// `config.static_suppression: false`, tune via `config.static_epsilon` /
+/// `config.static_after_seconds`.
+fn static_params(zone: &Zone) -> Option<(f64, i64)> {
+    let cfg = &zone.config.0;
+    if cfg
+        .get("static_suppression")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true)
+    {
+        let eps = cfg
+            .get("static_epsilon")
+            .and_then(|v| v.as_f64())
+            .filter(|v| v.is_finite() && *v > 0.0)
+            .unwrap_or(DEFAULT_STATIC_EPSILON)
+            .clamp(0.001, 0.5);
+        let after = cfg
+            .get("static_after_seconds")
+            .and_then(|v| v.as_i64())
+            .filter(|v| *v > 0)
+            .unwrap_or(DEFAULT_STATIC_AFTER_SECS)
+            .clamp(5, 86_400);
+        Some((eps, after))
+    } else {
+        None
+    }
 }
 
 fn confirm_frames(zone: &Zone) -> u32 {
@@ -214,6 +308,7 @@ impl ZoneEngine {
                     parse_labels(&z.labels.0),
                     confirm_frames(z),
                     min_confidence(z),
+                    static_params(z),
                 )
             })
             .collect();
@@ -228,7 +323,7 @@ impl ZoneEngine {
                 };
                 let label = d.label.as_deref().unwrap_or("");
                 for (idx, zone) in zones.iter().enumerate() {
-                    let (poly, labels, confirm, min_conf) = &parsed[idx];
+                    let (poly, labels, confirm, min_conf, static_cfg) = &parsed[idx];
                     if !labels.is_empty() && !labels.iter().any(|l| l == label) {
                         continue;
                     }
@@ -239,19 +334,74 @@ impl ZoneEngine {
                     }
                     let raw_inside = point_in_polygon(point, poly);
                     let key = format!("{camera_id}|{}|{track}", zone.id);
-                    let entry = state.entry(key).or_insert_with(|| TrackZoneState {
-                        track: track.to_string(),
-                        zone_id: zone.id.clone(),
-                        zone_name: zone.name.clone(),
-                        severity: zone.severity.clone(),
-                        inside: false,
-                        entered_at: now,
-                        dwell_emitted: false,
-                        last_seen: now,
-                        candidate: None,
-                        candidate_count: 0,
-                    });
+                    if !state.contains_key(&key) {
+                        // A detector flickering around its threshold kills and re-births tracks of
+                        // the SAME static object under fresh ids — each rebirth would restart the
+                        // static clock and fire a fresh enter. If a suppressed sibling of this
+                        // zone sits within epsilon of this point, the "new" track IS that object:
+                        // inherit its suppression + origin instead of starting clean.
+                        let inherited = static_cfg.and_then(|(eps, _)| {
+                            find_suppressed_sibling(&state, camera_id, &zone.id, point, eps)
+                        });
+                        let (origin, suppressed, static_evented) = match inherited {
+                            Some(origin) => (origin, true, true),
+                            None => (point, false, false),
+                        };
+                        state.insert(
+                            key.clone(),
+                            TrackZoneState {
+                                track: track.to_string(),
+                                zone_id: zone.id.clone(),
+                                zone_name: zone.name.clone(),
+                                severity: zone.severity.clone(),
+                                inside: false,
+                                entered_at: now,
+                                dwell_emitted: false,
+                                last_seen: now,
+                                candidate: None,
+                                candidate_count: 0,
+                                first_seen: now,
+                                origin,
+                                max_displacement: 0.0,
+                                suppressed,
+                                static_evented,
+                            },
+                        );
+                    }
+                    let entry = state.get_mut(&key).expect("just inserted");
                     entry.last_seen = now;
+
+                    // Static-object suppression (issue #47): update the displacement watermark and
+                    // suppression state BEFORE membership so this observation's events are gated.
+                    if let Some((eps, after)) = static_cfg {
+                        match update_static(entry, point, now, *eps, *after) {
+                            StaticTransition::BecameStatic => {
+                                // One-time operator notice (info): why this zone went quiet.
+                                emits.push(ZoneEvt {
+                                    camera_id: camera_id.to_string(),
+                                    zone_id: zone.id.clone(),
+                                    zone_name: zone.name.clone(),
+                                    severity: "info".into(),
+                                    track: track.to_string(),
+                                    event_type: "static_suppressed",
+                                    label: label.to_string(),
+                                    dwell: None,
+                                });
+                            }
+                            StaticTransition::BecameActive => {
+                                // It moved: re-announce presence so operators see the now-live
+                                // object (its original enter fired long ago or was inherited).
+                                if entry.inside {
+                                    entry.entered_at = now;
+                                    entry.dwell_emitted = false;
+                                    emits.push(make_evt(
+                                        camera_id, zone, track, "enter", label, None,
+                                    ));
+                                }
+                            }
+                            StaticTransition::None => {}
+                        }
+                    }
 
                     // Debounce: require `confirm` consecutive observations to flip membership.
                     if raw_inside == entry.inside {
@@ -268,17 +418,28 @@ impl ZoneEngine {
                             entry.inside = raw_inside;
                             entry.candidate = None;
                             entry.candidate_count = 0;
-                            if raw_inside {
-                                entry.entered_at = now;
-                                entry.dwell_emitted = false;
-                                emits.push(make_evt(camera_id, zone, track, "enter", label, None));
-                            } else {
-                                emits.push(make_evt(camera_id, zone, track, "exit", label, None));
+                            // A suppressed (static) track still updates membership silently.
+                            if !entry.suppressed {
+                                if raw_inside {
+                                    entry.entered_at = now;
+                                    entry.dwell_emitted = false;
+                                    emits.push(make_evt(
+                                        camera_id, zone, track, "enter", label, None,
+                                    ));
+                                } else {
+                                    emits.push(make_evt(
+                                        camera_id, zone, track, "exit", label, None,
+                                    ));
+                                }
                             }
                         }
                     }
 
-                    if entry.inside && zone.dwell_seconds > 0.0 && !entry.dwell_emitted {
+                    if entry.inside
+                        && !entry.suppressed
+                        && zone.dwell_seconds > 0.0
+                        && !entry.dwell_emitted
+                    {
                         let dwell = (now - entry.entered_at).num_milliseconds() as f64 / 1000.0;
                         if dwell >= zone.dwell_seconds {
                             entry.dwell_emitted = true;
@@ -301,7 +462,7 @@ impl ZoneEngine {
             for (k, s) in state.drain() {
                 if s.last_seen >= cutoff {
                     survivors.insert(k, s);
-                } else if s.inside {
+                } else if s.inside && !s.suppressed {
                     emits.push(ZoneEvt {
                         camera_id: camera_id.to_string(),
                         zone_id: s.zone_id.clone(),
@@ -323,6 +484,27 @@ impl ZoneEngine {
     }
 
     async fn emit(&self, evt: &ZoneEvt, now: DateTime<Utc>) {
+        // The one-time static-suppression notice is operator telemetry, not zone analytics: log it
+        // to the event feed and skip the zone_events row + the recording trigger (a static object
+        // must not extend event-mode recording).
+        if evt.event_type == "static_suppressed" {
+            let _ = repo::log_event(
+                &self.pool,
+                Some(&evt.camera_id),
+                "zone_static_suppressed",
+                "info",
+                json!({
+                    "zone_id": evt.zone_id,
+                    "zone": evt.zone_name,
+                    "track_id": evt.track,
+                    "label": evt.label,
+                    "note": "stationary object; zone events from this track suppressed until it moves",
+                }),
+            )
+            .await;
+            tracing::info!(camera_id = %evt.camera_id, zone = %evt.zone_name, track = %evt.track, "zone: static object suppressed");
+            return;
+        }
         let id = format!("zev_{}", Uuid::new_v4().simple());
         let evidence = if evt.event_type == "enter" {
             self.copy_evidence(&evt.camera_id, &id).await
@@ -384,6 +566,28 @@ impl ZoneEngine {
             None
         }
     }
+}
+
+/// A suppressed state entry of the same (camera, zone) whose ORIGIN lies within `epsilon` of
+/// `point` — i.e. the static object a "new" track was re-born from. Returns its origin so the new
+/// entry measures displacement from the object's true anchor.
+fn find_suppressed_sibling(
+    state: &HashMap<String, TrackZoneState>,
+    camera_id: &str,
+    zone_id: &str,
+    point: [f64; 2],
+    epsilon: f64,
+) -> Option<[f64; 2]> {
+    let prefix = format!("{camera_id}|{zone_id}|");
+    state
+        .iter()
+        .filter(|(k, s)| s.suppressed && k.starts_with(&prefix))
+        .find(|(_, s)| {
+            let dx = point[0] - s.origin[0];
+            let dy = point[1] - s.origin[1];
+            (dx * dx + dy * dy).sqrt() < epsilon
+        })
+        .map(|(_, s)| s.origin)
 }
 
 fn make_evt(
@@ -448,6 +652,147 @@ mod tests {
         assert_eq!(
             min_confidence(&zone_with_config(json!({ "min_confidence": "high" }))),
             0.5
+        );
+    }
+
+    fn fresh_state(origin: [f64; 2], first_seen: DateTime<Utc>) -> TrackZoneState {
+        TrackZoneState {
+            track: "t1".into(),
+            zone_id: "z1".into(),
+            zone_name: "test".into(),
+            severity: "info".into(),
+            inside: true,
+            entered_at: first_seen,
+            dwell_emitted: false,
+            last_seen: first_seen,
+            candidate: None,
+            candidate_count: 0,
+            first_seen,
+            origin,
+            max_displacement: 0.0,
+            suppressed: false,
+            static_evented: false,
+        }
+    }
+
+    /// Replays the live laundry case (issue #47): a "person" whose ground point never moves.
+    /// Before the time threshold nothing happens; once it ages past `after_secs` without moving
+    /// beyond epsilon it becomes static exactly once; when it finally moves it becomes active.
+    #[test]
+    fn update_static_lifecycle() {
+        let t0 = Utc::now();
+        let origin = [0.535, 0.41]; // laundry ground point, cam3
+        let mut st = fresh_state(origin, t0);
+
+        // 60s of pixel-frozen observations: below after_secs (120) — no transition.
+        let r = update_static(
+            &mut st,
+            [0.5351, 0.4101],
+            t0 + Duration::seconds(60),
+            0.02,
+            120,
+        );
+        assert_eq!(r, StaticTransition::None);
+        assert!(!st.suppressed);
+
+        // Past 120s, still frozen: suppressed, once.
+        let r = update_static(
+            &mut st,
+            [0.5349, 0.4099],
+            t0 + Duration::seconds(121),
+            0.02,
+            120,
+        );
+        assert_eq!(r, StaticTransition::BecameStatic);
+        assert!(st.suppressed && st.static_evented);
+        let r = update_static(&mut st, origin, t0 + Duration::seconds(122), 0.02, 120);
+        assert_eq!(r, StaticTransition::None, "no repeat announcement");
+
+        // It moves (someone takes the laundry / a real person walks): unsuppressed.
+        let r = update_static(
+            &mut st,
+            [0.60, 0.50],
+            t0 + Duration::seconds(200),
+            0.02,
+            120,
+        );
+        assert_eq!(r, StaticTransition::BecameActive);
+        assert!(!st.suppressed);
+        // Watermark keeps it from ever re-suppressing.
+        let r = update_static(
+            &mut st,
+            [0.60, 0.50],
+            t0 + Duration::seconds(999),
+            0.02,
+            120,
+        );
+        assert_eq!(r, StaticTransition::None);
+        assert!(!st.suppressed);
+    }
+
+    /// A moving track never suppresses, even after the time threshold.
+    #[test]
+    fn update_static_moving_track_never_suppresses() {
+        let t0 = Utc::now();
+        let mut st = fresh_state([0.2, 0.8], t0);
+        for i in 0..10 {
+            let p = [0.2 + 0.01 * i as f64, 0.8];
+            let r = update_static(&mut st, p, t0 + Duration::seconds(30 * (i + 1)), 0.02, 120);
+            assert_eq!(r, StaticTransition::None);
+        }
+        assert!(!st.suppressed);
+        assert!(st.max_displacement > 0.02);
+    }
+
+    /// A re-born track at a suppressed object's position inherits that object's suppression
+    /// (via its origin); a track elsewhere does not.
+    #[test]
+    fn reborn_track_folds_into_suppressed_sibling() {
+        let t0 = Utc::now();
+        let mut old = fresh_state([0.535, 0.41], t0);
+        old.suppressed = true;
+        old.static_evented = true;
+        let mut map = HashMap::new();
+        map.insert("cam3|z1|48156".to_string(), old);
+
+        assert_eq!(
+            find_suppressed_sibling(&map, "cam3", "z1", [0.536, 0.412], 0.02),
+            Some([0.535, 0.41])
+        );
+        // Different zone or far away: no fold.
+        assert_eq!(
+            find_suppressed_sibling(&map, "cam3", "z2", [0.536, 0.412], 0.02),
+            None
+        );
+        assert_eq!(
+            find_suppressed_sibling(&map, "cam3", "z1", [0.20, 0.80], 0.02),
+            None
+        );
+    }
+
+    /// Config parsing: on by default, per-zone off switch, clamped overrides.
+    #[test]
+    fn static_params_defaults_and_overrides() {
+        assert_eq!(
+            static_params(&zone_with_config(json!({}))),
+            Some((0.02, 120))
+        );
+        assert_eq!(
+            static_params(&zone_with_config(json!({ "static_suppression": false }))),
+            None
+        );
+        assert_eq!(
+            static_params(&zone_with_config(
+                json!({ "static_epsilon": 0.05, "static_after_seconds": 300 })
+            )),
+            Some((0.05, 300))
+        );
+        // Nonsense values fall back / clamp.
+        assert_eq!(
+            static_params(&zone_with_config(
+                json!({ "static_epsilon": -1.0, "static_after_seconds": 0 })
+            )),
+            Some((0.02, 120))
         );
     }
 
