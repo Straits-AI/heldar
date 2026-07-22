@@ -1,0 +1,21 @@
+{
+  // Heldar docs + marketing site — deployed to Cloudflare Workers (Static Assets).
+  // Cloudflare recommends Workers over Pages for new projects:
+  // https://developers.cloudflare.com/workers/static-assets/migration-guides/migrate-from-pages/
+  //
+  // This is an "assets-only" Worker: no `main` script, no `binding` — Cloudflare serves the
+  // pre-built Docusaurus output directly. Build first (`npm run build` -> ./build), then `wrangler deploy`.
+  // NOTE: this standalone assets-only Worker is NOT the live docs deploy. The canonical live site is the
+  // COMBINED edge Worker `heldar` defined in apps/edge/wrangler.jsonc (rendezvous script + Durable Object +
+  // these same website/build assets). Deploy docs with `cd apps/edge && npm run deploy`, NOT from here —
+  // deploying this assets-only config as `heldar` would strip the rendezvous script. Kept as a separate
+  // name so it can never overwrite the live Worker.
+  "name": "heldar-docs",
+  "compatibility_date": "2026-06-15",
+  "assets": {
+    "directory": "./build",
+    // Static multi-page site: Docusaurus emits a 404.html, so serve that for misses
+    // (use "single-page-application" only for SPA-style client routing).
+    "not_found_handling": "404-page"
+  }
+}

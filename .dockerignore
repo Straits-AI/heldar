@@ -1,0 +1,16 @@
+# The Dockerfile only COPYs Cargo.toml, Cargo.lock, and crates/ — keep everything else out of the build
+# context so `docker build` doesn't ship gigabytes (or any secret) to the daemon.
+target/
+.git/
+*.md
+**/node_modules
+data/
+recordings/
+website/build
+website/.docusaurus
+apps/web/dist
+# Never send secrets into the build context.
+.env
+*.key
+*.crt
+*.pt

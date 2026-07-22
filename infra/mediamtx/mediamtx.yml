@@ -1,0 +1,57 @@
+# Heldar Core — MediaMTX configuration (live-view gateway + dev RTSP server).
+# Minimal config; unspecified keys use MediaMTX defaults.
+
+logLevel: info
+
+# Control API — Heldar registers camera paths through this. Bound to loopback so only the local
+# kernel can reconfigure the media server (never expose the control plane on the network).
+api: yes
+apiAddress: 127.0.0.1:9997
+
+# RTSP server: ingests published streams (the dev synthetic camera) and proxies cameras.
+rtsp: yes
+rtspAddress: :8554
+
+# HLS output (browser live view). mpegts variant is the most broadly hls.js-compatible.
+hls: yes
+hlsAddress: :8888
+hlsVariant: mpegts
+
+# WebRTC output (lower-latency live view).
+webrtc: yes
+webrtcAddress: :8889
+# ICE servers for WebRTC. STUN is a safe, credential-free baseline (works on the LAN + non-symmetric
+# NAT). For remote viewing through a CGNAT'd box (ADR 0003) the kernel programs these at runtime over the
+# MediaMTX API — operator-provided TURN (HELDAR_WEBRTC_ICE_SERVERS) or short-lived TURN fetched from the
+# rendezvous — so a relay candidate is available for symmetric-NAT traversal.
+webrtcICEServers2:
+  - url: stun:stun.cloudflare.com:3478
+
+rtmp: no
+srt: no
+
+# Authentication: DELEGATED TO THE KERNEL via HTTP external auth. For every publish/read/playback,
+# MediaMTX POSTs the request to the kernel's /internal/mediamtx-auth, which decides:
+#   - publish: allowed only from a loopback client — the KERNEL-OWNED live-publisher ffmpeg (spawned and
+#     supervised by heldar-core, never by MediaMTX — this image has no ffmpeg) publishes from
+#     rtsp://localhost — closing the stream-injection surface (a rogue publisher overwriting a feed).
+#   - read/playback: when kernel auth is ENABLED, a valid kernel-minted, per-camera token (carried in
+#     the ?token= query the kernel appends to the stream URL, and by the browser's WHEP/HLS loader onto
+#     every request) is required — so the browser streaming DIRECTLY from MediaMTX is gated by the SAME
+#     kernel auth as the API. When kernel auth is DISABLED (LAN-appliance default), the kernel allows
+#     LAN/private/overlay media clients and denies public ones, so a port-forwarded box still does not
+#     serve every camera to the internet.
+# `authInternalUsers` is intentionally omitted — it is IGNORED under authMethod: http.
+# The kernel API is on 127.0.0.1:8000 in every deployment (host-networked); change the port here if you
+# set HELDAR_API_PORT. api/metrics/pprof are excluded from the callback because those servers are
+# already loopback-bound (apiAddress above), so they need no kernel round-trip.
+authMethod: http
+authHTTPAddress: http://127.0.0.1:8000/internal/mediamtx-auth
+authHTTPExclude:
+  - action: api
+  - action: metrics
+  - action: pprof
+
+# Heldar adds named camera proxy paths via the API.
+paths:
+  all_others:

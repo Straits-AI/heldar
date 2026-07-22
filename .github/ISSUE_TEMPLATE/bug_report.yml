@@ -1,0 +1,49 @@
+name: Bug report
+description: Something is broken or behaving unexpectedly
+labels: ["needs-triage"]
+body:
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment mode
+      description: How is this box running?
+      options:
+        - docker-compose
+        - native systemd
+        - appliance image (flashed DVR)
+        - built from source
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Heldar version
+      description: Release tag or commit hash.
+      placeholder: e.g. 0.3.1 or cba740a
+    validations:
+      required: true
+  - type: input
+    id: camera
+    attributes:
+      label: Camera vendor + model
+      description: If the bug involves a camera (ingest, recording, ONVIF, camera config), which one?
+      placeholder: e.g. HikVision DS-2CD2143G2
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened / what you expected
+      description: What you did, what happened, and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: core-log
+    attributes:
+      label: Relevant core.log lines
+      description: Paste the lines around the failure (journalctl -u heldar-core, or data/core.log). Redact camera credentials and tokens.
+      render: text
+  - type: textarea
+    id: console-errors
+    attributes:
+      label: Dashboard console errors
+      description: If the dashboard misbehaves, paste any errors from the browser dev-tools console.
+      render: text

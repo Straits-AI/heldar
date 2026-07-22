@@ -1,0 +1,15 @@
+# Heldar AI worker — OPTIONAL CLIP semantic-embedding backend (issue #38).
+#
+# The "embedding" task type and semantic-search query answering need open_clip (torch is shared
+# with ultralytics). Without it the worker degrades gracefully: "embedding" tasks fall back to the
+# safe placeholder (no vectors indexed, never fabricated) and query-embedding jobs are answered
+# with {"error": "clip backend unavailable"} so /search/semantic fails fast — the dashboard shows
+# "embedding worker offline" instead of hanging. Install on top of the core requirements:
+#
+#   pip install -r requirements.txt -r requirements-embed.txt
+#
+# The default checkpoint (ViT-B-32/openai, ~350 MB) downloads on first use. Override it per task
+# via the config keys clip_model/clip_pretrained, and for the query side via env
+# HELDAR_AI_CLIP_MODEL / HELDAR_AI_CLIP_PRETRAINED — both sides must use the SAME checkpoint or
+# the kernel compares vectors from different embedding spaces.
+open_clip_torch>=2.24

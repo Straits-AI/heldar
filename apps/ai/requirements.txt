@@ -1,0 +1,25 @@
+# Heldar reference AI worker — FULL local install (core + the optional model stack).
+#
+# Core runtime (always required) — intentionally light: HTTP + frame decode. It lives in
+# requirements-core.txt so the container image (apps/ai/Dockerfile) can install ONLY the core and
+# stay small + multi-arch buildable (torch/opencv are ~2 GB per architecture — enough to overflow a
+# CI runner's disk); worker.py imports the model stack lazily, so the core-only image runs every
+# motion-type task and cleanly reports model-type tasks as unavailable.
+-r requirements-core.txt
+
+# Stage 3 real model: Ultralytics YOLOv8 + ByteTrack (used by YoloAnalyzer for
+# the "detection"/"yolo" task types). This pulls in torch/torchvision/opencv,
+# which are large (~2 GB) and download on first install. It is only imported
+# lazily when a YOLO task actually runs, so motion-only deployments can omit it.
+# GPU is used automatically when torch detects CUDA; otherwise it runs on CPU.
+ultralytics>=8.3
+lap>=0.5            # ByteTrack data-association solver (model.track tracker)
+
+# Stage 4 ANPR plate OCR — OPTIONAL. Pick ONE (or neither). Only needed for the
+# "anpr" task type's plate reading; the AnprAnalyzer falls back to emitting vehicles
+# WITHOUT a plate (never a fabricated one) when no backend is installed. The core
+# entry engine still logs unreadable-plate events for guard review. Both are large
+# (extra model downloads on first use) and imported lazily, so motion/detection-only
+# deployments can omit them entirely.
+# paddleocr>=2.7   # preferred backend (PP-OCR); pulls in paddlepaddle
+# easyocr>=1.7     # alternative backend; pulls in torch (shared with ultralytics above)

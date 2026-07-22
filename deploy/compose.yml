@@ -1,0 +1,75 @@
+# Heldar — one-liner deploy (public OPEN images: kernel + generic apps, no proprietary vertical).
+#
+#   docker compose up -d                 # pull prebuilt images + start the stack
+#   docker compose --profile ai up -d    # + the reference AI worker
+#   docker compose pull && docker compose up -d   # update to the latest images
+#
+# Host networking (Linux) keeps MediaMTX + LAN cameras reachable at the documented 127.0.0.1 ports.
+# The dashboard is then http://<this-host>:8080.
+#
+# Production (auth on, secrets, full/private image):
+#   docker compose -f compose.yml -f compose.prod.yml up -d   (see docs/PRODUCTION.md)
+name: heldar
+
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+
+  core:
+    image: ghcr.io/straits-ai/heldar-core:${HELDAR_VERSION:-latest}
+    restart: unless-stopped
+    network_mode: host
+    # `.env` is optional here (LAN defaults work without it); install.sh generates one, and the
+    # production overlay reads HELDAR_SECRET_KEY / HELDAR_CORS_ORIGINS from it.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      HELDAR_DATA_DIR: /data
+      HELDAR_DATABASE_URL: sqlite:///data/heldar.db
+      HELDAR_API_HOST: 0.0.0.0
+      HELDAR_API_PORT: "8000"
+      HELDAR_MEDIAMTX_API_URL: http://127.0.0.1:9997
+      HELDAR_MEDIAMTX_HLS_BASE: http://127.0.0.1:8888
+      HELDAR_MEDIAMTX_RTSP_BASE: rtsp://127.0.0.1:8554
+      HELDAR_MEDIAMTX_WEBRTC_BASE: http://127.0.0.1:8889
+    volumes:
+      # Named volume so the non-root image user (uid 10001) owns /data (a host bind mount would be
+      # owned by the host user and break writes).
+      - heldar-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/readyz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    depends_on:
+      mediamtx:
+        condition: service_started
+
+  web:
+    image: ghcr.io/straits-ai/heldar-web:${HELDAR_VERSION:-latest}
+    restart: unless-stopped
+    network_mode: host # nginx listens on :8080 and proxies /api,/media,/healthz to 127.0.0.1:8000
+    depends_on:
+      core:
+        condition: service_healthy
+
+  # Reference AI worker (opt-in): `docker compose --profile ai up -d`. Polls core for AI tasks.
+  ai:
+    image: ghcr.io/straits-ai/heldar-ai:${HELDAR_VERSION:-latest}
+    restart: unless-stopped
+    network_mode: host
+    profiles: ["ai"]
+    environment:
+      HELDAR_API: http://127.0.0.1:8000
+    depends_on:
+      core:
+        condition: service_healthy
+
+volumes:
+  heldar-data:

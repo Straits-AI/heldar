@@ -1,0 +1,40 @@
+[Unit]
+Description=Heldar Core — media/DVR recorder + perception kernel
+Documentation=https://github.com/Straits-AI/heldar
+After=network-online.target mediamtx.service
+# Pull in mediamtx (not just order after it) so enabling heldar-core starts the media server too.
+Wants=network-online.target mediamtx.service
+# Bound restart storms: if it fails >5 times in 60s, stop and surface the failure instead of looping.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+# Runs as a dedicated non-root user. StateDirectory creates + owns /var/lib/heldar.
+User=heldar
+Group=heldar
+StateDirectory=heldar
+Environment=HELDAR_DATA_DIR=/var/lib/heldar
+Environment=HELDAR_DATABASE_URL=sqlite:///var/lib/heldar/heldar.db
+Environment=HELDAR_API_HOST=0.0.0.0
+# The dashboard: heldar-core serves the built SPA from this dir (appliance images install it here).
+Environment=HELDAR_WEB_DIR=/usr/local/share/heldar/web
+# Recording schedules use the server's LOCAL timezone. Set this to your timezone (needs tzdata, which
+# the appliance image includes) or recording windows fire in UTC. Example: Environment=TZ=Asia/Kuala_Lumpur
+# Environment=TZ=UTC
+# Operator overrides (SMTP, camera creds, etc). Optional — `-` = ignore if absent.
+EnvironmentFile=-/etc/heldar/heldar.env
+ExecStart=/usr/local/bin/heldar-core
+Restart=on-failure
+RestartSec=3
+
+# ---- Hardening (compatible with writing the data dir) ----
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/heldar
+# Do NOT set PrivateNetwork=yes (it isolates the netns and breaks reachability).
+
+[Install]
+WantedBy=multi-user.target

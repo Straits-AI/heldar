@@ -1,0 +1,63 @@
+{
+  "format": "heldar-catalog/v1",
+  "name": "Heldar Official",
+  "issued_at": "2026-06-16T00:00:00Z",
+  "entries": [
+    {
+      "id": "entry",
+      "name": "Access Control",
+      "publisher": "Heldar",
+      "kind": "core",
+      "summary": "ANPR authorization, vehicle/visitor registry, guard workflow, entry reports.",
+      "description": "Plate-based entry authorization with a vehicle/visitor-pass/watchlist registry, a guard confirm/reject workflow, and entry/exception/audit reports. Domain-neutral; any gated-entry deployment uses it as-is.",
+      "icon": "entry",
+      "homepage": "https://github.com/Straits-AI/heldar/tree/main/crates/heldar-entry",
+      "categories": ["access-control", "anpr"],
+      "install": { "type": "builtin", "availability": "open" }
+    },
+    {
+      "id": "movement",
+      "name": "Movement Intelligence",
+      "publisher": "Heldar",
+      "kind": "core",
+      "summary": "Cross-camera ReID candidates, journey trails, and red-zone breach alerts (audited).",
+      "description": "A privacy-gated correlation layer: multi-signal vehicle ReID anchored on the plate, weak on-demand person-candidate search, and a red-zone breach rule engine. Every identity-like query is audited.",
+      "icon": "movement",
+      "homepage": "https://github.com/Straits-AI/heldar/tree/main/crates/heldar-movement",
+      "categories": ["analytics", "reid"],
+      "install": { "type": "builtin", "availability": "open" }
+    },
+    {
+      "id": "search",
+      "name": "Forensic Search",
+      "publisher": "Heldar",
+      "kind": "core",
+      "summary": "Natural-language + structured query over stored event facts, with a traceable proof layer.",
+      "description": "Turns accumulated event facts into a queryable memory. The LLM is a query planner, never the source of truth; every answer decomposes into evidence-backed claim levels with confidences.",
+      "icon": "search",
+      "homepage": "https://github.com/Straits-AI/heldar/tree/main/crates/heldar-search",
+      "categories": ["search", "forensics"],
+      "install": { "type": "builtin", "availability": "open" }
+    },
+    {
+      "id": "hello-module",
+      "name": "Hello Plugin",
+      "publisher": "Heldar",
+      "kind": "community",
+      "summary": "A zero-dependency reference sidecar plugin you can copy to build your own.",
+      "description": "The smallest complete Heldar sidecar: serves a UI, a health endpoint, and a webhook receiver in ~150 lines of standard-library Python. Use it as a template for your own out-of-process plugin.",
+      "icon": "module",
+      "homepage": "https://github.com/Straits-AI/heldar/tree/main/examples/hello-module",
+      "categories": ["example", "template"],
+      "install": {
+        "type": "sidecar",
+        "image": null,
+        "default_base_url": "http://127.0.0.1:9123",
+        "subscribes": ["*"],
+        "role": "viewer",
+        "nav": [{ "path": "/hello-module", "label": "Hello Plugin", "icon": "module" }],
+        "docs": "https://github.com/Straits-AI/heldar/blob/main/website/docs/develop/sidecar-plugins.md"
+      }
+    }
+  ]
+}
