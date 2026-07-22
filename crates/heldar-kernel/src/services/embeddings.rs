@@ -574,6 +574,106 @@ pub async fn search_similar(
     Ok(SimilarOutcome { hits, truncated })
 }
 
+/// One appearance to score for visual similarity — a moment observed on a camera. The join to
+/// crop embeddings is TEMPORAL-SPATIAL (camera + time window), never by `track_id`: the embedding
+/// task and the detection/ANPR tasks run independent ByteTrack instances, so their track-id spaces
+/// are disjoint (see the worker docs). `label` optionally narrows to a class the embedder indexed.
+pub struct AppearanceRef {
+    pub camera_id: String,
+    pub ts: DateTime<Utc>,
+    pub label: Option<String>,
+}
+
+/// Owner decision (issue #51): at least this many comparable crop embeddings must exist on EACH
+/// side before an appearance-similarity score is claimed — one lucky crop is not evidence.
+pub const APPEARANCE_MIN_VECTORS: usize = 2;
+/// Cap on crops fetched per side (a dense multi-second window still bounds the cross-product).
+const APPEARANCE_MAX_VECTORS: usize = 32;
+
+/// Crop embeddings observed within `±window_secs` of an appearance, newest-of-window first.
+async fn vectors_near(
+    pool: &SqlitePool,
+    a: &AppearanceRef,
+    window_secs: i64,
+) -> AppResult<Vec<(String, Vec<f32>)>> {
+    let win = Duration::seconds(window_secs.max(1));
+    let mut sql = String::from(
+        "SELECT model, vec FROM embeddings WHERE camera_id = ? AND ts >= ? AND ts <= ?",
+    );
+    if a.label.is_some() {
+        sql.push_str(" AND label = ?");
+    }
+    sql.push_str(" ORDER BY ts DESC LIMIT ?");
+    let mut q = sqlx::query_as::<_, (String, Vec<u8>)>(&sql)
+        .bind(&a.camera_id)
+        .bind(a.ts - win)
+        .bind(a.ts + win);
+    if let Some(label) = &a.label {
+        q = q.bind(label);
+    }
+    let rows = q
+        .bind(APPEARANCE_MAX_VECTORS as i64)
+        .fetch_all(pool)
+        .await?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(model, blob)| decode_vec(&blob).map(|v| (model, v)))
+        .collect())
+}
+
+/// Visual-similarity score in [-1, 1] between two appearances, for the movement app's cross-camera
+/// link scorer (issue #51). Fetches each side's crop embeddings within `±window_secs` and returns
+/// the **best pairwise cosine** across vectors sharing the same model (embeddings from different
+/// CLIP checkpoints are incomparable, so cross-model pairs are never compared). Returns `None` —
+/// an honest ABSENCE, never a low score — when either side has fewer than [`APPEARANCE_MIN_VECTORS`]
+/// comparable vectors (no embedding task on that camera, retention pruned them, or the object class
+/// isn't indexed, e.g. the privacy-excluded `person`). Max-of-pairs is robust to a few off-angle or
+/// occluded crops dragging a mean down.
+pub async fn appearance_similarity(
+    pool: &SqlitePool,
+    a: &AppearanceRef,
+    b: &AppearanceRef,
+    window_secs: i64,
+) -> AppResult<Option<f32>> {
+    let va = vectors_near(pool, a, window_secs).await?;
+    if va.len() < APPEARANCE_MIN_VECTORS {
+        return Ok(None);
+    }
+    let vb = vectors_near(pool, b, window_secs).await?;
+    if vb.len() < APPEARANCE_MIN_VECTORS {
+        return Ok(None);
+    }
+    // A model is only usable if BOTH sides have the minimum count in it (else "≥2 per side" isn't met
+    // for any comparable space). Compute the best cosine within each such shared model.
+    let mut best: Option<f32> = None;
+    let models: std::collections::HashSet<&str> = va.iter().map(|(m, _)| m.as_str()).collect();
+    for model in models {
+        let sa: Vec<&Vec<f32>> = va
+            .iter()
+            .filter(|(m, _)| m == model)
+            .map(|(_, v)| v)
+            .collect();
+        let sb: Vec<&Vec<f32>> = vb
+            .iter()
+            .filter(|(m, _)| m == model)
+            .map(|(_, v)| v)
+            .collect();
+        if sa.len() < APPEARANCE_MIN_VECTORS || sb.len() < APPEARANCE_MIN_VECTORS {
+            continue;
+        }
+        for x in &sa {
+            for y in &sb {
+                if let Some(c) = cosine(x, y) {
+                    if c.is_finite() && best.map(|prev| c > prev).unwrap_or(true) {
+                        best = Some(c);
+                    }
+                }
+            }
+        }
+    }
+    Ok(best)
+}
+
 /// Delete one queue row (best-effort). Called by the search route as soon as its request
 /// completes — successfully or not — so a query's payload (possibly a multi-MB image) lives in
 /// heldar.db only for the seconds the search is actually waiting. A worker's late result for a
@@ -956,5 +1056,96 @@ mod tests {
             ingest_batch(&st, &too_big).await,
             Err(AppError::BadRequest(_))
         ));
+    }
+
+    #[tokio::test]
+    async fn appearance_similarity_gates_on_min_vectors_and_takes_best_pair() {
+        let pool = mem_pool().await;
+        seed_camera(&pool, "camA").await;
+        seed_camera(&pool, "camB").await;
+        let t = Utc::now();
+        let a = AppearanceRef {
+            camera_id: "camA".into(),
+            ts: t,
+            label: None,
+        };
+        let b = AppearanceRef {
+            camera_id: "camB".into(),
+            ts: t,
+            label: None,
+        };
+
+        // Only ONE vector on each side yet → below APPEARANCE_MIN_VECTORS → honest None.
+        insert_embedding(&pool, "camA", "car", &[1.0, 0.0], t).await;
+        insert_embedding(&pool, "camB", "car", &[1.0, 0.0], t).await;
+        assert_eq!(
+            appearance_similarity(&pool, &a, &b, 5).await.unwrap(),
+            None,
+            "one vector per side is not enough evidence"
+        );
+
+        // Second vector each: camB has an off-angle crop plus one that matches camA well. Max-of-
+        // pairs must find the good pair (~1.0), not be dragged down by the bad one.
+        insert_embedding(&pool, "camA", "car", &[0.9, 0.1], t).await;
+        insert_embedding(&pool, "camB", "car", &[0.0, 1.0], t).await; // orthogonal, off-angle
+        let score = appearance_similarity(&pool, &a, &b, 5)
+            .await
+            .unwrap()
+            .expect("both sides now have >= 2 vectors");
+        assert!(
+            score > 0.99,
+            "best pair is the identical [1,0] crops: {score}"
+        );
+
+        // A vector outside the ±window is not gathered → back under the min → None.
+        let far = AppearanceRef {
+            camera_id: "camA".into(),
+            ts: t + Duration::hours(1),
+            label: None,
+        };
+        assert_eq!(
+            appearance_similarity(&pool, &far, &b, 5).await.unwrap(),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn appearance_similarity_never_compares_across_models() {
+        let pool = mem_pool().await;
+        seed_camera(&pool, "camA").await;
+        seed_camera(&pool, "camB").await;
+        let t = Utc::now();
+        // camA vectors are model 'm' (helper default); camB vectors are a DIFFERENT model.
+        insert_embedding(&pool, "camA", "car", &[1.0, 0.0], t).await;
+        insert_embedding(&pool, "camA", "car", &[1.0, 0.0], t).await;
+        for _ in 0..2 {
+            let id = format!("emb_{}", Uuid::new_v4().simple());
+            sqlx::query(
+                "INSERT INTO embeddings (id, camera_id, label, ts, model, dim, vec, created_at)
+                 VALUES (?,?,?,?,'other-model',?,?,?)",
+            )
+            .bind(&id)
+            .bind("camB")
+            .bind("car")
+            .bind(t)
+            .bind(2i64)
+            .bind(encode_vec(&[1.0, 0.0]))
+            .bind(Utc::now())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let a = AppearanceRef {
+            camera_id: "camA".into(),
+            ts: t,
+            label: None,
+        };
+        let b = AppearanceRef {
+            camera_id: "camB".into(),
+            ts: t,
+            label: None,
+        };
+        // Identical vectors but incomparable checkpoints → no shared-model pair → None.
+        assert_eq!(appearance_similarity(&pool, &a, &b, 5).await.unwrap(), None);
     }
 }

@@ -39,6 +39,10 @@ pub struct MovementCandidate {
     pub to_time: Option<DateTime<Utc>>,
     pub transit_seconds: Option<f64>,
     pub score: f64,
+    /// Visual-similarity signal in [-1, 1] (issue #51): cosine between the two appearances' CLIP
+    /// crop embeddings. Additive/secondary — `score` still ranks. `None` when it couldn't be
+    /// computed (no embeddings for a camera/class/window), which is NOT the same as a low score.
+    pub appearance_score: Option<f64>,
     pub signals: Json<serde_json::Value>,
     pub status: String,
     pub reviewed_by: Option<String>,

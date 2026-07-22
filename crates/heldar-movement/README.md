@@ -19,6 +19,11 @@ frame decode, and the kernel has no dependency on it.
   operator-linked cameras within a plausible transit window, then fuses plate-exactness, transit-time
   plausibility, and vehicle attribute agreement (color/type) into a 0..1 score. Anchored on the plate,
   never a pure visual embedding.
+- **Optional appearance confirmation (issue #51).** When crop embeddings exist for both cameras (an
+  `embedding` AI task is running), each proposed vehicle candidate carries an additive `appearance_score`
+  — the cosine similarity of the two appearances' CLIP crops, from the kernel embeddings store. It is a
+  *secondary* signal shown alongside the plate-anchored score (it does not change the ranking), and is
+  absent (not zero) when embeddings can't be found. Off unless `HELDAR_MOVEMENT_APPEARANCE_SCORING=true`.
 - **Candidate matching, not identity.** Every cross-camera link is a scored *candidate* with per-signal
   evidence and a `pending` status. A human confirms or rejects it; nothing is asserted as legal identity.
 - **Movement trails.** Resolves all appearances of a plate across cameras, time-ordered, bounded to the
@@ -42,7 +47,8 @@ crate, which builds the `heldar-core` binary) applies its schema, loads its conf
 loops, and merges its router. The crate's public surface:
 
 - `config::MovementConfig` and `MovementConfig::from_env()` — engine interval, scan window, minimum
-  candidate score, red-zone kinds, retention days (all read from `HELDAR_MOVEMENT_*` env vars).
+  candidate score, red-zone kinds, retention days, appearance-scoring toggle + window (all read from
+  `HELDAR_MOVEMENT_*` env vars).
 - `schema::init(&pool)` — installs its three tables (`camera_links`, `movement_candidates`,
   `breach_alerts`) idempotently against the shared kernel pool.
 - `reid::run` / `reid::run_once` and `breach::run` / `breach::run_once` — the supervised proposer and

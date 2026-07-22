@@ -22,12 +22,14 @@ var D = {
 	"plate_exact",
 	"transit",
 	"color_match",
-	"type_match"
+	"type_match",
+	"appearance_score"
 ], M = {
 	plate_exact: "Plate exact",
 	transit: "Transit",
 	color_match: "Color match",
-	type_match: "Type match"
+	type_match: "Type match",
+	appearance_score: "Appearance"
 };
 function N({ children: e, className: t }) {
 	return /* @__PURE__ */ T("th", {

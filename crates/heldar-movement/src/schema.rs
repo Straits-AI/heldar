@@ -19,6 +19,11 @@ const MIGRATIONS: &[AppMigration] = &[
         name: "read_contract",
         sql: include_str!("../migrations/0002_read_contract.sql"),
     },
+    AppMigration {
+        version: 3,
+        name: "appearance_score",
+        sql: include_str!("../migrations/0003_appearance_score.sql"),
+    },
 ];
 
 pub async fn init(pool: &SqlitePool) -> anyhow::Result<()> {
