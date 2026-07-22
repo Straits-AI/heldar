@@ -424,7 +424,15 @@ async fn main() -> anyhow::Result<()> {
             state.clone(),
             media_guard,
         ));
-    let app = verticals::merge_routes(app).merge(media);
+    // Authentication floor for the ENTIRE /api/v1 surface — kernel, open apps, and verticals
+    // alike (issue #52): a handler that forgets to name `Principal` can no longer answer
+    // unauthenticated. Applied after the verticals merge so proprietary routes are covered too;
+    // non-/api/v1 paths pass through (media has its own guard below).
+    let app = verticals::merge_routes(app).layer(axum::middleware::from_fn_with_state(
+        state.clone(),
+        heldar_kernel::auth::require_api_auth,
+    ));
+    let app = app.merge(media);
 
     // Serve the built dashboard so the whole product is ONE binary at ONE URL. The /api/*, /media/*,
     // /healthz, /readyz and /metrics routes above are explicit and take precedence; the SPA is only

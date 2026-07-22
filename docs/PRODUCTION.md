@@ -172,6 +172,16 @@ These are deliberately out of the current scope — track them for higher-assura
 
 - At-rest encryption of **recorded footage** (segments are stored unencrypted; rely on disk/volume
   encryption — LUKS/BitLocker — today).
+- **Camera credentials in the ffmpeg command line.** Passwords are encrypted at rest
+  (`HELDAR_SECRET_KEY`), but the recorder/sampler/publisher decrypt them at spawn time and pass the
+  RTSP URL (`rtsp://user:pass@host/…`) as an ffmpeg `-i` argument, so a **local shell user on the
+  appliance** can read them from `ps`/`/proc/<pid>/cmdline` while a stream is active. ffmpeg has no
+  separate credential option, and its only file/stdin input path (the `concat` demuxer) drops the
+  `-rtsp_transport tcp` the recorder relies on — there is no ffmpeg-native fix that preserves the
+  streaming semantics. Mitigate at the OS level on multi-user hosts: mount `/proc` with
+  `hidepid=2` (e.g. `/etc/fstab`: `proc /proc proc defaults,hidepid=2 0 0`) so a user can't read
+  another user's `cmdline`. Single-operator appliances (the default posture) are unaffected — there
+  is no second unprivileged local account to read the argv.
 - A pluggable external **secret-store** backend (Vault / cloud secrets) for `HELDAR_SECRET_KEY` and camera
   credentials, instead of an env var + DB column.
 - RTSPS **enforcement** and audit-log **retention** tuning for privacy/compliance regimes.
