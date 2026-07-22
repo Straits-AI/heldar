@@ -714,6 +714,7 @@ function SemanticConsole({ nameFor, cameras }: { nameFor: NameFor; cameras: Came
   const [from, setFrom] = useState("");
   const [to, setTo] = useState("");
   const [camera, setCamera] = useState("");
+  const [label, setLabel] = useState("");
   const [k, setK] = useState(24);
 
   const [busy, setBusy] = useState<SemanticBusy>(null);
@@ -783,6 +784,8 @@ function SemanticConsole({ nameFor, cameras }: { nameFor: NameFor; cameras: Came
     const t = localInputToIso(to);
     if (t) body.to = t;
     if (camera) body.cameras = [camera];
+    const lbl = label.trim();
+    if (lbl) body.label = lbl;
     body.k = k;
     try {
       const r = await api.searchSemantic(body);
@@ -929,6 +932,15 @@ function SemanticConsole({ nameFor, cameras }: { nameFor: NameFor; cameras: Came
                   </option>
                 ))}
               </Select>
+            </Field>
+            <Field label="Label (optional)" htmlFor="sem-label">
+              <Input
+                id="sem-label"
+                value={label}
+                onChange={(e) => setLabel(e.target.value)}
+                placeholder="car"
+                autoComplete="off"
+              />
             </Field>
             <Field label="Results" htmlFor="sem-k">
               <Select id="sem-k" value={k} onChange={(e) => setK(Number(e.target.value))}>

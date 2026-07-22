@@ -440,7 +440,7 @@ blocks a request indefinitely and never fakes an answer.
 {
   "query": "red pickup truck",     // "[image]" for image queries
   "mode": "semantic",
-  "model": "open_clip/ViT-B-32/openai",
+  "model": "open_clip/ViT-B-32-quickgelu/openai",
   "count": 17,
   "truncated": false,              // true ⇒ the candidate scan hit its 100k-row cap —
                                    //   the ranking covers the newest 100k candidates, not all
@@ -454,7 +454,7 @@ blocks a request indefinitely and never fakes an answer.
       "track_id": "7",
       "bbox": [0.1, 0.2, 0.3, 0.4],
       "evidence_path": "/media/snapshots/emb_....jpg",  // crop thumb; may be null
-      "detection": { "confidence": 0.87, "attributes": { ... } }  // may be null (pruned/unlinked)
+      "detection": { "confidence": 0.87, "attributes": { ... } }  // PRESENT ONLY when correlated (see below)
     }
   ],
   "proof": { ... }                 // the same claim-ladder envelope as every other route
@@ -462,8 +462,17 @@ blocks a request indefinitely and never fakes an answer.
 ```
 
 The dashboard's Search module drives this as its **Semantic** tab (text or image query,
-camera/time/`k` filters, ranked crop cards) and deep-links every hit to Playback with a
-±60 s window around `timestamp`.
+camera/time/`label`/`k` filters, ranked crop cards) and deep-links every hit to Playback
+with a ±60 s window around `timestamp`.
+
+**The `detection` object is present only when the embedding row correlates to a live
+`detections` row** (a non-null `embeddings.detection_id` that still joins). It is **omitted
+entirely** — not emitted as `null` — otherwise. In practice it is usually absent: the
+reference embedding analyzer runs its OWN ByteTrack tracker, whose track/detection ids live
+in a different id-space from the `detection` task's, so it does not set `detection_id`. Each
+hit still carries its own `bbox` / `label` / `track_id` from the embedding row. Populating
+`detection` for reference-worker hits is a future frame+bbox-replay correlation, deliberately
+out of scope here; the join path stays for embeddings that do carry a real `detection_id`.
 
 **Ranked, not facts.** This is the crucial framing difference from `/events` and `/nl`:
 a structured or NL hit is a **stored event fact**; a semantic hit is a **similarity

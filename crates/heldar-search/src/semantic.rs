@@ -174,7 +174,7 @@ pub async fn search_semantic(
                 .detection_id
                 .as_deref()
                 .and_then(|id| detections.get(id).cloned());
-            json!({
+            let mut hit = json!({
                 "id": h.id,
                 "score": h.score,
                 "camera_id": h.camera_id,
@@ -183,8 +183,19 @@ pub async fn search_semantic(
                 "track_id": h.track_id,
                 "bbox": h.bbox,
                 "evidence_path": h.evidence_path,
-                "detection": det,
-            })
+            });
+            // `detection` is present ONLY when the embedding row carries a `detection_id` that
+            // joins to a live detection row. The reference embedding analyzer runs its OWN
+            // ByteTrack tracker, whose track/detection ids live in a different id-space from the
+            // `detection` task's, so it never sets `detection_id` — its hits carry their own
+            // bbox/label/track_id instead, and this key is simply omitted rather than emitted as
+            // a permanently-null field. (A future frame+bbox-replay correlation would populate it.)
+            if let Some(det) = det {
+                hit.as_object_mut()
+                    .expect("json! object")
+                    .insert("detection".into(), det);
+            }
+            hit
         })
         .collect();
     let proof = semantic_proof(

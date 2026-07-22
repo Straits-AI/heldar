@@ -38,7 +38,7 @@ The contract (served by the kernel; see crates/heldar-kernel/src/routes/ai.rs)
        POST {API}/api/v1/ai/embeddings
        {
          "camera_id": "...",
-         "model":     "open_clip/ViT-B-32/openai",
+         "model":     "open_clip/ViT-B-32-quickgelu/openai",
          "dim":       512,
          "frame_id":  "<task>:<captured_at>",       # optional idempotency key
          "items":     [{ "track_id", "detection_id", "label", "timestamp",
@@ -211,7 +211,7 @@ def parse_settings(argv: Optional[List[str]] = None) -> Settings:
     )
     parser.add_argument(
         "--clip-model",
-        default=_env("HELDAR_AI_CLIP_MODEL", "ViT-B-32"),
+        default=_env("HELDAR_AI_CLIP_MODEL", "ViT-B-32-quickgelu"),
         help="open_clip architecture used to answer embed queries (env HELDAR_AI_CLIP_MODEL).",
     )
     parser.add_argument(
@@ -237,7 +237,7 @@ def parse_settings(argv: Optional[List[str]] = None) -> Settings:
         # Floor at 0.2s: this endpoint is polled forever by design, so a 0/negative interval
         # (env typo) would hammer Core in a tight loop.
         embed_poll_interval=max(0.2, ns.embed_poll_interval),
-        clip_model=ns.clip_model.strip() or "ViT-B-32",
+        clip_model=ns.clip_model.strip() or "ViT-B-32-quickgelu",
         clip_pretrained=ns.clip_pretrained.strip() or "openai",
     )
 
@@ -412,7 +412,7 @@ class EmbeddingItem:
     """
 
     vec: List[float]
-    model: str  # e.g. "open_clip/ViT-B-32/openai"
+    model: str  # e.g. "open_clip/ViT-B-32-quickgelu/openai"
     label: Optional[str] = None
     bbox: Optional[List[float]] = None  # [x, y, w, h] normalized 0..1
     track_id: Optional[str] = None
@@ -1188,7 +1188,7 @@ class _ClipBackend:
         self.model_name = model_name
         self.pretrained = pretrained
         self.device = device
-        #: Wire-level model id (embeddings.model in the kernel), e.g. "open_clip/ViT-B-32/openai".
+        #: Wire-level model id (embeddings.model in the kernel), e.g. "open_clip/ViT-B-32-quickgelu/openai".
         self.model_id = f"open_clip/{model_name}/{pretrained}"
         model, _, preprocess = open_clip.create_model_and_transforms(
             model_name, pretrained=pretrained
@@ -1254,7 +1254,7 @@ class EmbeddingAnalyzer(Analyzer):
                               ``3600``) so a permanently parked object re-enters the index
                               after its old rows age out on the retention TTL.
       * ``min_box_px``      — skip boxes narrower/shorter than this many pixels (default ``24``).
-      * ``clip_model``      — open_clip architecture (default ``ViT-B-32``).
+      * ``clip_model``      — open_clip architecture (default ``ViT-B-32-quickgelu``).
       * ``clip_pretrained`` — open_clip pretrained tag (default ``openai``).
       * ``device``          — force a device (default auto: CUDA if available else CPU).
       * ``thumb_max_px``    — max dimension of the JPEG crop thumb sent for the UI
@@ -1330,7 +1330,7 @@ class EmbeddingAnalyzer(Analyzer):
         self.min_box_px = float(self.config.get("min_box_px", 24))
         self.thumb_max_px = int(self.config.get("thumb_max_px", 320))
         self.clip = _get_clip_backend(
-            str(self.config.get("clip_model", "ViT-B-32")),
+            str(self.config.get("clip_model", "ViT-B-32-quickgelu")),
             str(self.config.get("clip_pretrained", "openai")),
             self.device,
         )

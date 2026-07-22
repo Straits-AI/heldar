@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Features
+
+- **Semantic search polish** (#53): the Semantic tab exposes the `label` filter the API already
+  accepted; the default CLIP model becomes `ViT-B-32-quickgelu` (open_clip's recommended pairing for
+  the `openai` tag) on both the analyzer and the query worker — the emitted model id becomes
+  `open_clip/ViT-B-32-quickgelu/openai`, so operators upgrading re-index by letting the stride
+  repopulate as old vectors age out; and the semantic response omits the `detection` field when a hit
+  has no correlated detection row rather than emitting `null`.
 
 ## [0.3.0] - 2026-07-17
 
