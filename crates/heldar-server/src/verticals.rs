@@ -33,7 +33,7 @@ pub fn spawn_loops(pool: &SqlitePool) {
     // BakerySense rollup (aggregates anonymous behaviour metrics + prunes its observations).
     let bakery_cfg = Arc::new(heldar_bakery::config::BakeryConfig::from_env());
     let (p, b) = (pool.clone(), bakery_cfg);
-    crate::spawn_supervised("bakery_rollup", move || {
+    heldar_server::spawn_supervised("bakery_rollup", move || {
         heldar_bakery::rollup::run(p.clone(), b.clone())
     });
 }

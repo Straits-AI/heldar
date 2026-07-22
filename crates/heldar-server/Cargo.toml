@@ -5,7 +5,14 @@ edition = "2021"
 rust-version = "1.85"
 description = "Heldar composing server: links the open kernel with the open generic apps (entry/movement/search), plus optional proprietary verticals behind the `verticals` feature."
 license = "Apache-2.0"
-publish = false  # composition bin, not a library — lives in the repo, not on crates.io
+publish = false  # composition crate — lives in the repo, not on crates.io
+
+# The server is a LIBRARY (`heldar_server::run(impl Verticals)`) plus this workspace's composed
+# bin. An out-of-tree overlay workspace builds its own bin against the library via a path/git dep
+# instead of forking this crate — the enabler for a public-source-of-truth split.
+[lib]
+name = "heldar_server"
+path = "src/lib.rs"
 
 [[bin]]
 name = "heldar-core"
