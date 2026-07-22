@@ -64,10 +64,38 @@ cd apps/web && npm ci && npm run build
 
 1. Fork + branch from `main`.
 2. Make the change with tests; keep the quality bar green.
-3. Open a PR describing the problem and the approach. Link any issue.
-4. By contributing, you agree your contributions are licensed under **Apache-2.0** (the repo license).
+3. **Sign your work** (DCO): every commit needs a `Signed-off-by: Your Name <you@example.com>`
+   trailer — `git commit -s` adds it. This certifies, per the
+   [Developer Certificate of Origin](https://developercertificate.org), that you have the right to
+   submit the change under Apache-2.0. CI enforces it; fix a missing sign-off with
+   `git rebase --signoff origin/main`.
+4. Open a PR describing the problem and the approach. Link any issue.
+5. By contributing, you agree your contributions are licensed under **Apache-2.0** (the repo
+   license). Heldar is open-core: the same Apache-2.0 code also ships inside the commercial
+   builds, exactly as the license permits.
 
 All participation is covered by the [Code of Conduct](./CODE_OF_CONDUCT.md).
+
+## How your PR actually lands (read this — the repo is generated)
+
+Honesty first: the public `Straits-AI/heldar` tree is **generated** from an internal monorepo
+that also contains proprietary vertical products. The internal monorepo is the source of truth;
+each release regenerates the open subset and commits it here as a snapshot on top of the existing
+history (history, stars, links, and merged-PR commits are preserved — the snapshot supersedes by
+content, never by erasing).
+
+What that means for your PR:
+
+1. You open a PR here; CI runs the same open-build quality bar maintainers use.
+2. A maintainer reviews it **on the PR**, like any repo.
+3. When accepted, it is **imported into the internal monorepo with your authorship preserved**
+   (`git am` — your name and email stay on the commit) and the PR is merged here.
+4. The next release's snapshot commit re-exports the same change from the source of truth; your
+   merged commit remains in history and the release notes credit the PR.
+
+The paths you see here are identical to the internal paths, so patches apply cleanly in both
+directions. If a change you need touches something that is *not* in this tree (it will be obvious
+— the seam is documented in `ARCHITECTURE.md`), open an issue describing the need instead.
 
 ## Reporting security issues
 
