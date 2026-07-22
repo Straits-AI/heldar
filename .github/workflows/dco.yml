@@ -19,7 +19,7 @@ jobs:
     if: github.repository == 'Straits-AI/heldar' && !endsWith(github.event.pull_request.user.login, '[bot]')
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - name: Check Signed-off-by on every PR commit
