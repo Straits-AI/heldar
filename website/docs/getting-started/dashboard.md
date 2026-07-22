@@ -80,9 +80,12 @@ binary composes (`GET /api/v1/modules`) — the nav updates itself, no rebuild. 
 
 - **Entry** — the access-control console (plate authorization, the visitor/vehicle/watchlist registry,
   the guard confirm/reject workflow, reports).
-- **Movement** — cross-camera movement intelligence (human-reviewed ReID candidates, restricted-zone
-  breach incidents).
+- **Movement** — cross-camera movement intelligence (human-reviewed ReID candidates — with an
+  optional, off-by-default `appearance_score` CLIP-similarity signal secondary to the plate anchor —
+  restricted-zone breach incidents).
 - **Search** — natural-language query over stored event facts, with a proof ladder over every answer.
+  Search also includes semantic (text and image) retrieval over stored detection crops, surfaced as a
+  Semantic tab (`POST /api/v1/search/semantic`).
 
 Each has an operator guide in the [Operate](../operate/index.md) hub. Sidecar plugins mount as
 sandboxed iframes under `/m/{id}/` (see [Sidecar plugins](../develop/sidecar-plugins.md)).

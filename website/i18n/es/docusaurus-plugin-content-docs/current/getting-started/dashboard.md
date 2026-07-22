@@ -73,8 +73,8 @@ binario en ejecución compone (`GET /api/v1/modules`) — la navegación se actu
 
 - **Entry** — la consola de control de acceso (autorización de matrículas, el registro de visitantes/vehículos/listas de vigilancia,
   el flujo de trabajo de confirmación/rechazo del guardia, informes).
-- **Movement** — inteligencia de movimiento entre cámaras (candidatos de ReID revisados por humanos, incidentes de incursión en zonas restringidas).
-- **Search** — consulta en lenguaje natural sobre los hechos de eventos almacenados, con una cadena de pruebas para cada respuesta.
+- **Movement** — inteligencia de movimiento entre cámaras (candidatos de ReID revisados por humanos —con una señal `appearance_score` de similitud CLIP opcional y desactivada por defecto, secundaria al ancla de matrícula—, incidentes de incursión en zonas restringidas).
+- **Search** — consulta en lenguaje natural sobre los hechos de eventos almacenados, con una cadena de pruebas para cada respuesta. La búsqueda también incluye recuperación semántica (texto e imagen) sobre los recortes de detección almacenados, presentada como una pestaña **Semantic** (`POST /api/v1/search/semantic`).
 
 Cada uno tiene una guía de operador en el centro [Operate](../operate/index.md). Los complementos sidecar se montan como
 iframes en sandbox bajo `/m/{id}/` (consulte [Complementos sidecar](../develop/sidecar-plugins.md)).

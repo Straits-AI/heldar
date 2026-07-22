@@ -73,6 +73,14 @@ Auth and RBAC are **opt-in** via `HELDAR_AUTH_ENABLED` (default `false`).
   across capabilities, and every mutation is written to an immutable audit log.
   On first run with no users, an admin is seeded from the bootstrap env.
 
+When auth is enabled, a defence-in-depth floor rejects **every** `/api/v1/*`
+request before it reaches its handler unless the caller is authenticated — the
+only exceptions are `/api/v1/auth/login` and `/api/v1/auth/logout`. Each handler
+still enforces its own role on top of the floor, so an authenticated-but-under-
+privileged caller is refused at the handler. The unauthenticated liveness and
+metrics endpoints (`/healthz`, `/readyz`, `/metrics`) sit outside `/api/v1` and
+are unaffected.
+
 Sessions use an HttpOnly, SameSite=Strict cookie. Set
 `HELDAR_AUTH_COOKIE_SECURE=true` behind TLS (keep `false` for plain-HTTP LAN or
 overlay access). Tune the session lifetime with `HELDAR_SESSION_TTL_HOURS`

@@ -1508,6 +1508,16 @@ token present?
  └─ no/invalid token, auth_enabled=true  ─► 401 (authentication required / invalid credentials)
 ```
 
+**Authentication floor (`require_api_auth`).** Beyond the per-handler extractor, a router-level
+middleware (wired in `heldar-server/main.rs` after the app + vertical routers merge, before `/media`)
+resolves the caller once and **rejects any unauthenticated `/api/v1/*` request before the handler
+runs** — allowlisting only `/api/v1/auth/{login,logout}`. It stashes the resolved `Principal` in
+request extensions so the extractor reuses it (no double lookup). This is defence-in-depth against
+the "a handler that forgets to name `Principal` is silently public" class: authentication is now the
+floor for the whole surface, while each handler still asserts its own **role** on top. Non-`/api/v1`
+paths (`/healthz`, `/readyz`, `/metrics`, `/media/*` — separately guarded) pass through, and when
+`auth_enabled=false` the floor is a no-op (yields the synthetic admin).
+
 So with the default `HELDAR_AUTH_ENABLED=false` every request is the synthetic
 admin and the whole API behaves as the pre-Stage-4 open appliance; flip it on and the
 entry/admin surface requires a valid token and enforces roles. Five roles map to five
@@ -1807,15 +1817,17 @@ the ingest request.
   kernel ingest handler — the "kernel-open, apps-bundled" seam now correlating *across*
   cameras instead of *within* one.
 
-### 19.8 Honest scope — engineering done, no embedding by design, accuracy deferred
+### 19.8 Honest scope — engineering done, embedding is a secondary signal only, accuracy deferred
 
 The Stage 6 **engineering** is production-grade: the plate-anchored multi-signal proposer
 with the exact fused scoring + transit gating, the human confirm/reject workflow, the
 operator topology graph, the audited plate-trail + low-confidence person search, the
 red-zone breach engine with `zone_event_id` dedup + track→plate correlation, the worked
 incident lifecycle, the schema, retention, and the RBAC-gated API. **Deliberate
-deferrals**: **no visual/appearance ReID embedding** anywhere —
-vehicle ReID is anchored on the plate, person ReID is weak/topology-only; **no homography
+deferrals**: **no appearance embedding as the ReID anchor** — vehicle ReID is anchored on the
+plate, with an optional additive `appearance_score` (CLIP crop similarity, #51, off by default) as a
+*secondary* confirmation only, never the anchor and never fused into the ranking; person ReID is
+weak/topology-only with **no appearance embedding at all**; **no homography
 / ground-plane calibration** (transit windows are operator-declared per link, not
 geometry-derived); **ReID accuracy is unbenchmarked on local footage** (false-link /
 missed-link / path accuracy) — the human review gate is the safeguard, never

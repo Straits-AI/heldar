@@ -56,6 +56,14 @@ self-hosters pull the equivalent asset from the public `Straits-AI/heldar` relea
 | Archive cap | `HELDAR_ARCHIVE_DIR_MAX_BYTES` | `50 GiB` | tune | Caps the cumulative size of on-demand `.zip` exports so they can't fill the disk and push the retention sweeper into evicting live recordings. Each export also requires free-disk headroom and shares the backup concurrency limit. |
 | Strict mode | `HELDAR_STRICT_PROD` | `false` | **`true`** | Turns the guardrail warnings above into hard boot failures. |
 
+**Authentication floor (automatic).** With `HELDAR_AUTH_ENABLED=true`, a router-level middleware
+rejects unauthenticated requests to the **entire `/api/v1` surface** — kernel, apps, and verticals —
+before any handler runs. Only `/api/v1/auth/login` and `/api/v1/auth/logout` are reachable pre-auth;
+`/healthz`, `/readyz`, and `/metrics` sit outside `/api/v1` and are unaffected. This is
+defence-in-depth: a route is authenticated by default even if a handler forgets to check, so a new
+endpoint cannot accidentally ship publicly. It is authentication only — each handler still enforces
+its own **role** (RBAC) on top. No configuration; it follows `HELDAR_AUTH_ENABLED`.
+
 ## Rendezvous Worker (`apps/edge`) checklist
 
 Set these as Cloudflare secrets (`wrangler secret put <NAME>`):

@@ -476,10 +476,11 @@ RBAC-gated API.
 
 **Deliberately not built (honest deferrals):**
 
-- **No visual/appearance ReID embedding** anywhere. Vehicle ReID is **anchored on the
-  plate** (+ transit/colour/type); person ReID is **weak, topology + time only**, on demand
-  and human-triaged. This is the privacy stance, not a gap to "fix"
-  with a face/appearance model.
+- **No appearance embedding as the ReID anchor, and none at all for person.** Vehicle ReID is
+  **anchored on the plate** (+ transit/colour/type); the optional CLIP `appearance_score` (§3.4,
+  off by default) is a *secondary confirmation*, never the anchor and never fused into the ranking.
+  Person ReID is **weak, topology + time only**, on demand and human-triaged — no appearance/face
+  model. This is the privacy stance, not a gap to "fix" with a face/appearance identity model.
 - **No homography / ground-plane calibration.** Transit windows are operator-declared
   `transit_seconds` per link, not geometry-derived; there is no metric speed/distance model.
 - **ReID accuracy is unbenchmarked on local footage** (false-link / missed-link / path

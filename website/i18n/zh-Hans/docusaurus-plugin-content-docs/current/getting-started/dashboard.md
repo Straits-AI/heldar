@@ -42,8 +42,8 @@ sidebar_position: 4
 除平台页面外，控制台还根据运行二进制文件所组合的应用渲染**模块**部分（`GET /api/v1/modules`）——导航自动更新，无需重新构建。开源通用应用包括：
 
 - **Entry** — 访问控制台（车牌授权、访客/车辆/黑名单注册、保安确认/拒绝工作流、报告）。
-- **Movement** — 跨摄像头移动智能（人工审核的 ReID 候选、禁区闯入事件）。
-- **Search** — 对存储事件数据的自然语言查询，每条答案附有证据链。
+- **Movement** — 跨摄像头移动智能（人工审核的 ReID 候选——含可选且默认关闭的 `appearance_score` CLIP 相似度信号，次于车牌锚点——以及禁区闯入事件）。
+- **Search** — 对存储事件数据的自然语言查询，每条答案附有证据链。搜索还包含对已存储检测裁剪图的语义（文本与图像）检索，以 **Semantic** 标签页呈现（`POST /api/v1/search/semantic`）。
 
 各模块在[运维](../operate/index.md)中心提供操作指南。Sidecar 插件以沙箱 iframe 形式挂载在 `/m/{id}/` 下（详见 [Sidecar 插件](../develop/sidecar-plugins.md)）。
 
