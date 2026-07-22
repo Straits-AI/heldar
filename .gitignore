@@ -7,7 +7,7 @@ target/
 __pycache__/
 *.py[cod]
 *.egg-info/
-.venv/
+.venv*/
 .uv/
 .pytest_cache/
 .ruff_cache/
