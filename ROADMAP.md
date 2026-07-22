@@ -513,9 +513,9 @@ The staged plan above ends at semantic search, but the platform kept moving. The
 
 | Workstream | Status | Backed by |
 |---|---|---|
-| **WebRTC remote access** (browser-based; signaling + TURN via the rendezvous, MediaMTX/WHEP video, full remote dashboard) | ◑ P1 + P3 shipped; P2 signaling live — **remaining:** Cloudflare Realtime TURN key + Worker secrets + box env/restart | ADR 0003; `services/webrtc_rendezvous.rs`, `apps/edge/` |
+| **WebRTC remote access** (browser-based; signaling + TURN via the rendezvous, MediaMTX/WHEP video, full remote dashboard) | ✅ DONE — P1–P3 deployed + verified end-to-end (incl. TURN via the rendezvous `TURN_API_TOKEN` flow; #34 closed) | ADR 0003; `services/webrtc_rendezvous.rs`, `apps/edge/` |
 | **Control-plane fleet** (Postgres fleet index, outbox drain, node self-registration, mTLS + CRL, cross-site alert routing, fleet dashboard) | ◑ Phases 0–3 done — **remaining:** Phases 4–5 (out-of-process decode workers; media-plane isolation + worker trust scoping + `integrity_hash`), CRL hot-reload/OCSP, dashboard ack/paging | ADR 0001; `crates/heldar-control-plane`, `routes/outbox.rs`, `services/fleet_register.rs` |
-| **Per-box enrollment auth** (site-bound `HELDAR_CP_TOKEN` minted from `BOX_ENROLL_SECRET`; shared `BOX_TOKEN` demoted to legacy) | ◑ merged to main — **remaining:** deploy (set the Worker secret + re-mint box tokens) | `apps/edge/README.md` |
+| **Per-box enrollment auth** (site-bound `HELDAR_CP_TOKEN` minted from `BOX_ENROLL_SECRET`) | ✅ DONE — deployed 2026-07-15; the legacy shared `BOX_TOKEN` is fully retired (secret deleted, code path removed) | `apps/edge/README.md` |
 | **Plugin platform** (module registry, sidecar plugins with signed webhooks + `/m/{id}/` proxy, sandboxed Wasm host behind the off-by-default `wasm` feature) | ✅ DONE | `services/modules.rs`, `services/registry.rs`, `crates/heldar-wasm`, `examples/` |
 | **Backup engine** (destinations / policies / jobs, DB snapshot CLI + systemd timer) | ✅ DONE | `services/backup.rs`, `routes/backup.rs`, `infra/systemd/heldar-db-backup.*` |
 | **ONVIF discovery + ISAPI camera-config** (probe/enroll cameras; HikVision ISAPI settings) | ✅ DONE | `services/onvif.rs`, `services/discovery.rs`, `services/camera_config/` |

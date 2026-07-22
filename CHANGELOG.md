@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [0.3.0] - 2026-07-17
+
 ### Docs & community
 
 - **Production-readiness sweep** (docs, UI/UX, open repo). A seven-surface audit + fix pass: updated every
