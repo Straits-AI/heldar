@@ -56,6 +56,14 @@ self-hosters pull the equivalent asset from the public `Straits-AI/heldar` relea
 | Archive cap | `HELDAR_ARCHIVE_DIR_MAX_BYTES` | `50 GiB` | tune | Caps the cumulative size of on-demand `.zip` exports so they can't fill the disk and push the retention sweeper into evicting live recordings. Each export also requires free-disk headroom and shares the backup concurrency limit. |
 | Strict mode | `HELDAR_STRICT_PROD` | `false` | **`true`** | Turns the guardrail warnings above into hard boot failures. |
 
+**Authentication floor (automatic).** With `HELDAR_AUTH_ENABLED=true`, a router-level middleware
+rejects unauthenticated requests to the **entire `/api/v1` surface** — kernel, apps, and verticals —
+before any handler runs. Only `/api/v1/auth/login` and `/api/v1/auth/logout` are reachable pre-auth;
+`/healthz`, `/readyz`, and `/metrics` sit outside `/api/v1` and are unaffected. This is
+defence-in-depth: a route is authenticated by default even if a handler forgets to check, so a new
+endpoint cannot accidentally ship publicly. It is authentication only — each handler still enforces
+its own **role** (RBAC) on top. No configuration; it follows `HELDAR_AUTH_ENABLED`.
+
 ## Rendezvous Worker (`apps/edge`) checklist
 
 Set these as Cloudflare secrets (`wrangler secret put <NAME>`):
@@ -172,6 +180,16 @@ These are deliberately out of the current scope — track them for higher-assura
 
 - At-rest encryption of **recorded footage** (segments are stored unencrypted; rely on disk/volume
   encryption — LUKS/BitLocker — today).
+- **Camera credentials in the ffmpeg command line.** Passwords are encrypted at rest
+  (`HELDAR_SECRET_KEY`), but the recorder/sampler/publisher decrypt them at spawn time and pass the
+  RTSP URL (`rtsp://user:pass@host/…`) as an ffmpeg `-i` argument, so a **local shell user on the
+  appliance** can read them from `ps`/`/proc/<pid>/cmdline` while a stream is active. ffmpeg has no
+  separate credential option, and its only file/stdin input path (the `concat` demuxer) drops the
+  `-rtsp_transport tcp` the recorder relies on — there is no ffmpeg-native fix that preserves the
+  streaming semantics. Mitigate at the OS level on multi-user hosts: mount `/proc` with
+  `hidepid=2` (e.g. `/etc/fstab`: `proc /proc proc defaults,hidepid=2 0 0`) so a user can't read
+  another user's `cmdline`. Single-operator appliances (the default posture) are unaffected — there
+  is no second unprivileged local account to read the argv.
 - A pluggable external **secret-store** backend (Vault / cloud secrets) for `HELDAR_SECRET_KEY` and camera
   credentials, instead of an env var + DB column.
 - RTSPS **enforcement** and audit-log **retention** tuning for privacy/compliance regimes.

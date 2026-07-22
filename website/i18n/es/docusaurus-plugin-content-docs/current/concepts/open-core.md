@@ -33,7 +33,9 @@ El repositorio público `heldar` contiene:
   - **`heldar-movement`** - correlación entre cámaras. Un proponente de
     candidatos ReID multi-señal y un motor de reglas de violación de zonas
     restringidas, ambos ejecutándose como bucles supervisados en segundo plano
-    sobre hechos del kernel ya almacenados.
+    sobre hechos del kernel ya almacenados. Un `appearance_score` opcional y
+    desactivado por defecto (similitud CLIP de recortes) puede añadir una señal
+    de ReID aditiva, secundaria al ancla de matrícula.
   - **`heldar-search`** - búsqueda semántica. Una capa de consulta de solo
     lectura que convierte una pregunta en lenguaje natural en un plan
     estructurado, lo ejecuta de forma determinista sobre hechos de eventos

@@ -309,10 +309,12 @@ with its own schema/config/loops/retention/routes. Operator/integrator guide:
 
 **Shipped checklist:**
 
-- [x] **Person ReID + vehicle ReID — multi-signal, never pure visual embedding** — **no
-  appearance/visual embedding anywhere.** Vehicle ReID is anchored on the **plate**
-  (resolved by Access Control) and fused with transit-time plausibility + colour/type
-  agreement over the topology graph: `score_pair` = `0.8` plate anchor `±` transit (`+0.10`
+- [x] **Person ReID + vehicle ReID — multi-signal, never pure visual embedding** — vehicle
+  ReID is anchored on the **plate** (resolved by Access Control) and fused with transit-time
+  plausibility + colour/type; an optional additive `appearance_score` (CLIP crop similarity,
+  #51, off by default) is a *secondary* signal shown to the reviewer, never the anchor and
+  never fused into the ranking. The fused score runs
+  over the topology graph: `score_pair` = `0.8` plate anchor `±` transit (`+0.10`
   in-window / `+0.05` ≤2× / else 0) `±` colour (`+0.05`/`−0.10`) `±` type (`+0.05`/`−0.10`),
   proposed at `≥ HELDAR_MOVEMENT_MIN_SCORE` (default 0.5). Person ReID has no plate/no
   embedding, so it is **never auto-proposed** — only the weak topology+time search.
@@ -348,10 +350,12 @@ is unbenchmarked on local footage — the human review gate is the safeguard (se
 
 **Deferred (honest scope):**
 
-- [ ] **No visual / appearance ReID embedding** — by design:
-  vehicle ReID is **anchored on the plate** (+ transit/colour/type fusion); person ReID is
-  **weak, topology + time only**. No visual-embedding vector search / FastReID-style model
-  is wired in — and adding one for *person* identity needs explicit legal/consent/governance
+- [x] **Vehicle appearance embedding as an additive signal** — shipped: an optional CLIP
+  `appearance_score` on vehicle candidates (#51, `services::embeddings::appearance_similarity`,
+  off by default), secondary to the plate anchor and never fused into the ranking. What stays
+  deferred: **person** appearance embedding / FastReID-style identity ReID — person ReID
+  remains **weak, topology + time only**, and appearance ReID for *person* identity needs
+  explicit legal/consent/governance
   basis, not just engineering.
 - [ ] **No homography / ground-plane calibration** — transit windows are operator-declared
   `transit_seconds` per `camera_links` edge, not geometry-derived; no metric speed/distance
@@ -368,7 +372,7 @@ is unbenchmarked on local footage — the human review gate is the safeguard (se
 
 | ReID / privacy rule | Status | Backed by |
 |---|---|---|
-| Vehicle ReID multi-signal, **not** pure visual embedding | ✅ plate-anchored + transit + colour/type fusion; no embedding | `reid.rs::score_pair` |
+| Vehicle ReID multi-signal, **not** pure visual embedding | ✅ plate-anchored + transit + colour/type; optional additive CLIP `appearance_score` (#51, off by default), never the anchor | `reid.rs`, `services::embeddings::appearance_similarity` |
 | Camera topology + time-window filter | ✅ `camera_links` join scopes all matching | `reid.rs`, `routes.rs::search_person`, `camera_links` |
 | Movement trail / path | ✅ plate appearances time-ordered | `reid.rs::trail_for_plate` |
 | Person ReID = probabilistic correlation, never legal identity | ✅ weak topology+time only, on-demand, human-triage | `routes.rs::search_person` (cap 0.4 + note) |

@@ -71,12 +71,21 @@ const CANDIDATE_STATUS_COLOR: Record<MovementCandidate["status"], string> = {
 };
 
 // Preferred render order + friendly labels for the ReID signal breakdown.
-const SIGNAL_ORDER = ["plate_exact", "transit", "color_match", "type_match"];
+const SIGNAL_ORDER = [
+  "plate_exact",
+  "transit",
+  "color_match",
+  "type_match",
+  "appearance_score",
+];
 const SIGNAL_LABELS: Record<string, string> = {
   plate_exact: "Plate exact",
   transit: "Transit",
   color_match: "Color match",
   type_match: "Type match",
+  // Visual-similarity confirmation (issue #51): cosine between the two appearances' CLIP crop
+  // embeddings. Present only when embeddings existed for both cameras; a secondary signal.
+  appearance_score: "Appearance",
 };
 
 type NameFor = (id?: string | null) => string;

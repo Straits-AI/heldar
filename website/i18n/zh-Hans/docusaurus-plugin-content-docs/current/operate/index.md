@@ -17,7 +17,7 @@ slug: /operate
   - 车牌授权入场引擎、车辆/访客/黑名单注册表、
   保安确认/拒绝工作流、RBAC 及报告。
 - [移动轨迹](https://github.com/Straits-AI/heldar/blob/main/docs/MOVEMENT.md)
-  - 多信号跨摄像头 ReID 候选结果（需人工审核）及禁区
+  - 多信号跨摄像头 ReID 候选结果（需人工审核，可选且默认关闭的 `appearance_score` CLIP 相似度信号次于车牌锚点）及禁区
   入侵事件。
 - [搜索](https://github.com/Straits-AI/heldar/blob/main/docs/SEARCH.md)
   - 对已存储事件事实的确定性查询，以自然语言规划作为

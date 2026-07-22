@@ -221,9 +221,14 @@ instalada.
 propio rastreador YOLO + ByteTrack (clases de vehículos `[1, 2, 3, 5, 7]` por
 defecto — la clase person está deliberadamente excluida, una postura de
 privacidad), recorta cada cuadro rastreado y genera los embeddings de los
-recortes mediante CLIP (`ViT-B-32` / `openai` por defecto) en una única pasada
+recortes mediante CLIP (`ViT-B-32-quickgelu` / `openai` por defecto) en una única pasada
 por lotes. Cada pista se embebe la primera vez que se ve y luego cada
-`stride_seconds` (por defecto 10). El analizador **no publica ninguna
+`stride_seconds` (por defecto 10) mientras se mueve (la supresión de estáticos
+está activada por defecto: `static_suppression` `true`, `static_epsilon`
+(por defecto 0.02) es el umbral de desplazamiento del cuadro normalizado por
+debajo del cual una pista se considera parada, y `static_refresh_seconds`
+(por defecto 3600) es el suelo de re-embebido lento que mantiene un objeto
+permanentemente parado en el índice durante el TTL de retención). El analizador **no publica ninguna
 detección** — no debe disparar por duplicado los consumidores de zonas ni de
 control de acceso — sus embeddings van a `POST /api/v1/ai/embeddings` (hasta
 128 por lote, idempotente mediante una clave por fotograma, de modo que el
@@ -232,8 +237,9 @@ kernel omite los lotes reenviados). Una miniatura JPEG del recorte
 se convierte en el recorte clasificado que muestra el panel.
 
 Claves de `config` de la tarea: `weights`, `conf` (por defecto 0.35),
-`classes`, `stride_seconds` (10), `min_box_px` (24), `clip_model`,
-`clip_pretrained`, `device`, `thumb_max_px` (320), `imgsz`.
+`classes`, `stride_seconds` (10), `static_suppression` (por defecto `true`),
+`static_epsilon` (0.02), `static_refresh_seconds` (3600), `min_box_px` (24),
+`clip_model`, `clip_pretrained`, `device`, `thumb_max_px` (320), `imgsz`.
 
 **Lado de consulta - `GET /api/v1/ai/embed-queries`.** Un hilo daemon dedicado
 sondea `GET /api/v1/ai/embed-queries?worker_id=<id>` aproximadamente una vez
@@ -249,7 +255,7 @@ endpoint, el primer `404` detiene el hilo limpiamente.
 El modelo CLIP se carga de forma diferida y se comparte en todo el proceso
 (una sola copia entre todas las tareas de cámara y el hilo de consultas),
 determinado por `HELDAR_AI_CLIP_MODEL` / `HELDAR_AI_CLIP_PRETRAINED` (por
-defecto `ViT-B-32` / `openai`).
+defecto `ViT-B-32-quickgelu` / `openai`).
 
 **Instalación.** La dependencia de CLIP es opcional:
 

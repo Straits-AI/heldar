@@ -29,7 +29,9 @@ The public `heldar` repository contains:
     any gated-entry deployment uses it as-is.
   - **`heldar-movement`** - cross-camera correlation. A multi-signal ReID
     candidate proposer and a restricted-zone breach rule engine, both running as
-    supervised background loops over already-stored kernel facts.
+    supervised background loops over already-stored kernel facts. An optional,
+    off-by-default `appearance_score` (CLIP crop similarity) can add an additive
+    ReID signal secondary to the plate anchor.
   - **`heldar-search`** - semantic search. A read-only query layer that turns a
     natural-language question into a structured plan, executes it deterministically
     against stored event facts, and returns the rows as the answer. Now also

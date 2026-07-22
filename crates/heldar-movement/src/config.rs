@@ -15,6 +15,12 @@ pub struct MovementConfig {
     pub red_zone_kinds: Vec<String>,
     /// How long candidates + breach alerts are kept before retention prunes resolved/old ones.
     pub retention_days: i64,
+    /// Appearance-similarity scoring (issue #51): compute a visual cosine signal for each proposed
+    /// vehicle candidate from the kernel crop embeddings. Off unless an embedding task is expected.
+    pub appearance_scoring: bool,
+    /// Half-width (seconds) of the window around each appearance in which crop embeddings are
+    /// gathered for the similarity score.
+    pub appearance_window_s: i64,
 }
 
 impl MovementConfig {
@@ -38,6 +44,11 @@ impl MovementConfig {
                 .filter(|s| !s.is_empty())
                 .collect(),
             retention_days: parse_or("HELDAR_MOVEMENT_RETENTION_DAYS", 365).clamp(1, 3650),
+            appearance_scoring: std::env::var("HELDAR_MOVEMENT_APPEARANCE_SCORING")
+                .map(|v| matches!(v.trim(), "1" | "true" | "yes" | "on"))
+                .unwrap_or(false),
+            appearance_window_s: parse_or::<i64>("HELDAR_MOVEMENT_APPEARANCE_WINDOW_S", 5)
+                .clamp(1, 120),
         }
     }
 }

@@ -241,14 +241,18 @@ post its results, and write a consumer for it (see
 The reference worker also ships an `embedding` analyzer (YOLO + ByteTrack +
 open_clip; vehicle classes only by default - person is deliberately excluded)
 that embeds each track on first sight and then every `stride_seconds` while it
-moves (static objects are suppressed until they move again), and
+moves (static suppression is on by default — `static_suppression` `true`,
+`static_epsilon` `0.02` the normalized-bbox movement threshold below which a
+track counts as parked, and `static_refresh_seconds` `3600` the slow re-embed
+floor that keeps a permanently parked object in the index across the retention
+TTL), and
 posts the vectors through the optional endpoints above instead of
 `/api/v1/ai/events` - it emits no detections, so it never double-fires the
 zone or access-control consumers. A companion `EmbedQueryWorker` thread polls
 the query queue (~1 s, `HELDAR_AI_EMBED_POLL_INTERVAL`) and answers search
 queries with the CLIP text or image tower. Both need the optional CLIP extra
 (`pip install -r requirements-embed.txt`, model via `HELDAR_AI_CLIP_MODEL` /
-`HELDAR_AI_CLIP_PRETRAINED`, defaults `ViT-B-32` / `openai`); without it,
+`HELDAR_AI_CLIP_PRETRAINED`, defaults `ViT-B-32-quickgelu` / `openai`); without it,
 embedding tasks fall back to the placeholder and semantic searches return a
 fast `503` instead of hanging.
 

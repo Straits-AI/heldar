@@ -72,6 +72,15 @@ La autenticación y el RBAC son **opcionales** mediante `HELDAR_AUTH_ENABLED` (p
   sobre las capacidades, y cada mutación se escribe en un registro de auditoría inmutable.
   En el primer arranque sin usuarios, se crea un administrador a partir del entorno de arranque.
 
+Cuando la autenticación está habilitada, un piso de defensa en profundidad
+rechaza **todas** las solicitudes `/api/v1/*` antes de que lleguen a su handler
+salvo que quien llama esté autenticado — las únicas excepciones son
+`/api/v1/auth/login` y `/api/v1/auth/logout`. Cada handler sigue aplicando su
+propio rol por encima del piso, de modo que quien llama autenticado pero sin
+privilegios suficientes es rechazado en el handler. Los endpoints de sondeo y
+métricas sin autenticación (`/healthz`, `/readyz`, `/metrics`) quedan fuera de
+`/api/v1` y no se ven afectados.
+
 Las sesiones utilizan una cookie HttpOnly, SameSite=Strict. Establece
 `HELDAR_AUTH_COOKIE_SECURE=true` detrás de TLS (mantén `false` para acceso LAN en HTTP plano o
 acceso mediante overlay). Ajusta el tiempo de vida de la sesión con `HELDAR_SESSION_TTL_HOURS`

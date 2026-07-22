@@ -421,7 +421,7 @@ Request:
 ```json
 {
   "camera_id": "gate_a_01",
-  "model": "open_clip/ViT-B-32/openai",
+  "model": "open_clip/ViT-B-32-quickgelu/openai",
   "dim": 512,
   "frame_id": "ai_3f2a9c1b...:2026-07-16T10:00:00Z",
   "items": [
@@ -442,7 +442,7 @@ Field rules (`services/embeddings.rs`):
 
 - `camera_id` (**required**) must exist, else `404`.
 - `model` (**required**, non-empty) names the embedding space the vectors live in
-  (e.g. `open_clip/ViT-B-32/openai`); search only ranks vectors against a query
+  (e.g. `open_clip/ViT-B-32-quickgelu/openai`); search only ranks vectors against a query
   from the same space.
 - `dim` (**required**, 1…4096). Every item's `vec` must be **exactly `dim`
   finite floats**, else `400`.
@@ -499,7 +499,7 @@ Post the query vector back (body limit 1 MiB) — or an error, so the waiting
 search fails fast instead of timing out:
 
 ```json
-{ "vec": [0.0132, -0.0871, 0.0455], "model": "open_clip/ViT-B-32/openai", "dim": 512 }
+{ "vec": [0.0132, -0.0871, 0.0455], "model": "open_clip/ViT-B-32-quickgelu/openai", "dim": 512 }
 ```
 
 ```json
@@ -1163,7 +1163,7 @@ Per-task `config` keys (all optional):
 | `static_epsilon` | `0.02` | normalized-bbox movement threshold for "static" (same default as zones) |
 | `static_refresh_seconds` | `3600` | slow re-embed floor for static tracks (keeps them in the index across the retention TTL) |
 | `min_box_px` | `24` | skip boxes narrower/shorter than this many pixels (tiny crops embed to noise) |
-| `clip_model` | `ViT-B-32` | open_clip architecture |
+| `clip_model` | `ViT-B-32-quickgelu` | open_clip architecture |
 | `clip_pretrained` | `openai` | open_clip pretrained tag |
 | `device` | auto | torch device |
 | `thumb_max_px` | `320` | max dimension of the JPEG crop thumb; `0` disables thumbs |
@@ -1191,7 +1191,15 @@ The imports are lazy (`import torch, open_clip` in `__init__`). Without them:
   `POST /api/v1/search/semantic` returns a fast `503` ("embedding worker
   offline") instead of hanging the dashboard.
 
-The default checkpoint (`ViT-B-32`/`openai`, ~350 MB) downloads on first use.
+The default checkpoint (`ViT-B-32-quickgelu`/`openai`, ~350 MB) downloads on
+first use. The architecture default is `ViT-B-32-quickgelu` (not plain
+`ViT-B-32`): open_clip warns that the `openai` weights were trained with
+QuickGELU activations, so the plain variant is a slight numerical mismatch.
+Because the emitted `model` id encodes the architecture
+(`open_clip/ViT-B-32-quickgelu/openai`), flipping this default changes the id —
+vectors indexed under the old `ViT-B-32` default stop matching new queries.
+Operators upgrading re-index for free: just let the `embedding` task's stride
+repopulate, and the stale vectors age out on the retention TTL.
 
 ### 14.3 The `EmbedQueryWorker` thread — answering searches
 
@@ -1208,7 +1216,7 @@ only ~3 s, which the ~10 s tasks poll could never meet (§5.6 intro).
   fast rather than timing out.
 - CLIP loads lazily on the first query, through the same shared singleton as
   14.1, using `HELDAR_AI_CLIP_MODEL` / `HELDAR_AI_CLIP_PRETRAINED` (defaults
-  `ViT-B-32` / `openai`) for the query side.
+  `ViT-B-32-quickgelu` / `openai`) for the query side.
 - **Keep the checkpoints in sync.** The search prefilters stored embeddings by
   the query result's `model` id, so a task whose `clip_model`/`clip_pretrained`
   config differs from the worker's query-side envs indexes vectors that no
@@ -1223,7 +1231,7 @@ only ~3 s, which the ~10 s tasks poll could never meet (§5.6 intro).
 
 Worker-side knobs (env / CLI): `HELDAR_AI_EMBED_POLL_INTERVAL` /
 `--embed-poll-interval` (1.0 s), `HELDAR_AI_CLIP_MODEL` / `--clip-model`
-(`ViT-B-32`), `HELDAR_AI_CLIP_PRETRAINED` / `--clip-pretrained` (`openai`).
+(`ViT-B-32-quickgelu`), `HELDAR_AI_CLIP_PRETRAINED` / `--clip-pretrained` (`openai`).
 
 > **Deliberate v1 deferrals.** VLM interpretation over retrieved moments, ANN
 > indexes (the brute-force cosine scan is measured first — it streams

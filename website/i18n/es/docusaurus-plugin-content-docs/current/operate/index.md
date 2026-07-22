@@ -18,8 +18,9 @@ Cada enlace a continuación abre la guía en el repositorio en GitHub:
   - el motor de entrada con autorización de matrículas, el registro de vehículos/visitantes/lista de vigilancia,
   el flujo de confirmación/rechazo del guardia, RBAC e informes.
 - [Movimiento](https://github.com/Straits-AI/heldar/blob/main/docs/MOVEMENT.md)
-  - candidatos ReID multi-señal entre cámaras (revisados por humanos) e incidentes de
-  vulneración de zonas restringidas.
+  - candidatos ReID multi-señal entre cámaras (revisados por humanos, con una señal
+  `appearance_score` de similitud CLIP opcional y desactivada por defecto, secundaria
+  al ancla de matrícula) e incidentes de vulneración de zonas restringidas.
 - [Búsqueda](https://github.com/Straits-AI/heldar/blob/main/docs/SEARCH.md)
   - consulta determinista sobre hechos de eventos almacenados, con el plan en lenguaje natural como
   el único paso falible y una capa de prueba sobre cada respuesta.

@@ -57,6 +57,8 @@ HELDAR_WEB_DIR=./apps/web/dist
 - **`false`** - 开放 API，适用于单租户局域网设备。管理界面无需令牌即可访问，并以管理员身份运行。
 - **`true`** - 每个请求都需要会话（登录）或 `X-API-Key`。五个角色在各项能力上强制执行（`admin` / `manager` / `guard` / `viewer` / `integration`），每次变更都会写入不可篡改的审计日志。首次运行且无用户时，将从引导环境变量中生成一个管理员账户。
 
+启用鉴权后，一道纵深防御的底线会在请求到达其处理器之前**拒绝所有**未通过鉴权的 `/api/v1/*` 请求——唯一的例外是 `/api/v1/auth/login` 和 `/api/v1/auth/logout`。每个处理器仍会在此底线之上强制执行各自的角色，因此已鉴权但权限不足的调用方会在处理器处被拒绝。未鉴权的存活探测与指标端点（`/healthz`、`/readyz`、`/metrics`）位于 `/api/v1` 之外，不受影响。
+
 会话使用 HttpOnly、SameSite=Strict Cookie。在 TLS 后端设置
 `HELDAR_AUTH_COOKIE_SECURE=true`（明文 HTTP 局域网或覆盖网络访问时保持 `false`）。通过 `HELDAR_SESSION_TTL_HOURS` 调整会话有效期
 （默认 12），并可通过

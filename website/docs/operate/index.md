@@ -18,8 +18,9 @@ Each link below opens the in-repo guide on GitHub:
   - the plate-authorization entry engine, the vehicle/visitor/watchlist registry,
   the guard confirm/reject workflow, RBAC, and reports.
 - [Movement](https://github.com/Straits-AI/heldar/blob/main/docs/MOVEMENT.md)
-  - multi-signal cross-camera ReID candidates (human-reviewed) and restricted-zone
-  breach incidents.
+  - multi-signal cross-camera ReID candidates (human-reviewed, with an optional
+  off-by-default `appearance_score` CLIP-similarity signal secondary to the plate
+  anchor) and restricted-zone breach incidents.
 - [Search](https://github.com/Straits-AI/heldar/blob/main/docs/SEARCH.md)
   - deterministic query over stored event facts, with the natural-language plan as
   the single fallible step and a proof layer over every answer.

@@ -63,12 +63,16 @@ query audited**. Vehicle ReID is anchored on the resolved **plate**; person ReID
 Movement is the most identity-adjacent app in the stack, so its design is governed by
 three hard rules:
 
-1. **Multi-signal, never pure visual embedding.** There is **no appearance/visual ReID
-   embedding anywhere in this crate.** Vehicle ReID is anchored on the **plate** (already
-   resolved by Access Control into `entry_events`) and fused with **transit-time
-   plausibility** + **vehicle attribute agreement** (colour/type) over the operator's
-   **camera-topology graph**. The plate is the dominant signal; the rest only nudge a
-   plate-exact match up or down.
+1. **Multi-signal, plate-anchored — never a pure visual embedding.** Vehicle ReID is
+   anchored on the **plate** (already resolved by Access Control into `entry_events`) and
+   fused with **transit-time plausibility** + **vehicle attribute agreement** (colour/type)
+   over the operator's **camera-topology graph**. The plate is the dominant signal; the rest
+   only nudge a plate-exact match up or down. Appearance similarity (CLIP crop embeddings)
+   is available as an **optional, additive `appearance_score`** (issue #51,
+   `HELDAR_MOVEMENT_APPEARANCE_SCORING`) — a *secondary confirmation* shown next to the
+   plate-anchored score, never the anchor, never fused into the ranking, and absent (not a
+   low value) when embeddings don't exist. A candidate is never proposed on appearance
+   alone.
 
 2. **Candidate matching, not legal identity.** Every cross-camera link is a scored
    **candidate** with per-signal evidence and a confidence in `[0,1]`, written with
@@ -152,10 +156,31 @@ The `signals` JSON stored on the candidate records exactly which signals fired:
 A pair scoring `≥ HELDAR_MOVEMENT_MIN_SCORE` is written to `movement_candidates` as
 `subject_type='vehicle'`, `anchor=<plate>`, `from_*`/`to_*` referencing the two
 `entry_events` rows and their cameras/times, `transit_seconds=<gap>`, the fused `score`,
-the `signals` evidence, and `status='pending'`. The insert is
+the optional `appearance_score` (§3.4), the `signals` evidence, and `status='pending'`. The insert is
 `ON CONFLICT(subject_type, from_ref, to_ref) DO NOTHING` — so a pair already proposed (and
 possibly already **human-reviewed**) is never clobbered or reset to pending on a later
 tick.
+
+### 3.4 Optional appearance confirmation (`appearance_score`, issue #51)
+
+When `HELDAR_MOVEMENT_APPEARANCE_SCORING=true` and an `embedding` AI task has been indexing
+crops on the paired cameras, each proposed candidate also carries an `appearance_score` — the
+cosine similarity of the two appearances' CLIP crops. It is computed by the kernel seam
+`services::embeddings::appearance_similarity`, which gathers each appearance's crop embeddings
+within `±HELDAR_MOVEMENT_APPEARANCE_WINDOW_S` seconds (default 5) of its timestamp and returns
+the **best pairwise cosine across vectors of the same model** (embeddings from different CLIP
+checkpoints are incomparable). It is deliberately conservative:
+
+- **Temporal-spatial join, never by track id.** The `embedding` task and the detection/ANPR
+  tasks run independent ByteTrack instances, so their `track_id` spaces are disjoint — the
+  join is (camera, time-window), matching the appearance's moment, not a shared track id.
+- **≥ 2 vectors per side** are required before any score is claimed (owner decision) — one
+  lucky crop is not evidence.
+- **Absent, not zero,** when either side lacks the minimum (no embedding task on a camera,
+  retention pruned the vectors, or the class isn't indexed — vehicles are indexed by default,
+  `person` is not). The reviewer sees no appearance chip rather than a misleadingly low one.
+
+It never changes `score` or the min-score gate; it is surfaced as its own field and UI chip.
 
 ---
 
@@ -451,10 +476,11 @@ RBAC-gated API.
 
 **Deliberately not built (honest deferrals):**
 
-- **No visual/appearance ReID embedding** anywhere. Vehicle ReID is **anchored on the
-  plate** (+ transit/colour/type); person ReID is **weak, topology + time only**, on demand
-  and human-triaged. This is the privacy stance, not a gap to "fix"
-  with a face/appearance model.
+- **No appearance embedding as the ReID anchor, and none at all for person.** Vehicle ReID is
+  **anchored on the plate** (+ transit/colour/type); the optional CLIP `appearance_score` (§3.4,
+  off by default) is a *secondary confirmation*, never the anchor and never fused into the ranking.
+  Person ReID is **weak, topology + time only**, on demand and human-triaged — no appearance/face
+  model. This is the privacy stance, not a gap to "fix" with a face/appearance identity model.
 - **No homography / ground-plane calibration.** Transit windows are operator-declared
   `transit_seconds` per link, not geometry-derived; there is no metric speed/distance model.
 - **ReID accuracy is unbenchmarked on local footage** (false-link / missed-link / path

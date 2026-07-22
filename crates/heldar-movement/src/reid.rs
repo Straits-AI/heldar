@@ -122,16 +122,51 @@ async fn propose_vehicle_candidates(pool: &SqlitePool, cfg: &MovementConfig) -> 
         if gap < 1.0 || gap > (p.transit as f64) * 4.0 {
             continue;
         }
-        let (score, signals) = score_pair(gap, p.transit as f64, &p.a_subj.0, &p.b_subj.0);
+        let (score, mut signals) = score_pair(gap, p.transit as f64, &p.a_subj.0, &p.b_subj.0);
         if score < cfg.min_candidate_score {
             continue;
+        }
+        // Additive visual confirmation (issue #51): cosine between the two appearances' CLIP crop
+        // embeddings. Secondary to the plate anchor — it does NOT alter `score` or the min-score
+        // gate; it is surfaced as its own field for the reviewer. Absent (None) whenever embeddings
+        // can't be found, which is the common case unless an embedding task runs on both cameras.
+        let appearance_score = if cfg.appearance_scoring {
+            let a = heldar_kernel::services::embeddings::AppearanceRef {
+                camera_id: p.a_cam.clone(),
+                ts: p.a_ts,
+                label: None,
+            };
+            let b = heldar_kernel::services::embeddings::AppearanceRef {
+                camera_id: p.b_cam.clone(),
+                ts: p.b_ts,
+                label: None,
+            };
+            match heldar_kernel::services::embeddings::appearance_similarity(
+                pool,
+                &a,
+                &b,
+                cfg.appearance_window_s,
+            )
+            .await
+            {
+                Ok(v) => v.map(f64::from),
+                Err(e) => {
+                    tracing::warn!(error = %e, "movement reid: appearance score failed; omitting");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        if let Some(v) = appearance_score {
+            signals["appearance_score"] = json!(v);
         }
         // Don't clobber a human-reviewed candidate (UNIQUE on subject_type+from_ref+to_ref).
         let res = sqlx::query(
             "INSERT INTO movement_candidates
                (id, subject_type, anchor, from_camera, from_ref, from_time, to_camera, to_ref, to_time,
-                transit_seconds, score, signals, status, created_at)
-             VALUES (?, 'vehicle', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
+                transit_seconds, score, appearance_score, signals, status, created_at)
+             VALUES (?, 'vehicle', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)
              ON CONFLICT(subject_type, from_ref, to_ref) DO NOTHING",
         )
         .bind(format!("cand_{}", Uuid::new_v4().simple()))
@@ -144,6 +179,7 @@ async fn propose_vehicle_candidates(pool: &SqlitePool, cfg: &MovementConfig) -> 
         .bind(p.b_ts)
         .bind(gap)
         .bind(score)
+        .bind(appearance_score)
         .bind(Json(&signals))
         .bind(Utc::now())
         .execute(pool)

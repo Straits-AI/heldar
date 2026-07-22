@@ -378,33 +378,87 @@ struct SessionRow {
     active: bool,
 }
 
+/// Resolve the caller from request headers — the single credential-resolution path shared by the
+/// [`Principal`] extractor and the router-level [`require_api_auth`] floor.
+async fn resolve_request_principal(
+    st: &AppState,
+    headers: &axum::http::HeaderMap,
+) -> Result<Principal, AppError> {
+    match token_from_headers(headers) {
+        Some(tok) => {
+            match resolve_token(&st.pool, &tok, st.cfg.session_idle_timeout_minutes).await? {
+                Some(p) => Ok(p),
+                None => {
+                    if st.cfg.auth_enabled {
+                        Err(AppError::Unauthorized(
+                            "invalid or expired credentials".into(),
+                        ))
+                    } else {
+                        Ok(Principal::system_admin())
+                    }
+                }
+            }
+        }
+        None => {
+            if st.cfg.auth_enabled {
+                Err(AppError::Unauthorized("authentication required".into()))
+            } else {
+                Ok(Principal::system_admin())
+            }
+        }
+    }
+}
+
 impl FromRequestParts<AppState> for Principal {
     type Rejection = AppError;
 
     async fn from_request_parts(parts: &mut Parts, st: &AppState) -> Result<Self, Self::Rejection> {
-        match token_from_headers(&parts.headers) {
-            Some(tok) => {
-                match resolve_token(&st.pool, &tok, st.cfg.session_idle_timeout_minutes).await? {
-                    Some(p) => Ok(p),
-                    None => {
-                        if st.cfg.auth_enabled {
-                            Err(AppError::Unauthorized(
-                                "invalid or expired credentials".into(),
-                            ))
-                        } else {
-                            Ok(Principal::system_admin())
-                        }
-                    }
-                }
-            }
-            None => {
-                if st.cfg.auth_enabled {
-                    Err(AppError::Unauthorized("authentication required".into()))
-                } else {
-                    Ok(Principal::system_admin())
-                }
-            }
+        // The /api/v1 auth floor (require_api_auth) already resolved the caller — reuse it rather
+        // than hitting the sessions/api_keys tables a second time per request.
+        if let Some(p) = parts.extensions.get::<Principal>() {
+            return Ok(p.clone());
         }
+        resolve_request_principal(st, &parts.headers).await
+    }
+}
+
+/// `/api/v1` paths that are deliberately reachable without a credential. Keep this list SHORT and
+/// commented — every entry is a hole in the floor.
+const API_AUTH_ALLOWLIST: &[&str] = &[
+    // Pre-auth by definition: exchanges username+password for the session token.
+    "/api/v1/auth/login",
+    // Logout must stay idempotent: it reads the bearer token itself and clears the cookie, so an
+    // already-expired session still gets a clean `Set-Cookie: Max-Age=0` instead of a 401 here.
+    "/api/v1/auth/logout",
+];
+
+/// Router-level authentication floor for the whole `/api/v1` surface (June 2026 audit
+/// recommendation, issue #52). In this kernel a handler is authenticated only if it NAMES
+/// [`Principal`] in its signature — a handler without it silently answered unauthenticated (the
+/// exact class behind the six-handler audit finding fixed in c6d68bd). This middleware makes that
+/// class impossible: every `/api/v1/*` request must resolve a caller (or auth must be disabled)
+/// before ANY handler runs, allowlist excepted. The resolved [`Principal`] is stashed in request
+/// extensions so per-handler extractors don't pay a second lookup; per-handler
+/// [`Principal::require`] remains the RBAC layer on top.
+///
+/// Non-`/api/v1` paths (`/healthz`, `/readyz`, `/metrics`, `/media/*` — separately guarded —
+/// `/internal/*`, the SPA fallback) pass through untouched.
+pub async fn require_api_auth(
+    axum::extract::State(st): axum::extract::State<AppState>,
+    mut req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    let path = req.uri().path();
+    if !path.starts_with("/api/v1") || API_AUTH_ALLOWLIST.contains(&path) {
+        return next.run(req).await;
+    }
+    match resolve_request_principal(&st, req.headers()).await {
+        Ok(principal) => {
+            req.extensions_mut().insert(principal);
+            next.run(req).await
+        }
+        Err(e) => e.into_response(),
     }
 }
 
@@ -533,5 +587,121 @@ mod tests {
         assert!(admin.can_admin() && admin.can_ingest() && admin.can_manage_registry());
         assert!(guard.can_operate_gate() && !guard.can_manage_registry() && !guard.can_admin());
         assert!(integ.can_ingest() && !integ.can_operate_gate());
+    }
+
+    // ---- require_api_auth middleware (issue #52) --------------------------------------------
+
+    async fn auth_mw_state(auth_enabled: bool) -> AppState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let mut cfg = Config::from_env();
+        cfg.auth_enabled = auth_enabled;
+        let cfg = std::sync::Arc::new(cfg);
+        AppState {
+            recorder: crate::services::recorder::RecorderManager::new(pool.clone(), cfg.clone()),
+            sampler: crate::services::sampler::SamplerManager::new(pool.clone(), cfg.clone()),
+            live: crate::services::live_publisher::LivePublisherManager::new(
+                pool.clone(),
+                cfg.clone(),
+                reqwest::Client::new(),
+            ),
+            mirror: None,
+            consumers: std::sync::Arc::new(Vec::new()),
+            modules: std::sync::Arc::new(Vec::new()),
+            catalog: std::sync::Arc::new(crate::services::registry::CatalogService::new(&cfg)),
+            http: reqwest::Client::new(),
+            started_at: Utc::now(),
+            pool,
+            cfg,
+        }
+    }
+
+    /// The regression this middleware exists to prevent: a handler that FORGETS to name
+    /// `Principal` must still be unreachable unauthenticated once the floor is applied.
+    fn app_with_naked_handler(st: AppState) -> axum::Router {
+        use axum::routing::get;
+        axum::Router::new()
+            .route("/api/v1/naked", get(|| async { "secret" }))
+            .route("/api/v1/auth/login", get(|| async { "login-page" }))
+            .route("/healthz", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn_with_state(
+                st.clone(),
+                require_api_auth,
+            ))
+            .with_state(st)
+    }
+
+    async fn status_of(
+        app: &axum::Router,
+        path: &str,
+        bearer: Option<&str>,
+    ) -> axum::http::StatusCode {
+        use tower::ServiceExt;
+        let mut req = axum::http::Request::builder().uri(path);
+        if let Some(t) = bearer {
+            req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+        }
+        app.clone()
+            .oneshot(req.body(axum::body::Body::empty()).unwrap())
+            .await
+            .unwrap()
+            .status()
+    }
+
+    #[tokio::test]
+    async fn floor_blocks_unannotated_api_handler_when_auth_enabled() {
+        let st = auth_mw_state(true).await;
+        let app = app_with_naked_handler(st);
+        // The naked /api/v1 handler is unreachable without a credential — the whole point.
+        assert_eq!(
+            status_of(&app, "/api/v1/naked", None).await,
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+        // Allowlisted login + logout (idempotent) + non-/api/v1 health pass through.
+        assert_eq!(
+            status_of(&app, "/api/v1/auth/login", None).await,
+            axum::http::StatusCode::OK
+        );
+        assert!(API_AUTH_ALLOWLIST.contains(&"/api/v1/auth/logout"));
+        assert_eq!(
+            status_of(&app, "/healthz", None).await,
+            axum::http::StatusCode::OK
+        );
+        // A bogus bearer is still rejected.
+        assert_eq!(
+            status_of(&app, "/api/v1/naked", Some("vos_deadbeef")).await,
+            axum::http::StatusCode::UNAUTHORIZED
+        );
+    }
+
+    #[tokio::test]
+    async fn floor_admits_valid_session_and_is_open_when_auth_disabled() {
+        // Valid session → through.
+        let st = auth_mw_state(true).await;
+        sqlx::query("INSERT INTO users (id, username, password_hash, role, active, created_at, updated_at) VALUES ('u1','u1',?, 'admin', 1, ?, ?)")
+            .bind(hash_password("pw").unwrap())
+            .bind(Utc::now())
+            .bind(Utc::now())
+            .execute(&st.pool)
+            .await
+            .unwrap();
+        let (tok, _) = issue_session(&st.pool, &st.cfg, "u1").await.unwrap();
+        let app = app_with_naked_handler(st);
+        assert_eq!(
+            status_of(&app, "/api/v1/naked", Some(&tok)).await,
+            axum::http::StatusCode::OK
+        );
+
+        // Auth disabled (LAN appliance default) → the floor is a no-op.
+        let open = auth_mw_state(false).await;
+        let app_open = app_with_naked_handler(open);
+        assert_eq!(
+            status_of(&app_open, "/api/v1/naked", None).await,
+            axum::http::StatusCode::OK
+        );
     }
 }

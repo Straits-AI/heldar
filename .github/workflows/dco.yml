@@ -1,0 +1,44 @@
+# Developer Certificate of Origin check (public repo only).
+#
+# Every commit in a public PR must carry a `Signed-off-by: Name <email>` trailer
+# (`git commit -s`), certifying the contributor has the right to submit the change under the
+# repo's Apache-2.0 license (https://developercertificate.org). Heldar is open-core: the same
+# Apache-2.0 code ships in the commercial build, so a clean inbound-license record matters.
+# Bot PRs (e.g. dependabot) are exempt. The internal monorepo does not run this check.
+name: DCO
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  dco:
+    if: github.repository == 'Straits-AI/heldar' && !endsWith(github.event.pull_request.user.login, '[bot]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check Signed-off-by on every PR commit
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -eu
+          missing=0
+          for c in $(git rev-list "$BASE_SHA".."$HEAD_SHA"); do
+            if ! git log -1 --format=%B "$c" | grep -qiE '^Signed-off-by: .+ <.+@.+>'; then
+              echo "::error::commit $c is missing a Signed-off-by trailer (use: git commit -s)"
+              missing=1
+            fi
+          done
+          if [ "$missing" = 1 ]; then
+            echo ""
+            echo "Every commit needs a DCO sign-off: amend with  git rebase --signoff origin/main"
+            echo "See CONTRIBUTING.md — 'Sign your work'."
+            exit 1
+          fi
+          echo "DCO: all commits signed off"

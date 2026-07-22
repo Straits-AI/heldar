@@ -632,12 +632,12 @@ function J({ busy: e, onRun: t }) {
 		})]
 	});
 }
-var Y = [
+var ee = [
 	12,
 	24,
 	48
 ];
-function X({ path: e, alt: t }) {
+function Y({ path: e, alt: t }) {
 	let [n, r] = i(!1);
 	return n ? null : /* @__PURE__ */ T("a", {
 		href: e,
@@ -654,10 +654,10 @@ function X({ path: e, alt: t }) {
 		})
 	});
 }
-function Z({ hit: e, rank: t, nameFor: n, onPlayback: r }) {
+function te({ hit: e, rank: t, nameFor: n, onPlayback: r }) {
 	return /* @__PURE__ */ E("div", {
 		className: "flex gap-3 rounded-md border border-line bg-panel2/40 p-3 transition-colors duration-150 hover:border-[#34373e]",
-		children: [e.evidence_path && /* @__PURE__ */ T(X, {
+		children: [e.evidence_path && /* @__PURE__ */ T(Y, {
 			path: e.evidence_path,
 			alt: e.label ?? "match"
 		}), /* @__PURE__ */ E("div", {
@@ -713,50 +713,52 @@ function Z({ hit: e, rank: t, nameFor: n, onPlayback: r }) {
 		})]
 	});
 }
-function Q({ nameFor: e, cameras: t }) {
-	let n = a(), d = r(null), [p, g] = i(""), [_, y] = i(null), [b, S] = i(null), [C, D] = i(null), [O, k] = i(""), [A, j] = i(""), [M, N] = i(""), [P, L] = i(24), [R, B] = i(null), [V, H] = i(null), [U, W] = i(null), [G, K] = i(!1), q = p.trim().length > 0;
-	function J(e) {
-		if (!e || q) return;
+function X({ nameFor: e, cameras: t }) {
+	let n = a(), d = r(null), [p, g] = i(""), [_, y] = i(null), [b, S] = i(null), [C, D] = i(null), [O, k] = i(""), [A, j] = i(""), [M, N] = i(""), [P, L] = i(""), [R, B] = i(24), [V, H] = i(null), [U, W] = i(null), [G, K] = i(null), [q, J] = i(!1), Y = p.trim().length > 0;
+	function X(e) {
+		if (!e || Y) return;
 		if (!e.type.startsWith("image/")) {
-			H(`"${e.name}" is not an image — drop a JPEG, PNG, WebP, or GIF.`);
+			W(`"${e.name}" is not an image — drop a JPEG, PNG, WebP, or GIF.`);
 			return;
 		}
 		if (e.size === 0) {
-			H(`"${e.name}" is empty.`);
+			W(`"${e.name}" is empty.`);
 			return;
 		}
 		if (e.size > 7340032) {
-			H(`"${e.name}" is ${(e.size / (1024 * 1024)).toFixed(1)} MB — the limit is 7 MB. Resize or crop it first.`);
+			W(`"${e.name}" is ${(e.size / (1024 * 1024)).toFixed(1)} MB — the limit is 7 MB. Resize or crop it first.`);
 			return;
 		}
 		let t = new FileReader();
 		t.onload = () => {
 			let n = typeof t.result == "string" ? t.result : "", r = n.indexOf(",");
 			if (r < 0) {
-				H("Could not read that file as an image.");
+				W("Could not read that file as an image.");
 				return;
 			}
-			y(n.slice(r + 1)), D(n), S(e.name), H(null);
-		}, t.onerror = () => H("Could not read that file as an image."), t.readAsDataURL(e);
+			y(n.slice(r + 1)), D(n), S(e.name), W(null);
+		}, t.onerror = () => W("Could not read that file as an image."), t.readAsDataURL(e);
 	}
-	function X() {
+	function Z() {
 		y(null), S(null), D(null), d.current && (d.current.value = "");
 	}
 	async function Q(e) {
 		e.preventDefault();
 		let t = p.trim();
 		if (!t && !_) return;
-		B("semantic"), H(null);
+		H("semantic"), W(null);
 		let n = t ? { text: t } : { image_b64: _ }, r = x(O);
 		r && (n.from = r);
 		let i = x(A);
-		i && (n.to = i), M && (n.cameras = [M]), n.k = P;
+		i && (n.to = i), M && (n.cameras = [M]);
+		let a = P.trim();
+		a && (n.label = a), n.k = R;
 		try {
-			W(await v.searchSemantic(n)), K(!0);
+			K(await v.searchSemantic(n)), J(!0);
 		} catch (e) {
-			e instanceof o && e.status === 503 ? H("Embedding worker offline — semantic search needs a running AI worker with the CLIP extra installed.") : H(e instanceof o ? e.message : String(e)), W(null), K(!0);
+			e instanceof o && e.status === 503 ? W("Embedding worker offline — semantic search needs a running AI worker with the CLIP extra installed.") : W(e instanceof o ? e.message : String(e)), K(null), J(!0);
 		} finally {
-			B(null);
+			H(null);
 		}
 	}
 	function $(e) {
@@ -808,9 +810,9 @@ function Q({ nameFor: e, cameras: t }) {
 									type: "file",
 									accept: "image/*",
 									className: "hidden",
-									disabled: R !== null || q,
+									disabled: V !== null || Y,
 									onChange: (e) => {
-										J(e.target.files?.[0]), e.target.value = "";
+										X(e.target.files?.[0]), e.target.value = "";
 									}
 								}), _ ? /* @__PURE__ */ E("div", {
 									className: "flex items-center gap-2 rounded-md border border-line bg-panel2 px-2 py-1.5",
@@ -826,18 +828,18 @@ function Q({ nameFor: e, cameras: t }) {
 										}),
 										/* @__PURE__ */ T(s, {
 											size: "sm",
-											onClick: X,
-											disabled: R !== null,
+											onClick: Z,
+											disabled: V !== null,
 											children: "Clear"
 										})
 									]
 								}) : /* @__PURE__ */ E("button", {
 									type: "button",
 									onClick: () => d.current?.click(),
-									disabled: R !== null || q,
+									disabled: V !== null || Y,
 									onDragOver: (e) => e.preventDefault(),
 									onDrop: (e) => {
-										e.preventDefault(), q || J(e.dataTransfer.files?.[0]);
+										e.preventDefault(), Y || X(e.dataTransfer.files?.[0]);
 									},
 									className: "flex w-full items-center justify-center gap-2 rounded-md border border-dashed border-line bg-panel2 px-3 py-2 font-mono text-[11px] text-fg-muted transition-colors duration-150 hover:border-accent/50 hover:text-fg-secondary disabled:cursor-not-allowed disabled:opacity-50",
 									children: [/* @__PURE__ */ E("svg", {
@@ -855,7 +857,7 @@ function Q({ nameFor: e, cameras: t }) {
 											/* @__PURE__ */ T("path", { d: "M5 5.5l3-3 3 3" }),
 											/* @__PURE__ */ T("path", { d: "M2.5 10.5v2a1 1 0 0 0 1 1h9a1 1 0 0 0 1-1v-2" })
 										]
-									}), q ? "Text query set — clear it to use an image" : "Drop an image or click to browse"]
+									}), Y ? "Text query set — clear it to use an image" : "Drop an image or click to browse"]
 								})]
 							})]
 						}),
@@ -901,13 +903,24 @@ function Q({ nameFor: e, cameras: t }) {
 									})
 								}),
 								/* @__PURE__ */ T(l, {
+									label: "Label (optional)",
+									htmlFor: "sem-label",
+									children: /* @__PURE__ */ T(u, {
+										id: "sem-label",
+										value: P,
+										onChange: (e) => L(e.target.value),
+										placeholder: "car",
+										autoComplete: "off"
+									})
+								}),
+								/* @__PURE__ */ T(l, {
 									label: "Results",
 									htmlFor: "sem-k",
 									children: /* @__PURE__ */ T(m, {
 										id: "sem-k",
-										value: P,
-										onChange: (e) => L(Number(e.target.value)),
-										children: Y.map((e) => /* @__PURE__ */ E("option", {
+										value: R,
+										onChange: (e) => B(Number(e.target.value)),
+										children: ee.map((e) => /* @__PURE__ */ E("option", {
 											value: e,
 											children: ["Top ", e]
 										}, e))
@@ -920,32 +933,32 @@ function Q({ nameFor: e, cameras: t }) {
 							children: /* @__PURE__ */ T(s, {
 								type: "submit",
 								variant: "primary",
-								disabled: R !== null || !q && !_,
-								children: R === "semantic" ? /* @__PURE__ */ E(w, { children: [/* @__PURE__ */ T(h, { size: 14 }), "Searching…"] }) : "Search by similarity"
+								disabled: V !== null || !Y && !_,
+								children: V === "semantic" ? /* @__PURE__ */ E(w, { children: [/* @__PURE__ */ T(h, { size: 14 }), "Searching…"] }) : "Search by similarity"
 							})
 						})
 					]
-				}), V && /* @__PURE__ */ T("div", {
+				}), U && /* @__PURE__ */ T("div", {
 					className: "mt-3",
-					children: /* @__PURE__ */ T(I, { children: V })
+					children: /* @__PURE__ */ T(I, { children: U })
 				})]
 			}),
-			U && /* @__PURE__ */ E(f, {
+			G && /* @__PURE__ */ E(f, {
 				title: "Ranked matches",
-				subtitle: `Crops ranked by similarity to "${U.query}"${U.model ? ` · ${U.model}` : ""}`,
+				subtitle: `Crops ranked by similarity to "${G.query}"${G.model ? ` · ${G.model}` : ""}`,
 				actions: /* @__PURE__ */ T("span", {
 					className: "font-mono text-[11px] tabular-nums text-fg-muted",
-					children: U.count
+					children: G.count
 				}),
-				children: [U.truncated && /* @__PURE__ */ E("p", {
+				children: [G.truncated && /* @__PURE__ */ E("p", {
 					className: "mb-3 flex items-start gap-1.5 rounded border border-connecting/30 bg-connecting/[0.06] px-2 py-1.5 font-mono text-[10px] leading-relaxed text-connecting",
 					children: [/* @__PURE__ */ T(F, { className: "mt-0.5 shrink-0" }), /* @__PURE__ */ T("span", { children: "The candidate scan hit its cap before covering the whole window — narrow the time range or camera filter for a complete ranking." })]
-				}), U.hits.length === 0 ? /* @__PURE__ */ T(c, {
+				}), G.hits.length === 0 ? /* @__PURE__ */ T(c, {
 					title: "No similar crops found",
 					hint: "Nothing embedded in this window resembles the query. Widen the time range, check the camera filter, or confirm an embedding AI task is running for these cameras."
 				}) : /* @__PURE__ */ T("div", {
 					className: "grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-3",
-					children: U.hits.map((t, n) => /* @__PURE__ */ T(Z, {
+					children: G.hits.map((t, n) => /* @__PURE__ */ T(te, {
 						hit: t,
 						rank: n + 1,
 						nameFor: e,
@@ -953,14 +966,14 @@ function Q({ nameFor: e, cameras: t }) {
 					}, t.id))
 				})]
 			}),
-			!G && /* @__PURE__ */ T(c, {
+			!q && /* @__PURE__ */ T(c, {
 				title: "Search by what it looks like",
 				hint: "Type a description ('red pickup truck') or drop an example image. Crops from the embedding index are ranked by visual similarity — a recall tool for finding footage, not a source of verified facts."
 			})
 		]
 	});
 }
-function $({ nameFor: t }) {
+function Z({ nameFor: t }) {
 	let [n, r] = i(""), [a, d] = i(null), [p, m] = i(null), [g, _] = i(null), [b, x] = i(null), [S, C] = i(!1), [D, O] = i(!1), k = e(async (e) => {
 		let t = e.trim();
 		if (t) {
@@ -1157,7 +1170,7 @@ function $({ nameFor: t }) {
 		]
 	});
 }
-function ee({ active: e, onClick: t, children: n }) {
+function Q({ active: e, onClick: t, children: n }) {
 	return /* @__PURE__ */ T("button", {
 		type: "button",
 		onClick: t,
@@ -1165,7 +1178,7 @@ function ee({ active: e, onClick: t, children: n }) {
 		children: n
 	});
 }
-function te() {
+function $() {
 	let [r, a] = i(null), [c, l] = i(!0), [u, m] = i(!1), [g, _] = i(null), [y, b] = i("query"), x = e(async () => {
 		l(!0), _(null);
 		try {
@@ -1251,7 +1264,7 @@ function te() {
 				}, {
 					key: "semantic",
 					label: "Semantic"
-				}].map((e) => /* @__PURE__ */ T(ee, {
+				}].map((e) => /* @__PURE__ */ T(Q, {
 					active: y === e.key,
 					onClick: () => b(e.key),
 					children: e.label
@@ -1259,7 +1272,7 @@ function te() {
 			})]
 		}), /* @__PURE__ */ T("div", {
 			className: "mt-5",
-			children: y === "query" ? /* @__PURE__ */ T($, { nameFor: k }) : /* @__PURE__ */ T(Q, {
+			children: y === "query" ? /* @__PURE__ */ T(Z, { nameFor: k }) : /* @__PURE__ */ T(X, {
 				nameFor: k,
 				cameras: D
 			})
@@ -1268,6 +1281,6 @@ function te() {
 }
 //#endregion
 //#region src/modules/search/entry.tsx
-var ne = te;
+var ne = $;
 //#endregion
 export { ne as default };

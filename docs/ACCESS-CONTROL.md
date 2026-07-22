@@ -255,10 +255,12 @@ posture ("No auth on the API — local/LAN dev").
 
 ### 5.2 Enabling auth (`HELDAR_AUTH_ENABLED=true`)
 
-When enabled, every Stage 4 entry/admin handler requires a valid bearer token
-(session **or** API key). A request with no token → **401 `authentication required`**;
-an invalid/expired token → **401 `invalid or expired credentials`**. Roles are then
-enforced per §4.
+When enabled, a router-level **authentication floor** rejects any unauthenticated request to the
+whole `/api/v1/*` surface before the handler runs — allowlisting only `/api/v1/auth/login` and
+`/api/v1/auth/logout`. A request with no token → **401 `authentication required`**; an
+invalid/expired token → **401 `invalid or expired credentials`**. So authentication is guaranteed
+for every endpoint (a handler can't accidentally ship public); each handler then enforces **roles**
+per §4 on top. `/healthz`, `/readyz`, and `/metrics` are outside `/api/v1` and unaffected.
 
 ### 5.3 Bootstrap admin via env
 

@@ -133,13 +133,20 @@ which override the built-in defaults.
 | `--api-key` | `HELDAR_API_KEY` | _(none)_ | Integration API key sent as `X-API-Key` when Core auth is enabled |
 | `--worker-id` | `HELDAR_AI_WORKER_ID` | `<hostname>:<pid>` | Stable identity for task sharding across co-located workers |
 | `--embed-poll-interval` | `HELDAR_AI_EMBED_POLL_INTERVAL` | `1.0` | Seconds between `/ai/embed-queries` polls by the embed-query thread (kept fast — semantic-search requests block on the answer) |
-| `--clip-model` | `HELDAR_AI_CLIP_MODEL` | `ViT-B-32` | open_clip architecture the embed-query thread answers with |
+| `--clip-model` | `HELDAR_AI_CLIP_MODEL` | `ViT-B-32-quickgelu` | open_clip architecture the embed-query thread answers with |
 | `--clip-pretrained` | `HELDAR_AI_CLIP_PRETRAINED` | `openai` | open_clip pretrained tag the embed-query thread answers with |
 
 The last three configure the **embed-query polling thread** (semantic search).
 The query-side CLIP checkpoint must match what the `embedding` tasks index
 with (their `clip_model`/`clip_pretrained` config keys), or the kernel ends up
 comparing vectors from different embedding spaces.
+
+The default flipped from `ViT-B-32` to `ViT-B-32-quickgelu` (open_clip warns
+that the `openai` checkpoint uses QuickGELU activations). This changes the
+emitted `model` id (now `open_clip/ViT-B-32-quickgelu/openai`), so vectors
+indexed under the old default stop matching new queries — operators upgrading
+re-index simply by letting the stride repopulate, as the old vectors age out on
+the retention TTL.
 
 ### Per-task `config` (from the task's `config` JSON)
 
@@ -175,7 +182,7 @@ The `embedding` analyzer (`EmbeddingAnalyzer`) reads these keys (all optional):
 | `static_epsilon` | `0.02` | Normalized bbox-movement threshold below which a track counts as static |
 | `static_refresh_seconds` | `3600` | Re-embed even a static track this often (survives retention TTL) |
 | `min_box_px` | `24` | Skip boxes narrower or shorter than this many pixels |
-| `clip_model` | `ViT-B-32` | open_clip architecture |
+| `clip_model` | `ViT-B-32-quickgelu` | open_clip architecture |
 | `clip_pretrained` | `openai` | open_clip pretrained tag |
 | `device` | `auto` | Force a device (`"cpu"`, `0`, …); `auto` = GPU if CUDA else CPU |
 | `thumb_max_px` | `320` | Max dimension of the JPEG crop thumb sent for the UI (`0` disables thumbs) |

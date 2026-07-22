@@ -24,7 +24,7 @@
 
 `heldar-search` is a *library* crate. It does not ship a binary; the runnable `heldar-core` server lives in the un-published `heldar-server` crate, which composes this crate alongside the other Heldar apps over the kernel's seams. Key public surface (see `src/lib.rs`):
 
-- `routes::router(cfg) -> Router<AppState>` mounts `POST /api/v1/search/events` (structured), `POST /api/v1/search/nl` (natural language), and `POST /api/v1/search/plan` (dry-run).
+- `routes::router(cfg) -> Router<AppState>` mounts `POST /api/v1/search/events` (structured), `POST /api/v1/search/nl` (natural language), `POST /api/v1/search/plan` (dry-run), and `POST /api/v1/search/semantic` (CLIP similarity retrieval over stored crop embeddings — text or image query; see `semantic.rs`).
 - `config::SearchConfig` with `SearchConfig::from_env()` reads the optional LLM seam and result cap from the environment.
 - `query::{QueryPlan, SearchHit, execute, window, breakdown}` is the plan type and its deterministic executor.
 - `planner::{parse_rules, plan_llm, sanitize}` is the natural-language-to-plan layer.

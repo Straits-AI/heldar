@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Features
+
+- **Cross-camera movement candidates gain an optional appearance signal** (#51). When an `embedding`
+  AI task is indexing crops, each proposed vehicle ReID candidate now carries an additive
+  `appearance_score` — the cosine similarity of the two appearances' CLIP crops, from the kernel
+  embeddings store, via the new `services::embeddings::appearance_similarity` seam (temporal-spatial
+  join, ≥2 vectors per side, best-pairwise-cosine within a shared model). It is a secondary signal
+  shown next to the plate-anchored score — never fused into the ranking, absent (not zero) when
+  embeddings don't exist, and off unless `HELDAR_MOVEMENT_APPEARANCE_SCORING=true`. Person appearance
+  stays out of scope (the class is not embedded by default).
+- **Semantic search polish** (#53): the Semantic tab exposes the `label` filter the API already
+  accepted; the default CLIP model becomes `ViT-B-32-quickgelu` (open_clip's recommended pairing for
+  the `openai` tag) on both the analyzer and the query worker — the emitted model id becomes
+  `open_clip/ViT-B-32-quickgelu/openai`, so operators upgrading re-index by letting the stride
+  repopulate as old vectors age out; and the semantic response omits the `detection` field when a hit
+  has no correlated detection row rather than emitting `null`.
 
 ## [0.3.0] - 2026-07-17
 
