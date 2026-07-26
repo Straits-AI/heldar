@@ -51,7 +51,7 @@ futures-util = { version = "0.3", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
-thiserror = "1"
+thiserror = "2"
 dotenvy = "0.15"
 libc = "0.2"
 async-trait = "0.1"
