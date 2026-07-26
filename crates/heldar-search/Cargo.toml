@@ -33,6 +33,6 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 anyhow = "1"
 # Validates query-image payloads before they enter the embed queue (already resolved in Cargo.lock
 # via the kernel; adds zero new compiled crates).
-base64 = "0.22"
+base64 = "0.23"
 # Background query-log retention loop.
 tokio = { version = "1", features = ["time"] }
