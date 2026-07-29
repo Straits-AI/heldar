@@ -76,26 +76,22 @@ cd apps/web && npm ci && npm run build
 
 All participation is covered by the [Code of Conduct](./CODE_OF_CONDUCT.md).
 
-## How your PR actually lands (read this — the repo is generated)
+## How your PR lands
 
-Honesty first: the public `Straits-AI/heldar` tree is **generated** from an internal monorepo
-that also contains proprietary vertical products. The internal monorepo is the source of truth;
-each release regenerates the open subset and commits it here as a snapshot on top of the existing
-history (history, stars, links, and merged-PR commits are preserved — the snapshot supersedes by
-content, never by erasing).
+This repository **is** the source of truth for the open platform — the kernel, the generic apps,
+the reference AI worker and the dashboard are developed here, in the open. There is no mirror and
+no import step: your commit, with your authorship, is the commit that ships.
 
-What that means for your PR:
+1. You open a PR. CI runs the same quality bar maintainers run (`cargo fmt`/`clippy -D warnings`/
+   tests, the open build, the dashboard build) plus the DCO sign-off check.
+2. A maintainer reviews it here.
+3. On merge it is on `main`, and goes out in the next release to crates.io / GitHub Releases /
+   container images.
 
-1. You open a PR here; CI runs the same open-build quality bar maintainers use.
-2. A maintainer reviews it **on the PR**, like any repo.
-3. When accepted, it is **imported into the internal monorepo with your authorship preserved**
-   (`git am` — your name and email stay on the commit) and the PR is merged here.
-4. The next release's snapshot commit re-exports the same change from the source of truth; your
-   merged commit remains in history and the release notes credit the PR.
-
-The paths you see here are identical to the internal paths, so patches apply cleanly in both
-directions. If a change you need touches something that is *not* in this tree (it will be obvious
-— the seam is documented in `ARCHITECTURE.md`), open an issue describing the need instead.
+Proprietary vertical products (e.g. client-specific analytics apps) and the hosted relay live in
+separate private repositories and consume the crates published from *this* repo through the
+documented seams — they never reach back into it. If a change you need would touch something not
+in this tree, open an issue describing the need and we will work out the seam.
 
 ## Reporting security issues
 

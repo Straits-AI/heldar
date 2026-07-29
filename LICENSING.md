@@ -1,8 +1,11 @@
 # Licensing
 
-Heldar is **open-core**. The kernel and the generic reference apps are **Apache-2.0** and live in
-the public `heldar` repo; vertical/client-specific products are **proprietary** and live in the
-private `heldar-proprietary` repo, depending on the open crates through published seams.
+Heldar is **open-core**. The kernel and the generic reference apps are **Apache-2.0** and are
+developed in this public `heldar` repo — the source of truth for the open platform. Vertical /
+client-specific products (and the hosted relay) are **proprietary**, live in their own private
+repositories, and depend on the crates published from here through the documented seams. Each
+vertical has its own repo and lifecycle; none of them is required to build or run the open
+platform.
 
 | Component | Crate / path | License |
 |---|---|---|
