@@ -294,6 +294,9 @@ pub async fn plan_llm(
 
 /// Convenience: clamp planner-produced hours into range (defensive against an LLM emitting nonsense).
 pub fn sanitize(mut plan: QueryPlan) -> QueryPlan {
+    // `zone` is a semantic-route-only field (issue #77); the structured executor has no zone-id
+    // filter, so clear it here rather than let a caller believe it filtered.
+    plan.zone = None;
     if let Some(h) = plan.hour_min {
         if h > 23 {
             plan.hour_min = None;

@@ -45,6 +45,9 @@ pub struct SemanticBody {
     pub cameras: Vec<String>,
     /// Exact detection label filter (e.g. "car").
     pub label: Option<String>,
+    /// Zone scope (issue #77): a zone id — only crops whose bbox ground point falls inside the
+    /// zone's polygon are ranked. Zones are per-camera, so this pins the camera implicitly.
+    pub zone: Option<String>,
     pub k: Option<usize>,
 }
 
@@ -116,6 +119,28 @@ pub async fn search_semantic(
         .as_deref()
         .map(str::trim)
         .filter(|l| !l.is_empty());
+    // Zone scope (issue #77): resolve id -> (camera, polygon, name). The zone pins its camera; a
+    // caller-supplied `cameras` list that doesn't include it is a contradiction we refuse rather
+    // than silently answer "no results" for.
+    let zone = match body
+        .zone
+        .as_deref()
+        .map(str::trim)
+        .filter(|z| !z.is_empty())
+    {
+        Some(zid) => Some(embeddings::resolve_zone_scope(&st.pool, zid).await?),
+        None => None,
+    };
+    let mut cameras = body.cameras.clone();
+    if let Some(z) = &zone {
+        if !cameras.is_empty() && !cameras.iter().any(|c| c == &z.camera_id) {
+            return Err(AppError::BadRequest(format!(
+                "zone `{}` belongs to camera `{}`, which is not in `cameras`",
+                z.zone_id, z.camera_id
+            )));
+        }
+        cameras = vec![z.camera_id.clone()];
+    }
 
     // Embed the query via the pull-only worker queue; a missing/slow worker is a clean 503. The
     // queue row (which may hold a multi-MB image payload) is deleted as soon as this request is
@@ -133,9 +158,10 @@ pub async fn search_semantic(
     let filters = SimilarFilters {
         from,
         to,
-        cameras: (!body.cameras.is_empty()).then(|| body.cameras.clone()),
+        cameras: (!cameras.is_empty()).then(|| cameras.clone()),
         label: label.map(str::to_string),
         model: embedded.model.clone(),
+        zone_polygon: zone.as_ref().map(|z| z.polygon.clone()),
     };
     let outcome = embeddings::search_similar(&st.pool, &embedded.vec, &filters, k).await?;
     let detections = detection_meta(&st.pool, &outcome.hits).await;
@@ -146,8 +172,9 @@ pub async fn search_semantic(
     let plan = QueryPlan {
         from: Some(from.to_rfc3339()),
         to: Some(to.to_rfc3339()),
-        cameras: body.cameras.clone(),
+        cameras: cameras.clone(),
         text: text.map(str::to_string),
+        zone: zone.as_ref().map(|z| z.zone_id.clone()),
         limit: Some(k as i64),
         ..QueryPlan::default()
     };
@@ -206,11 +233,15 @@ pub async fn search_semantic(
         from.to_rfc3339(),
         to.to_rfc3339(),
         window_defaulted,
+        zone.as_ref().map(|z| z.name.as_str()),
     );
     Ok(Json(json!({
         "query": query_text,
         "mode": "semantic",
         "model": model,
+        // `enabled` is echoed so a caller scoping by a disabled zone sees it deliberately: retrieval
+        // is geometry over stored history, unlike the live zone engine which skips disabled zones.
+        "zone": zone.as_ref().map(|z| json!({ "id": z.zone_id, "name": z.name, "enabled": z.enabled })),
         "count": outcome.hits.len(),
         "truncated": outcome.truncated,
         "hits": hits,
@@ -295,6 +326,7 @@ fn semantic_proof(
     eff_from: String,
     eff_to: String,
     defaulted: bool,
+    zone_name: Option<&str>,
 ) -> Value {
     let n = hits.len();
     let levels = vec![
@@ -324,6 +356,9 @@ fn semantic_proof(
                 "count": n,
                 "truncated": truncated,
                 "window": { "from": eff_from, "to": eff_to, "defaulted": defaulted },
+                // Zone scope: containment = the crop bbox's ground point inside the zone polygon
+                // (the zone engine's semantics), tested per candidate during the scan.
+                "zone": zone_name,
             },
         }),
         json!({

@@ -866,7 +866,8 @@ function ee({ nameFor: e }) {
 		if (e.preventDefault(), t.trim()) {
 			m(!0), g(null);
 			try {
-				d(await _.searchPlate(t.trim())), y(!0);
+				let e = await _.searchPlate(t.trim());
+				d(e), y(!0);
 			} catch (e) {
 				g(e instanceof i ? e.message : String(e)), d(null), y(!0);
 			} finally {
@@ -983,7 +984,8 @@ function ne() {
 	let [o, s] = r(null), [c, f] = r(!0), [m, h] = r(!1), [g, v] = r(null), [y, b] = r("breaches"), S = e(async () => {
 		f(!0), v(null);
 		try {
-			s(await _.me()), h(!1);
+			let e = await _.me();
+			s(e), h(!1);
 		} catch (e) {
 			e instanceof i && e.status === 401 ? (s(null), h(!0)) : v(e instanceof Error ? e.message : String(e));
 		} finally {

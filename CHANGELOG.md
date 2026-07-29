@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Features
 
+- **Zone-aware semantic retrieval** (#77): `POST /api/v1/search/semantic` gains an optional
+  `zone` filter — *"red car in the patio zone"* — ranking only crops whose bbox ground point
+  falls inside the zone's polygon, using the zone engine's exact containment semantics
+  (geometric per-candidate test during the scan; deliberately NOT a `zone_events` time-window
+  join, which would mis-attribute across the embedding task's separate track-id space). The zone
+  pins its camera; conflicts are a 400. The Semantic tab gains a per-camera Zone select, the
+  response echoes the zone, the search-log plan snapshot records it (and `planner::sanitize`
+  clears the field on the structured/NL paths so it can never silently no-op there).
+
 - **Cross-camera movement candidates gain an optional appearance signal** (#51). When an `embedding`
   AI task is indexing crops, each proposed vehicle ReID candidate now carries an additive
   `appearance_score` — the cosine similarity of the two appearances' CLIP crops, from the kernel

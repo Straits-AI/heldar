@@ -440,6 +440,46 @@ pub struct SimilarFilters {
     /// Only rows embedded by this model are comparable to the query vector. `None` skips the
     /// filter (used when the worker didn't report its model id).
     pub model: Option<String>,
+    /// Zone scope (issue #77): keep only candidates whose bbox **ground point (bottom-center)**
+    /// falls inside this normalized polygon — the zone engine's exact containment semantics, so
+    /// "in the zone" means the same thing here as everywhere else. Rows without a bbox are
+    /// excluded while this is set (nothing to test). Applied during the scan, before top-k.
+    pub zone_polygon: Option<Vec<[f64; 2]>>,
+}
+
+/// A zone resolved for retrieval scoping (issue #77): the geometry plus the camera it pins.
+#[derive(Debug)]
+pub struct ZoneScope {
+    pub zone_id: String,
+    pub name: String,
+    pub camera_id: String,
+    pub enabled: bool,
+    pub polygon: Vec<[f64; 2]>,
+}
+
+/// Resolve a zone id to its retrieval scope. `NotFound` for an unknown id; a degenerate polygon
+/// (< 3 points) is a `BadRequest` — silently matching nothing would read as "no results".
+pub async fn resolve_zone_scope(pool: &SqlitePool, zone_id: &str) -> AppResult<ZoneScope> {
+    let row: Option<(String, String, i64, sqlx::types::Json<Value>)> =
+        sqlx::query_as("SELECT name, camera_id, enabled, polygon FROM zones WHERE id = ?")
+            .bind(zone_id)
+            .fetch_optional(pool)
+            .await?;
+    let (name, camera_id, enabled, polygon) =
+        row.ok_or_else(|| AppError::NotFound(format!("zone {zone_id} not found")))?;
+    let polygon = crate::services::zones::parse_polygon(&polygon.0);
+    if polygon.len() < 3 {
+        return Err(AppError::BadRequest(format!(
+            "zone {zone_id} has a degenerate polygon (fewer than 3 points)"
+        )));
+    }
+    Ok(ZoneScope {
+        zone_id: zone_id.to_string(),
+        name,
+        camera_id,
+        enabled: enabled != 0,
+        polygon,
+    })
 }
 
 /// One similarity hit, newest-scan-order broken by score.
@@ -551,6 +591,18 @@ pub async fn search_similar(
         }
         let ts: DateTime<Utc> = row.get("ts");
         let bbox: Option<sqlx::types::Json<Value>> = row.get("bbox");
+        // Zone scope: ground-point-in-polygon on the crop's bbox (the zone engine's containment
+        // semantics). Must run BEFORE the top-k heap — filtering after would break k.
+        if let Some(poly) = &filters.zone_polygon {
+            let inside = bbox
+                .as_ref()
+                .and_then(|b| crate::services::zones::bbox_ground_point(&b.0))
+                .map(|p| crate::services::zones::point_in_polygon(p, poly))
+                .unwrap_or(false);
+            if !inside {
+                continue;
+            }
+        }
         heap.push(HeapHit(SimilarHit {
             id: row.get("id"),
             score,
@@ -951,6 +1003,7 @@ mod tests {
             cameras: Some(vec!["cam1".into()]),
             label: Some("car".into()),
             model: Some("m".into()),
+            zone_polygon: None,
         };
         let out = search_similar(&pool, &[1.0, 0.0], &filters, 10)
             .await
@@ -1054,6 +1107,136 @@ mod tests {
         }
         assert!(matches!(
             ingest_batch(&st, &too_big).await,
+            Err(AppError::BadRequest(_))
+        ));
+    }
+
+    async fn insert_embedding_with_bbox(
+        pool: &SqlitePool,
+        cam: &str,
+        vec: &[f32],
+        ts: DateTime<Utc>,
+        bbox: Option<Value>,
+    ) -> String {
+        let id = format!("emb_{}", Uuid::new_v4().simple());
+        sqlx::query(
+            "INSERT INTO embeddings (id, camera_id, label, ts, model, dim, vec, bbox, created_at)
+             VALUES (?,?,'car',?,'m',?,?,?,?)",
+        )
+        .bind(&id)
+        .bind(cam)
+        .bind(ts)
+        .bind(vec.len() as i64)
+        .bind(encode_vec(vec))
+        .bind(bbox.map(sqlx::types::Json))
+        .bind(Utc::now())
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// Zone scoping (issue #77): only candidates whose bbox GROUND POINT (bottom-center) is inside
+    /// the polygon survive; bbox-less rows are excluded while the filter is active.
+    #[tokio::test]
+    async fn search_similar_zone_polygon_filters_by_ground_point() {
+        let pool = mem_pool().await;
+        seed_camera(&pool, "camZ").await;
+        let t = Utc::now();
+        // Left-half zone: x in [0, 0.5], full height.
+        let poly = vec![[0.0, 0.0], [0.5, 0.0], [0.5, 1.0], [0.0, 1.0]];
+        // bbox [x,y,w,h] -> ground point (x + w/2, y + h). Inside: (0.2, 0.5).
+        let inside = insert_embedding_with_bbox(
+            &pool,
+            "camZ",
+            &[1.0, 0.0],
+            t,
+            Some(serde_json::json!([0.1, 0.3, 0.2, 0.2])),
+        )
+        .await;
+        // Ground point (0.8, 0.5) — right half, outside the zone.
+        insert_embedding_with_bbox(
+            &pool,
+            "camZ",
+            &[1.0, 0.0],
+            t,
+            Some(serde_json::json!([0.7, 0.3, 0.2, 0.2])),
+        )
+        .await;
+        // Straddling bbox whose ground point lands inside: box spans the middle but bottom-center
+        // is (0.45, 0.9) -> inside.
+        let straddle = insert_embedding_with_bbox(
+            &pool,
+            "camZ",
+            &[0.9, 0.1],
+            t,
+            Some(serde_json::json!([0.3, 0.5, 0.3, 0.4])),
+        )
+        .await;
+        // No bbox: excluded while the zone filter is active.
+        insert_embedding_with_bbox(&pool, "camZ", &[1.0, 0.0], t, None).await;
+
+        let filters = SimilarFilters {
+            from: t - Duration::hours(1),
+            to: t + Duration::hours(1),
+            cameras: None,
+            label: None,
+            model: Some("m".into()),
+            zone_polygon: Some(poly),
+        };
+        let out = search_similar(&pool, &[1.0, 0.0], &filters, 10)
+            .await
+            .unwrap();
+        let ids: Vec<&str> = out.hits.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(ids, vec![inside.as_str(), straddle.as_str()]);
+
+        // Without the filter all four rank (the bbox-less row included).
+        let all = search_similar(
+            &pool,
+            &[1.0, 0.0],
+            &SimilarFilters {
+                from: t - Duration::hours(1),
+                to: t + Duration::hours(1),
+                cameras: None,
+                label: None,
+                model: Some("m".into()),
+                zone_polygon: None,
+            },
+            10,
+        )
+        .await
+        .unwrap();
+        assert_eq!(all.hits.len(), 4);
+    }
+
+    #[tokio::test]
+    async fn resolve_zone_scope_paths() {
+        let pool = mem_pool().await;
+        seed_camera(&pool, "camZ").await;
+        sqlx::query(
+            "INSERT INTO zones (id, camera_id, name, polygon, created_at, updated_at)
+             VALUES ('zone_ok','camZ','Patio','[[0,0],[1,0],[1,1],[0,1]]',?,?),
+                    ('zone_bad','camZ','Line','[[0,0],[1,1]]',?,?)",
+        )
+        .bind(Utc::now())
+        .bind(Utc::now())
+        .bind(Utc::now())
+        .bind(Utc::now())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let z = resolve_zone_scope(&pool, "zone_ok").await.unwrap();
+        assert_eq!(
+            (z.camera_id.as_str(), z.name.as_str(), z.polygon.len()),
+            ("camZ", "Patio", 4)
+        );
+        assert!(matches!(
+            resolve_zone_scope(&pool, "zone_missing").await,
+            Err(AppError::NotFound(_))
+        ));
+        assert!(matches!(
+            resolve_zone_scope(&pool, "zone_bad").await,
             Err(AppError::BadRequest(_))
         ));
     }

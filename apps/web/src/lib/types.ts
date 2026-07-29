@@ -1293,6 +1293,9 @@ export interface SemanticSearchRequest {
   to?: string;
   cameras?: string[];
   label?: string;
+  /** Zone-id scope (#77): only crops whose bbox ground point is inside the zone's polygon rank.
+   *  Zones are per-camera — the server pins the camera; a conflicting `cameras` list is a 400. */
+  zone?: string;
   /** Top-k, clamped server-side to 1..=100 (default 24). */
   k?: number;
 }
@@ -1322,6 +1325,8 @@ export interface SemanticSearchResponse {
   /** Embedding model id; null only in degenerate cases (e.g. legacy rows with no model echo). */
   model: string | null;
   count: number;
+  /** Echo of the zone scope when one was applied (#77); null/absent otherwise. */
+  zone?: { id: string; name: string } | null;
   /** True if the candidate scan hit its cap — narrow the window/filters. */
   truncated: boolean;
   hits: SemanticHit[];

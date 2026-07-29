@@ -85,7 +85,8 @@ binary composes (`GET /api/v1/modules`) — the nav updates itself, no rebuild. 
   restricted-zone breach incidents).
 - **Search** — natural-language query over stored event facts, with a proof ladder over every answer.
   Search also includes semantic (text and image) retrieval over stored detection crops, surfaced as a
-  Semantic tab (`POST /api/v1/search/semantic`).
+  Semantic tab (`POST /api/v1/search/semantic`), including zone-scoped queries ("red car in
+the patio zone") via the tab's per-camera Zone select.
 
 Each has an operator guide in the [Operate](../operate/index.md) hub. Sidecar plugins mount as
 sandboxed iframes under `/m/{id}/` (see [Sidecar plugins](../develop/sidecar-plugins.md)).

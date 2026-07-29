@@ -33,6 +33,11 @@ pub struct QueryPlan {
     pub zone_kind: Option<String>,
     /// Free-text substring matched across plate / zone / kind.
     pub text: Option<String>,
+    /// Zone-id scope — SEMANTIC route only (issue #77): recorded here so the search_log snapshot
+    /// captures it. The structured executor ignores it and `planner::sanitize` clears it, so a
+    /// structured/NL caller can never set it expecting filtering that doesn't happen.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zone: Option<String>,
     pub limit: Option<i64>,
 }
 

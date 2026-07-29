@@ -40,6 +40,7 @@ import type {
   SemanticHit,
   SemanticSearchRequest,
   SemanticSearchResponse,
+  Zone,
 } from "@heldar/shell";
 
 /* ====================================================================== */
@@ -715,7 +716,32 @@ function SemanticConsole({ nameFor, cameras }: { nameFor: NameFor; cameras: Came
   const [to, setTo] = useState("");
   const [camera, setCamera] = useState("");
   const [label, setLabel] = useState("");
+  const [zone, setZone] = useState("");
+  const [zones, setZones] = useState<Zone[]>([]);
   const [k, setK] = useState(24);
+
+  // Zone scope (issue #77): zones are per-camera, so the Zone select activates once a camera is
+  // chosen and clears when the camera changes. Fetch is best-effort — an empty list just leaves
+  // the select disabled.
+  useEffect(() => {
+    setZone("");
+    if (!camera) {
+      setZones([]);
+      return;
+    }
+    let cancelled = false;
+    api
+      .listZones(camera)
+      .then((zs) => {
+        if (!cancelled) setZones(zs);
+      })
+      .catch(() => {
+        if (!cancelled) setZones([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [camera]);
 
   const [busy, setBusy] = useState<SemanticBusy>(null);
   const [error, setError] = useState<string | null>(null);
@@ -786,6 +812,7 @@ function SemanticConsole({ nameFor, cameras }: { nameFor: NameFor; cameras: Came
     if (camera) body.cameras = [camera];
     const lbl = label.trim();
     if (lbl) body.label = lbl;
+    if (zone) body.zone = zone;
     body.k = k;
     try {
       const r = await api.searchSemantic(body);
@@ -929,6 +956,22 @@ function SemanticConsole({ nameFor, cameras }: { nameFor: NameFor; cameras: Came
                 {cameras.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.name}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            <Field label="Zone (optional)" htmlFor="sem-zone">
+              <Select
+                id="sem-zone"
+                value={zone}
+                onChange={(e) => setZone(e.target.value)}
+                disabled={!camera || zones.length === 0}
+                title={camera ? undefined : "Pick a camera first — zones are per-camera"}
+              >
+                <option value="">{camera ? "Whole frame" : "Pick a camera first"}</option>
+                {zones.map((z) => (
+                  <option key={z.id} value={z.id}>
+                    {z.name}
                   </option>
                 ))}
               </Select>

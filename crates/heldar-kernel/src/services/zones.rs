@@ -174,7 +174,7 @@ fn line_direction_filter(zone: &Zone) -> String {
         .to_string()
 }
 
-fn point_in_polygon(p: [f64; 2], poly: &[[f64; 2]]) -> bool {
+pub(crate) fn point_in_polygon(p: [f64; 2], poly: &[[f64; 2]]) -> bool {
     let n = poly.len();
     if n < 3 {
         return false;
@@ -193,7 +193,7 @@ fn point_in_polygon(p: [f64; 2], poly: &[[f64; 2]]) -> bool {
     inside
 }
 
-fn parse_polygon(v: &Value) -> Vec<[f64; 2]> {
+pub(crate) fn parse_polygon(v: &Value) -> Vec<[f64; 2]> {
     v.as_array()
         .map(|arr| {
             arr.iter()
@@ -277,8 +277,10 @@ fn confirm_frames(zone: &Zone) -> u32 {
     .clamp(1, 10) as u32
 }
 
-/// Ground point of a detection bbox `[x, y, w, h]` (normalized): bottom-center.
-fn bbox_ground_point(v: &Value) -> Option<[f64; 2]> {
+/// Ground point of a detection bbox `[x, y, w, h]` (normalized): bottom-center. `pub(crate)`:
+/// the embeddings service reuses it so zone-scoped retrieval means EXACTLY what the zone engine
+/// means by "in the zone" (issue #77).
+pub(crate) fn bbox_ground_point(v: &Value) -> Option<[f64; 2]> {
     let a = v.as_array()?;
     if a.len() < 4 {
         return None;

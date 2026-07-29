@@ -1258,7 +1258,8 @@ function Q() {
 		}
 		W(!0), K(null);
 		try {
-			J(await g.createApiKey(N.trim(), V)), X(!1), B(""), await t.refresh();
+			let e = await g.createApiKey(N.trim(), V);
+			J(e), X(!1), B(""), await t.refresh();
 		} catch (e) {
 			K(e instanceof i ? e.message : String(e));
 		} finally {
@@ -1563,7 +1564,8 @@ function ee() {
 	let [o, s] = r(null), [c, f] = r(!0), [m, h] = r(!1), [_, v] = r(null), [y, x] = r("live"), S = e(async () => {
 		f(!0), v(null);
 		try {
-			s(await g.me()), h(!1);
+			let e = await g.me();
+			s(e), h(!1);
 		} catch (e) {
 			e instanceof i && e.status === 401 ? (s(null), h(!0)) : v(e instanceof Error ? e.message : String(e));
 		} finally {

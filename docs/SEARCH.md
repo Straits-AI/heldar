@@ -430,9 +430,24 @@ blocks a request indefinitely and never fakes an answer.
   "to":   "2026-07-16T00:00:00Z",  // optional
   "cameras": ["cam1"],             // optional camera-id filter
   "label": "car",                  // optional exact label filter
+  "zone": "zone_abc123",           // optional zone-id scope (#77) — see below
   "k": 24                          // top-k; clamped 1…100, default 24
 }
 ```
+
+**Zone scope (`zone`, issue #77)** — *"red car in the patio zone."* Only candidates whose crop
+bbox **ground point (bottom-center)** falls inside the zone's polygon are ranked — the zone
+engine's exact containment semantics, so "in the zone" means the same thing here as in zone
+events. It is geometric (tested per candidate during the scan), **not** a `zone_events`
+time-window join — the embedding task's track ids are a different id-space, and time-window
+joins would mis-attribute whenever several objects are present. Zones are per-camera, so the
+filter pins the camera implicitly; a `cameras` list that doesn't include the zone's camera is a
+`400`, an unknown zone id a `404`. Crops without a stored bbox are excluded while the filter is
+active (the reference worker always sends one). The response echoes
+`"zone": { "id", "name", "enabled" }` and the proof's aggregate records the zone scope. A
+**disabled** zone still scopes retrieval (geometry over stored history, unlike the live zone
+engine which skips disabled zones) — the `enabled` echo makes that deliberate. In the dashboard,
+the Semantic tab's **Zone** select activates once a camera is chosen.
 
 **Response:**
 
