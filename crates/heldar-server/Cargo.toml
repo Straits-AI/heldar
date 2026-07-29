@@ -3,13 +3,12 @@ name = "heldar-server"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.85"
-description = "Heldar composing server: links the open kernel with the open generic apps (entry/movement/search), plus optional proprietary verticals behind the `verticals` feature."
+description = "Heldar composing server: links the open kernel with the generic apps (entry/movement/search) into a runnable deployment."
 license = "Apache-2.0"
-publish = false  # composition crate — lives in the repo, not on crates.io
+publish = false  # composition crate — build from the repo, not crates.io
 
-# The server is a LIBRARY (`heldar_server::run(impl Verticals)`) plus this workspace's composed
-# bin. An out-of-tree overlay workspace builds its own bin against the library via a path/git dep
-# instead of forking this crate — the enabler for a public-source-of-truth split.
+# Library (`heldar_server::run(impl Verticals)`) + the composed open bin. Downstream deployments
+# can build their own composed binary against the library instead of forking this crate.
 [lib]
 name = "heldar_server"
 path = "src/lib.rs"
@@ -19,26 +18,19 @@ name = "heldar-core"
 path = "src/main.rs"
 
 [features]
-# `verticals` pulls the proprietary vertical app crates (e.g. bakery) into the composition. The OPEN
-# reference build (`--no-default-features`) links only kernel + the Apache-2.0 generic apps; the
-# private production bins enable this. At the polyrepo split the public server drops it entirely.
-default = ["verticals"]
-verticals = ["dep:heldar-bakery"]
-# `wasm` pulls the sandboxed in-process Wasm plugin host (heldar-wasm → wasmi). OFF by default so the
-# lean appliance binary never links a Wasm runtime; enable it to load `*.wasm` DetectionConsumer plugins.
+# Sandboxed Wasm plugin host — OFF by default so the lean appliance binary never links a Wasm runtime.
 wasm = ["dep:heldar-wasm"]
-# `smtp` links the email notifier (kernel SMTP client). OFF by default so the appliance binary links no
-# SMTP/TLS stack; enable to deliver matching events by email (env-configured: HELDAR_SMTP_*).
+# Email/SMTP notifier — OFF by default so the lean appliance binary links no SMTP/TLS stack. Enable to
+# deliver matching events by email (env-configured: HELDAR_SMTP_*). Forwards to the kernel feature.
 smtp = ["heldar-kernel/smtp"]
 
 [dependencies]
+# Path-only (no version pins): heldar-server is publish=false, so it always builds against the
+# in-workspace crates. This avoids a per-release version-bump chore here and any stale pin.
 heldar-kernel = { path = "../heldar-kernel" }
-# Open generic apps (Apache-2.0) — always composed.
 heldar-entry = { path = "../heldar-entry" }
 heldar-movement = { path = "../heldar-movement" }
 heldar-search = { path = "../heldar-search" }
-# Proprietary verticals — optional, gated by the `verticals` feature.
-heldar-bakery = { path = "../heldar-bakery", optional = true }
 # Sandboxed Wasm plugin host — optional, gated by the `wasm` feature (keeps wasmi out of the default build).
 heldar-wasm = { path = "../heldar-wasm", optional = true }
 tokio = { version = "1", features = ["full"] }
