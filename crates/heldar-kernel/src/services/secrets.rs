@@ -179,19 +179,24 @@ mod tests {
         k
     }
 
+    /// NOTE: test fixtures here must be OBVIOUSLY SYNTHETIC. This crate is published (crates.io)
+    /// and mirrored to the public repo, so a real credential used as a fixture is a disclosure —
+    /// and a published crate version can only be yanked, never deleted.
+    const FIXTURE_PASSWORD: &str = "test-camera-password-not-real";
+
     #[test]
     fn round_trip_with_key() {
         let k = key();
-        let sealed = encrypt(Some(&k), "REDACTED-TEST-CREDENTIAL").unwrap();
+        let sealed = encrypt(Some(&k), FIXTURE_PASSWORD).unwrap();
         assert!(
             sealed.starts_with(PREFIX),
             "sealed value carries the marker"
         );
         assert!(
-            !sealed.contains("REDACTED-TEST-CREDENTIAL"),
+            !sealed.contains(FIXTURE_PASSWORD),
             "plaintext must not appear"
         );
-        assert_eq!(decrypt(Some(&k), &sealed).unwrap(), "REDACTED-TEST-CREDENTIAL");
+        assert_eq!(decrypt(Some(&k), &sealed).unwrap(), FIXTURE_PASSWORD);
     }
 
     #[test]
