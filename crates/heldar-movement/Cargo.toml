@@ -1,6 +1,6 @@
 [package]
 name = "heldar-movement"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 rust-version = "1.85"
 description = "Heldar Movement intelligence — generic cross-camera ReID + movement trails + red-zone breach alerts. Multi-signal candidate matching (plate/attributes/topology/time), never pure visual embedding; ReID is probabilistic correlation with human review, not legal identity. Built on the heldar-kernel platform."
