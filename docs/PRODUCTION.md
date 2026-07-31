@@ -26,8 +26,7 @@ or an empty dial-out bearer (`HELDAR_CP_TOKEN`) while a rendezvous is configured
 
 Each tagged release attaches static `heldar-core` binaries (x86_64 + aarch64). To upgrade a box in place:
 
-    REPO=Straits-AI/heldar                 # open build (self-hosters)
-    # REPO=Straits-AI/heldar-proprietary   # full/licensed build
+    REPO=Straits-AI/heldar                 # licensed/full deployments substitute their own release repo
     ARCH=$(uname -m)                       # x86_64 or aarch64
     V=vX.Y.Z
     curl -fsSLO "https://github.com/$REPO/releases/download/$V/heldar-core-$V-$ARCH-linux-musl"

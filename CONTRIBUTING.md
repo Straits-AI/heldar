@@ -23,12 +23,14 @@ Prerequisites: Rust (via `rustup`), FFmpeg + ffprobe on `PATH`, Node.js (fronten
 ```bash
 rustup update
 cargo build --workspace
+cd apps/web && npm ci && cd -    # dashboard deps
 scripts/setup_mediamtx.sh        # fetch the MediaMTX live-view gateway
 scripts/run_stack.sh             # MediaMTX + core (:8000) + web (Vite)
 ```
 
 The per-stage `scripts/validate_*.sh` scripts exercise each capability end-to-end against a running
-stack and write reports to `data/`.
+stack and write reports to `data/` (override with `HELDAR_DATA_DIR`). Those that need a registered
+camera default to `cam_192_168_0_2`; point them at yours with `CAM=<camera-id>`.
 
 ## Quality bar (CI will check these)
 

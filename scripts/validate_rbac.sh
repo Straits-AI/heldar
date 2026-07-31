@@ -6,13 +6,16 @@ set -u
 PORT=8001
 API=http://127.0.0.1:$PORT/api/v1
 TMP=$(mktemp -d)
-REPORT=/home/soh/cctv/data/validate_rbac.txt
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA="${HELDAR_DATA_DIR:-$ROOT/data}"
+mkdir -p "$DATA"
+REPORT="$DATA/validate_rbac.txt"
 : > "$REPORT"
 log(){ echo "$@" | tee -a "$REPORT"; }
 jqget(){ python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
 code(){ curl -s -o /dev/null -w '%{http_code}' "$@"; }
 
-cd /home/soh/cctv
+cd "$ROOT"
 log "== starting auth-enabled core on :$PORT (temp db $TMP) =="
 HELDAR_AUTH_ENABLED=true \
 HELDAR_BOOTSTRAP_ADMIN_USER=admin \

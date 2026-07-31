@@ -46,15 +46,18 @@ The public `heldar` repository contains:
 
 ## What is proprietary
 
-Vertical and client-specific products live as separate crates in a private
-repository (`heldar-proprietary`). They **depend on** the open crates (via
-crates.io, or a git tag pre-publish, with a local path patch for side-by-side
-development) and layer their domain specifics on top. They are never copied into
-the public repo, and the kernel never references them.
+Vertical and client-specific products live as separate crates, each in its own
+private repository (one per product, so their release cycles stay independent).
+They **depend on** the open crates (via crates.io, with a local path patch for
+side-by-side development) and layer their domain specifics on top. They are never
+merged into this repo, and the kernel never references them.
 
-The composing server isolates proprietary composition behind a seam: in the open
-build that seam is a no-op stub, so the reference server links zero proprietary
-code. `main.rs` is byte-identical between the open and private builds.
+The composing server is a **library**: `heldar_server::run(impl Verticals)` takes
+a four-hook composition trait, so a private product builds its own binary in a few
+dozen lines against these crates (the kernel and apps from crates.io; the
+composition crate by git tag) — no fork of this tree, no file substitution. The
+`heldar-core` binary here composes the open apps and a no-op `Verticals`, so the
+reference build links zero proprietary code.
 
 ## Why this shape
 

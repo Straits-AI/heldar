@@ -4,8 +4,11 @@
 # Runs against the stack with AUTH disabled (default); see validate_rbac.sh for the RBAC path.
 set -u
 API=http://127.0.0.1:8000/api/v1
-CAM=cam_192_168_0_2
-REPORT=/home/soh/cctv/data/validate_entry.txt
+CAM="${CAM:-cam_192_168_0_2}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA="${HELDAR_DATA_DIR:-$ROOT/data}"
+mkdir -p "$DATA"
+REPORT="$DATA/validate_entry.txt"
 : > "$REPORT"
 log(){ echo "$@" | tee -a "$REPORT"; }
 jqget(){ python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }

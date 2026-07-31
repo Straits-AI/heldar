@@ -3,8 +3,11 @@
 # input validation. Assumes the stack is running and cam_192_168_0_2 is registered.
 set -u
 API=http://127.0.0.1:8000
-CAM=cam_192_168_0_2
-REPORT=/home/soh/cctv/data/validate_zones.txt
+CAM="${CAM:-cam_192_168_0_2}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA="${HELDAR_DATA_DIR:-$ROOT/data}"
+mkdir -p "$DATA"
+REPORT="$DATA/validate_zones.txt"
 : > "$REPORT"
 log(){ echo "$@" | tee -a "$REPORT"; }
 post(){ curl -s -o /dev/null -w "%{http_code} " -X POST "$API/api/v1/ai/events" -H 'content-type: application/json' -d "$1"; }

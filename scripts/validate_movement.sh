@@ -4,9 +4,12 @@
 # Assumes the stack is up. Auth off (default).
 set -u
 API=http://127.0.0.1:8000/api/v1
-A=cam_192_168_0_2
-Bc=cam_movement_b
-REPORT=/home/soh/cctv/data/validate_movement.txt
+A="${CAM:-cam_192_168_0_2}"
+Bc="${CAM_B:-cam_movement_b}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA="${HELDAR_DATA_DIR:-$ROOT/data}"
+mkdir -p "$DATA"
+REPORT="$DATA/validate_movement.txt"
 : > "$REPORT"
 log(){ echo "$@" | tee -a "$REPORT"; }
 jqget(){ python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }

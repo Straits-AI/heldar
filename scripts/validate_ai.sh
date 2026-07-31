@@ -4,8 +4,11 @@
 # and camera cam_192_168_0_2 is registered.
 set -u
 API=http://127.0.0.1:8000
-CAM=cam_192_168_0_2
-REPORT=/home/soh/cctv/data/validate_ai.txt
+CAM="${CAM:-cam_192_168_0_2}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA="${HELDAR_DATA_DIR:-$ROOT/data}"
+mkdir -p "$DATA"
+REPORT="$DATA/validate_ai.txt"
 : > "$REPORT"
 log(){ echo "$@" | tee -a "$REPORT"; }
 
@@ -23,12 +26,12 @@ curl -s "$API/api/v1/ai/tasks" | python3 -m json.tool 2>/dev/null | tee -a "$REP
 log "## wait for sampler to produce a frame"
 FRAME_OK=0
 for i in $(seq 1 25); do
-  code=$(curl -s -o /home/soh/cctv/data/ai_frame.jpg -w '%{http_code}' "$API/api/v1/cameras/$CAM/frame")
+  code=$(curl -s -o "$DATA/ai_frame.jpg" -w '%{http_code}' "$API/api/v1/cameras/$CAM/frame")
   if [ "$code" = "200" ]; then FRAME_OK=1; break; fi
   sleep 1
 done
 log "frame http=$code ok=$FRAME_OK"
-file /home/soh/cctv/data/ai_frame.jpg 2>/dev/null | tee -a "$REPORT"
+file "$DATA/ai_frame.jpg" 2>/dev/null | tee -a "$REPORT"
 log "frame age header:"
 curl -s -D - -o /dev/null "$API/api/v1/cameras/$CAM/frame" | grep -i '^x-frame' | tee -a "$REPORT"
 

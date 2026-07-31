@@ -5,9 +5,9 @@ common case for home/small-site internet: a shared public IPv4, no inbound port-
 useless). This is an **open kernel** capability: every deployment of the Apache-2.0 kernel gets
 private remote viewing out of the box.
 
-Remote access is **WebRTC-primary, browser-based** — see [`ARCHITECTURE.md`](../ARCHITECTURE.md) §21
-(the WebRTC model; the full design of record is ADR 0003, `docs/adr/0003-webrtc-remote-access.md` in
-the private monorepo). All phases are **shipped** (P1 live video → P2 universal reach → P3 the full dashboard; see
+Remote access is **WebRTC-primary, browser-based** — the design of record is
+[`ARCHITECTURE.md`](../ARCHITECTURE.md) §21, which carries the full WebRTC model (originally decided
+as ADR 0003). All phases are **shipped** (P1 live video → P2 universal reach → P3 the full dashboard; see
 _Status & phasing_ below). The optional self-hoster **overlay** paths (Recipes A/B) remain available
 for operators who prefer full-L3 reach over the hosted rendezvous. Hardening a deployment for the
 public internet: [`docs/PRODUCTION.md`](PRODUCTION.md).

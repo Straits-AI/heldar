@@ -44,10 +44,12 @@ explicitly and why.
    one. Deploys keep a rollback binary. A cleared runtime override reverts to the env default. Prefer
    changes that can be undone without a data migration.
 
-8. **Open-core discipline.** The public repo is *generated* from the private monorepo by a scrubbing
-   step; proprietary code and names never reach it, and secrets are never committed (reference
-   credentials by `file:line` + type only). If a change could leak proprietary material to the open
-   tree, the generator must strip it and the leak-gate must catch it.
+8. **Open-core discipline.** This repository is the source of truth for the open platform, and it is
+   developed in the open — the commit that lands here is the commit that ships. Proprietary code and
+   client names therefore must never be written into it in the first place, and secrets are never
+   committed (reference credentials by `file:line` + type only). Anything vertical- or
+   client-specific belongs in its own private repository, consuming these crates through the
+   published seams.
 
 9. **Compose, don't couple.** Apps plug into the kernel through narrow, named seams — a
    `DetectionConsumer`, a `Router<AppState>` merge, a self-installed schema (`schema::init`). Adding a

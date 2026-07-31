@@ -1,7 +1,8 @@
-//! The composed `heldar-core` binary for THIS workspace: the library server plus the in-tree
-//! vertical composition (`verticals.rs` — the real proprietary module here; a no-op stub in the
-//! open repo, so this file is identical across both). An out-of-tree overlay builds its own bin
-//! against `heldar_server::run` instead of this one.
+//! The composed `heldar-core` binary: the library server (`heldar_server::run`) plus this
+//! workspace's vertical composition (`verticals.rs`, a no-op here — the open build links no
+//! proprietary code). A private product does NOT fork this file: it depends on this crate (by git
+//! tag — the composition crate is `publish = false`) and calls `heldar_server::run` with its own
+//! `Verticals` implementation.
 
 use axum::Router;
 use heldar_kernel::modules::ModuleManifest;

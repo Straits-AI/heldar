@@ -52,16 +52,20 @@ El repositorio público `heldar` contiene:
 ## Qué es propietario
 
 Los productos verticales y específicos para clientes residen como crates
-separados en un repositorio privado (`heldar-proprietary`). **Dependen de** los
-crates abiertos (a través de crates.io, o una etiqueta git previa a la
-publicación, con un parche de ruta local para el desarrollo en paralelo) y
-añaden sus especificidades de dominio encima. Nunca se copian en el repositorio
-público y el kernel nunca los referencia.
+separados, cada uno en su propio repositorio privado (uno por producto, para que
+sus ciclos de publicación sean independientes). **Dependen de** los crates
+abiertos (a través de crates.io, con un parche de ruta local para el desarrollo
+en paralelo) y añaden sus especificidades de dominio encima. Nunca se fusionan en
+este repositorio y el kernel nunca los referencia.
 
-El servidor de composición aísla la composición propietaria detrás de una
-interfaz: en la compilación abierta esa interfaz es un stub sin operación, por
-lo que el servidor de referencia no enlaza ningún código propietario. `main.rs`
-es byte a byte idéntico entre las compilaciones abierta y privada.
+El servidor de composición es una **biblioteca**: `heldar_server::run(impl
+Verticals)` recibe un trait de composición de cuatro puntos de enganche, así que
+un producto privado construye su propio binario en unas pocas docenas de líneas
+frente a estos crates (el kernel y las apps desde crates.io; el crate de
+composición por etiqueta git) — sin bifurcar este árbol ni sustituir archivos. El
+binario `heldar-core` de aquí compone las apps abiertas y un `Verticals` sin
+operación, por lo que la compilación de referencia no enlaza ningún código
+propietario.
 
 ## Por qué esta estructura
 

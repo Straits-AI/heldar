@@ -3,13 +3,14 @@
 # Starts MediaMTX + a synthetic camera + the core server, exercises every Stage 0 capability,
 # writes a report to data/validate_report.txt, and tears everything down.
 set -u
-ROOT=/home/soh/cctv
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA="${HELDAR_DATA_DIR:-$ROOT/data}"
 MTX="$ROOT/infra/mediamtx/mediamtx"
 CORE="$ROOT/target/debug/heldar-core"
 API=http://127.0.0.1:8000
-REPORT="$ROOT/data/validate_report.txt"
-LOGDIR="$ROOT/data/validate_logs"
-mkdir -p "$LOGDIR" "$ROOT/data"
+REPORT="$DATA/validate_report.txt"
+LOGDIR="$DATA/validate_logs"
+mkdir -p "$LOGDIR" "$DATA"
 : > "$REPORT"
 
 log(){ echo "$@" | tee -a "$REPORT"; }
@@ -29,25 +30,17 @@ cleanup(){
 trap cleanup EXIT
 
 # Clean prior validation artifacts
-rm -rf "$ROOT/data/recordings/synth_cam" "$ROOT/data/heldar.db"* 2>/dev/null
-rm -f "$ROOT/data/clips/"*.mp4 2>/dev/null
+rm -rf "$DATA/recordings/synth_cam" "$DATA/heldar.db"* 2>/dev/null
+rm -f "$DATA/clips/"*.mp4 2>/dev/null
 
 hr "start MediaMTX"
 "$MTX" "$ROOT/infra/mediamtx/mediamtx.yml" >"$LOGDIR/mediamtx.log" 2>&1 &
 MTX_PID=$!
 sleep 2
 
-hr "start synthetic camera (testsrc -> rtsp://127.0.0.1:8554/cam_test)"
-ffmpeg -nostdin -hide_banner -loglevel warning -re \
-  -f lavfi -i "testsrc=size=1280x720:rate=15" \
-  -c:v libx264 -preset ultrafast -tune zerolatency -g 30 -pix_fmt yuv420p \
-  -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/cam_test >"$LOGDIR/synth.log" 2>&1 &
-SYNTH_PID=$!
-sleep 3
-
 hr "start Heldar Core (segment=5s, indexer=3s)"
 HELDAR_DEFAULT_SEGMENT_SECONDS=5 \
-HELDAR_DATA_DIR="$ROOT/data" \
+HELDAR_DATA_DIR="$DATA" \
 HELDAR_INDEXER_INTERVAL_S=3 \
 HELDAR_HEALTH_INTERVAL_S=10 \
 HELDAR_RETENTION_INTERVAL_S=60 \
@@ -63,6 +56,19 @@ for _ in $(seq 1 30); do
 done
 log "API up: $UP"
 [ "$UP" = 1 ] || { log "API DID NOT START — core.log tail:"; tail -n 30 "$LOGDIR/core.log" | tee -a "$REPORT"; exit 1; }
+
+# The synthetic publisher must start AFTER the core: MediaMTX delegates publish authorization to the
+# kernel (`authMethod: http` -> /internal/mediamtx-auth), so publishing before the core is up gets a
+# 401 and ffmpeg exits immediately.
+hr "start synthetic camera (testsrc -> rtsp://127.0.0.1:8554/cam_test)"
+ffmpeg -nostdin -hide_banner -loglevel warning -re \
+  -f lavfi -i "testsrc=size=1280x720:rate=15" \
+  -c:v libx264 -preset ultrafast -tune zerolatency -g 30 -pix_fmt yuv420p \
+  -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/cam_test >"$LOGDIR/synth.log" 2>&1 &
+SYNTH_PID=$!
+sleep 3
+kill -0 "$SYNTH_PID" 2>/dev/null \
+  || { log "SYNTHETIC CAMERA DIED — synth.log tail:"; tail -n 10 "$LOGDIR/synth.log" | tee -a "$REPORT"; exit 1; }
 
 hr "healthz"; curl -fsS "$API/healthz"; echo | tee -a "$REPORT"
 hr "system (initial)"; curl -fsS "$API/api/v1/system" | tee -a "$REPORT"; echo | tee -a "$REPORT"
@@ -106,9 +112,9 @@ log "recorded range: '$FROM' .. '$TO' (segment_count=$(echo "$SEGS" | python3 -c
 
 if [ -n "$FROM" ]; then
   hr "snapshot at $FROM (recorded)"
-  curl -sS "$API/api/v1/cameras/synth_cam/snapshot?at=$FROM" -o "$ROOT/data/snap_recorded.jpg" \
+  curl -sS "$API/api/v1/cameras/synth_cam/snapshot?at=$FROM" -o "$DATA/snap_recorded.jpg" \
     -w "http=%{http_code} bytes=%{size_download}\n" | tee -a "$REPORT"
-  file "$ROOT/data/snap_recorded.jpg" 2>/dev/null | tee -a "$REPORT"
+  file "$DATA/snap_recorded.jpg" 2>/dev/null | tee -a "$REPORT"
 
   hr "clip export $FROM .. $TO"
   curl -sS -X POST "$API/api/v1/cameras/synth_cam/clip" -H 'content-type: application/json' \
@@ -116,9 +122,9 @@ if [ -n "$FROM" ]; then
 fi
 
 hr "live snapshot (grab from stream now)"
-curl -sS "$API/api/v1/cameras/synth_cam/snapshot" -o "$ROOT/data/snap_live.jpg" \
+curl -sS "$API/api/v1/cameras/synth_cam/snapshot" -o "$DATA/snap_live.jpg" \
   -w "http=%{http_code} bytes=%{size_download}\n" | tee -a "$REPORT"
-file "$ROOT/data/snap_live.jpg" 2>/dev/null | tee -a "$REPORT"
+file "$DATA/snap_live.jpg" 2>/dev/null | tee -a "$REPORT"
 
 hr "liveview (register MediaMTX path)"
 curl -sS "$API/api/v1/cameras/synth_cam/liveview" -w "\n[http=%{http_code}]\n" | tee -a "$REPORT"
@@ -145,7 +151,7 @@ hr "system (final)"
 curl -fsS "$API/api/v1/system" | tee -a "$REPORT"; echo | tee -a "$REPORT"
 
 hr "on-disk artifacts"
-log "recordings/synth_cam:"; ls -la "$ROOT/data/recordings/synth_cam" 2>/dev/null | tee -a "$REPORT"
-log "clips:"; ls -la "$ROOT/data/clips" 2>/dev/null | grep -E '\.mp4$' | tee -a "$REPORT"
+log "recordings/synth_cam:"; ls -la "$DATA/recordings/synth_cam" 2>/dev/null | tee -a "$REPORT"
+log "clips:"; ls -la "$DATA/clips" 2>/dev/null | grep -E '\.mp4$' | tee -a "$REPORT"
 
 hr "VALIDATION COMPLETE"
