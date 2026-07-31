@@ -2,6 +2,10 @@
 # Publish a synthetic H.264 RTSP stream to MediaMTX so the kernel can be tested without
 # real cameras / credentials. Requires MediaMTX running (scripts/dev.sh or run it directly).
 #
+# Start heldar-core FIRST: MediaMTX delegates publish authorization to the kernel
+# (`authMethod: http` -> /internal/mediamtx-auth), so publishing while the core is down is
+# denied with `ANNOUNCE failed: 401 Unauthorized` and ffmpeg exits straight away.
+#
 # Usage: scripts/synth_camera.sh [path] [size] [fps]
 #   path  MediaMTX path name (default: cam_test)
 #   size  WxH (default: 1280x720)

@@ -3,8 +3,11 @@
 # proof), plan dry-run, and the identity-query audit. Assumes the stack is up. Auth off (default).
 set -u
 API=http://127.0.0.1:8000/api/v1
-CAM=cam_192_168_0_2
-REPORT=/home/soh/cctv/data/validate_search.txt
+CAM="${CAM:-cam_192_168_0_2}"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+DATA="${HELDAR_DATA_DIR:-$ROOT/data}"
+mkdir -p "$DATA"
+REPORT="$DATA/validate_search.txt"
 : > "$REPORT"
 log(){ echo "$@" | tee -a "$REPORT"; }
 jqget(){ python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
@@ -48,5 +51,5 @@ log ""
 log "## identity-query audit (plate search writes audit_log):"
 curl -s -X POST "$API/search/nl" -H 'content-type: application/json' -d '{"query":"vehicle SEEK999"}' >/dev/null
 log "  search_identity_query audit entries: $(curl -s "$API/audit?action=search_identity_query&limit=5" | jqget 'len(d)')"
-log "  search_log rows: $(sqlite3 /home/soh/cctv/data/heldar.db 'SELECT count(*) FROM search_log;' 2>/dev/null)"
+log "  search_log rows: $(sqlite3 "$DATA/heldar.db" 'SELECT count(*) FROM search_log;' 2>/dev/null)"
 log "DONE"

@@ -1,8 +1,9 @@
-//! Proprietary vertical composition seam — a NO-OP stub in the open repo.
+//! Vertical composition for this workspace — deliberately a NO-OP.
 //!
-//! `main.rs` calls these functions unconditionally. In the open build they do nothing and reference
-//! no proprietary crate. The private workspace replaces this file with the real composition module
-//! (the proprietary verticals) — `main.rs` is identical across both repos.
+//! `main.rs` adapts these functions into a [`heldar_server::Verticals`] implementation. Nothing here
+//! references a proprietary crate, so the reference `heldar-core` binary links none. This file is
+//! also the smallest worked example of the seam: a private product implements the same four hooks
+//! in its own repository and passes them to `heldar_server::run`.
 
 use axum::Router;
 use heldar_kernel::modules::ModuleManifest;

@@ -7,7 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **The from-source quickstart works in any clone.** `scripts/run_stack.sh` resolved its paths from a
+  hardcoded `/home/soh/cctv`, so for everyone else it started nothing — and, having no precondition
+  checks, still printed `stack up: …` and slept for 30 minutes. It now resolves paths relative to the
+  script, honours `HELDAR_DATA_DIR`, and fails loudly on a missing binary, MediaMTX, or dashboard
+  deps. The same hardcoded root is gone from `smoke_web.sh` and every `validate_*.sh`, whose reports
+  now land in the repo's `data/`; the camera they exercise is overridable with `CAM=`.
+
+- **`scripts/setup_mediamtx.sh` runs outside Linux/x86.** It parsed the release tag with `grep -oP`
+  (GNU-only — it failed outright on macOS/BSD) and always downloaded `linux_amd64`. It now detects
+  OS/arch (linux + darwin; amd64/arm64/armv7/armv6) and parses the tag portably. `MEDIAMTX_TAG=`
+  pins a release.
+
+- **Synthetic-camera harnesses publish after the core, not before.** Since publish authorization moved
+  to the kernel (`authMethod: http` → `/internal/mediamtx-auth`), starting an ffmpeg publisher before
+  heldar-core is up gets a 401 and the publisher exits immediately — so `validate.sh`, `smoke_web.sh`
+  and the Playwright `e2e_stack.sh` were all exercising cameras that never streamed. The publishers now
+  start after the API is healthy, and `validate.sh` aborts if its camera dies.
+
+- **The Playwright e2e stack actually records.** `e2e_stack.sh` runs the core on `:8011`, but
+  `mediamtx.yml` pins the kernel auth callback to `:8000`, so MediaMTX asked a dead port and denied
+  every publish *and* read. It now starts MediaMTX from a port-adjusted copy of the config. Two further
+  portability fixes: `wait "${PIDS[-1]}"` needs bash ≥ 4.3 and aborted under `set -u` on macOS's bash
+  3.2 (it now waits on the core PID), and the `fuser -k` port cleanup falls back to `lsof` where
+  `fuser` has no `-k`.
+
+### Documentation
+
+- Docs no longer describe the retired generated-tree model. `LICENSING.md`, `DESIGN-PRINCIPLES.md` #8,
+  the open-core and module-system pages (plus their `es`/`zh-Hans` translations), `REMOTE-ACCESS.md`,
+  `PRODUCTION.md` and the `heldar-server` composition-root comments said the public repo was *generated
+  from a private monorepo* and that `main.rs` was substituted per build — which contradicted
+  CONTRIBUTING and would have told a contributor their PR gets regenerated away. They now describe the
+  real model: this repo is the source of truth, and a private product composes its own binary against
+  `heldar_server::run(impl Verticals)`.
+- `ARCHITECTURE.md` §21 no longer points at a `docs/adr/` path that does not exist in this repo.
+- README/CONTRIBUTING dev setup now includes the dashboard `npm ci` step that `run_stack.sh` requires,
+  and the README no longer describes the production overlay as switching to a private image (it is an
+  open hardening overlay).
 
 ## [0.3.1] - 2026-07-31
 

@@ -48,9 +48,10 @@ the shell's React and design system instead of duplicating them — the built bu
 (~10–50 KB) and always match the host.
 
 Why it matters: because no module UI is compiled into the dashboard, the SPA is **byte-identical for the
-open and full builds**. There is one `heldar-web` image for both, and the open-repo generator drops a
-proprietary vertical's UI by deleting its one self-contained directory — no per-file source patching. A
-module that ships no page (e.g. a headless compute plugin) simply omits `ui_url`.
+open and full builds**. There is one `heldar-web` image for both, and a proprietary vertical ships its UI
+as one self-contained bundle its own repository builds and serves — nothing about it lives in, or has to
+be stripped from, this tree. A module that ships no page (e.g. a headless compute plugin) simply omits
+`ui_url`.
 
 ## One manifest, composed at boot + runtime
 

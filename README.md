@@ -37,8 +37,8 @@ curl -fsSL https://heldar.swmengappdev.workers.dev/install.sh | sh
 
 Pulls the prebuilt **OPEN** images (kernel + generic apps) and starts MediaMTX + core + web — the
 dashboard is then at `http://localhost:8080`. Add the reference AI worker with `--profile ai`; update
-with `docker compose pull`. Production (private full image, auth, secrets, TLS) uses the overlay
-`docker compose -f deploy/compose.yml -f deploy/compose.prod.yml up -d` — see
+with `docker compose pull`. For production (auth on, secure cookies, strict boot guardrails) layer the
+hardening overlay: `docker compose -f deploy/compose.yml -f deploy/compose.prod.yml up -d` — see
 [`docs/PRODUCTION.md`](docs/PRODUCTION.md). For a flashed DVR/appliance, use the native-systemd image
 instead (`make appliance-image`, [`infra/systemd/`](infra/systemd/)).
 
@@ -51,6 +51,7 @@ dashboard; Python 3 for the AI worker.
 rustup update                        # the project tracks latest stable
 cargo build --workspace
 cp .env.example .env                 # defaults work out of the box; never commit .env
+(cd apps/web && npm ci)              # dashboard dependencies
 scripts/setup_mediamtx.sh            # fetch the MediaMTX live-view gateway
 scripts/run_stack.sh                 # MediaMTX + core (http://localhost:8000) + web (Vite on :5173)
 ```

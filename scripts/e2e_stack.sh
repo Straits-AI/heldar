@@ -24,24 +24,26 @@ trap cleanup EXIT INT TERM
 
 # Free the ports + kill leftovers from a previous run that may have been killed before its trap ran,
 # so every boot starts clean (the core port + MediaMTX's RTSP/API ports, and the synthetic publishers).
-fuser -k "${PORT}/tcp" 8554/tcp 9997/tcp 2>/dev/null || true
+# `fuser -k` is Linux-only (macOS fuser takes no -k), so prefer lsof when it is available.
+if command -v lsof >/dev/null 2>&1; then
+  for p in "$PORT" 8554 9997; do
+    lsof -ti "tcp:$p" 2>/dev/null | xargs -r kill -9 2>/dev/null || true
+  done
+else
+  fuser -k "${PORT}/tcp" 8554/tcp 9997/tcp 2>/dev/null || true
+fi
 pkill -9 -f 'rtsp://127.0.0.1:8554/cam_e2e_' 2>/dev/null || true
 sleep 1
 
 echo "[e2e_stack] MediaMTX"
-"$MTX" "$ROOT/infra/mediamtx/mediamtx.yml" >"$LOG/mediamtx.log" 2>&1 & PIDS+=($!)
+# The shipped config pins the kernel auth callback to :8000, but this stack runs the core on $PORT so
+# it never collides with a dev core. Without repointing it, MediaMTX asks a dead port and denies every
+# publish AND read with a 401 — cameras silently stay offline. Generate a port-adjusted copy.
+MTX_CFG="$DATA/mediamtx.yml"
+sed "s|http://127.0.0.1:8000/internal/mediamtx-auth|http://127.0.0.1:${PORT}/internal/mediamtx-auth|" \
+  "$ROOT/infra/mediamtx/mediamtx.yml" >"$MTX_CFG"
+"$MTX" "$MTX_CFG" >"$LOG/mediamtx.log" 2>&1 & PIDS+=($!)
 sleep 2
-
-echo "[e2e_stack] $NCAMS synthetic cameras"
-for i in $(seq 1 "$NCAMS"); do
-  # testsrc has a built-in moving pattern + frame counter (motion for the AI task); no drawtext, since
-  # that filter needs libfreetype which isn't in every ffmpeg build.
-  ffmpeg -nostdin -hide_banner -loglevel error -re \
-    -f lavfi -i "testsrc=size=640x360:rate=10" \
-    -c:v libx264 -preset ultrafast -tune zerolatency -g 20 -pix_fmt yuv420p \
-    -f rtsp -rtsp_transport tcp "rtsp://127.0.0.1:8554/cam_e2e_${i}" >"$LOG/cam_${i}.log" 2>&1 & PIDS+=($!)
-done
-sleep 3
 
 echo "[e2e_stack] core (isolated DB under $DATA, port $PORT)"
 HELDAR_DATABASE_URL="sqlite://$DATA/heldar.db" \
@@ -52,11 +54,25 @@ HELDAR_DEFAULT_SEGMENT_SECONDS=5 \
 HELDAR_INDEXER_INTERVAL_S=3 \
 HELDAR_HEALTH_INTERVAL_S=5 \
 HELDAR_AI_ENABLED=true HELDAR_DEFAULT_AI_FPS=2 \
-"$CORE" >"$LOG/core.log" 2>&1 & PIDS+=($!)
+"$CORE" >"$LOG/core.log" 2>&1 & CORE_PID=$!; PIDS+=($CORE_PID)
 
 # wait for the API
 for _ in $(seq 1 40); do curl -fsS "$API/healthz" >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS "$API/healthz" >/dev/null 2>&1 || { echo "[e2e_stack] core did not start"; tail -20 "$LOG/core.log"; exit 1; }
+
+# Publishers start AFTER the core: MediaMTX delegates publish authorization to the kernel
+# (`authMethod: http` -> /internal/mediamtx-auth), so publishing earlier is denied with a 401 and
+# every ffmpeg exits immediately — leaving the e2e suite running against cameras that never stream.
+echo "[e2e_stack] $NCAMS synthetic cameras"
+for i in $(seq 1 "$NCAMS"); do
+  # testsrc has a built-in moving pattern + frame counter (motion for the AI task); no drawtext, since
+  # that filter needs libfreetype which isn't in every ffmpeg build.
+  ffmpeg -nostdin -hide_banner -loglevel error -re \
+    -f lavfi -i "testsrc=size=640x360:rate=10" \
+    -c:v libx264 -preset ultrafast -tune zerolatency -g 20 -pix_fmt yuv420p \
+    -f rtsp -rtsp_transport tcp "rtsp://127.0.0.1:8554/cam_e2e_${i}" >"$LOG/cam_${i}.log" 2>&1 & PIDS+=($!)
+done
+sleep 3
 
 echo "[e2e_stack] registering $NCAMS cameras"
 for i in $(seq 1 "$NCAMS"); do
@@ -71,4 +87,6 @@ curl -fsS -X POST "$API/api/v1/cameras/cam_e2e_1/ai-tasks" -H 'content-type: app
   -d '{"task_type":"motion","fps":2,"width":480,"enabled":true,"config":{"threshold":0.0008,"pixel_delta":6}}' >/dev/null 2>&1 || true
 
 echo "[e2e_stack] ready: $NCAMS cameras on $API (dashboard served). Waiting…"
-wait "${PIDS[-1]}"
+# Foreground on the core (Playwright's `webServer` keeps the stack alive). Not `${PIDS[-1]}`:
+# negative array subscripts need bash >= 4.3 and macOS ships bash 3.2, where that aborts under `set -u`.
+wait "$CORE_PID"
