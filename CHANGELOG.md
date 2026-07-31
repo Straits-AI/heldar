@@ -43,7 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   CONTRIBUTING and would have told a contributor their PR gets regenerated away. They now describe the
   real model: this repo is the source of truth, and a private product composes its own binary against
   `heldar_server::run(impl Verticals)`.
-- `ARCHITECTURE.md` §21 no longer points at a `docs/adr/` path that does not exist in this repo.
+- **Architecture decision records are published** under [`docs/adr/`](docs/adr): ADR 0003 (remote
+  viewing over WebRTC; retiring the mobile app and kernel-managed WireGuard) and ADR 0004 (edge nodes
+  stay on SQLite rather than porting to Postgres). Shipped code and docs cited these as the design
+  records while the directory did not exist here, so `ARCHITECTURE.md` §21 and `REMOTE-ACCESS.md` now
+  link to a document a reader can actually open. Decisions that are wholly about the commercial tier
+  stay unpublished, and the index says so.
+- `services/embeddings.rs` credited the no-vector-DB/no-ANN choice to ADR 0004, which is the
+  SQLite-versus-Postgres brief; no ADR records that decision, so the rationale now stands on its own.
+- CONTRIBUTING notes that `issue #NN` references predating 2026-07 point at the tracker used before
+  development moved into the open, and do not match this repo's issue numbers.
 - README/CONTRIBUTING dev setup now includes the dashboard `npm ci` step that `run_stack.sh` requires,
   and the README no longer describes the production overlay as switching to a private image (it is an
   open hardening overlay).

@@ -6,9 +6,9 @@ useless). This is an **open kernel** capability: every deployment of the Apache-
 private remote viewing out of the box.
 
 Remote access is **WebRTC-primary, browser-based** — the design of record is
-[`ARCHITECTURE.md`](../ARCHITECTURE.md) §21, which carries the full WebRTC model (originally decided
-as ADR 0003). All phases are **shipped** (P1 live video → P2 universal reach → P3 the full dashboard; see
-_Status & phasing_ below). The optional self-hoster **overlay** paths (Recipes A/B) remain available
+[`ARCHITECTURE.md`](../ARCHITECTURE.md) §21, which carries the full WebRTC model; the decision that
+produced it is [ADR 0003](adr/0003-webrtc-remote-access.md). All phases are **shipped** (P1 live
+video → P2 universal reach → P3 the full dashboard; see _Status & phasing_ below). The optional self-hoster **overlay** paths (Recipes A/B) remain available
 for operators who prefer full-L3 reach over the hosted rendezvous. Hardening a deployment for the
 public internet: [`docs/PRODUCTION.md`](PRODUCTION.md).
 
@@ -21,7 +21,7 @@ public internet: [`docs/PRODUCTION.md`](PRODUCTION.md).
   **signaling + TURN hosted in `heldar-control-plane`**; live video rides **MediaMTX / WHEP**
   (`:8889`). Media is **end-to-end encrypted (DTLS-SRTP)**: the rendezvous brokers only SDP/ICE and
   relayed control, never the video bytes. Design: [`ARCHITECTURE.md`](../ARCHITECTURE.md) §21
-  (ADR 0003).
+  ([ADR 0003](adr/0003-webrtc-remote-access.md)).
 - **Optional (works today): a WireGuard overlay** running as an external daemon on the host, for
   self-hosters who want full L3 reachability rather than just the browser view.
   - **Your own / dev use → Tailscale** (Personal, free): zero servers, near-zero ops, $0.
@@ -85,7 +85,7 @@ Headscale) removes even that third-party metadata, at the cost of a small VPS to
 ## Status & phasing
 
 WebRTC remote access **shipped in three phases, all landed** (implementation:
-[`ARCHITECTURE.md`](../ARCHITECTURE.md) §21; full phased plan: ADR 0003):
+[`ARCHITECTURE.md`](../ARCHITECTURE.md) §21; the decision: [ADR 0003](adr/0003-webrtc-remote-access.md)):
 
 - **P1 — LAN / WHEP ✅:** sub-second live video in the browser over MediaMTX WHEP (`:8889`) on the LAN.
 - **P2 — universal reach ✅:** the box dials out to **signaling + TURN**, so the same browser view works

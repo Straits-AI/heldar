@@ -2,7 +2,7 @@
 //! worker's `embedding` task, the pull-only query-embedding job queue, and brute-force cosine
 //! top-k over the stored vectors.
 //!
-//! Vectors live as little-endian f32 BLOBs in SQLite (no vector DB / ANN index — ADR 0004): at
+//! Vectors live as little-endian f32 BLOBs in SQLite (deliberately no vector DB / ANN index): at
 //! single-box scale even a million 512-d vectors scan in tens of milliseconds, and the scan
 //! streams rows so peak memory stays at one row + the k-sized heap.
 //!

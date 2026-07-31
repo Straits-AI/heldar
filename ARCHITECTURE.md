@@ -2023,7 +2023,7 @@ useless), so the only thing that reaches it is the node **dialing out**. Remote 
 **browser-based WebRTC**: the box dials OUT to a **signaling + TURN service** in the control plane,
 NAT traversal is negotiated over ICE, and a browser viewer plays live video over **WHEP** (served by
 MediaMTX). The deploy recipes live in `docs/REMOTE-ACCESS.md`; this section is the architecture of
-record (originally decided as ADR 0003).
+record, and the decision that produced it is `docs/adr/0003-webrtc-remote-access.md`.
 
 **Two layers, kept separate.** *Reachability* is WebRTC: the box and the browser exchange SDP/ICE
 through the control-plane **signaling** endpoint, then establish a direct peer connection whenever
