@@ -56,6 +56,12 @@ cargo build -p heldar-server --features smtp --locked
 cd apps/web && npm ci && npm run build
 ```
 
+- **Design decisions are recorded.** [`docs/adr/`](./docs/adr) holds the decision records — why the
+  system is the way it is, as opposed to how it works today (that's [ARCHITECTURE.md](./ARCHITECTURE.md)).
+  A decision that changes a seam or reverses one of these deserves a new ADR alongside the code.
+- **A note on `issue #NN` in comments.** References predating 2026-07 point at the tracker this project
+  used before it moved development into the open; they do **not** correspond to issue numbers in this
+  repo. They are kept as provenance for the original design discussion — don't follow them here.
 - **Architecture seams matter.** Apps plug into the kernel only through public seams (the
   `DetectionConsumer` trait, `Router<AppState>` merging, a self-installed schema, the auth primitive).
   Don't add app-specific knowledge to the kernel — see [ARCHITECTURE.md](./ARCHITECTURE.md).
