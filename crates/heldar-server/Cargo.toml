@@ -33,13 +33,13 @@ heldar-movement = { path = "../heldar-movement" }
 heldar-search = { path = "../heldar-search" }
 # Sandboxed Wasm plugin host — optional, gated by the `wasm` feature (keeps wasmi out of the default build).
 heldar-wasm = { path = "../heldar-wasm", optional = true }
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1.53.1", features = ["full"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 chrono = { version = "0.4", features = ["serde"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-anyhow = "1"
+anyhow = "1.0.104"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
