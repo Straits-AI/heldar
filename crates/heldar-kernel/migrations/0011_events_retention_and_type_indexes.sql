@@ -1,0 +1,26 @@
+-- Two missing indexes on `events`, both on hot paths that degrade into full-table scans as the log grows.
+-- Same failure mode as 0005 (consumer_fanout.fanned_at): the query is correct, but without an index it
+-- holds or starves the single SQLite writer once the table is large.
+--
+-- 1) events(created_at) — the retention prune.
+--    retention.rs deletes aged rows in bounded batches with `DELETE ... WHERE created_at < ? LIMIT ...`
+--    (delete_aged_in_batches). The only index covering created_at is idx_events_severity_created
+--    (severity, created_at); created_at is the SECOND column, so the planner can only SCAN it, never seek.
+--    Every batch therefore walks the whole index while holding the write lock.
+--
+-- 2) events(event_type, timestamp) — the disk-health probe in GET /api/v1/system.
+--    routes/system.rs runs `SELECT MAX(timestamp) FROM events WHERE event_type IN
+--    ('disk_smart_warning','raid_degraded')`. No index led with event_type, so this scanned the entire
+--    table on EVERY dashboard poll — to find rows that on a healthy box do not exist at all. Leading with
+--    event_type makes it a covering seek per type; including timestamp lets MAX() read one row per type.
+--
+-- Observed on the live box: 5.69M events (93% of them `object_detected`, one per detection from the
+-- reference AI worker). The system probe took 3.28s uncontended and 92–139s under write load, so the
+-- remote-dashboard relay timed out and the console showed "Core unreachable / box did not answer in
+-- time" while every other endpoint was fine. After these indexes: 0.0001s, and the slow-statement rate
+-- fell from ~9/min to ~1/min.
+--
+-- Both are idempotent (IF NOT EXISTS) so they are a no-op where an operator already added them
+-- out-of-band for relief.
+CREATE INDEX IF NOT EXISTS idx_events_created_at ON events (created_at);
+CREATE INDEX IF NOT EXISTS idx_events_type_time ON events (event_type, timestamp);
