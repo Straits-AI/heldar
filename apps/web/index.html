@@ -30,11 +30,19 @@
       specifier at a thin shim (public/modules/*-shim.js) that re-exports from window globals set
       by main.tsx before any module bundle loads.
 
-      The map is injected at runtime so the base path (/ on appliance, /app/ on remote dashboard)
-      is handled correctly without a rebuild.
+      The specifiers must carry the SPA's base path: "/" on the appliance, "/app/" on the remote
+      dashboard. Vite substitutes %BASE_URL% here at build time (it mirrors `base` in vite.config.ts,
+      set from VITE_BASE_PATH), so one source builds both.
+
+      This previously read a <base href> element that does not exist in this document, so it always
+      fell through to "/". That is correct on the appliance and silently wrong remotely: the shims
+      404 under /app/, every module bundle dies on its first import, and the dashboard can only
+      report "Module unavailable" for Search/Entry/Movement.
     -->
     <script>
-      const b = document.querySelector('base')?.getAttribute('href') || '/';
+      // Defensive: if the token were ever left unsubstituted, fall back to the appliance base.
+      const rawBase = "%BASE_URL%";
+      const b = rawBase.startsWith("%") ? "/" : rawBase;
       const map = { imports: {
         "react":              b + "modules/react-shim.js",
         "react-dom":          b + "modules/react-dom-shim.js",
