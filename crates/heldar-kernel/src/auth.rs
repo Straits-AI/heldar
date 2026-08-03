@@ -29,6 +29,53 @@ use crate::state::AppState;
 pub const SESSION_PREFIX: &str = "vos_";
 pub const APIKEY_PREFIX: &str = "vok_";
 
+/// In-memory liveness for sessions, keyed by the hashed session id (never the raw token).
+///
+/// The idle timeout asks "was this operator active recently?", and the durable answer is
+/// `sessions.last_used_at`. But that stamp is a debounced, best-effort WRITE: under write pressure it
+/// can hit the pool's `busy_timeout` and be dropped, and while the box is unreachable the dashboard's
+/// polls never arrive to refresh it at all. Because the idle check then *deletes* the session, an
+/// operator who never stopped working gets logged out — worst of all during an outage, which is exactly
+/// when they are trying to diagnose something.
+///
+/// So liveness is tracked here too, and the idle check uses whichever signal is newer. This map is
+/// authoritative for "recently seen" while the process lives; `last_used_at` remains the restart-durable
+/// fallback. Entries are bounded: anything past the idle window is dropped once the map grows.
+static SESSION_SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, i64>>> =
+    std::sync::OnceLock::new();
+
+/// Above this many tracked sessions, prune entries older than the idle window on the next touch.
+const SESSION_SEEN_PRUNE_AT: usize = 4096;
+
+fn session_seen() -> &'static std::sync::Mutex<std::collections::HashMap<String, i64>> {
+    SESSION_SEEN.get_or_init(Default::default)
+}
+
+/// Record that a session was just used. Infallible and lock-poison-tolerant: liveness must never be the
+/// thing that fails, since a failure here logs a working operator out.
+fn mark_session_seen(sid: &str, now: DateTime<Utc>, idle_minutes: i64) {
+    let Ok(mut map) = session_seen().lock() else {
+        return;
+    };
+    if map.len() > SESSION_SEEN_PRUNE_AT {
+        let cutoff = (now - Duration::minutes(idle_minutes.max(1))).timestamp();
+        map.retain(|_, seen| *seen >= cutoff);
+    }
+    map.insert(sid.to_string(), now.timestamp());
+}
+
+/// The most recent in-memory sighting of a session, if any.
+fn session_last_seen(sid: &str) -> Option<i64> {
+    session_seen().lock().ok()?.get(sid).copied()
+}
+
+/// Forget a session's liveness (on logout / expiry) so the map does not pin dead sessions.
+fn forget_session_seen(sid: &str) {
+    if let Ok(mut map) = session_seen().lock() {
+        map.remove(sid);
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Role {
     Admin,
@@ -330,9 +377,19 @@ async fn resolve_token(
     .await?;
     if let Some(r) = row {
         // Absolute TTL, then idle timeout — either drops the session.
-        let idle_expired =
-            idle_minutes > 0 && r.last_used_at < now - Duration::minutes(idle_minutes);
+        //
+        // Idle is judged on the NEWER of the durable stamp and the in-memory sighting (see SESSION_SEEN):
+        // the stamp below is best-effort and can be silently dropped under write pressure, so trusting it
+        // alone logs out operators who never went idle.
+        let last_active = match session_last_seen(&r.sid) {
+            Some(seen) if seen > r.last_used_at.timestamp() => {
+                DateTime::from_timestamp(seen, 0).unwrap_or(r.last_used_at)
+            }
+            _ => r.last_used_at,
+        };
+        let idle_expired = idle_minutes > 0 && last_active < now - Duration::minutes(idle_minutes);
         if r.expires_at <= now || idle_expired {
+            forget_session_seen(&r.sid);
             let _ = sqlx::query("DELETE FROM sessions WHERE id = ?")
                 .bind(&r.sid)
                 .execute(pool)
@@ -346,16 +403,33 @@ async fn resolve_token(
             tracing::error!(user = %r.uid, role = %r.role, "auth: user has unparseable role; denying");
             return Ok(None);
         };
-        // Debounced like the api-key stamp (idle timeouts are measured in minutes, so 1-minute
-        // granularity on last_used_at is lossless for the idle check and spares the SQLite writer).
-        let _ = sqlx::query(
+        // Liveness first, and in memory, so it cannot fail: this is what the idle check reads, and the
+        // operator is demonstrably active right now.
+        mark_session_seen(&r.sid, now, idle_minutes);
+        // Then the durable stamp, debounced like the api-key one (idle timeouts are measured in minutes,
+        // so 1-minute granularity is lossless for the idle check and spares the SQLite writer).
+        //
+        // NOTE the third bind. It was missing, so the debounce placeholder was left UNBOUND — SQLite
+        // reads an unbound parameter as NULL, `last_used_at < NULL` is never true, and the WHERE never
+        // matched. The stamp therefore never updated after login (rows_affected=0, always), so every
+        // session idled out a fixed interval after LOGIN no matter how actively it was used.
+        if let Err(e) = sqlx::query(
             "UPDATE sessions SET last_used_at = ?
              WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)",
         )
         .bind(now)
         .bind(&r.sid)
+        .bind(now - Duration::minutes(1))
         .execute(pool)
-        .await;
+        .await
+        {
+            // Best-effort, but no longer silent: a persistently failing stamp means sessions stop
+            // surviving a restart, and that is worth seeing.
+            tracing::warn!(
+                error = %e,
+                "auth: could not persist session last_used_at; liveness held in memory only"
+            );
+        }
         return Ok(Some(Principal {
             id: r.uid,
             name: r.display_name.unwrap_or_default(),
@@ -538,6 +612,110 @@ pub async fn audit(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn mem_pool_migrated() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        pool
+    }
+
+    /// Seed a user + a session whose `last_used_at` is `age_minutes` old, returning (raw token, sid).
+    async fn seed_session(pool: &SqlitePool, age_minutes: i64) -> (String, String) {
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO users (id, username, password_hash, display_name, role, active, created_at, updated_at)
+             VALUES ('u1','op',?,'Op','admin',1,?,?)",
+        )
+        .bind(hash_password("pw").unwrap())
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+        let token = random_token(SESSION_PREFIX);
+        let sid = token_hash(&token);
+        sqlx::query(
+            "INSERT INTO sessions (id, user_id, created_at, expires_at, last_used_at)
+             VALUES (?, 'u1', ?, ?, ?)",
+        )
+        .bind(&sid)
+        .bind(now - Duration::minutes(age_minutes))
+        .bind(now + Duration::hours(8))
+        .bind(now - Duration::minutes(age_minutes))
+        .execute(pool)
+        .await
+        .unwrap();
+        (token, sid)
+    }
+
+    /// Regression: the debounce placeholder in the `last_used_at` UPDATE was left unbound, so SQLite
+    /// read it as NULL, `last_used_at < NULL` never held, and the stamp NEVER advanced after login —
+    /// every session idled out a fixed interval after login regardless of activity.
+    #[tokio::test]
+    async fn using_a_session_advances_last_used_at() {
+        let pool = mem_pool_migrated().await;
+        let (token, sid) = seed_session(&pool, 10).await;
+
+        let before: DateTime<Utc> =
+            sqlx::query_scalar("SELECT last_used_at FROM sessions WHERE id = ?")
+                .bind(&sid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let p = resolve_token(&pool, &token, 45).await.unwrap();
+        assert!(p.is_some(), "a 10-minute-old session must still resolve");
+
+        let after: DateTime<Utc> =
+            sqlx::query_scalar("SELECT last_used_at FROM sessions WHERE id = ?")
+                .bind(&sid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            after > before,
+            "using a session must advance last_used_at (was {before}, now {after}) — otherwise the \
+             idle timeout measures time since LOGIN, not since last activity"
+        );
+    }
+
+    /// An operator who keeps working must not be idled out just because the durable stamp is stale:
+    /// the in-memory sighting is the newer signal and wins.
+    #[tokio::test]
+    async fn in_memory_liveness_keeps_an_active_session_alive() {
+        let pool = mem_pool_migrated().await;
+        // Stamp is older than the idle window, but the session was just seen in-process.
+        let (token, sid) = seed_session(&pool, 90).await;
+        mark_session_seen(&sid, Utc::now(), 45);
+
+        assert!(
+            resolve_token(&pool, &token, 45).await.unwrap().is_some(),
+            "a session seen in-memory within the idle window must survive a stale durable stamp"
+        );
+    }
+
+    /// ...but a genuinely idle session still expires, and is cleaned up.
+    #[tokio::test]
+    async fn genuinely_idle_session_still_expires() {
+        let pool = mem_pool_migrated().await;
+        let (token, sid) = seed_session(&pool, 90).await;
+        forget_session_seen(&sid);
+
+        assert!(
+            resolve_token(&pool, &token, 45).await.unwrap().is_none(),
+            "a session idle past the window must be rejected"
+        );
+        let left: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE id = ?")
+            .bind(&sid)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(left, 0, "an idle-expired session is deleted");
+    }
 
     #[test]
     fn password_hash_roundtrip() {
