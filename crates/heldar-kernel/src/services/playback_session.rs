@@ -21,6 +21,7 @@ use uuid::Uuid;
 use crate::error::{AppError, AppResult};
 use crate::models::Segment;
 use crate::state::AppState;
+use crate::util;
 
 /// Bound a single remux so a hung/cancelled job cannot wedge the request or orphan ffmpeg
 /// (kill_on_drop kills the child when the timed-out future is dropped). Stream-copy of even a couple
@@ -175,8 +176,15 @@ pub async fn create_session(
 }
 
 /// Concatenate `segments`, trim to the exact `[from, from+requested)` window, and remux (`-c copy`)
-/// into an HLS VOD playlist (`index.m3u8` + `seg_*.ts`) inside `session_dir`. The temp concat list
-/// (which holds absolute recording paths) is removed on every outcome so it is never served.
+/// into an HLS VOD playlist (`index.m3u8` + `init.mp4` + `seg_*.m4s`) inside `session_dir`. The temp
+/// concat list (which holds absolute recording paths) is removed on every outcome so it is never served.
+///
+/// Output is **fragmented MP4**, not MPEG-TS. Recordings are frequently H.265/HEVC (the efficient
+/// default on many cameras' sub-streams), and browsers decode HEVC in fMP4 but **not** in MPEG-TS —
+/// hls.js does not support HEVC-in-TS at all. With TS output the playlist fetched fine and the player
+/// then requested zero segments, so recorded playback was a silent black rectangle while live view
+/// (which is transcoded to H.264) worked. fMP4 also keeps the cheap `-c copy` path, which matters
+/// because preserving H.265 is the whole point of recording it.
 async fn generate_hls(
     state: &AppState,
     session_dir: &StdPath,
@@ -185,9 +193,34 @@ async fn generate_hls(
     requested: f64,
     hls_time: i64,
 ) -> AppResult<()> {
+    // Pre-flight each source file. A segment truncated by an unclean shutdown or power loss is normal
+    // on a DVR appliance, and the concat demuxer aborts the WHOLE job on one unreadable input — which
+    // surfaced to the operator as `Failed to open: cam2 (internal error)` for an entire time range.
+    // Drop the unreadable ones and play the rest; a hole beats an unplayable window.
+    let mut usable: Vec<&Segment> = Vec::with_capacity(segments.len());
+    let mut is_hevc = false;
+    for s in segments {
+        match util::ffprobe_file(&state.cfg.ffprobe_bin, StdPath::new(&s.path)).await {
+            Ok(p) if p.duration_s.is_finite() && p.duration_s > 0.0 => {
+                let c = p.codec.unwrap_or_default().to_ascii_lowercase();
+                is_hevc |= c.contains("hevc") || c.contains("h265");
+                usable.push(s);
+            }
+            _ => tracing::warn!(
+                path = %s.path,
+                "playback: skipping unreadable segment (truncated?); the window will have a hole"
+            ),
+        }
+    }
+    if usable.is_empty() {
+        return Err(AppError::Other(anyhow::anyhow!(
+            "no readable segments in the requested window"
+        )));
+    }
+
     let list_path = session_dir.join("concat.txt");
     let mut list = String::new();
-    for s in segments {
+    for s in &usable {
         let escaped = s.path.replace('\'', "'\\''");
         list.push_str(&format!("file '{escaped}'\n"));
     }
@@ -195,10 +228,10 @@ async fn generate_hls(
         .await
         .map_err(|e| AppError::Other(e.into()))?;
 
-    let first_start = segments[0].start_time;
+    let first_start = usable[0].start_time;
     let ss = ((from - first_start).num_milliseconds() as f64 / 1000.0).max(0.0);
     let playlist_path = session_dir.join("index.m3u8");
-    let seg_pattern = session_dir.join("seg_%05d.ts");
+    let seg_pattern = session_dir.join("seg_%05d.m4s");
 
     let mut cmd = Command::new(&state.cfg.ffmpeg_bin);
     cmd.kill_on_drop(true)
@@ -216,11 +249,22 @@ async fn generate_hls(
         // Trim the concatenated input to the exact window (keyframe-aligned, like the clip exporter).
         .args(["-ss", &format!("{ss:.3}")])
         .args(["-t", &format!("{requested:.3}")])
-        .args(["-c", "copy", "-avoid_negative_ts", "make_zero"])
+        .args(["-c", "copy", "-avoid_negative_ts", "make_zero"]);
+    if is_hevc {
+        // Apple platforms only decode HEVC in fMP4 when the sample entry is `hvc1` (parameter sets in
+        // the sample description); ffmpeg's default here is `hev1` (in-band), which Safari/iOS refuse.
+        // This rewrites one box name — verified byte-identical segment output, so still no re-encode.
+        cmd.args(["-tag:v", "hvc1"]);
+    }
+    cmd
         // HLS VOD: a complete, seekable playlist (vod forces an unbounded list_size = all segments).
         .args(["-f", "hls"])
         .args(["-hls_time", &hls_time.to_string()])
         .args(["-hls_playlist_type", "vod"])
+        // fMP4 rather than the MPEG-TS default — see the note on this fn. The init segment is named
+        // relative to the playlist, and ServeDir already serves everything under the session dir.
+        .args(["-hls_segment_type", "fmp4"])
+        .args(["-hls_fmp4_init_filename", "init.mp4"])
         .arg("-hls_segment_filename")
         .arg(&seg_pattern)
         .arg(&playlist_path)
