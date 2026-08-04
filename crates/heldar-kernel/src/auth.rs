@@ -368,7 +368,7 @@ async fn resolve_token(
     }
     // Otherwise treat as a session token.
     let row: Option<SessionRow> = sqlx::query_as(
-        "SELECT s.id AS sid, s.expires_at, s.last_used_at, u.id AS uid, u.display_name, u.role, u.active
+        "SELECT s.id AS sid, s.created_at, s.expires_at, s.last_used_at, u.id AS uid, u.display_name, u.role, u.active
            FROM sessions s JOIN users u ON u.id = s.user_id
           WHERE s.id = ?",
     )
@@ -389,6 +389,24 @@ async fn resolve_token(
         };
         let idle_expired = idle_minutes > 0 && last_active < now - Duration::minutes(idle_minutes);
         if r.expires_at <= now || idle_expired {
+            // Say WHY before the row disappears. Expiry deletes the session, so without this an
+            // operator asking "why was I logged out?" has nothing to look at, and a genuine timeout is
+            // indistinguishable from a bad token or a logout. Both reasons are reported, and the idle
+            // case carries the numbers needed to judge whether the timeout is set too aggressively.
+            if r.expires_at <= now {
+                tracing::info!(
+                    user = %r.uid,
+                    session_age_min = (now - r.created_at).num_minutes(),
+                    "auth: session reached its absolute TTL; re-login required"
+                );
+            } else {
+                tracing::info!(
+                    user = %r.uid,
+                    idle_min = (now - last_active).num_minutes(),
+                    idle_timeout_min = idle_minutes,
+                    "auth: session idle-expired; re-login required"
+                );
+            }
             forget_session_seen(&r.sid);
             let _ = sqlx::query("DELETE FROM sessions WHERE id = ?")
                 .bind(&r.sid)
@@ -444,6 +462,7 @@ async fn resolve_token(
 #[derive(sqlx::FromRow)]
 struct SessionRow {
     sid: String,
+    created_at: DateTime<Utc>,
     expires_at: DateTime<Utc>,
     last_used_at: DateTime<Utc>,
     uid: String,
