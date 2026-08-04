@@ -110,6 +110,41 @@ impl Role {
     }
 }
 
+/// How a session's expiry behaves, resolved from config.
+///
+/// `max_lifetime_hours == 0` keeps expiry ABSOLUTE — `expires_at` is fixed at login, so an operator
+/// working continuously is still logged out after `ttl_hours`. Above 0, an in-use session SLIDES: each
+/// use pushes `expires_at` to `now + ttl_hours`, never past `created_at + max_lifetime_hours`.
+///
+/// Sliding one opaque, DB-backed session is what a stateless design would need a refresh token for.
+/// Here the session is already revocable by deleting a row, so a second long-lived credential would add
+/// attack surface and buy nothing. The cap is mandatory: uncapped sliding makes a stolen cookie
+/// immortal, which is exactly what the absolute TTL exists to prevent.
+#[derive(Clone, Copy, Debug)]
+pub struct SessionPolicy {
+    pub idle_minutes: i64,
+    pub ttl_hours: i64,
+    pub max_lifetime_hours: i64,
+}
+
+impl SessionPolicy {
+    /// The new `expires_at` for a session used at `now`, or None when expiry is absolute or the slide
+    /// would not move it forward (so the common case writes nothing).
+    fn slide_to(
+        &self,
+        now: DateTime<Utc>,
+        created_at: DateTime<Utc>,
+        current: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        if self.max_lifetime_hours <= 0 {
+            return None;
+        }
+        let ceiling = created_at + Duration::hours(self.max_lifetime_hours);
+        let target = (now + Duration::hours(self.ttl_hours)).min(ceiling);
+        (target > current).then_some(target)
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum PrincipalKind {
     User,
@@ -324,8 +359,9 @@ pub fn clear_session_cookie(cfg: &Config) -> String {
 async fn resolve_token(
     pool: &SqlitePool,
     token: &str,
-    idle_minutes: i64,
+    policy: SessionPolicy,
 ) -> AppResult<Option<Principal>> {
+    let idle_minutes = policy.idle_minutes;
     let hash = token_hash(token);
     let now = Utc::now();
     if token.starts_with(APIKEY_PREFIX) {
@@ -431,15 +467,28 @@ async fn resolve_token(
         // reads an unbound parameter as NULL, `last_used_at < NULL` is never true, and the WHERE never
         // matched. The stamp therefore never updated after login (rows_affected=0, always), so every
         // session idled out a fixed interval after LOGIN no matter how actively it was used.
-        if let Err(e) = sqlx::query(
+        //
+        // Sliding expiry rides the SAME debounced statement (see SessionPolicy::slide_to): when it is
+        // enabled, an in-use session's `expires_at` is pushed forward, capped at
+        // created_at + max_lifetime_hours. Folding it in here means no extra write per request, and the
+        // 1-minute debounce bounds how often expiry moves at all.
+        let slid = policy.slide_to(now, r.created_at, r.expires_at);
+        let sql = if slid.is_some() {
+            "UPDATE sessions SET last_used_at = ?, expires_at = ?
+             WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)"
+        } else {
             "UPDATE sessions SET last_used_at = ?
-             WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)",
-        )
-        .bind(now)
-        .bind(&r.sid)
-        .bind(now - Duration::minutes(1))
-        .execute(pool)
-        .await
+             WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)"
+        };
+        let mut q = sqlx::query(sql).bind(now);
+        if let Some(new_exp) = slid {
+            q = q.bind(new_exp);
+        }
+        if let Err(e) = q
+            .bind(&r.sid)
+            .bind(now - Duration::minutes(1))
+            .execute(pool)
+            .await
         {
             // Best-effort, but no longer silent: a persistently failing stamp means sessions stop
             // surviving a restart, and that is worth seeing.
@@ -479,7 +528,17 @@ async fn resolve_request_principal(
 ) -> Result<Principal, AppError> {
     match token_from_headers(headers) {
         Some(tok) => {
-            match resolve_token(&st.pool, &tok, st.cfg.session_idle_timeout_minutes).await? {
+            match resolve_token(
+                &st.pool,
+                &tok,
+                SessionPolicy {
+                    idle_minutes: st.cfg.session_idle_timeout_minutes,
+                    ttl_hours: st.cfg.session_ttl_hours,
+                    max_lifetime_hours: st.cfg.session_max_lifetime_hours,
+                },
+            )
+            .await?
+            {
                 Some(p) => Ok(p),
                 None => {
                     if st.cfg.auth_enabled {
@@ -632,6 +691,15 @@ pub async fn audit(
 mod tests {
     use super::*;
 
+    fn test_policy(idle_minutes: i64) -> SessionPolicy {
+        // Absolute expiry (max_lifetime 0) unless a test opts into sliding — matches the shipped default.
+        SessionPolicy {
+            idle_minutes,
+            ttl_hours: 8,
+            max_lifetime_hours: 0,
+        }
+    }
+
     async fn mem_pool_migrated() -> SqlitePool {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
@@ -671,6 +739,95 @@ mod tests {
         (token, sid)
     }
 
+    /// Sliding expiry: enabled, an in-use session's expiry moves forward — but never past the hard
+    /// ceiling. Without the cap, sliding would make a stolen cookie immortal, which is the exact thing
+    /// the absolute TTL exists to prevent, so the ceiling is the load-bearing half of this feature.
+    #[test]
+    fn sliding_expiry_moves_forward_but_never_past_the_ceiling() {
+        let now = Utc::now();
+        let created = now - Duration::hours(20);
+
+        // Absolute by default (max_lifetime 0): never slides, whatever the current expiry.
+        let absolute = SessionPolicy {
+            idle_minutes: 45,
+            ttl_hours: 8,
+            max_lifetime_hours: 0,
+        };
+        assert_eq!(
+            absolute.slide_to(now, created, now + Duration::hours(1)),
+            None
+        );
+
+        // Sliding on: a session expiring in an hour is pushed out to now + ttl.
+        let sliding = SessionPolicy {
+            idle_minutes: 45,
+            ttl_hours: 8,
+            max_lifetime_hours: 168,
+        };
+        let got = sliding
+            .slide_to(now, created, now + Duration::hours(1))
+            .unwrap();
+        assert_eq!(got, now + Duration::hours(8));
+
+        // The ceiling wins: created 167h ago with a 168h cap leaves only an hour, not the full ttl.
+        let old = now - Duration::hours(167);
+        let capped = sliding
+            .slide_to(now, old, now + Duration::minutes(5))
+            .unwrap();
+        assert_eq!(capped, old + Duration::hours(168));
+        assert!(
+            capped < now + Duration::hours(8),
+            "the cap must bound the slide"
+        );
+
+        // Past the ceiling entirely: nothing to extend, so the session is allowed to die.
+        let ancient = now - Duration::hours(200);
+        assert_eq!(
+            sliding.slide_to(now, ancient, now + Duration::hours(1)),
+            None
+        );
+
+        // No pointless write when the slide would not move expiry forward.
+        assert_eq!(
+            sliding.slide_to(now, created, now + Duration::hours(20)),
+            None
+        );
+    }
+
+    /// End-to-end: with sliding on, using a session actually pushes `expires_at` in the database.
+    #[tokio::test]
+    async fn using_a_session_extends_expiry_when_sliding_is_enabled() {
+        let pool = mem_pool_migrated().await;
+        let (token, sid) = seed_session(&pool, 10).await;
+        let before: DateTime<Utc> =
+            sqlx::query_scalar("SELECT expires_at FROM sessions WHERE id = ?")
+                .bind(&sid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        let policy = SessionPolicy {
+            idle_minutes: 45,
+            ttl_hours: 24,
+            max_lifetime_hours: 168,
+        };
+        assert!(resolve_token(&pool, &token, policy)
+            .await
+            .unwrap()
+            .is_some());
+
+        let after: DateTime<Utc> =
+            sqlx::query_scalar("SELECT expires_at FROM sessions WHERE id = ?")
+                .bind(&sid)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(
+            after > before,
+            "sliding expiry must extend expires_at on use (was {before}, now {after})"
+        );
+    }
+
     /// Regression: the debounce placeholder in the `last_used_at` UPDATE was left unbound, so SQLite
     /// read it as NULL, `last_used_at < NULL` never held, and the stamp NEVER advanced after login —
     /// every session idled out a fixed interval after login regardless of activity.
@@ -686,7 +843,7 @@ mod tests {
                 .await
                 .unwrap();
 
-        let p = resolve_token(&pool, &token, 45).await.unwrap();
+        let p = resolve_token(&pool, &token, test_policy(45)).await.unwrap();
         assert!(p.is_some(), "a 10-minute-old session must still resolve");
 
         let after: DateTime<Utc> =
@@ -712,7 +869,10 @@ mod tests {
         mark_session_seen(&sid, Utc::now(), 45);
 
         assert!(
-            resolve_token(&pool, &token, 45).await.unwrap().is_some(),
+            resolve_token(&pool, &token, test_policy(45))
+                .await
+                .unwrap()
+                .is_some(),
             "a session seen in-memory within the idle window must survive a stale durable stamp"
         );
     }
@@ -725,7 +885,10 @@ mod tests {
         forget_session_seen(&sid);
 
         assert!(
-            resolve_token(&pool, &token, 45).await.unwrap().is_none(),
+            resolve_token(&pool, &token, test_policy(45))
+                .await
+                .unwrap()
+                .is_none(),
             "a session idle past the window must be rejected"
         );
         let left: i64 = sqlx::query_scalar("SELECT count(*) FROM sessions WHERE id = ?")

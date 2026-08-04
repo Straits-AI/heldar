@@ -111,6 +111,20 @@ pub struct Config {
     /// absolute TTL. 0 (default) disables it. Recommended for internet-exposed remote-dashboard
     /// access (bounds a stolen token's window), paired with a shorter `session_ttl_hours`.
     pub session_idle_timeout_minutes: i64,
+    /// Hard ceiling (hours) on a session's total life when SLIDING expiry is enabled. 0 (default)
+    /// keeps expiry strictly absolute: `expires_at` is fixed at login and never moves, so an operator
+    /// working continuously is still logged out after `session_ttl_hours`.
+    ///
+    /// Set > 0 to let an in-use session slide — each use pushes `expires_at` to
+    /// `now + session_ttl_hours`, never past `created_at + this`. That gives "stay signed in while I
+    /// am working, log me out if I walk away", which is what a refresh token would be used for in a
+    /// stateless design. Sessions here are opaque and DB-backed (revocable by deleting one row), so no
+    /// second long-lived credential is warranted — sliding the one session is the whole mechanism.
+    ///
+    /// The cap is not optional: without it, sliding makes a stolen cookie effectively immortal, which
+    /// is precisely what the absolute TTL exists to prevent. Opt-in by design, so upgrading never
+    /// silently lengthens a session's life.
+    pub session_max_lifetime_hours: i64,
     /// Add `Secure` to the session cookie (require HTTPS). Default false for HTTP LAN/overlay
     /// appliances; set true when the deployment is served over TLS.
     pub auth_cookie_secure: bool,
@@ -483,6 +497,7 @@ impl Config {
             auth_enabled: parse_bool("HELDAR_AUTH_ENABLED", false),
             session_ttl_hours: parse_or("HELDAR_SESSION_TTL_HOURS", 12),
             session_idle_timeout_minutes: parse_or("HELDAR_SESSION_IDLE_TIMEOUT_MIN", 0),
+            session_max_lifetime_hours: parse_or("HELDAR_SESSION_MAX_LIFETIME_HOURS", 0),
             auth_cookie_secure: parse_bool("HELDAR_AUTH_COOKIE_SECURE", false),
             login_max_failures: parse_or("HELDAR_LOGIN_MAX_FAILURES", 5),
             login_lockout_min: parse_or("HELDAR_LOGIN_LOCKOUT_MIN", 15),
