@@ -12,7 +12,7 @@
 # which are large (~2 GB) and download on first install. It is only imported
 # lazily when a YOLO task actually runs, so motion-only deployments can omit it.
 # GPU is used automatically when torch detects CUDA; otherwise it runs on CPU.
-ultralytics>=8.3
+ultralytics>=8.4.115
 lap>=0.5            # ByteTrack data-association solver (model.track tracker)
 
 # Stage 4 ANPR plate OCR — OPTIONAL. Pick ONE (or neither). Only needed for the
