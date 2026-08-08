@@ -15,11 +15,16 @@
 //! rejected regardless of policy. Loopback + RFC1918/ULA are gated behind [`EgressPolicy::allow_lan`],
 //! which cloud-only egress (e.g. a hosted control-plane) sets to `false`.
 //!
-//! Scope (v1, matching the original registry guard): only *literal-IP* hosts are inspected. A
-//! hostname that resolves to a private address (DNS rebinding) is out of scope here; the mitigation
-//! that actually closes it is [`egress_client`], which disables redirects — combine the two.
+//! DNS is validated *and pinned*, not out of scope. [`validate_egress_url`] stays the cheap
+//! store-time UX check (it inspects only literal-IP hosts and never resolves), but every actual
+//! outbound sink calls [`resolve_validate_pin`] right before it sends: that resolves ALL of the host's
+//! A/AAAA records, FAIL-CLOSED rejects if the name resolves to nothing or if *any* resolved address is
+//! forbidden under the policy (checking every record — not just the one that happens to be dialed —
+//! defeats round-robin DNS rebinding), and returns a client PINNED to those validated addresses so the
+//! IP that was checked is the exact IP that gets connected to (closing the TOCTOU re-resolution window).
+//! Redirect-following stays disabled on every egress client as a second layer.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::time::Duration;
 
 /// How strict to be about the egress target for a given sink.
@@ -117,12 +122,97 @@ pub fn reject_forbidden_ip(ip: IpAddr, policy: &EgressPolicy) -> Result<(), Stri
 /// redirects is the SSRF bypass that defeats a target check (a public host 302s to an internal or
 /// metadata URL), so no egress client should follow them. Falls back to a default client only if the
 /// builder somehow fails.
+///
+/// UNSAFE ON ITS OWN: this client disables redirects but never resolves or validates the target, so a
+/// hostname with an A record pointing at loopback/RFC1918/the metadata endpoint still connects. Every
+/// in-tree sink now uses [`resolve_validate_pin`] instead. Retained (deprecated rather than deleted)
+/// because removing a `pub` item from a published crate is a semver break.
+#[deprecated(
+    since = "0.3.2",
+    note = "does not validate DNS resolution; use `resolve_validate_pin` for a resolved-validated-pinned client"
+)]
 pub fn egress_client(timeout: Duration) -> reqwest::Client {
     reqwest::Client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap_or_default()
+}
+
+/// Validate a slice of already-resolved socket addresses against `policy`. Pure (does no DNS itself), so
+/// the resolve-and-validate logic is unit-testable without touching the network. FAIL-CLOSED: an EMPTY
+/// slice is rejected (a host that resolves to nothing must not fall through to a connection), and the
+/// first forbidden address rejects the whole set. Rejecting when *any* resolved address is forbidden —
+/// not just the one that happens to be dialed — is what defeats round-robin DNS rebinding, where only
+/// some of a name's A records point at a forbidden target.
+pub fn validate_resolved_addrs(addrs: &[SocketAddr], policy: &EgressPolicy) -> Result<(), String> {
+    if addrs.is_empty() {
+        return Err("host did not resolve to any address".into());
+    }
+    for addr in addrs {
+        reject_forbidden_ip(addr.ip(), policy)?;
+    }
+    Ok(())
+}
+
+/// Resolve ALL A/AAAA records for `host:port` and validate every one against `policy`, returning the
+/// validated addresses. FAIL-CLOSED: a resolution error, zero addresses, or ANY forbidden address is an
+/// error. The returned addresses are meant to be PINNED into the egress client (see
+/// [`pinned_egress_client`]) so the IP that was validated is the exact IP that gets dialed.
+pub async fn resolve_and_validate(
+    host: &str,
+    port: u16,
+    policy: &EgressPolicy,
+) -> Result<Vec<SocketAddr>, String> {
+    let addrs: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| format!("could not resolve host `{host}`: {e}"))?
+        .collect();
+    validate_resolved_addrs(&addrs, policy)?;
+    Ok(addrs)
+}
+
+/// Build an egress client (redirects disabled, `timeout`) that PINS DNS for `host` to `addrs`. Pinning
+/// makes reqwest dial only the (already-validated) addresses instead of re-resolving `host` at connect
+/// time, closing the TOCTOU window a plain resolve-then-connect leaves open (a name could rebind to a
+/// forbidden IP between the check and the connection). The URL keeps `host` as its name, so TLS SNI and
+/// the `Host` header stay correct.
+pub fn pinned_egress_client(
+    timeout: Duration,
+    host: &str,
+    addrs: &[SocketAddr],
+) -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
+        .resolve_to_addrs(host, addrs)
+        .build()
+        .unwrap_or_default()
+}
+
+/// Request-time egress guard: resolve `url`'s host, reject if it resolves to nothing or to any forbidden
+/// address under `policy`, and return an egress client PINNED to the validated addresses. This is what
+/// actually protects an outbound connection; [`validate_egress_url`] is only the cheap store-time UX
+/// check (it never resolves DNS). Every server-initiated sink calls this immediately before it sends,
+/// then issues the request through the returned client against the original `url`.
+pub async fn resolve_validate_pin(
+    url: &reqwest::Url,
+    policy: &EgressPolicy,
+    timeout: Duration,
+) -> Result<reqwest::Client, String> {
+    let host = url
+        .host_str()
+        .ok_or_else(|| "url has no host".to_string())?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| "url has no known port".to_string())?;
+    // `url` brackets IPv6 literals (`[::1]`); strip them for both the DNS lookup and the pin key.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host);
+    let addrs = resolve_and_validate(host, port, policy).await?;
+    Ok(pinned_egress_client(timeout, host, &addrs))
 }
 
 #[cfg(test)]
@@ -175,8 +265,9 @@ mod tests {
     }
 
     #[test]
-    fn hostnames_pass_dns_rebind_out_of_scope() {
-        // Literal-IP only; a hostname is accepted (redirects disabled by egress_client close the gap).
+    fn validate_egress_url_accepts_hostnames_resolution_deferred() {
+        // The cheap store-time check inspects literal IPs only; a hostname passes here and is resolved
+        // + validated + pinned later by `resolve_validate_pin` at request time.
         assert!(validate_egress_url("https://internal.example.com/", &EgressPolicy::LAN).is_ok());
     }
 
@@ -184,5 +275,33 @@ mod tests {
     fn rejects_non_http_schemes() {
         assert!(rejected("file:///etc/passwd", &EgressPolicy::LAN));
         assert!(rejected("gopher://x/", &EgressPolicy::LAN));
+    }
+
+    #[test]
+    fn resolved_addr_set_rejects_any_forbidden_member() {
+        // A public host and the round-robin variants of forbidden targets.
+        let public: SocketAddr = "93.184.216.34:443".parse().unwrap();
+        let metadata: SocketAddr = "169.254.169.254:443".parse().unwrap();
+        let loopback: SocketAddr = "127.0.0.1:443".parse().unwrap();
+
+        // An all-public set passes under either policy.
+        assert!(validate_resolved_addrs(&[public], &EgressPolicy::PUBLIC).is_ok());
+        assert!(validate_resolved_addrs(&[public], &EgressPolicy::LAN).is_ok());
+
+        // A single forbidden member fails the WHOLE set — this is what stops round-robin DNS rebinding
+        // where only one of several A records points at a forbidden address.
+        assert!(validate_resolved_addrs(&[public, metadata], &EgressPolicy::PUBLIC).is_err());
+        assert!(validate_resolved_addrs(&[public, metadata], &EgressPolicy::LAN).is_err());
+
+        // LAN permits loopback, but PUBLIC does not — even mixed with a public record.
+        assert!(validate_resolved_addrs(&[loopback], &EgressPolicy::LAN).is_ok());
+        assert!(validate_resolved_addrs(&[public, loopback], &EgressPolicy::PUBLIC).is_err());
+    }
+
+    #[test]
+    fn empty_resolution_is_rejected_fail_closed() {
+        // A host that resolves to nothing must be rejected, never allowed to fall through to a connect.
+        assert!(validate_resolved_addrs(&[], &EgressPolicy::LAN).is_err());
+        assert!(validate_resolved_addrs(&[], &EgressPolicy::PUBLIC).is_err());
     }
 }

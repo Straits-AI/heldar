@@ -76,3 +76,96 @@ jobs:
         working-directory: apps/web
       - run: npm run build
         working-directory: apps/web
+
+  e2e:
+    name: playwright e2e (synthetic stack)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The e2e webServer (scripts/e2e_stack.sh) boots MediaMTX + synthetic ffmpeg cameras + the core.
+      - name: install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # Provision the MediaMTX binary into infra/mediamtx/ exactly where the stack script expects it
+      # ($ROOT/infra/mediamtx/mediamtx), auto-detecting the runner's OS/arch.
+      - name: provision MediaMTX
+        run: ./scripts/setup_mediamtx.sh
+      # scripts/e2e_stack.sh runs the debug binary at target/debug/heldar-core.
+      - name: build heldar-core (debug)
+        run: cargo build --locked --bin heldar-core
+      - name: npm ci
+        working-directory: apps/web
+        run: npm ci
+      # The stack serves the dashboard from apps/web/dist (HELDAR_WEB_DIR), so build it before the run.
+      - name: build dashboard (dist for the stack)
+        working-directory: apps/web
+        run: npm run build
+      - name: install Playwright chromium + system deps
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+      - name: playwright e2e
+        working-directory: apps/web
+        run: npm run test:e2e
+      - name: upload playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: apps/web/playwright-report/
+          retention-days: 7
+
+  integration:
+    name: integration (validate.sh · rbac against synthetic camera)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      # Same provisioning as the e2e stack: MediaMTX binary + the debug core the scripts invoke.
+      - name: provision MediaMTX
+        run: ./scripts/setup_mediamtx.sh
+      - name: build heldar-core (debug)
+        run: cargo build --locked --bin heldar-core
+      # Full media validation: boots MediaMTX + a synthetic RTSP camera + the core, records, and
+      # exercises snapshot/clip/HLS. validate.sh was patched to track a failure counter and exit
+      # non-zero on any failed Stage 0 guarantee, so this step fails CI on a bad build.
+      - name: media validation (scripts/validate.sh)
+        run: ./scripts/validate.sh
+      # RBAC validation is fully self-contained: it starts its own auth-enabled core on :8001 with a
+      # temp DB (no MediaMTX/camera needed) and prints PASS/FAIL lines. It does not exit non-zero on a
+      # failed assertion, so gate on FAIL markers in its report.
+      - name: rbac validation (scripts/validate_rbac.sh)
+        run: |
+          ./scripts/validate_rbac.sh
+          if grep -Eq '(^|[[:space:]])FAIL ' data/validate_rbac.txt; then
+            echo "::error::validate_rbac.sh reported one or more FAIL assertions"
+            grep -E '(^|[[:space:]])FAIL ' data/validate_rbac.txt || true
+            exit 1
+          fi
+      # Deliberately NOT run in CI (they are not self-contained for a clean runner):
+      #   - validate_ai.sh: needs a REAL camera (cam_192_168_0_2) actively streaming so the sampler
+      #     produces frames — real hardware, cannot be satisfied synthetically here.
+      #   - validate_search.sh / validate_zones.sh / validate_entry.sh / validate_movement.sh: assume a
+      #     pre-running shared stack on :8000 with the dev box's camera cam_192_168_0_2 already
+      #     registered; they don't boot their own core, so they'd need extra orchestration to run in CI.
+      #     (Their event data is synthetic, but the harness assumption isn't — revisit if a headless
+      #     seed-core fixture is added.)
+      - name: upload validation reports
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: validation-reports
+          path: |
+            data/validate_report.txt
+            data/validate_rbac.txt
+            data/validate_logs/
+          retention-days: 7
+          if-no-files-found: ignore

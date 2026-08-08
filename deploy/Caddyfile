@@ -1,0 +1,43 @@
+# Heldar dashboard — TLS termination via Caddy.
+#
+# TWO modes, selected purely by env (see deploy/TLS.md):
+#   Public domain + Let's Encrypt : HELDAR_TLS_DOMAIN=cam.example.com   HELDAR_TLS_ISSUER=you@example.com
+#   LAN self-signed (default)     : HELDAR_TLS_DOMAIN=https://192.168.1.50  HELDAR_TLS_ISSUER=internal
+#
+# Port model: Caddy binds :80 and :443 on the host (host networking) and reverse-proxies CLEARTEXT
+# to the existing nginx dashboard on 127.0.0.1:8080, which in turn proxies /api,/media,/healthz to
+# the kernel on 127.0.0.1:8000. Caddy never touches the media plane (MediaMTX / WHEP / RTSP) — that
+# stays on its own host ports for the WebRTC remote-access path. :80 exists for the ACME HTTP-01
+# challenge and the automatic HTTP->HTTPS redirect; all real traffic is :443.
+{
+	# ACME account / internal-CA root are persisted on the caddy-data volume (see compose.tls.yml)
+	# so certs and the self-signed root survive restarts. Admin API off — nothing should reach it
+	# on a host-networked box.
+	admin off
+}
+
+# Shared dashboard security headers. HSTS is meaningful for public domains; browsers ignore HSTS
+# sent for bare IP addresses, so it is harmless in LAN self-signed mode.
+(heldar_security_headers) {
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# Don't advertise the reverse proxy.
+		-Server
+	}
+}
+
+{$HELDAR_TLS_DOMAIN:localhost} {
+	# `internal` -> Caddy's local CA (LAN self-signed). An email address -> ACME / Let's Encrypt
+	# for the public domain above.
+	tls {$HELDAR_TLS_ISSUER:internal}
+
+	import heldar_security_headers
+
+	# Single cleartext hop to the existing dashboard container (nginx on :8080), loopback only.
+	# Caddy adds X-Forwarded-Proto/-For/Host automatically; the kernel marks the session cookie
+	# Secure from HELDAR_AUTH_COOKIE_SECURE (compose.prod.yml), independent of this hop's scheme.
+	reverse_proxy 127.0.0.1:8080
+}

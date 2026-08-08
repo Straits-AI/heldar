@@ -232,7 +232,8 @@ pub async fn get_registered(pool: &SqlitePool, id: &str) -> AppResult<Option<Mod
 /// Background loop: probe each registered sidecar's `/heldar/health` and record reachability so the
 /// dashboard can badge healthy/unreachable plugins. Never returns (supervised).
 pub async fn run(pool: SqlitePool) {
-    let client = crate::net_guard::egress_client(Duration::from_secs(5));
+    let policy = crate::net_guard::EgressPolicy::LAN;
+    let timeout = Duration::from_secs(5);
     let mut tick = tokio::time::interval(Duration::from_secs(30));
     loop {
         tick.tick().await;
@@ -245,9 +246,13 @@ pub async fn run(pool: SqlitePool) {
         };
         for m in mods {
             let url = format!("{}{}", m.base_url, HEALTH_PATH);
-            let health = match client.get(&url).send().await {
-                Ok(r) if r.status().is_success() => "healthy",
-                _ => "unreachable",
+            // Resolve-validate-PIN per probe: `base_url` was screened at registration, but the health
+            // probe is unattended and a hostname base_url could resolve (or rebind) to the cloud
+            // metadata/link-local range — so re-check and pin the connection to the validated IP here.
+            let health = if probe_health(&url, &policy, timeout).await {
+                "healthy"
+            } else {
+                "unreachable"
             };
             if let Err(e) = sqlx::query(
                 "UPDATE module_registrations SET health = ?, health_checked_at = ? WHERE id = ?",
@@ -262,4 +267,21 @@ pub async fn run(pool: SqlitePool) {
             }
         }
     }
+}
+
+/// One health probe: resolve-validate the sidecar health URL, pin the connection to the checked
+/// address, and GET it. Returns `true` only on a 2xx. A blocked/forbidden target, a resolution failure,
+/// or any transport error is reported as unhealthy (never a connection to an unvalidated address).
+async fn probe_health(
+    url: &str,
+    policy: &crate::net_guard::EgressPolicy,
+    timeout: Duration,
+) -> bool {
+    let Ok(parsed) = crate::net_guard::validate_egress_url(url, policy) else {
+        return false;
+    };
+    let Ok(client) = crate::net_guard::resolve_validate_pin(&parsed, policy, timeout).await else {
+        return false;
+    };
+    matches!(client.get(url).send().await, Ok(r) if r.status().is_success())
 }

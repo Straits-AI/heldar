@@ -7,6 +7,9 @@ import { defineConfig, devices } from "@playwright/test";
 // camera-specific specs assume the synthetic cam_e2e_* ids the stack seeds).
 const externalBase = process.env.HELDAR_E2E_BASE_URL;
 const baseURL = externalBase ?? "http://localhost:8011";
+// Must track E2E_CAMS in scripts/e2e_stack.sh (same default): the last camera the stack seeds is
+// what tells us seeding finished.
+const ncams = Number(process.env.E2E_CAMS ?? 6);
 
 export default defineConfig({
   testDir: "./e2e",
@@ -28,7 +31,10 @@ export default defineConfig({
     ? undefined
     : {
         command: "bash ../../scripts/e2e_stack.sh",
-        url: `${baseURL}/healthz`,
+        // Wait for the LAST seeded camera, not /healthz. /healthz goes green as soon as the core
+        // boots — before any camera is registered — so gating on it starts the suite mid-seed and
+        // the camera specs flake on a heading that does not exist yet.
+        url: `${baseURL}/api/v1/cameras/cam_e2e_${ncams}`,
         // Always boot a fresh stack on the dedicated port (the script self-cleans any prior one), so a
         // stale stack from a killed run is never reused with out-of-window footage.
         reuseExistingServer: false,

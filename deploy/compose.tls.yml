@@ -1,0 +1,47 @@
+# Heldar — TLS termination overlay. Layer THIRD, on top of compose.yml + compose.prod.yml:
+#
+#   docker compose -f compose.yml -f compose.prod.yml -f compose.tls.yml up -d
+#
+# compose.prod.yml already flips the hardened posture on (auth required, Secure session cookie,
+# strict-prod, short sessions) — but it terminates NO TLS, so on its own it serves a Secure-marked
+# cookie over plain HTTP. This overlay adds a Caddy reverse proxy that terminates HTTPS on :443 and
+# proxies cleartext to the existing nginx dashboard on 127.0.0.1:8080, completing the secure path.
+#
+# Modes (env, see deploy/TLS.md):
+#   Public domain + Let's Encrypt : HELDAR_TLS_DOMAIN=cam.example.com   HELDAR_TLS_ISSUER=you@example.com
+#   LAN self-signed (the default) : HELDAR_TLS_DOMAIN=https://192.168.1.50  HELDAR_TLS_ISSUER=internal
+#
+# Port model: 443 (+80 for ACME/redirect) inbound on the host; loopback HTTP onward to nginx :8080,
+# which proxies /api,/media,/healthz to the kernel :8000. Host networking is kept deliberately — the
+# media plane (MediaMTX / WHEP / RTSP) needs it, and it lets Caddy reach the dashboard on 127.0.0.1.
+name: heldar
+
+services:
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    # Host networking: Caddy binds :80/:443 on the host directly and reverse-proxies to the
+    # dashboard on 127.0.0.1:8080. Matches the rest of the stack; no bridge/port-map needed.
+    network_mode: host
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Site address. Public FQDN (cam.example.com) for ACME, or an https:// LAN address/IP for
+      # self-signed. Defaults to localhost so a bare `up -d` still serves a self-signed cert.
+      HELDAR_TLS_DOMAIN: ${HELDAR_TLS_DOMAIN:-localhost}
+      # `internal` = Caddy local CA (LAN self-signed, default). An email = ACME / Let's Encrypt.
+      HELDAR_TLS_ISSUER: ${HELDAR_TLS_ISSUER:-internal}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Persist issued certs + the internal-CA root so they survive restarts (a fresh internal CA
+      # every boot would re-prompt every LAN browser).
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      web:
+        condition: service_started
+
+volumes:
+  caddy-data:
+  caddy-config:

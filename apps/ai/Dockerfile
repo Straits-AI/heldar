@@ -5,7 +5,9 @@
 # multi-arch build. To run YOLO in a container, derive your own image:
 #   FROM ghcr.io/straits-ai/heldar-ai
 #   RUN pip install --no-cache-dir "ultralytics>=8.3" "lap>=0.5"
-FROM python:3.13-slim
+# Pinned base: concrete minor.patch tag + multi-arch index @sha256 digest for reproducibility.
+# To bump: `docker buildx imagetools inspect python:<tag>` and update the digest (see docs/SUPPLY-CHAIN.md).
+FROM python:3.13.14-slim@sha256:9662417aace5ae7b8e2609cce472b72a8958e134ba372808abe9cc1a0c0125e6
 
 # Keep Python lean and logs unbuffered (so they stream out of the container).
 ENV PYTHONUNBUFFERED=1 \

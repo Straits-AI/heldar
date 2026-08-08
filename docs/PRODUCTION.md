@@ -22,6 +22,42 @@ off**. It warns (or, under `HELDAR_STRICT_PROD=true`, refuses) on a non-`Secure`
 an over-long session TTL, a localhost **or wildcard (`*`)** CORS allowlist, plaintext camera credentials,
 or an empty dial-out bearer (`HELDAR_CP_TOKEN`) while a rendezvous is configured.
 
+## Deployment-mode ladder
+
+The same binary spans four postures. Pick the one that matches how the box is reachable, and configure
+to its row. The ladder is a **guide**, not a switch: the defaults below are what ship today, and moving
+up the ladder is done by setting the vars, not by flipping a single mode flag.
+
+| Mode | Auth | Bind (`HELDAR_API_HOST`) | Reachable from | Extra hardening | Boot behavior |
+| --- | --- | --- | --- | --- | --- |
+| **DEV** | off | `127.0.0.1` (loopback) | this host only | none needed | boots quietly |
+| **COMMISSIONING** | off | `0.0.0.0` (LAN) | the whole LAN | *temporary* — enable auth before you rely on the box | boots with a **loud boxed WARNING** (see below) |
+| **PRODUCTION-LAN** | **on** | `0.0.0.0` (LAN) | the whole LAN | `HELDAR_AUTH_COOKIE_SECURE=true` + HTTPS in front, `HELDAR_SECRET_KEY` set (encrypted creds) | boots clean |
+| **PRODUCTION-REMOTE** | **on** | `0.0.0.0` behind the rendezvous/overlay | the internet | all of PRODUCTION-LAN **+** TLS, `HELDAR_STRICT_PROD=true`, locked CORS, short sessions, idle timeout | auth-off **refuses to boot**; strict mode turns the soft warnings into refusals |
+
+### The LAN-trust startup warning (COMMISSIONING)
+
+With **auth off** and the API bound to a **non-loopback** address (`0.0.0.0`, a LAN IP — anything other
+than `127.0.0.1` / `::1` / `localhost`), the box trusts **every device on the LAN as full admin**: any
+compromised camera, IoT gadget, or laptop on the same network reaches the NVR API with admin rights and
+no login. This is the intentional first-run/commissioning posture, so the box still **boots** — but it
+now emits a prominent, boxed startup `WARN` naming the concrete risk and the exact remediation:
+
+- **Require login:** `HELDAR_AUTH_ENABLED=true` (recommended — moves you to PRODUCTION-LAN), or
+- **Local dev only:** `HELDAR_API_HOST=127.0.0.1` (loopback, no LAN exposure — DEV).
+
+This warning is separate from the internet-exposure refusal above: it fires on a plain LAN bind with
+**no** remote path configured (the case the exposure check can't see). It does **not** fire when auth is
+on, nor when the bind is loopback-only.
+
+### Optional: `HELDAR_DEPLOYMENT_MODE` (opt-in tightening)
+
+Setting `HELDAR_DEPLOYMENT_MODE=production` (also accepts `production-lan` / `production-remote`)
+**escalates** the LAN-trust warning into a **hard boot refusal**: a production box with auth off on a
+non-loopback bind will not start until you set `HELDAR_AUTH_ENABLED=true` (or bind loopback). Leaving the
+var **unset** (or `dev` / `commissioning`) preserves today's behavior exactly — warn-and-boot — so this
+is purely opt-in and never breaks the `docker compose up -d` commissioning flow.
+
 ### Upgrading a box (prebuilt binary)
 
 Each tagged release attaches static `heldar-core` binaries (x86_64 + aarch64). To upgrade a box in place:
@@ -54,6 +90,7 @@ self-hosters pull the equivalent asset from the public `Straits-AI/heldar` relea
 | CORS | `HELDAR_CORS_ORIGINS` | `localhost:5173` | **lock** | Empty (same-origin) or the dashboard origin only; a `localhost` or `*` entry is flagged. |
 | Archive cap | `HELDAR_ARCHIVE_DIR_MAX_BYTES` | `50 GiB` | tune | Caps the cumulative size of on-demand `.zip` exports so they can't fill the disk and push the retention sweeper into evicting live recordings. Each export also requires free-disk headroom and shares the backup concurrency limit. |
 | Strict mode | `HELDAR_STRICT_PROD` | `false` | **`true`** | Turns the guardrail warnings above into hard boot failures. |
+| Deployment mode | `HELDAR_DEPLOYMENT_MODE` | unset | **`production`** | Opt-in. `production*` turns the auth-off-on-LAN startup warning into a hard boot refusal. Unset = warn-and-boot (unchanged). |
 
 **Authentication floor (automatic).** With `HELDAR_AUTH_ENABLED=true`, a router-level middleware
 rejects unauthenticated requests to the **entire `/api/v1` surface** — kernel, apps, and verticals —

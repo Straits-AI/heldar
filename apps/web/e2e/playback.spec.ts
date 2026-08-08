@@ -5,24 +5,44 @@ import { test, expect } from "@playwright/test";
 // transport + a player per camera.
 test("synchronized playback opens a session per selected camera", async ({ page, request }) => {
   // The cameras need at least one completed, indexed segment before a playback session has anything to
-  // build — poll the segments API rather than guessing a sleep.
+  // build — poll the segments API rather than guessing a sleep. Poll EVERY camera this test opens, not
+  // just the first: they are registered sequentially and start recording at slightly different times,
+  // so cam_e2e_2 can still have nothing indexed when cam_e2e_1 does, and its session then fails to
+  // build (the transport never appears, or only one <video> mounts).
+  const cameras = ["cam_e2e_1", "cam_e2e_2"];
   await expect
     .poll(
       async () => {
-        const r = await request.get("/api/v1/cameras/cam_e2e_1/segments?limit=1");
-        if (!r.ok()) return 0;
-        const segs = await r.json();
-        return Array.isArray(segs) ? segs.length : 0;
+        const counts = await Promise.all(
+          cameras.map(async (id) => {
+            const r = await request.get(`/api/v1/cameras/${id}/segments?limit=1`);
+            if (!r.ok()) return 0;
+            const segs = await r.json();
+            return Array.isArray(segs) ? segs.length : 0;
+          }),
+        );
+        // The weakest camera gates the test.
+        return Math.min(...counts);
       },
-      { timeout: 40_000, intervals: [1500] },
+      { timeout: 60_000, intervals: [1500] },
     )
     .toBeGreaterThan(0);
 
   await page.goto("/playback");
   await expect(page.getByRole("heading", { name: "Synchronized Playback" })).toBeVisible();
 
-  // Use the page's OWN default window ([now − 30 min, now], computed in the browser's timezone so it's
-  // self-consistent and within the 2h playback cap). It covers the footage the poll above confirmed.
+  // Extend the page's default window ([now − 30 min, now]) a few minutes into the future. The `To`
+  // control is a datetime-local input, so it has MINUTE precision: a `To` of "now" floors to :00 and
+  // excludes anything recorded during the current partial minute. On a freshly-booted stack that is
+  // all of the footage, and the open fails with "no recorded footage in the requested range". Computed
+  // in-page so it uses the browser's own clock and timezone, and stays inside the 2h playback cap.
+  const windowEnd = await page.evaluate(() => {
+    const d = new Date(Date.now() + 5 * 60 * 1000);
+    const pad = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  });
+  await page.getByRole("textbox", { name: "To" }).fill(windowEnd);
+
   await page.getByTestId("pb-cam-cam_e2e_1").click();
   await page.getByTestId("pb-cam-cam_e2e_2").click();
   await page.getByTestId("pb-open").click();

@@ -16,6 +16,15 @@ mkdir -p "$LOGDIR" "$DATA"
 log(){ echo "$@" | tee -a "$REPORT"; }
 hr(){ log ""; log "----- $* -----"; }
 
+# Assertion tracking so the script exits non-zero on a real validation failure (CI gate). Backward
+# compatible for local use: local runs still print the full report and tear down; the only added
+# behaviour is a non-zero exit + a "FAIL:" line when a core Stage 0 guarantee is not met.
+FAILS=0
+fail(){ FAILS=$((FAILS+1)); log "FAIL: $*"; }
+check(){ # check <condition-desc> <actual> <expected>
+  if [ "$2" = "$3" ]; then log "PASS: $1 ($2)"; else fail "$1 (got '$2', want '$3')"; fi
+}
+
 MTX_PID=""; SYNTH_PID=""; CORE_PID=""
 cleanup(){
   hr "cleanup"
@@ -108,7 +117,10 @@ PY
 )
 FROM=$(echo "$RANGE" | awk '{print $1}')
 TO=$(echo "$RANGE" | awk '{print $2}')
-log "recorded range: '$FROM' .. '$TO' (segment_count=$(echo "$SEGS" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))' 2>/dev/null))"
+SEG_COUNT=$(echo "$SEGS" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)
+log "recorded range: '$FROM' .. '$TO' (segment_count=$SEG_COUNT)"
+# Core Stage 0 guarantee: the recorder produced at least one indexed segment from the synthetic camera.
+if [ "${SEG_COUNT:-0}" -gt 0 ] 2>/dev/null; then log "PASS: recorder produced $SEG_COUNT segment(s)"; else fail "no recorded segments (recorder/indexer produced nothing)"; fi
 
 if [ -n "$FROM" ]; then
   hr "snapshot at $FROM (recorded)"
@@ -122,9 +134,16 @@ if [ -n "$FROM" ]; then
 fi
 
 hr "live snapshot (grab from stream now)"
-curl -sS "$API/api/v1/cameras/synth_cam/snapshot" -o "$DATA/snap_live.jpg" \
-  -w "http=%{http_code} bytes=%{size_download}\n" | tee -a "$REPORT"
+SNAP_CODE=$(curl -sS "$API/api/v1/cameras/synth_cam/snapshot" -o "$DATA/snap_live.jpg" -w '%{http_code}')
+SNAP_BYTES=$(wc -c <"$DATA/snap_live.jpg" 2>/dev/null | tr -d ' ')
+log "http=$SNAP_CODE bytes=$SNAP_BYTES"
 file "$DATA/snap_live.jpg" 2>/dev/null | tee -a "$REPORT"
+# Core Stage 0 guarantee: a live JPEG snapshot can be grabbed from the running stream.
+if [ "$SNAP_CODE" = "200" ] && file "$DATA/snap_live.jpg" 2>/dev/null | grep -qi 'JPEG'; then
+  log "PASS: live snapshot is a JPEG"
+else
+  fail "live snapshot not a valid JPEG (http=$SNAP_CODE)"
+fi
 
 hr "liveview (register MediaMTX path)"
 curl -sS "$API/api/v1/cameras/synth_cam/liveview" -w "\n[http=%{http_code}]\n" | tee -a "$REPORT"
@@ -137,6 +156,8 @@ for _ in $(seq 1 10); do
 done
 log "HLS http=$HLS_CODE"
 head -c 400 /tmp/hls.m3u8 2>/dev/null | tee -a "$REPORT"; echo | tee -a "$REPORT"
+# Core Stage 0 guarantee: the live-view HLS playlist is served for the registered camera.
+check "HLS playlist served" "$HLS_CODE" "200"
 
 hr "events (recent)"
 curl -fsS "$API/api/v1/events?limit=20" | tee -a "$REPORT"; echo | tee -a "$REPORT"
@@ -155,3 +176,7 @@ log "recordings/synth_cam:"; ls -la "$DATA/recordings/synth_cam" 2>/dev/null | t
 log "clips:"; ls -la "$DATA/clips" 2>/dev/null | grep -E '\.mp4$' | tee -a "$REPORT"
 
 hr "VALIDATION COMPLETE"
+# Exit non-zero if any core Stage 0 guarantee failed, so CI actually fails on a bad build. The EXIT
+# trap (cleanup) still runs and preserves this status. Local runs are unaffected on success.
+if [ "$FAILS" -gt 0 ]; then log "VALIDATION FAILED: $FAILS check(s) failed"; exit 1; fi
+log "VALIDATION PASSED: all checks green"

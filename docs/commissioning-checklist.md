@@ -271,3 +271,21 @@ Wait at least 2–3 segment lengths (~3+ min at the 60 s default) after enabling
       from a real snapshot, not just on paper).
 - [ ] Credentials handed off to the secret store; no secrets left in notes.
 - [ ] Camera marked commissioned in the install log with the Heldar `id`.
+
+---
+
+## Box auth posture (before you leave site)
+
+Out of the box the kernel runs in **COMMISSIONING** mode: `HELDAR_AUTH_ENABLED=false` with the API
+bound to `0.0.0.0` (the LAN). That is deliberately zero-friction for onboarding, but it means **every
+device on the LAN is a full admin** — any compromised camera, IoT device, or laptop on the network can
+drive the NVR with no login. On such a bind the kernel now prints a **loud, boxed startup WARNING**
+saying exactly this; treat it as a to-do, not noise.
+
+- [ ] Before handover, move the box off the commissioning posture: set `HELDAR_AUTH_ENABLED=true`
+      (PRODUCTION-LAN) and create the admin user. For a dev/bench box instead, bind
+      `HELDAR_API_HOST=127.0.0.1` (loopback, DEV) so it is not LAN-reachable.
+- [ ] For a locked production box you can enforce this: set `HELDAR_DEPLOYMENT_MODE=production` so the
+      box **refuses to boot** with auth off on a LAN bind rather than merely warning.
+
+See the deployment-mode ladder in [`PRODUCTION.md`](PRODUCTION.md) for the full posture matrix.

@@ -75,16 +75,23 @@ done
 sleep 3
 
 echo "[e2e_stack] registering $NCAMS cameras"
+# Seed order is the readiness contract: Playwright waits for the LAST camera
+# (cam_e2e_$NCAMS) to exist, so every earlier seed step must finish before it. /healthz is NOT a
+# usable gate — it goes green when the core boots, which is before any of this has run, and the
+# suite then races the seeding.
 for i in $(seq 1 "$NCAMS"); do
   curl -fsS -X POST "$API/api/v1/cameras" -H 'content-type: application/json' -d "{
     \"id\":\"cam_e2e_${i}\",\"name\":\"E2E Camera ${i}\",\"vendor\":\"generic\",
     \"main_stream_url\":\"rtsp://127.0.0.1:8554/cam_e2e_${i}\",\"record_stream\":\"main\",
     \"segment_seconds\":5,\"retention_hours\":1
   }" >/dev/null || true
+  # One camera gets a motion AI task so the AI page + perception path have data. Registered here,
+  # right after its camera, rather than after the loop — so it too is covered by the readiness gate.
+  if [ "$i" -eq 1 ]; then
+    curl -fsS -X POST "$API/api/v1/cameras/cam_e2e_1/ai-tasks" -H 'content-type: application/json' \
+      -d '{"task_type":"motion","fps":2,"width":480,"enabled":true,"config":{"threshold":0.0008,"pixel_delta":6}}' >/dev/null 2>&1 || true
+  fi
 done
-# one camera gets a motion AI task so the AI page + perception path have data
-curl -fsS -X POST "$API/api/v1/cameras/cam_e2e_1/ai-tasks" -H 'content-type: application/json' \
-  -d '{"task_type":"motion","fps":2,"width":480,"enabled":true,"config":{"threshold":0.0008,"pixel_delta":6}}' >/dev/null 2>&1 || true
 
 echo "[e2e_stack] ready: $NCAMS cameras on $API (dashboard served). Waiting…"
 # Foreground on the core (Playwright's `webServer` keeps the stack alive). Not `${PIDS[-1]}`:

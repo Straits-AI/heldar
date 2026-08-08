@@ -1,0 +1,19 @@
+# gitleaks configuration for the secret-scanning CI gate (.github/workflows/security.yml).
+#
+# Starts from the upstream default ruleset and adds narrowly-scoped allowlists. Keep every entry
+# pinned to a specific value AND path (matchCondition = "AND") so it can only ever silence the one
+# known-safe string — a real credential appearing in the same file still fails the scan.
+
+[extend]
+useDefault = true
+
+# The plugin registry ships an example signed catalog so operators can try verified-publisher
+# pinning locally. The documented value is the Ed25519 PUBLIC key used to VERIFY that catalog's
+# signature — publishing it is the entire point (you pin it via HELDAR_REGISTRY_TRUSTED_KEYS). The
+# generic-api-key rule flags it only because a base64 public key is high-entropy. The corresponding
+# private key is not in this repository.
+[[allowlists]]
+description = "Example registry Ed25519 PUBLIC verification key (docs, not a credential)"
+matchCondition = "AND"
+paths = ['''examples/registry/README\.md''']
+regexes = ['''ADIHkj3Z0gm/o04gofyC8xO2WPsrCx3kMaoDL9ZBQX8=''']

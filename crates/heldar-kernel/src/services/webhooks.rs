@@ -34,13 +34,10 @@ const BATCH: i64 = 100;
 /// Give up on an event after this many recorded failed attempts (so a dead endpoint can't wedge the
 /// per-subscription cursor forever — the cursor then advances past the poison event).
 const MAX_ATTEMPTS: i64 = 5;
+/// Per-delivery request timeout (also the pinned egress client's timeout).
+const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub async fn run(pool: SqlitePool, cfg: Arc<Config>) {
-    // Built once, outside the loop, and reused across cycles. Redirects are disabled (via the shared
-    // egress client) so a webhook target can't 302 the box to an internal/metadata URL and defeat the
-    // create-time target guard.
-    let client = crate::net_guard::egress_client(Duration::from_secs(10));
-
     let mut tick = tokio::time::interval(Duration::from_secs(cfg.notifier_interval_s.max(5)));
     loop {
         tick.tick().await;
@@ -56,7 +53,7 @@ pub async fn run(pool: SqlitePool, cfg: Arc<Config>) {
             continue;
         }
         for sub in subs {
-            if let Err(e) = deliver_subscription(&pool, &client, &sub).await {
+            if let Err(e) = deliver_subscription(&pool, &sub).await {
                 tracing::error!(error = %e, subscription = %sub.id, "webhooks: delivery cycle failed");
             }
         }
@@ -84,11 +81,7 @@ async fn save_cursor(pool: &SqlitePool, sub_id: &str, cursor: DateTime<Utc>) -> 
 
 /// Deliver every pending, matching event for one subscription, draining in batches until caught up or
 /// stopped at a retryable failure.
-async fn deliver_subscription(
-    pool: &SqlitePool,
-    client: &reqwest::Client,
-    sub: &WebhookSubscription,
-) -> anyhow::Result<()> {
+async fn deliver_subscription(pool: &SqlitePool, sub: &WebhookSubscription) -> anyhow::Result<()> {
     // First time we see this subscription (cursor NULL): start at "now", no backlog replay — mirrors
     // the old notifier so a subscription added LATER does not replay the full event history.
     let Some(mut cursor) = sub.cursor_at else {
@@ -111,7 +104,7 @@ async fn deliver_subscription(
                 advanced = true;
                 continue;
             }
-            match try_deliver(pool, client, sub, &ev).await {
+            match try_deliver(pool, sub, &ev).await {
                 DeliverOutcome::Advance => {
                     cursor = ev.created_at;
                     advanced = true;
@@ -163,12 +156,7 @@ enum DeliverOutcome {
 }
 
 /// Attempt to deliver one event, recording the attempt in the `webhook_deliveries` ledger.
-async fn try_deliver(
-    pool: &SqlitePool,
-    client: &reqwest::Client,
-    sub: &WebhookSubscription,
-    ev: &Event,
-) -> DeliverOutcome {
+async fn try_deliver(pool: &SqlitePool, sub: &WebhookSubscription, ev: &Event) -> DeliverOutcome {
     let prior_failures: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM webhook_deliveries
           WHERE subscription_id = ? AND event_id = ? AND status = 'failed'",
@@ -183,7 +171,6 @@ async fn try_deliver(
     let delivery_id = format!("whd_{}", Uuid::new_v4().simple());
     let body = event_body(ev);
     let res = send_event(
-        client,
         &sub.url,
         &delivery_id,
         &ev.event_type,
@@ -251,14 +238,40 @@ pub struct SendResult {
 /// POST a signed webhook body. The body is serialized ONCE and both signed and sent verbatim so the
 /// `X-Heldar-Signature` always covers the exact bytes the receiver gets. Used by the delivery loop and
 /// by the synthetic `/test` route.
+///
+/// The target is resolve-validated and the connection PINNED to the checked address at send time (via
+/// [`crate::net_guard::resolve_validate_pin`], `EgressPolicy::LAN`): the create-time `validate_url`
+/// check only inspects literal IPs, so a subscription URL whose *hostname* resolves (or later rebinds)
+/// to the cloud-metadata/link-local range is caught here, right before the bytes go out.
 pub async fn send_event(
-    client: &reqwest::Client,
     url: &str,
     delivery_id: &str,
     event_type: &str,
     secret: Option<&str>,
     body: &Value,
 ) -> SendResult {
+    let policy = crate::net_guard::EgressPolicy::LAN;
+    let parsed = match crate::net_guard::validate_egress_url(url, &policy) {
+        Ok(u) => u,
+        Err(e) => {
+            return SendResult {
+                ok: false,
+                status: None,
+                error: Some(format!("blocked egress target: {e}")),
+            }
+        }
+    };
+    let client =
+        match crate::net_guard::resolve_validate_pin(&parsed, &policy, DELIVERY_TIMEOUT).await {
+            Ok(c) => c,
+            Err(e) => {
+                return SendResult {
+                    ok: false,
+                    status: None,
+                    error: Some(format!("blocked egress target: {e}")),
+                }
+            }
+        };
     let raw = serde_json::to_string(body).unwrap_or_else(|_| "{}".to_string());
     let mut req = client
         .post(url)
