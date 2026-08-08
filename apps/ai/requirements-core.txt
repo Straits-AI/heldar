@@ -4,4 +4,4 @@
 # install runs every motion-type task and cleanly reports model-type tasks as unavailable.
 requests>=2.32
 pillow>=10.4
-numpy>=1.26
+numpy>=2.5.1
