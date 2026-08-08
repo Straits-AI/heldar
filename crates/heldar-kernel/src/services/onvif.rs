@@ -242,6 +242,13 @@ xmlns:wsu=\"http://docs.oasis-open.org/wss/2004/01/oasis-200401-wss-wssecurity-u
 
 /// POST a SOAP envelope to an ONVIF service endpoint and return the response body text. ONVIF SOAP
 /// faults (often returned with HTTP 4xx/5xx) are surfaced as a clear error with the fault reason.
+///
+/// The endpoint is resolve-validated and the connection PINNED to the checked address here, right
+/// before the POST (via [`crate::net_guard::resolve_validate_pin`], `EgressPolicy::LAN`). This matters
+/// because `url` is not only the operator-supplied `device_url` (already screened in
+/// `resolve_device_url`) but also the `media_url`/`ptz_url` that come straight out of the *device's own*
+/// GetCapabilities/GetServices response — a malicious or compromised camera could return an XAddr
+/// pointing at 169.254.169.254 or an internal service, which resolving + pinning at send time rejects.
 async fn soap_call(
     state: &AppState,
     url: &str,
@@ -249,9 +256,14 @@ async fn soap_call(
     envelope: String,
 ) -> AppResult<String> {
     let timeout = Duration::from_millis(state.cfg.onvif_request_timeout_ms.max(500));
+    let policy = crate::net_guard::EgressPolicy::LAN;
+    let parsed = crate::net_guard::validate_egress_url(url, &policy)
+        .map_err(|e| AppError::Other(anyhow::anyhow!("ONVIF endpoint {url} rejected: {e}")))?;
+    let client = crate::net_guard::resolve_validate_pin(&parsed, &policy, timeout)
+        .await
+        .map_err(|e| AppError::Other(anyhow::anyhow!("ONVIF endpoint {url} rejected: {e}")))?;
     let content_type = format!("application/soap+xml; charset=utf-8; action=\"{action}\"");
-    let resp = state
-        .http
+    let resp = client
         .post(url)
         .header(reqwest::header::CONTENT_TYPE, content_type)
         .timeout(timeout)

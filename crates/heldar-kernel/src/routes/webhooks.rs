@@ -328,15 +328,8 @@ async fn test(
         "timestamp": Utc::now(),
         "payload": { "message": "Heldar webhook test" },
     });
-    let res = webhooks::send_event(
-        &st.http,
-        &sub.url,
-        &delivery_id,
-        "test",
-        sub.secret.as_deref(),
-        &body,
-    )
-    .await;
+    let res =
+        webhooks::send_event(&sub.url, &delivery_id, "test", sub.secret.as_deref(), &body).await;
 
     // Record the synthetic delivery (event_id NULL, so it never counts toward real-event retry bounds).
     webhooks::record_delivery(

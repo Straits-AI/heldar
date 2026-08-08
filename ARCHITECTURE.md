@@ -775,8 +775,33 @@ event-type + severity filter and an optional HMAC secret. Key properties:
   `webhook_deliveries`; a retryable failure keeps the cursor (retried next cycle)
   until the per-event attempts reach `MAX_ATTEMPTS` (5), after which the cursor
   advances so one dead endpoint cannot wedge the queue forever. 10 s HTTP timeout;
-  redirects are disabled (egress guard) so a target can't 302 the box to an
+  the shared egress guard (§14.3.1) resolves and pins the target before each POST, so
+  a subscription can't be pointed — directly, by DNS, or by redirect — at an
   internal/metadata URL.
+
+#### 14.3.1 Egress guard: resolve → validate → pin (`net_guard.rs`)
+
+Every server-initiated outbound request (webhook delivery, ONVIF SOAP, sidecar health
+polling) goes through one guard, in two layers:
+
+- **Store time** — `validate_egress_url` checks the scheme allowlist and, for a
+  *literal-IP* host, the forbidden ranges. This is the cheap UX check that rejects a
+  bad URL at the API boundary; it deliberately does no DNS.
+- **Request time** — `resolve_validate_pin` resolves **all** of the host's A/AAAA
+  records, rejects the request if it resolves to nothing or if **any** record is
+  forbidden under the policy, and returns a client with those addresses **pinned**
+  (`resolve_to_addrs`, redirects still disabled). Validating every record — not just
+  the one that happens to be dialed — defeats round-robin DNS rebinding, and pinning
+  closes the TOCTOU window where a name could rebind between the check and the
+  connect. The URL keeps its original hostname, so TLS SNI and the `Host` header stay
+  correct.
+
+Policy is deployment-aware: `EgressPolicy::LAN` (all current sinks) permits
+private/loopback targets because cameras, MediaMTX, and localhost sidecars legitimately
+live there; `EgressPolicy::PUBLIC` rejects them and requires HTTPS. **Link-local
+(`169.254.0.0/16`, `fe80::/10` — where cloud metadata lives) and the
+unspecified/broadcast addresses are rejected under every policy**, and v4-mapped IPv6 is
+canonicalized first so `::ffff:169.254.169.254` can't smuggle past the v6 arm.
 
 ### 14.4 Disk-free retention floor (`services/retention.rs`)
 
