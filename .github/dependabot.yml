@@ -1,15 +1,47 @@
 # This repo is the source of truth for the open platform, so dependency updates are actioned here.
+# We pin container bases and the MediaMTX image by tag + @sha256 digest (see docs/SUPPLY-CHAIN.md);
+# Dependabot's `docker` ecosystem bumps those pins deliberately via PRs (it updates both the tag and
+# the digest), instead of us floating `latest`/`:1` and silently drifting on a re-pull.
 version: 2
 updates:
+  # --- Container base images (three Dockerfiles) ---
+  - package-ecosystem: docker
+    directory: "/"                 # root Dockerfile (rust builder + debian runtime)
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: "/apps/web"         # node builder + nginx runtime
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    directory: "/apps/ai"          # python runtime
+    schedule:
+      interval: weekly
+
+  # --- Compose service images (MediaMTX + ghcr heldar-*) ---
+  - package-ecosystem: docker-compose
+    directory: "/deploy"           # compose.yml (+ prod/tls overlays)
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker-compose
+    directory: "/"                 # docker-compose.yml (dev/single-node)
+    schedule:
+      interval: weekly
+
+  # --- Language/tooling ecosystems ---
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: weekly
   - package-ecosystem: cargo
-    directory: "/"
+    directory: "/"                 # root Cargo workspace
     schedule:
       interval: weekly
   - package-ecosystem: npm
     directory: "/apps/web"
+    schedule:
+      interval: weekly
+  - package-ecosystem: pip
+    directory: "/apps/ai"          # requirements-*.txt (core + optional model stacks)
     schedule:
       interval: weekly

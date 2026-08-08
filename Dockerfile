@@ -3,7 +3,10 @@
 # Migrations are embedded into the binary at compile time (sqlx::migrate!), so the runtime image
 # does not need the migrations directory.
 
-FROM rust:1-bookworm AS builder
+# Pinned base: concrete minor.patch tag + multi-arch index @sha256 digest for a reproducible build.
+# MSRV is 1.85 (see crates/*/Cargo.toml rust-version). To bump: pick the new tag, then resolve its
+# index digest with `docker buildx imagetools inspect rust:<tag>` (see docs/SUPPLY-CHAIN.md).
+FROM rust:1.85.1-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4 AS builder
 # Optional cargo features to compile in (space-separated), e.g. FEATURES="smtp". Empty = default build.
 ARG FEATURES=""
 WORKDIR /app
@@ -11,7 +14,9 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates ./crates
 RUN cargo build --release --bin heldar-core ${FEATURES:+--features "$FEATURES"}
 
-FROM debian:bookworm-slim
+# Pinned runtime base: bookworm (Debian 12) codename + multi-arch index @sha256 digest.
+# To bump: `docker buildx imagetools inspect debian:bookworm-slim` and update the digest.
+FROM debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 ARG FEATURES=""
 # ffmpeg: recorder/clip/snapshot/sampler. curl: container HEALTHCHECK. ca-certificates: outbound TLS.
 # tzdata is required for `chrono::Local` (recording-schedule windows are evaluated in the server's
