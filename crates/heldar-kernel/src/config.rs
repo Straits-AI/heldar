@@ -145,6 +145,12 @@ pub struct Config {
     /// reverse proxy, a port-forward, or a public-cloud bind. Operators using those must set this so
     /// the auth-off boot refusal + hardening guardrails still fire. Default false (LAN appliance).
     pub exposed_declared: bool,
+    /// Optional deployment-mode ladder (`HELDAR_DEPLOYMENT_MODE`). Unset/empty preserves today's
+    /// permissive defaults exactly. `production` (and its `production-lan` / `production-remote`
+    /// variants) TIGHTENS behavior: auth-off on a non-loopback bind becomes a hard boot refusal
+    /// instead of a warning. Documented in docs/PRODUCTION.md. Stored lowercased; never a breaking
+    /// default.
+    pub deployment_mode: String,
     /// Optional first-run admin bootstrap (only used when no users exist yet).
     pub bootstrap_admin_user: Option<String>,
     pub bootstrap_admin_password: Option<String>,
@@ -387,7 +393,6 @@ impl Config {
                 for w in &warnings {
                     tracing::warn!("production guardrail: {w}");
                 }
-                Ok(())
             }
             GuardrailOutcome::StrictRefuse(warnings) => {
                 for w in &warnings {
@@ -398,6 +403,45 @@ impl Config {
                     warnings.len()
                 )
             }
+        }
+        // Separate, LAN-only posture check: auth off on a non-loopback bind trusts the whole LAN as
+        // admin. Runs alongside (not inside) the exposure guardrails above so it stays independently
+        // testable. When the box is internet-exposed with auth off, the exposure refusal above already
+        // bailed; this only bites the plain LAN-bind case the exposure check can't see.
+        self.enforce_lan_trust_guardrail()
+    }
+
+    /// Whether `HELDAR_DEPLOYMENT_MODE` selects a production tier. Any `production*` value
+    /// (`production`, `production-lan`, `production-remote`) counts; unset/empty/`dev`/`commissioning`
+    /// do not — so the default behavior is unchanged.
+    pub fn deployment_mode_is_production(&self) -> bool {
+        self.deployment_mode.starts_with("production")
+    }
+
+    /// LAN-trust guardrail. With auth OFF and the API bound to a non-loopback address, every device on
+    /// the LAN is trusted as full admin. Default posture: emit a loud, boxed startup WARNING and boot
+    /// (so `docker compose up -d` commissioning still works). If `HELDAR_DEPLOYMENT_MODE=production*`,
+    /// this becomes a hard boot refusal instead. Kept as its own method (and pure decision function) so
+    /// it is separately testable from [`evaluate_production_guardrails`].
+    fn enforce_lan_trust_guardrail(&self) -> anyhow::Result<()> {
+        match evaluate_lan_trust(
+            self.auth_enabled,
+            bind_is_loopback(&self.api_host),
+            self.deployment_mode_is_production(),
+        ) {
+            LanTrustOutcome::Silent => Ok(()),
+            LanTrustOutcome::Warn => {
+                warn_lan_trusted_as_admin(&self.api_host);
+                Ok(())
+            }
+            LanTrustOutcome::Refuse => anyhow::bail!(
+                "HELDAR_DEPLOYMENT_MODE={} requires authentication: the API is bound to {} (a \
+                 non-loopback address) with HELDAR_AUTH_ENABLED=false, which trusts every device on \
+                 the LAN as full admin. Set HELDAR_AUTH_ENABLED=true, or bind \
+                 HELDAR_API_HOST=127.0.0.1 for local dev.",
+                self.deployment_mode,
+                self.api_host
+            ),
         }
     }
 
@@ -504,6 +548,9 @@ impl Config {
             secret_key_b64: var("HELDAR_SECRET_KEY"),
             strict_prod: parse_bool("HELDAR_STRICT_PROD", false),
             exposed_declared: parse_bool("HELDAR_INTERNET_EXPOSED", false),
+            deployment_mode: var_or("HELDAR_DEPLOYMENT_MODE", "")
+                .trim()
+                .to_ascii_lowercase(),
             bootstrap_admin_user: var("HELDAR_BOOTSTRAP_ADMIN_USER"),
             bootstrap_admin_password: var("HELDAR_BOOTSTRAP_ADMIN_PASSWORD"),
             audit_retention_days: parse_or("HELDAR_AUDIT_RETENTION_DAYS", 365),
@@ -702,6 +749,73 @@ fn evaluate_production_guardrails(s: &GuardrailState) -> GuardrailOutcome {
     GuardrailOutcome::Pass(warnings)
 }
 
+/// What the boot path should do about the LAN-trust posture (auth off on a non-loopback bind).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LanTrustOutcome {
+    /// Nothing to say: auth is on, or the API is bound loopback-only.
+    Silent,
+    /// Auth off on a LAN bind — emit the boxed warning, then boot.
+    Warn,
+    /// Auth off on a LAN bind AND a production deployment mode — refuse to boot.
+    Refuse,
+}
+
+/// Pure LAN-trust decision, split out so it is unit-testable without the environment or full `Config`.
+/// Auth on, or a loopback-only bind → nothing to flag. Auth off on a non-loopback bind trusts the
+/// whole LAN as admin: warn by default, or refuse when a production deployment mode is selected.
+fn evaluate_lan_trust(
+    auth_enabled: bool,
+    bind_is_loopback: bool,
+    mode_is_production: bool,
+) -> LanTrustOutcome {
+    if auth_enabled || bind_is_loopback {
+        return LanTrustOutcome::Silent;
+    }
+    if mode_is_production {
+        return LanTrustOutcome::Refuse;
+    }
+    LanTrustOutcome::Warn
+}
+
+/// Whether the API bind address is loopback-only (`127.0.0.1`, `::1`, or `localhost`). Anything we
+/// cannot confirm as loopback — `0.0.0.0`, `::`, a LAN IP, or an unresolvable hostname — is treated as
+/// non-loopback so the warning fails loud rather than silent.
+fn bind_is_loopback(api_host: &str) -> bool {
+    let host = api_host.trim();
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+/// Emit the prominent, boxed startup warning for the auth-off-on-LAN posture. The box text is fully
+/// static (so it stays aligned in logs); the dynamic bind address is named in the lead sentence.
+fn warn_lan_trusted_as_admin(api_host: &str) {
+    tracing::warn!(
+        target: "heldar::security",
+        "AUTHENTICATION IS DISABLED and the API is bound to {host} (a non-loopback address), so the \
+         box is trusting EVERY device on the LAN as full admin.\n\
+         ┌──────────────────────────────────────────────────────────────────────────────┐\n\
+         │  ⚠  SECURITY WARNING: HELDAR_AUTH_ENABLED=false on a LAN-reachable API          │\n\
+         │                                                                                │\n\
+         │  Every device on this network — any camera, IoT gadget, or laptop — can reach  │\n\
+         │  the NVR API with FULL ADMIN rights and NO login. A single compromised camera  │\n\
+         │  or IoT device on the LAN therefore gets full control of your cameras,         │\n\
+         │  recordings, and settings.                                                     │\n\
+         │                                                                                │\n\
+         │  Remediation (pick one):                                                       │\n\
+         │    • Require login:   set HELDAR_AUTH_ENABLED=true       (recommended)          │\n\
+         │    • Local dev only:  set HELDAR_API_HOST=127.0.0.1      (loopback, no LAN)      │\n\
+         │                                                                                │\n\
+         │  This is expected during first-time COMMISSIONING — enable auth before you     │\n\
+         │  rely on this box. See docs/PRODUCTION.md for the deployment-mode ladder.       │\n\
+         └──────────────────────────────────────────────────────────────────────────────┘",
+        host = api_host,
+    );
+}
+
 #[cfg(test)]
 mod guardrail_tests {
     use super::*;
@@ -831,5 +945,81 @@ mod guardrail_tests {
         assert!(
             matches!(evaluate_production_guardrails(&s), GuardrailOutcome::Pass(w) if w.iter().any(|x| x.contains("HELDAR_CP_TOKEN")))
         );
+    }
+
+    // --- LAN-trust guardrail (auth off on a non-loopback bind) -------------------------------------
+
+    #[test]
+    fn lan_trust_warns_when_auth_off_and_non_loopback() {
+        // The gap the audit flagged: auth off + LAN bind (0.0.0.0), no remote access → warn, not silent.
+        assert_eq!(
+            evaluate_lan_trust(false, false, false),
+            LanTrustOutcome::Warn
+        );
+    }
+
+    #[test]
+    fn lan_trust_silent_when_auth_off_but_loopback() {
+        // Dev posture: auth off but bound to 127.0.0.1/::1 — no LAN exposure, nothing to warn about.
+        assert_eq!(
+            evaluate_lan_trust(false, true, false),
+            LanTrustOutcome::Silent
+        );
+    }
+
+    #[test]
+    fn lan_trust_silent_when_auth_on() {
+        // Auth on: the LAN is not trusted as admin regardless of bind address.
+        assert_eq!(
+            evaluate_lan_trust(true, false, false),
+            LanTrustOutcome::Silent
+        );
+        assert_eq!(
+            evaluate_lan_trust(true, true, false),
+            LanTrustOutcome::Silent
+        );
+    }
+
+    #[test]
+    fn lan_trust_refuses_in_production_mode_when_auth_off_and_non_loopback() {
+        // HELDAR_DEPLOYMENT_MODE=production tightens the warning into a hard boot refusal.
+        assert_eq!(
+            evaluate_lan_trust(false, false, true),
+            LanTrustOutcome::Refuse
+        );
+    }
+
+    #[test]
+    fn lan_trust_production_mode_does_not_bite_loopback_or_auth_on() {
+        // Production mode only refuses the actually-unsafe posture; loopback or auth-on stay silent.
+        assert_eq!(
+            evaluate_lan_trust(false, true, true),
+            LanTrustOutcome::Silent
+        );
+        assert_eq!(
+            evaluate_lan_trust(true, false, true),
+            LanTrustOutcome::Silent
+        );
+    }
+
+    #[test]
+    fn bind_is_loopback_classifies_addresses() {
+        assert!(bind_is_loopback("127.0.0.1"), "IPv4 loopback");
+        assert!(bind_is_loopback("127.0.0.5"), "IPv4 loopback range");
+        assert!(bind_is_loopback("::1"), "IPv6 loopback");
+        assert!(bind_is_loopback("localhost"), "localhost hostname");
+        assert!(
+            bind_is_loopback("LOCALHOST"),
+            "localhost is case-insensitive"
+        );
+        assert!(bind_is_loopback("  127.0.0.1  "), "trims surrounding space");
+
+        assert!(!bind_is_loopback("0.0.0.0"), "all-interfaces bind");
+        assert!(!bind_is_loopback("::"), "IPv6 unspecified");
+        assert!(!bind_is_loopback("192.168.1.10"), "LAN address");
+        assert!(!bind_is_loopback("10.0.0.1"), "private LAN address");
+        // A hostname we can't confirm as loopback is treated as non-loopback (fail-loud).
+        assert!(!bind_is_loopback("nvr.local"), "unresolvable hostname");
+        assert!(!bind_is_loopback(""), "empty string");
     }
 }

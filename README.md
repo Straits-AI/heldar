@@ -38,9 +38,20 @@ curl -fsSL https://heldar.swmengappdev.workers.dev/install.sh | sh
 Pulls the prebuilt **OPEN** images (kernel + generic apps) and starts MediaMTX + core + web — the
 dashboard is then at `http://localhost:8080`. Add the reference AI worker with `--profile ai`; update
 with `docker compose pull`. For production (auth on, secure cookies, strict boot guardrails) layer the
-hardening overlay: `docker compose -f deploy/compose.yml -f deploy/compose.prod.yml up -d` — see
-[`docs/PRODUCTION.md`](docs/PRODUCTION.md). For a flashed DVR/appliance, use the native-systemd image
-instead (`make appliance-image`, [`infra/systemd/`](infra/systemd/)).
+hardening overlay, and add the TLS overlay to terminate HTTPS:
+
+```bash
+docker compose -f deploy/compose.yml -f deploy/compose.prod.yml -f deploy/compose.tls.yml up -d
+```
+
+The hardening overlay marks the session cookie `Secure`, so it expects HTTPS in front of it — the TLS
+overlay ([`deploy/TLS.md`](deploy/TLS.md)) supplies that with Caddy, in either automatic-Let's-Encrypt
+mode for a public domain or self-signed mode for a LAN appliance. See
+[`docs/PRODUCTION.md`](docs/PRODUCTION.md) for the full deployment-mode ladder (DEV → COMMISSIONING →
+PRODUCTION-LAN → PRODUCTION-REMOTE) and [`docs/SUPPLY-CHAIN.md`](docs/SUPPLY-CHAIN.md) for the image
+pinning policy — production deployments should set `HELDAR_VERSION` to a pinned release tag rather than
+tracking `latest`. For a flashed DVR/appliance, use the native-systemd image instead
+(`make appliance-image`, [`infra/systemd/`](infra/systemd/)).
 
 **Build from source:**
 
