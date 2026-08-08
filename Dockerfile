@@ -6,7 +6,7 @@
 # Pinned base: concrete minor.patch tag + multi-arch index @sha256 digest for a reproducible build.
 # MSRV is 1.85 (see crates/*/Cargo.toml rust-version). To bump: pick the new tag, then resolve its
 # index digest with `docker buildx imagetools inspect rust:<tag>` (see docs/SUPPLY-CHAIN.md).
-FROM rust:1.85.1-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4 AS builder
+FROM rust:1.97.1-bookworm@sha256:14bc9c5966e7b3a385794b3d5389a8765668342025fbcc7b2e3d2866ac4bd8c3 AS builder
 # Optional cargo features to compile in (space-separated), e.g. FEATURES="smtp". Empty = default build.
 ARG FEATURES=""
 WORKDIR /app
