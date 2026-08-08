@@ -66,9 +66,19 @@ jobs:
         with:
           # Full history so the scan covers every commit on the ref, not just the tip.
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
+      # The gitleaks CLI is MIT-licensed, but gitleaks-action@v2 refuses to run for an
+      # ORGANIZATION without a paid GITLEAKS_LICENSE secret. Invoke the binary directly so the
+      # gate works on a fork or a licence-less org; pinned by version for reproducibility.
+      - name: install gitleaks
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITLEAKS_VERSION: 8.30.1
+        run: |
+          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+            | tar -xz -C /usr/local/bin gitleaks
+          gitleaks version
+      # `git` mode scans full history (fetch-depth: 0 above). Non-zero exit = leaks found.
+      - name: gitleaks scan
+        run: gitleaks git --redact --verbose --exit-code 1 .
 
   trivy-fs:
     name: filesystem scan (trivy)
