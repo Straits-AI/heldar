@@ -798,10 +798,25 @@ polling) goes through one guard, in two layers:
 
 Policy is deployment-aware: `EgressPolicy::LAN` (all current sinks) permits
 private/loopback targets because cameras, MediaMTX, and localhost sidecars legitimately
-live there; `EgressPolicy::PUBLIC` rejects them and requires HTTPS. **Link-local
-(`169.254.0.0/16`, `fe80::/10` — where cloud metadata lives) and the
+live there; `EgressPolicy::PUBLIC` requires HTTPS and accepts **only globally routable
+unicast addresses**. That is an allowlist, not a deny-list of the private ranges —
+"not RFC1918" would still admit CGNAT/shared space (`100.64.0.0/10`), the benchmarking
+(`198.18.0.0/15`) and documentation blocks, multicast, and all of `240.0.0.0/4`. IPv6 is a
+positive `2000::/3` test minus the special-purpose carve-outs inside it, including
+`2002::/16` (6to4 embeds an arbitrary IPv4 address, so it can smuggle an RFC1918 or
+metadata destination past a v6-only check).
+
+**Link-local (`169.254.0.0/16`, `fe80::/10` — where cloud metadata lives) and the
 unspecified/broadcast addresses are rejected under every policy**, and v4-mapped IPv6 is
-canonicalized first so `::ffff:169.254.169.254` can't smuggle past the v6 arm.
+canonicalized first so `::ffff:169.254.169.254` can't smuggle past the v6 arm. Client
+construction fails CLOSED: a builder error returns an error rather than falling back to a
+default client, which would follow redirects and pin nothing.
+
+The sidecar reverse proxy (§ plugin sidecars) resolves and pins **per request**, not just
+at registration/health-check time — a hostname that re-resolves between the two is exactly
+the TOCTOU the pinning exists to close. It also caps the upstream response it will buffer
+and strips origin-authority response headers (`Set-Cookie`, HSTS, `Access-Control-Allow-*`,
+…) so a sidecar cannot act on the dashboard origin it is served from.
 
 ### 14.4 Disk-free retention floor (`services/retention.rs`)
 
