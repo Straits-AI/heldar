@@ -9,7 +9,7 @@ COPY . .
 RUN npm run build
 
 # Pinned runtime base: concrete minor.patch tag + multi-arch index @sha256 digest.
-FROM nginx:1.27.5-alpine@sha256:65645c7bb6a0661892a8b03b89d0743208a18dd2f3f17a54ef4b76fb8e2f2a10
+FROM nginx:1.31.3-alpine@sha256:4a73073bd557c65b759505da037898b61f1be6cbcc3c2c3aeac22d2a470c1752
 COPY --from=builder /app/dist /usr/share/nginx/html
 # Rendered by the image's envsubst entrypoint step into /etc/nginx/conf.d/default.conf at start, so
 # the listen address is deployment-settable (loopback-only behind the TLS overlay). The filter keeps
