@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::{AppError, AppResult};
 use crate::models::Segment;
 use crate::repo;
@@ -148,7 +148,7 @@ async fn list_incidents(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<IncidentSummary>>> {
-    principal.require(principal.can_view(), "list incidents")?;
+    principal.require_cap(Cap::EventsRead, "list incidents")?;
     let rows = sqlx::query_as::<_, IncidentSummary>(
         "SELECT incident_id,
                 COUNT(*) AS segment_count,
@@ -175,7 +175,7 @@ async fn incident_segments(
     Path(incident_id): Path<String>,
     principal: Principal,
 ) -> AppResult<Json<Vec<SegmentView>>> {
-    principal.require(principal.can_view(), "read incident segments")?;
+    principal.require_cap(Cap::VideoPlayback, "read incident segments")?;
     let segments = sqlx::query_as::<_, Segment>(
         "SELECT * FROM segments WHERE incident_id = ? ORDER BY start_time ASC LIMIT ?",
     )

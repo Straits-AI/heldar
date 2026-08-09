@@ -234,6 +234,46 @@ PATCH /api/v1/ai-tasks/ai_3f2a9c1b4d5e4f6a8b0c1d2e3f405162
 A worker needs only these four core endpoints (the semantic-embedding endpoints in §5.6–§5.8 are optional). All live under `/api/v1` and return
 JSON (except the frame, which is `image/jpeg`).
 
+> **Provenance, in one paragraph.** A batch posted over this API is *always*
+> recorded as `attributes.source = "worker"`. The kernel **rewrites** `source` and
+> `_prov` on every detection from the credential and lease the request arrived
+> under, discarding whatever the body said. There is no request a client can make
+> that produces `source = "camera_native"` — that value is reserved for the
+> kernel's own camera-native ANPR poller, which is a closed, in-process producer
+> (`Provenance::Kernel`). This matters because `heldar-entry` treats a
+> camera-native plate read as authoritative for the barrier; see §5.0 and §12.4.
+
+### 5.0 Leases and frame tickets (the provenance chain)
+
+Three server-side facts bind a posted detection to a frame the worker actually held:
+
+1. **A lease** (`POST /api/v1/ai/leases`, §5.1a) binds `(credential, worker_id)` to
+   a set of tasks. One row per task, renewed about once a minute — never per frame.
+2. **A frame ticket** is issued with the JPEG when the worker pulls a frame *for a
+   task it holds a live lease on* (`?task=<ai_task_id>`, §5.2). It is a stateless
+   HMAC naming the task and the frame's capture time, bound to the calling
+   credential and the lease's camera. Zero writes; nothing to expire or sweep.
+3. **Ingest** (§5.3) verifies the ticket and then **derives** `camera_id`,
+   `task_type` and `frame_id` from it. Values still present in the body are
+   cross-checked, not trusted: a disagreement is `409`.
+
+Because `frame_id` becomes `"{task_id}:{captured_ms}"` — server-derived — a client
+can no longer name a frame it never held. That closes a suppression trick: the
+outbox is first-writer-wins on `(camera_id, frame_id)`, so pre-claiming the id the
+real worker was about to use used to make its genuine detection a silent no-op.
+
+**Enforcement is staged** via `HELDAR_INGEST_PROVENANCE`:
+
+| Tier | Ticketless ingest | Notes |
+| --- | --- | --- |
+| `off` | accepted | no notice |
+| `warn` | accepted | **default.** Logs once per credential per hour and raises one `ingest_unleased` event, so you get the list of clients that would break |
+| `enforce` | `401 frame_ticket_required` | promoted automatically by `HELDAR_DEPLOYMENT_MODE=production*` |
+
+The attribute rewrite, the reserved-event denylist and the severity clamp are
+**unconditional in every tier**, including auth-off — no legitimate client ever
+depended on asserting them. Only the *ticket requirement* is staged.
+
 ### 5.1 Discover — `GET /api/v1/ai/tasks`
 
 Returns every **enabled** task on an **enabled** camera, each carrying the
@@ -271,10 +311,54 @@ you get the whole list** — a single worker needs nothing. The reference worker
 tasks automatically. (Idempotency still holds during a rebalance: a task briefly
 analyzed by two workers is deduped by the outbox `frame_id`.)
 
+### 5.1a Lease tasks — `POST /api/v1/ai/leases`
+
+Acquire **and** renew are the same call, so a worker's poll loop needs no state
+machine: call it every tick and run whatever comes back. Requires `ai:tasks`.
+
+Request:
+
+```json
+{ "worker_id": "box-1:1421", "ttl_secs": 60,
+  "task_types": ["anpr"], "max_tasks": 32 }
+```
+
+`task_types` and `max_tasks` are optional filters. `ttl_secs` is clamped to
+`15..=300` (default 60) and must comfortably exceed your poll interval.
+
+Response `200 OK`:
+
+```json
+{
+  "lease_id": "lse_9f1c…",
+  "worker_id": "box-1:1421",
+  "expires_at": "2026-06-13T08:16:31.120+00:00",
+  "tasks": [ { "id": "ai_3f2a…", "camera_id": "gate_a_01", "…": "…",
+               "frame_url": "/api/v1/cameras/gate_a_01/frame?profile=sub&task=ai_3f2a…" } ]
+}
+```
+
+A task is leased to **one** holder at a time. A second credential asking while the
+lease is live gets an empty `tasks` array; the row becomes claimable again once the
+lease lapses (expiry is a predicate at claim time — there is no reaper task, so
+nothing new competes with the recorder for SQLite's single writer).
+
+`DELETE /api/v1/ai/leases/{lease_id}` releases early on graceful shutdown, so a
+restart does not wait out the TTL. It is scoped to the holding credential: a lease
+id is not a capability on its own.
+
+`GET /api/v1/ai/tasks` (§5.1) is **unchanged** and still works for a worker that
+never leases — it simply gets no frame tickets, which under `warn` behaves exactly
+as it always has.
+
 ### 5.2 Pull a frame — `GET /api/v1/cameras/{id}/frame`
 
 Serves the latest sampled JPEG for a camera (the worker's input). The worker pulls
 this on its own cadence — typically at (or just under) the task fps.
+
+Pass **`?task=<ai_task_id>`** (the `frame_url` from a lease already includes it) to
+receive a frame ticket alongside the image. Omit it — as the dashboard does — and
+no ticket header is emitted and nothing else changes.
 
 Response `200 OK`:
 
@@ -283,6 +367,7 @@ Content-Type: image/jpeg
 Cache-Control: no-store
 x-frame-age-ms: 142
 x-frame-captured-at: 2026-06-13T08:15:31.120+00:00
+x-frame-ticket: f1.ai_3f2a….1786269688550.1786269808.E9-8SZSo…
 
 <JPEG bytes>
 ```
@@ -293,6 +378,14 @@ x-frame-captured-at: 2026-06-13T08:15:31.120+00:00
   frame.
 - **`x-frame-captured-at`** — RFC3339 timestamp of that write; echo it back as the
   detection `timestamp` so detections align to capture time, not post time.
+- **`x-frame-ticket`** — present only when `?task=` was passed *and* the caller
+  holds a live lease on that task. **Opaque**: carry it back on the POST that
+  describes *this* frame, and never parse, cache or reuse it. Every failure mode
+  (no lease, a lease on another camera, a lease-table error) degrades to "no
+  header" — the frame itself is always served, so perception never goes down
+  because leasing had a bad day. Default lifetime 120s
+  (`HELDAR_FRAME_TICKET_TTL_SECS`, clamped `10..=900`); tickets do not survive a
+  kernel restart, which is harmless because the next pull issues a fresh one.
 
 `404 Not Found` when no frame exists yet (no enabled AI task for the camera, or
 the sampler hasn't produced its first frame):
@@ -313,6 +406,7 @@ Request:
 
 ```json
 {
+  "frame_ticket": "f1.ai_3f2a….1786269688550.1786269808.E9-8SZSo…",
   "camera_id": "gate_a_01",
   "task_type": "detection",
   "timestamp": "2026-06-13T08:15:31.120Z",
@@ -340,6 +434,12 @@ Request:
 
 Field rules (`models.rs::AiIngest`):
 
+- `frame_ticket` — the `x-frame-ticket` from the frame this batch describes.
+  Required under `HELDAR_INGEST_PROVENANCE=enforce` (`401 frame_ticket_required`
+  without it); optional under `warn`/`off`. When present and valid, `camera_id`,
+  `task_type` and `frame_id` are **derived from it**, and the body's own values are
+  only cross-checked — `409` if they disagree. Keep sending them anyway: they are a
+  useful consistency check and they are what an older kernel needs.
 - `camera_id` (**required**) must exist, else `404`.
 - `task_type` (**required**) is stored on each detection row.
 - `timestamp` optional RFC3339; if omitted/unparseable the server uses `now()`.
@@ -347,16 +447,34 @@ Field rules (`models.rs::AiIngest`):
 - `detections` optional (defaults to `[]`) — send `[]` to post only an event.
   Every field inside a detection is optional except its position in the array.
 - `event` optional. `event_type` is **required** when present; `severity`
-  defaults to `info` (use `warning`/`critical` to trigger the Stage 1 alert
+  defaults to `info` (use `warning` to trigger the Stage 1 alert
   webhook); `payload` defaults to `{}`. The event is written to the **same
   `events` table** the kernel uses, so AI alerts flow through the existing
   alert/notifier path for free.
+- `attributes.source` and `attributes._prov` are **server-owned** and are stripped
+  from anything you send. Do not set them.
+
+**Event-type rules for a worker credential.** `event_type` must match
+`^[a-z0-9_]{1,64}$` and must not begin with a reserved kernel-domain prefix —
+`gate_`, `entry_`, `zone_`, `camera_`, `disk_`, `raid_` — else `400`. It is a
+denylist, not an allowlist, so a third-party sidecar's own event types keep
+working; what it stops is a forged `gate_opened` reaching webhooks and operator
+email, where it would be indistinguishable from a real barrier actuation. Worker
+severity is clamped to `info`/`warning`: a worker cannot self-escalate to
+`critical`. Kernel-internal producers are unrestricted — they *are* the domain.
 
 Response `200 OK`:
 
 ```json
-{ "detections_ingested": 2 }
+{ "detections_ingested": 2, "ticketed": true }
 ```
+
+`ticketed` tells you whether the batch was bound to a server-issued frame, without
+having to know the box's tier. A worker that expected `true` and reads `false`
+has lost its lease and should re-acquire.
+
+A redelivery of an already-ingested frame is a no-op and answers
+`{ "detections_ingested": 0, "duplicate": true, "ticketed": … }`.
 
 ### 5.4 Sampler status — `GET /api/v1/ai/samplers`
 
@@ -524,17 +642,25 @@ prefilter that keeps them apart.
 ## 6. The worker loop (pseudocode)
 
 ```
-tasks = GET /api/v1/ai/tasks                     # refresh every few seconds
+# Supervisor tick, every few seconds. Acquire and renew are the same call.
+tasks = POST /api/v1/ai/leases { worker_id, ttl_secs }   -> .tasks
+      | on 404 (kernel predates leases): GET /api/v1/ai/tasks
+
 for each task (own thread / async task):
     loop at ~task.fps:
-        resp = GET task.frame_url
+        resp = GET task.frame_url                # frame_url already carries &task=
         if resp is 404:        sleep, continue   # no frame yet
         if x-frame-captured-at == last_seen: continue   # unchanged frame; skip
         # (optionally also skip when x-frame-age-ms is too high → sampler frozen)
+        ticket = resp.headers["x-frame-ticket"]  # may be absent — that is fine
         dets, event = analyze(task, resp.body)
         if dets or event:
-            POST /api/v1/ai/events { camera_id, task_type, timestamp,
+            POST /api/v1/ai/events { frame_ticket = ticket,
+                                     camera_id, task_type, timestamp,
                                      detections = dets, event = event }
+            # 401 frame_ticket_required / 409  -> drop this batch, re-acquire the
+            # lease, and carry on with the NEXT frame. Never resend the same body
+            # under a different ticket: a ticket names one specific captured frame.
 ```
 
 Because `latest.jpg` is last-value, pulling faster than the sampler writes just
@@ -1032,6 +1158,44 @@ engine reads:
 "detector": "yolov8n.pt"}`. The engine keeps the **highest-confidence** observation of
 each attribute across the track's frames and votes the **plate** across frames — so a
 single noisy read is outvoted (see [`docs/ACCESS-CONTROL.md`](ACCESS-CONTROL.md) §2.2).
+
+#### Server-owned keys: `source` and `_prov`
+
+Two keys in `attributes` are **written by the kernel, never by you**, and any value
+you send for them is discarded before the row is persisted:
+
+| Key | Value | Meaning |
+|---|---|---|
+| `source` | `"worker"` | the batch arrived over the HTTP ingest API |
+| `source` | `"camera_native"` | the batch came from the kernel's own camera-native ANPR poller — **unreachable from the API** |
+| `_prov` | `{"key","task","worker"}` | which credential/lease produced it (worker batches) |
+| `_prov` | `{"producer":"native_anpr"}` | which in-process kernel producer produced it |
+
+This is load-bearing for the barrier. `heldar-entry` weights a `camera_native` read
+at the full configured vote threshold — the device already consolidated multiple
+frames itself — so one such read commits an entry event immediately. A worker read
+carries one vote and needs `anpr_min_votes` of them. Since `source` used to arrive
+inside client-supplied attributes, anything holding an integration key could claim
+to be the camera's on-board engine; now the value is a function of *how the batch
+entered the kernel*, and the external API cannot express the authoritative one.
+
+Two further gate hardenings ride alongside it:
+
+- **One vote per frame.** A batch is one frame, so it contributes at most one vote
+  per `(track, plate)`. Repeating the same detection N times in a single body no
+  longer reaches the threshold; N distinct tickets — i.e. N distinct sampled frames
+  off that physical camera — are required.
+- **Commit-on-prune never actuates.** When a track ages out below the vote
+  threshold, the entry event is still written (the audit record is the point) but
+  it is marked `workflow_status = "review"`, a `gate_review_not_actuated` event is
+  raised, and the barrier is **not** opened. Previously a single accepted read still
+  opened the gate about 30 seconds later, which left the gate capability intact even
+  with the vote path hardened.
+
+The entry event's `audit` block now names the real producer instead of the old
+hard-coded `"system"`, and carries `evidence: { votes, min_votes, source, key,
+actuated }`. A `gate_opened` event carries the same `provenance` block — the first
+time a barrier opening is attributable to a specific credential.
 
 Example posted detection:
 

@@ -115,6 +115,14 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
     if resealed > 0 {
         tracing::info!("sealed {resealed} legacy camera credential(s) at rest");
     }
+    // One boxed banner naming the resolved machine-credential posture and every credential still on a
+    // role expansion. Best-effort: a failed query here must never stop the box from booting.
+    let legacy_keys: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, name FROM api_keys WHERE capabilities IS NULL AND active = 1")
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+    cfg.log_machine_auth_banner(&legacy_keys);
     // Release any transient segment read-locks left by a crash mid clip/snapshot export.
     db::clear_segment_read_locks(&pool)
         .await

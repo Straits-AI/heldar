@@ -4,7 +4,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use axum::Router;
 
-use crate::auth::Principal;
+use crate::auth::{Cap, Principal};
 use crate::error::AppResult;
 use crate::services::metrics;
 use crate::state::AppState;
@@ -18,7 +18,7 @@ pub fn router() -> Router<AppState> {
 /// present a valid API key (Bearer); when auth is disabled (LAN-appliance default) the extractor
 /// yields the synthetic admin and this stays open, unchanged.
 async fn metrics_handler(State(st): State<AppState>, principal: Principal) -> AppResult<Response> {
-    principal.require(principal.can_view(), "read metrics")?;
+    principal.require_cap(Cap::SystemRead, "read metrics")?;
     let body = metrics::render(&st.pool, &st.cfg).await?;
     Ok((
         [(

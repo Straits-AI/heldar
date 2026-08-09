@@ -14,7 +14,7 @@ use axum::routing::{any, get};
 use axum::{Json, Router};
 use serde_json::json;
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::{AppError, AppResult};
 use crate::modules::{ModuleDetail, ModuleManifest, ModuleRegisterRequest, ModuleRegistered};
 use crate::services;
@@ -35,7 +35,7 @@ async fn list(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<ModuleManifest>>> {
-    principal.require(principal.can_view(), "list modules")?;
+    principal.require_cap(Cap::SystemRead, "list modules")?;
     let mut out: Vec<ModuleManifest> = st.modules.as_ref().clone();
     for r in services::modules::list_registered(&st.pool).await? {
         out.push(r.to_manifest());
@@ -196,7 +196,7 @@ async fn forward(
     headers: HeaderMap,
     body: Bytes,
 ) -> AppResult<Response> {
-    principal.require(principal.can_view(), "access a module")?;
+    principal.require_cap(Cap::ModuleProxy, "access a module")?;
     let row = services::modules::get_registered(&st.pool, id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("module `{id}` not found")))?;

@@ -38,3 +38,52 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub started_at: DateTime<Utc>,
 }
+
+impl AppState {
+    /// Load a camera ON BEHALF OF a caller: camera scope first, then existence.
+    ///
+    /// This is the single choke point for camera scoping on the request path. The order matters — an
+    /// out-of-scope id answers 403 whether or not the camera exists, so the scope boundary cannot be
+    /// used as an existence oracle for the rest of the fleet.
+    ///
+    /// Background services (recorder, sampler, live publisher, mirror, ANR) deliberately do NOT go
+    /// through here: they never hold a `Principal`, and recording must never acquire a new failure mode
+    /// from the auth layer. They keep the raw query.
+    pub async fn camera_for(
+        &self,
+        principal: &crate::auth::Principal,
+        id: &str,
+    ) -> crate::error::AppResult<crate::models::Camera> {
+        principal.require_camera(id, "access this camera")?;
+        crate::routes::cameras::load_camera(&self.pool, id).await
+    }
+
+    /// Assert camera scope without loading the row — for handlers that only need the id (they 404 via
+    /// their own query, or address a per-camera resource rather than the camera itself).
+    pub fn camera_scope_check(
+        &self,
+        principal: &crate::auth::Principal,
+        id: &str,
+    ) -> crate::error::AppResult<()> {
+        principal.require_camera(id, "access this camera")
+    }
+}
+
+/// SQL predicate + bind values restricting a camera-keyed list query to a principal's scope.
+///
+/// Returns `None` when the caller is unrestricted (the overwhelming default), so unscoped callers pay
+/// no predicate at all. Otherwise returns `(" AND camera_id IN (?,?,…)", ids)` — an EMPTY allowlist
+/// yields `IN ()`-equivalent `AND 0`, i.e. no rows, which is the fail-closed answer.
+pub fn camera_scope_filter(
+    principal: &crate::auth::Principal,
+    column: &str,
+) -> Option<(String, Vec<String>)> {
+    let ids = principal.camera_scope()?;
+    if ids.is_empty() {
+        return Some((" AND 0".to_string(), Vec::new()));
+    }
+    let mut sorted: Vec<String> = ids.iter().cloned().collect();
+    sorted.sort();
+    let placeholders = vec!["?"; sorted.len()].join(",");
+    Some((format!(" AND {column} IN ({placeholders})"), sorted))
+}

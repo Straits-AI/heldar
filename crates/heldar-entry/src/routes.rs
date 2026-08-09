@@ -19,7 +19,7 @@ use crate::models::{
     AuditLog, EntryEvent, Vehicle, VehicleCreate, VehicleUpdate, VisitorPass, VisitorPassCreate,
     VisitorPassUpdate, Watchlist, WatchlistCreate, WatchlistUpdate,
 };
-use heldar_kernel::auth::{self, Principal};
+use heldar_kernel::auth::{self, Cap, Principal};
 use heldar_kernel::error::{AppError, AppResult};
 use heldar_kernel::state::AppState;
 
@@ -73,7 +73,7 @@ const ENTRY_UI_BUNDLE: &str = include_str!("../ui/entry.js");
 /// authenticated viewer may load it — it is inert frontend code; the data it fetches is separately
 /// gated by the kernel's RBAC.
 async fn serve_ui(principal: Principal) -> AppResult<axum::response::Response> {
-    principal.require(principal.can_view(), "load the entry module UI")?;
+    principal.require_cap(Cap::EventsRead, "load the entry module UI")?;
     Ok((
         [
             (
@@ -117,7 +117,7 @@ async fn list_vehicles(
     principal: Principal,
     Query(q): Query<VehicleQuery>,
 ) -> AppResult<Json<Vec<Vehicle>>> {
-    principal.require(principal.can_view(), "view vehicles")?;
+    principal.require_cap(Cap::IdentityRead, "view vehicles")?;
     let limit = q.limit.unwrap_or(200).clamp(1, 2000);
     let plate_norm = q.plate.as_deref().map(normalize_plate);
     let like = q.q.as_deref().map(|s| format!("%{}%", s.trim()));
@@ -147,7 +147,7 @@ async fn get_vehicle(
     principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<Vehicle>> {
-    principal.require(principal.can_view(), "view vehicles")?;
+    principal.require_cap(Cap::IdentityRead, "view vehicles")?;
     let v = sqlx::query_as::<_, Vehicle>("SELECT * FROM vehicles WHERE id = ?")
         .bind(&id)
         .fetch_optional(&st.pool)
@@ -346,7 +346,7 @@ async fn list_passes(
     principal: Principal,
     Query(q): Query<PassQuery>,
 ) -> AppResult<Json<Vec<VisitorPass>>> {
-    principal.require(principal.can_view(), "view passes")?;
+    principal.require_cap(Cap::IdentityRead, "view passes")?;
     let limit = q.limit.unwrap_or(200).clamp(1, 2000);
     let like = q.q.as_deref().map(|s| format!("%{}%", s.trim()));
     let rows = sqlx::query_as::<_, VisitorPass>(
@@ -373,7 +373,7 @@ async fn get_pass(
     principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<VisitorPass>> {
-    principal.require(principal.can_view(), "view passes")?;
+    principal.require_cap(Cap::IdentityRead, "view passes")?;
     Ok(Json(load_pass(&st.pool, &id).await?))
 }
 
@@ -656,7 +656,7 @@ async fn list_watchlist(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<Watchlist>>> {
-    principal.require(principal.can_view(), "view watchlist")?;
+    principal.require_cap(Cap::IdentityRead, "view watchlist")?;
     // Bound the result set: the watchlist can grow large, and an unbounded SELECT * would load every
     // row into memory at once (OOM/latency risk). 1000 is well above any realistic operator view.
     let rows = sqlx::query_as::<_, Watchlist>(
@@ -819,7 +819,7 @@ async fn list_entry_events(
     principal: Principal,
     Query(q): Query<EntryEventQuery>,
 ) -> AppResult<Json<Vec<EntryEvent>>> {
-    principal.require(principal.can_view(), "view entry events")?;
+    principal.require_cap(Cap::EventsRead, "view entry events")?;
     let limit = q.limit.unwrap_or(200).clamp(1, 5000);
     let from = parse_opt_ts(&q.from, "from")?;
     let to = parse_opt_ts(&q.to, "to")?;
@@ -857,7 +857,7 @@ async fn get_entry_event(
     principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<EntryEvent>> {
-    principal.require(principal.can_view(), "view entry events")?;
+    principal.require_cap(Cap::EventsRead, "view entry events")?;
     let ev = sqlx::query_as::<_, EntryEvent>("SELECT * FROM entry_events WHERE id = ?")
         .bind(&id)
         .fetch_optional(&st.pool)
@@ -986,7 +986,7 @@ async fn report_entry_log(
     principal: Principal,
     Query(q): Query<ReportQuery>,
 ) -> AppResult<Json<Value>> {
-    principal.require(principal.can_view(), "view reports")?;
+    principal.require_cap(Cap::EventsRead, "view reports")?;
     let (from, to) = report_window(&q)?;
     let limit = q.limit.unwrap_or(1000).clamp(1, 10000);
     let events = sqlx::query_as::<_, EntryEvent>(
@@ -1011,7 +1011,7 @@ async fn report_exceptions(
     principal: Principal,
     Query(q): Query<ReportQuery>,
 ) -> AppResult<Json<Value>> {
-    principal.require(principal.can_view(), "view reports")?;
+    principal.require_cap(Cap::EventsRead, "view reports")?;
     let (from, to) = report_window(&q)?;
     let limit = q.limit.unwrap_or(1000).clamp(1, 10000);
     // Exceptions = anything that is not an automatic clean match: blocked / exception / unmatched,
@@ -1102,7 +1102,7 @@ async fn get_gate_state(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Value>> {
-    principal.require(principal.can_view(), "view gate configuration")?;
+    principal.require_cap(Cap::IdentityRead, "view gate configuration")?;
     let kill_switch = crate::gate::GateActuator::kill_switch(&st.pool).await;
     let policies = sqlx::query_as::<_, crate::gate::GatePolicy>(
         "SELECT * FROM gate_policies ORDER BY camera_id ASC",

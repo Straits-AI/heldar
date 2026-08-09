@@ -11,10 +11,9 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::AppResult;
 use crate::models::{CameraOnvif, PtzPreset};
-use crate::routes::cameras::load_camera;
 use crate::services::onvif;
 use crate::state::AppState;
 
@@ -60,8 +59,8 @@ async fn get_onvif(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<Json<CameraOnvif>> {
-    principal.require(principal.can_view(), "view ONVIF profile")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    principal.require_cap(Cap::CameraRead, "view ONVIF profile")?;
+    let _ = st.camera_for(&principal, &id).await?;
     Ok(Json(onvif::load_onvif(&st.pool, &id).await?))
 }
 
@@ -79,7 +78,7 @@ async fn probe(
     body: Option<Json<ProbeRequest>>,
 ) -> AppResult<Json<CameraOnvif>> {
     principal.require(principal.can_manage_registry(), "probe ONVIF devices")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    let _ = st.camera_for(&principal, &id).await?;
     let device_url = body.and_then(|Json(b)| b.device_url);
     let onvif = onvif::probe(&st, &id, device_url).await?;
     auth::audit(
@@ -105,8 +104,8 @@ async fn list_presets(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<Json<Vec<PtzPreset>>> {
-    principal.require(principal.can_view(), "view PTZ presets")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    principal.require_cap(Cap::CameraRead, "view PTZ presets")?;
+    let _ = st.camera_for(&principal, &id).await?;
     let rows = sqlx::query_as::<_, PtzPreset>(
         "SELECT * FROM camera_ptz_presets WHERE camera_id = ? ORDER BY token ASC",
     )
@@ -122,7 +121,7 @@ async fn refresh_presets(
     principal: Principal,
 ) -> AppResult<Json<Vec<PtzPreset>>> {
     principal.require(principal.can_manage_registry(), "refresh PTZ presets")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    let _ = st.camera_for(&principal, &id).await?;
     let presets = onvif::get_presets(&st, &id).await?;
     auth::audit(
         &st.pool,
@@ -155,7 +154,7 @@ async fn continuous_move(
     Json(body): Json<ContinuousMoveRequest>,
 ) -> AppResult<Json<Value>> {
     principal.require(principal.can_manage_registry(), "control PTZ")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    let _ = st.camera_for(&principal, &id).await?;
     onvif::continuous_move(&st, &id, body.pan, body.tilt, body.zoom).await?;
     auth::audit(
         &st.pool,
@@ -175,7 +174,7 @@ async fn ptz_stop(
     principal: Principal,
 ) -> AppResult<Json<Value>> {
     principal.require(principal.can_manage_registry(), "control PTZ")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    let _ = st.camera_for(&principal, &id).await?;
     onvif::stop(&st, &id).await?;
     auth::audit(&st.pool, &principal, "ptz_stop", "camera", &id, json!({})).await;
     Ok(Json(json!({ "ok": true })))
@@ -193,7 +192,7 @@ async fn goto_preset(
     Json(body): Json<GotoPresetRequest>,
 ) -> AppResult<Json<Value>> {
     principal.require(principal.can_manage_registry(), "control PTZ")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    let _ = st.camera_for(&principal, &id).await?;
     onvif::goto_preset(&st, &id, &body.token).await?;
     auth::audit(
         &st.pool,

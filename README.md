@@ -120,6 +120,16 @@ HELDAR_API=http://localhost:8000 .venv/bin/python worker.py
 See the [Quickstart](https://heldar.swmengappdev.workers.dev/docs/getting-started/quickstart) for
 enabling detection tasks, drawing zones, and configuring alerting.
 
+> **AI ingest provenance.** Detections posted over `/api/v1/ai/events` are always recorded as
+> `source: "worker"` — the kernel writes that attribute itself and strips whatever the client sent, so
+> no API caller can claim to be a camera's on-board ANPR engine (a read the barrier treats as
+> authoritative). Workers additionally **lease** their tasks and post a server-issued **frame ticket**,
+> which lets the kernel derive `camera_id`/`task_type`/`frame_id` instead of trusting the body.
+> Requiring the ticket is staged: `HELDAR_INGEST_PROVENANCE` defaults to `warn` (ticketless ingest
+> still works, with a once-per-hour notice per credential) and is promoted to `enforce` automatically
+> when `HELDAR_DEPLOYMENT_MODE=production*`. See [ADR 0005](docs/adr/0005-task-lease-bound-ai-ingest.md)
+> and [`docs/AI-WORKERS.md`](docs/AI-WORKERS.md) §5.0.
+
 ### Default ports
 
 | Port | Service |

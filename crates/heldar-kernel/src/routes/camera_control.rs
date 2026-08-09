@@ -14,9 +14,8 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::AppResult;
-use crate::routes::cameras::load_camera;
 use crate::services::camera_config::types::{
     DayNightConfig, DayNightPatch, ImageConfig, ImageConfigPatch, IntrusionConfig, IoOutput,
     LineCrossingConfig, MotionConfig,
@@ -64,8 +63,14 @@ pub fn router() -> Router<AppState> {
 }
 
 /// Build a device-control provider for `id` (404 unknown camera; 400 not configurable).
-async fn provider_for(st: &AppState, id: &str) -> AppResult<Box<dyn CameraConfigProvider>> {
-    let cam = load_camera(&st.pool, id).await?;
+async fn provider_for(
+    st: &AppState,
+    principal: &Principal,
+    id: &str,
+) -> AppResult<Box<dyn CameraConfigProvider>> {
+    // Camera scope is asserted HERE rather than in each handler: every read and every write in
+    // this file goes through this helper, so a new endpoint cannot forget the check.
+    let cam = st.camera_for(principal, id).await?;
     camera_config::for_camera(&cam, &st.http, st.cfg.isapi_request_timeout_ms)
 }
 
@@ -76,7 +81,8 @@ async fn get_capabilities(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<Json<Value>> {
-    principal.require(principal.can_view(), "view camera device capabilities")?;
+    principal.require_cap(Cap::CameraRead, "view camera device capabilities")?;
+    st.camera_scope_check(&principal, &id)?;
     Ok(Json(camera_control::stored_capabilities(&st, &id).await?))
 }
 
@@ -89,6 +95,7 @@ async fn probe(
         principal.can_manage_registry(),
         "probe camera device capabilities",
     )?;
+    st.camera_scope_check(&principal, &id)?;
     let map = camera_control::refresh_capabilities(&st, &id).await?;
     auth::audit(
         &st.pool,
@@ -114,8 +121,8 @@ async fn get_day_night(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<Json<DayNightConfig>> {
-    principal.require(principal.can_view(), "view camera day/night configuration")?;
-    let provider = provider_for(&st, &id).await?;
+    principal.require_cap(Cap::CameraRead, "view camera day/night configuration")?;
+    let provider = provider_for(&st, &principal, &id).await?;
     Ok(Json(provider.get_day_night().await?))
 }
 
@@ -136,7 +143,7 @@ async fn put_day_night(
             ));
         }
     }
-    let provider = provider_for(&st, &id).await?;
+    let provider = provider_for(&st, &principal, &id).await?;
     provider.put_day_night(&patch).await?;
     let updated = provider.get_day_night().await?;
     auth::audit(
@@ -158,8 +165,8 @@ async fn get_image(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<Json<ImageConfig>> {
-    principal.require(principal.can_view(), "view camera image configuration")?;
-    let provider = provider_for(&st, &id).await?;
+    principal.require_cap(Cap::CameraRead, "view camera image configuration")?;
+    let provider = provider_for(&st, &principal, &id).await?;
     Ok(Json(provider.get_image_config().await?))
 }
 
@@ -173,7 +180,7 @@ async fn put_image(
         principal.can_manage_registry(),
         "configure camera image settings",
     )?;
-    let provider = provider_for(&st, &id).await?;
+    let provider = provider_for(&st, &principal, &id).await?;
     provider.put_image_config(&patch).await?;
     let updated = provider.get_image_config().await?;
     auth::audit(
@@ -214,7 +221,7 @@ async fn put_detection(
         principal.can_manage_registry(),
         "configure camera built-in detections",
     )?;
-    let provider = provider_for(&st, &id).await?;
+    let provider = provider_for(&st, &principal, &id).await?;
     provider.set_builtin_detection(&kind, body.enabled).await?;
     auth::audit(
         &st.pool,
@@ -238,8 +245,8 @@ async fn get_line_crossing(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<Json<LineCrossingConfig>> {
-    principal.require(principal.can_view(), "view line-crossing rules")?;
-    let provider = provider_for(&st, &id).await?;
+    principal.require_cap(Cap::CameraRead, "view line-crossing rules")?;
+    let provider = provider_for(&st, &principal, &id).await?;
     Ok(Json(provider.get_line_crossing().await?))
 }
 
@@ -254,7 +261,7 @@ async fn put_line_crossing(
         principal.can_manage_registry(),
         "configure line-crossing rules",
     )?;
-    let provider = provider_for(&st, &id).await?;
+    let provider = provider_for(&st, &principal, &id).await?;
     provider.put_line_crossing(&cfg).await?;
     let updated = provider.get_line_crossing().await?;
     auth::audit(
@@ -278,8 +285,8 @@ async fn get_intrusion(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<Json<IntrusionConfig>> {
-    principal.require(principal.can_view(), "view intrusion regions")?;
-    let provider = provider_for(&st, &id).await?;
+    principal.require_cap(Cap::CameraRead, "view intrusion regions")?;
+    let provider = provider_for(&st, &principal, &id).await?;
     Ok(Json(provider.get_intrusion().await?))
 }
 
@@ -294,7 +301,7 @@ async fn put_intrusion(
         principal.can_manage_registry(),
         "configure intrusion regions",
     )?;
-    let provider = provider_for(&st, &id).await?;
+    let provider = provider_for(&st, &principal, &id).await?;
     provider.put_intrusion(&cfg).await?;
     let updated = provider.get_intrusion().await?;
     auth::audit(
@@ -318,8 +325,8 @@ async fn get_motion(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<Json<MotionConfig>> {
-    principal.require(principal.can_view(), "view motion detection settings")?;
-    let provider = provider_for(&st, &id).await?;
+    principal.require_cap(Cap::CameraRead, "view motion detection settings")?;
+    let provider = provider_for(&st, &principal, &id).await?;
     Ok(Json(provider.get_motion().await?))
 }
 
@@ -334,7 +341,7 @@ async fn put_motion(
         principal.can_manage_registry(),
         "configure motion detection",
     )?;
-    let provider = provider_for(&st, &id).await?;
+    let provider = provider_for(&st, &principal, &id).await?;
     provider.put_motion(&cfg).await?;
     let updated = provider.get_motion().await?;
     auth::audit(
@@ -357,8 +364,8 @@ async fn list_outputs(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<Json<Vec<IoOutput>>> {
-    principal.require(principal.can_view(), "view camera IO outputs")?;
-    let provider = provider_for(&st, &id).await?;
+    principal.require_cap(Cap::CameraRead, "view camera IO outputs")?;
+    let provider = provider_for(&st, &principal, &id).await?;
     Ok(Json(provider.list_io_outputs().await?))
 }
 
@@ -378,6 +385,7 @@ async fn pulse_output(
     body: Option<Json<PulseRequest>>,
 ) -> AppResult<Json<Value>> {
     principal.require(principal.can_manage_registry(), "pulse a camera IO output")?;
+    st.camera_scope_check(&principal, &id)?;
     let req = body.map(|Json(b)| b).unwrap_or_default();
     // Map a device refusal to a 400 with the ISAPI reason — the operator needs to see e.g.
     // "Invalid Operation" (camera has no relay port), not a generic internal error.

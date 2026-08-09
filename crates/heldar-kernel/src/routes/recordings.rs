@@ -4,10 +4,9 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::Principal;
+use crate::auth::{Cap, Principal};
 use crate::error::{AppError, AppResult};
 use crate::models::Segment;
-use crate::routes::cameras::load_camera;
 use crate::state::AppState;
 use crate::util;
 
@@ -78,8 +77,8 @@ async fn list_segments(
     Path(id): Path<String>,
     Query(q): Query<RangeQuery>,
 ) -> AppResult<Json<Vec<SegmentView>>> {
-    principal.require(principal.can_view(), "list recording segments")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    principal.require_cap(Cap::VideoPlayback, "list recording segments")?;
+    let _ = st.camera_for(&principal, &id).await?;
     let (from, to) = parse_range(&q)?;
     let limit = q.limit.unwrap_or(500).clamp(1, 5000);
 
@@ -216,8 +215,8 @@ async fn timeline(
     Path(id): Path<String>,
     Query(q): Query<RangeQuery>,
 ) -> AppResult<Json<Timeline>> {
-    principal.require(principal.can_view(), "view recording timeline")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    principal.require_cap(Cap::VideoPlayback, "view recording timeline")?;
+    let _ = st.camera_for(&principal, &id).await?;
     let (from, to) = parse_range(&q)?;
     let segments = fetch_segments_in_range(&st.pool, &id, from, to).await?;
     let segment_count = segments.len();
@@ -250,8 +249,8 @@ async fn gaps(
     Path(id): Path<String>,
     Query(q): Query<RangeQuery>,
 ) -> AppResult<Json<Gaps>> {
-    principal.require(principal.can_view(), "view recording gaps")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    principal.require_cap(Cap::VideoPlayback, "view recording gaps")?;
+    let _ = st.camera_for(&principal, &id).await?;
     let (from, to) = parse_range(&q)?;
     let segments = fetch_segments_in_range(&st.pool, &id, from, to).await?;
     let ranges = coalesce(&segments);

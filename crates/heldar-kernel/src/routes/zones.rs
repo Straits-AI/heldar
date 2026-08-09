@@ -10,10 +10,9 @@ use serde_json::{json, Value};
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::{AppError, AppResult};
 use crate::models::{Zone, ZoneCreate, ZoneEvent, ZoneUpdate};
-use crate::routes::cameras::load_camera;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -129,8 +128,8 @@ async fn list_zones(
     principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<Vec<Zone>>> {
-    principal.require(principal.can_view(), "list zones")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    principal.require_cap(Cap::EventsRead, "list zones")?;
+    let _ = st.camera_for(&principal, &id).await?;
     let zones = sqlx::query_as::<_, Zone>(
         "SELECT * FROM zones WHERE camera_id = ? ORDER BY created_at ASC",
     )
@@ -147,7 +146,7 @@ async fn create_zone(
     Json(body): Json<ZoneCreate>,
 ) -> AppResult<(StatusCode, Json<Zone>)> {
     principal.require(principal.can_manage_registry(), "create zones")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    let _ = st.camera_for(&principal, &id).await?;
     if body.name.trim().is_empty() {
         return Err(AppError::BadRequest("`name` is required".into()));
     }
@@ -354,8 +353,8 @@ async fn list_zone_events(
     Path(id): Path<String>,
     Query(q): Query<ZoneEventQuery>,
 ) -> AppResult<Json<Vec<ZoneEventView>>> {
-    principal.require(principal.can_view(), "list zone events")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    principal.require_cap(Cap::EventsRead, "list zone events")?;
+    let _ = st.camera_for(&principal, &id).await?;
     let limit = q.limit.unwrap_or(200).clamp(1, 5000);
     let parse = |s: &Option<String>, field: &str| -> AppResult<Option<chrono::DateTime<Utc>>> {
         match s {
@@ -416,8 +415,8 @@ async fn zone_event_aggregates(
     Path(id): Path<String>,
     Query(q): Query<AggregateQuery>,
 ) -> AppResult<Json<Value>> {
-    principal.require(principal.can_view(), "aggregate zone events")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    principal.require_cap(Cap::EventsRead, "aggregate zone events")?;
+    let _ = st.camera_for(&principal, &id).await?;
     let bucket_minutes = q.bucket_minutes.unwrap_or(60).clamp(1, 1440);
     let parse = |s: &Option<String>, field: &str| -> AppResult<Option<chrono::DateTime<Utc>>> {
         match s {
@@ -476,8 +475,8 @@ async fn zone_occupancy(
     principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
-    principal.require(principal.can_view(), "view zone occupancy")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    principal.require_cap(Cap::EventsRead, "view zone occupancy")?;
+    let _ = st.camera_for(&principal, &id).await?;
     let rows: Vec<(String, i64, String)> = sqlx::query_as(
         "SELECT zo.zone_id, zo.count, zo.updated_at
          FROM zone_occupancy zo JOIN zones z ON z.id = zo.zone_id

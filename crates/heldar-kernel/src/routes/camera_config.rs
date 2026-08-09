@@ -19,9 +19,8 @@ use axum::{Json, Router};
 use chrono::Utc;
 use serde_json::{json, Value};
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::{AppError, AppResult};
-use crate::routes::cameras::load_camera;
 use crate::services::camera_config::types::{
     BulkAction, BulkCameraResult, BulkConfigRequest, BulkConfigResponse, DeviceInfo,
     EnsureOnvifUserRequest, NtpConfig, OnvifSettings, OnvifUserType, OsdConfig, RebootRequest,
@@ -76,8 +75,14 @@ pub fn router() -> Router<AppState> {
 
 /// Build a camera-config provider for `id`, 404ing when the camera is unknown and 400ing when it is
 /// not configurable (no address/credentials, or an unsupported vendor).
-async fn provider_for(st: &AppState, id: &str) -> AppResult<Box<dyn CameraConfigProvider>> {
-    let cam = load_camera(&st.pool, id).await?;
+async fn provider_for(
+    st: &AppState,
+    principal: &Principal,
+    id: &str,
+) -> AppResult<Box<dyn CameraConfigProvider>> {
+    // Camera scope is asserted HERE rather than in each handler: every read and every write in
+    // this file goes through this helper, so a new endpoint cannot forget the check.
+    let cam = st.camera_for(principal, id).await?;
     camera_config::for_camera(&cam, &st.http, st.cfg.isapi_request_timeout_ms)
 }
 
@@ -88,8 +93,8 @@ async fn get_device_info(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<Json<DeviceInfo>> {
-    principal.require(principal.can_view(), "view camera configuration")?;
-    let provider = provider_for(&st, &id).await?;
+    principal.require_cap(Cap::CameraRead, "view camera configuration")?;
+    let provider = provider_for(&st, &principal, &id).await?;
     let info = provider.get_device_info().await?;
     // Refresh the per-camera ISAPI cache (identity columns only; integration/clock state preserved).
     sqlx::query(
@@ -120,8 +125,8 @@ async fn get_video_list(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<Json<Vec<VideoConfig>>> {
-    principal.require(principal.can_view(), "view camera video configuration")?;
-    let provider = provider_for(&st, &id).await?;
+    principal.require_cap(Cap::CameraRead, "view camera video configuration")?;
+    let provider = provider_for(&st, &principal, &id).await?;
     Ok(Json(provider.list_video_configs().await?))
 }
 
@@ -130,8 +135,8 @@ async fn get_video(
     Path((id, channel)): Path<(String, u32)>,
     principal: Principal,
 ) -> AppResult<Json<VideoConfig>> {
-    principal.require(principal.can_view(), "view camera video configuration")?;
-    let provider = provider_for(&st, &id).await?;
+    principal.require_cap(Cap::CameraRead, "view camera video configuration")?;
+    let provider = provider_for(&st, &principal, &id).await?;
     Ok(Json(provider.get_video_config(channel).await?))
 }
 
@@ -142,7 +147,7 @@ async fn put_video(
     Json(patch): Json<VideoConfigPatch>,
 ) -> AppResult<Json<VideoConfig>> {
     principal.require(principal.can_manage_registry(), "configure camera video")?;
-    let provider = provider_for(&st, &id).await?;
+    let provider = provider_for(&st, &principal, &id).await?;
     let merged = merge_video(provider.get_video_config(channel).await?, &patch);
     provider.put_video_config(channel, &merged).await?;
     let updated = provider.get_video_config(channel).await?;
@@ -171,8 +176,8 @@ async fn get_time(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<Json<TimeConfig>> {
-    principal.require(principal.can_view(), "view camera clock")?;
-    let provider = provider_for(&st, &id).await?;
+    principal.require_cap(Cap::CameraRead, "view camera clock")?;
+    let provider = provider_for(&st, &principal, &id).await?;
     Ok(Json(provider.get_time_config().await?))
 }
 
@@ -183,7 +188,7 @@ async fn put_time(
     Json(cfg): Json<TimeConfig>,
 ) -> AppResult<Json<TimeConfig>> {
     principal.require(principal.can_manage_registry(), "configure camera clock")?;
-    let provider = provider_for(&st, &id).await?;
+    let provider = provider_for(&st, &principal, &id).await?;
     provider.put_time_config(&cfg).await?;
     let updated = provider.get_time_config().await?;
     auth::audit(
@@ -203,8 +208,8 @@ async fn get_ntp(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<Json<NtpConfig>> {
-    principal.require(principal.can_view(), "view camera NTP server")?;
-    let provider = provider_for(&st, &id).await?;
+    principal.require_cap(Cap::CameraRead, "view camera NTP server")?;
+    let provider = provider_for(&st, &principal, &id).await?;
     Ok(Json(provider.get_ntp_config().await?))
 }
 
@@ -218,7 +223,7 @@ async fn put_ntp(
         principal.can_manage_registry(),
         "configure camera NTP server",
     )?;
-    let provider = provider_for(&st, &id).await?;
+    let provider = provider_for(&st, &principal, &id).await?;
     provider.put_ntp_config(&cfg).await?;
     let updated = provider.get_ntp_config().await?;
     auth::audit(
@@ -239,7 +244,7 @@ async fn sync_now(
     principal: Principal,
 ) -> AppResult<Json<TimeConfig>> {
     principal.require(principal.can_manage_registry(), "sync camera clock")?;
-    let provider = provider_for(&st, &id).await?;
+    let provider = provider_for(&st, &principal, &id).await?;
     let updated = provider.sync_time_now().await?;
     auth::audit(
         &st.pool,
@@ -260,8 +265,8 @@ async fn get_onvif_settings(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<Json<OnvifSettings>> {
-    principal.require(principal.can_view(), "view camera ONVIF settings")?;
-    let provider = provider_for(&st, &id).await?;
+    principal.require_cap(Cap::CameraRead, "view camera ONVIF settings")?;
+    let provider = provider_for(&st, &principal, &id).await?;
     Ok(Json(provider.get_onvif_settings().await?))
 }
 
@@ -275,7 +280,7 @@ async fn put_onvif_settings(
         principal.can_manage_registry(),
         "configure camera ONVIF settings",
     )?;
-    let provider = provider_for(&st, &id).await?;
+    let provider = provider_for(&st, &principal, &id).await?;
     provider.put_onvif_settings(&cfg).await?;
     let updated = provider.get_onvif_settings().await?;
     auth::audit(
@@ -300,7 +305,7 @@ async fn ensure_onvif_user(
         principal.can_manage_registry(),
         "provision a camera ONVIF user",
     )?;
-    let provider = provider_for(&st, &id).await?;
+    let provider = provider_for(&st, &principal, &id).await?;
     // The provider treats a duplicate create as success and does not report created-vs-existed, so
     // the cache flag is the kernel's record of whether it has already provisioned this user.
     let already: bool = sqlx::query_scalar::<_, i64>(
@@ -344,8 +349,8 @@ async fn get_osd(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<Json<OsdConfig>> {
-    principal.require(principal.can_view(), "view camera OSD overlays")?;
-    let provider = provider_for(&st, &id).await?;
+    principal.require_cap(Cap::CameraRead, "view camera OSD overlays")?;
+    let provider = provider_for(&st, &principal, &id).await?;
     Ok(Json(provider.get_osd_config().await?))
 }
 
@@ -359,7 +364,7 @@ async fn put_osd(
         principal.can_manage_registry(),
         "configure camera OSD overlays",
     )?;
-    let provider = provider_for(&st, &id).await?;
+    let provider = provider_for(&st, &principal, &id).await?;
     provider.put_osd_config(&cfg).await?;
     let updated = provider.get_osd_config().await?;
     auth::audit(
@@ -386,7 +391,7 @@ async fn reboot(
     Json(body): Json<RebootRequest>,
 ) -> AppResult<Json<Value>> {
     principal.require(principal.can_manage_registry(), "reboot a camera")?;
-    let cam = load_camera(&st.pool, &id).await?; // 404 if missing
+    let cam = st.camera_for(&principal, &id).await?; // 403 out of scope, 404 if missing
     if !body.confirm {
         tracing::warn!(camera_id = %id, "camera reboot rejected: `confirm` was not true");
         return Err(AppError::BadRequest(
@@ -441,7 +446,7 @@ async fn bulk_config(
     // SERIAL loop: one slow/unreachable camera is bounded by `per_camera` and never aborts the run.
     let mut results: Vec<BulkCameraResult> = Vec::with_capacity(ids.len());
     for cam_id in &ids {
-        let outcome = run_bulk_for_camera(&st, cam_id, &body.action, per_camera).await;
+        let outcome = run_bulk_for_camera(&st, &principal, cam_id, &body.action, per_camera).await;
         results.push(match outcome {
             Ok(()) => BulkCameraResult {
                 camera_id: cam_id.clone(),
@@ -482,11 +487,12 @@ async fn bulk_config(
 /// Build a provider for one camera and run the bulk action, bounded by `per_camera`.
 async fn run_bulk_for_camera(
     st: &AppState,
+    principal: &Principal,
     cam_id: &str,
     action: &BulkAction,
     per_camera: Duration,
 ) -> AppResult<()> {
-    let provider = provider_for(st, cam_id).await?;
+    let provider = provider_for(st, principal, cam_id).await?;
     match tokio::time::timeout(per_camera, apply_bulk_action(provider.as_ref(), action)).await {
         Ok(res) => res,
         Err(_) => Err(AppError::Other(anyhow::anyhow!(

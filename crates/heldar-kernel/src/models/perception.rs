@@ -79,6 +79,102 @@ pub struct DetectionIngest {
     pub attributes: Option<Value>,
 }
 
+/// A kernel-internal detection producer.
+///
+/// A CLOSED set on purpose. `Provenance::Kernel` is what makes a batch authoritative — a native ANPR
+/// read weighted to the gate's whole vote threshold — so the producer name must never be a string that
+/// could originate, however indirectly, in a request body. There is exactly one variant today, and
+/// adding one is a deliberate kernel change reviewed as such.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KernelProducer {
+    /// The camera-native ANPR poller (`services::native_anpr`) — the ONLY producer of `camera_native`.
+    NativeAnpr,
+}
+
+impl KernelProducer {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            KernelProducer::NativeAnpr => "native_anpr",
+        }
+    }
+
+    /// The `attributes.source` marker this producer's detections are stamped with. This is the value
+    /// `heldar-entry`'s ANPR engine keys on to treat a read as authoritative.
+    pub fn source(self) -> &'static str {
+        match self {
+            KernelProducer::NativeAnpr => "camera_native",
+        }
+    }
+}
+
+/// WHO produced a detection batch — a PARAMETER of ingest, never a field of the payload.
+///
+/// This is the whole fix for forgeable provenance. `attributes.source` used to arrive inside
+/// client-supplied detection attributes, so anything holding an integration key could assert
+/// `source = "camera_native"` and have `heldar-entry` treat a single forged plate read as authoritative
+/// enough to open a barrier. Now the ingest path REWRITES the attributes from this parameter before
+/// persisting, and the external HTTP handler can only ever construct [`Provenance::Worker`].
+#[derive(Debug, Clone)]
+pub enum Provenance {
+    /// Produced inside the kernel process by a named, closed-set producer.
+    Kernel { producer: KernelProducer },
+    /// Posted over the HTTP ingest API by a credential. `task_id` / `worker_id` are present only when
+    /// the batch arrived with a valid frame ticket (i.e. under a live lease).
+    Worker {
+        api_key_id: String,
+        task_id: Option<String>,
+        worker_id: Option<String>,
+    },
+}
+
+impl Provenance {
+    /// The `attributes.source` value written for this producer. Server-authored, always.
+    pub fn source(&self) -> &'static str {
+        match self {
+            Provenance::Kernel { producer } => producer.source(),
+            Provenance::Worker { .. } => "worker",
+        }
+    }
+
+    /// The value persisted in `detections.provenance` / `outbox.provenance` for SQL-queryable
+    /// forensics. `'client'` is reserved for pre-migration rows and means UNTRUSTED.
+    pub fn column(&self) -> String {
+        match self {
+            Provenance::Kernel { producer } => format!("kernel:{}", producer.as_str()),
+            Provenance::Worker { .. } => "worker".to_string(),
+        }
+    }
+
+    /// `outbox.produced_by`: which credential (or kernel producer) is answerable for this batch.
+    pub fn produced_by(&self) -> String {
+        match self {
+            Provenance::Kernel { producer } => format!("kernel:{}", producer.as_str()),
+            Provenance::Worker { api_key_id, .. } => format!("apikey:{api_key_id}"),
+        }
+    }
+
+    /// The `_prov` object embedded in every detection's attributes, so a consumer reading the batch
+    /// (inline or on fan-out replay) sees the same server-authored trail the columns carry.
+    pub fn detail(&self) -> Value {
+        match self {
+            Provenance::Kernel { producer } => serde_json::json!({ "producer": producer.as_str() }),
+            Provenance::Worker {
+                api_key_id,
+                task_id,
+                worker_id,
+            } => serde_json::json!({
+                "key": api_key_id,
+                "task": task_id,
+                "worker": worker_id,
+            }),
+        }
+    }
+
+    pub fn is_worker(&self) -> bool {
+        matches!(self, Provenance::Worker { .. })
+    }
+}
+
 /// Optional event an AI worker can raise alongside its detections.
 #[derive(Debug, Deserialize)]
 pub struct IngestEvent {
@@ -100,6 +196,12 @@ pub struct AiIngest {
     #[serde(default)]
     pub detections: Vec<DetectionIngest>,
     pub event: Option<IngestEvent>,
+    /// Server-issued frame ticket from `x-frame-ticket` on the frame this batch describes.
+    ///
+    /// When present and valid, `camera_id`, `task_type` and `frame_id` are all DERIVED from it and the
+    /// body's own values are only cross-checked (409 on disagreement) — a worker can only speak about
+    /// frames it was actually handed. Required under `HELDAR_INGEST_PROVENANCE=enforce`.
+    pub frame_ticket: Option<String>,
 }
 
 /// A polygon region on a camera; tracked detections crossing it raise enter/exit/dwell events.

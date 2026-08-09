@@ -10,7 +10,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::AppResult;
 use crate::registry::RegistryView;
 use crate::services;
@@ -24,7 +24,7 @@ pub fn router() -> Router<AppState> {
 
 /// The merged store view: bundled + remote catalogs, each entry cross-referenced for installed state.
 async fn list(State(st): State<AppState>, principal: Principal) -> AppResult<Json<RegistryView>> {
-    principal.require(principal.can_view(), "view the plugin store")?;
+    principal.require_cap(Cap::SystemRead, "view the plugin store")?;
     let registrations = services::modules::list_registered(&st.pool).await?;
     Ok(Json(st.catalog.view(&st.modules, &registrations)))
 }

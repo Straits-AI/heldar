@@ -66,7 +66,13 @@ pub struct EmbeddingIngest {
     pub model: String,
     pub dim: usize,
     /// Batch idempotency key (same convention as detection ingest: `"{task_id}:{captured_at}"`).
+    ///
+    /// Ignored when a valid `frame_ticket` is present — the kernel derives it, so a client can no
+    /// longer name a frame it never held a ticket for.
     pub frame_id: Option<String>,
+    /// Server-issued frame ticket (see [`crate::services::frame_ticket`]). Required under
+    /// `HELDAR_INGEST_PROVENANCE=enforce`; when present, `camera_id` and `frame_id` come from it.
+    pub frame_ticket: Option<String>,
     pub items: Vec<EmbeddingItem>,
 }
 
@@ -128,16 +134,21 @@ fn validate_vec(vec: &[f32], dim: usize, what: &str) -> AppResult<()> {
 /// no-op via the partial unique index. Returns the number of rows actually inserted. Thumbnails
 /// are written to the snapshots dir after commit (a failed file write leaves a dangling
 /// `evidence_path`; the dashboard hides broken evidence images client-side).
-pub async fn ingest_batch(st: &AppState, body: &EmbeddingIngest) -> AppResult<u64> {
+///
+/// `camera_id` and `frame_id` are passed in by the ROUTE rather than read from `body`: under a valid
+/// frame ticket they are server-derived, so this function never sees the client's claim.
+pub async fn ingest_batch(
+    st: &AppState,
+    body: &EmbeddingIngest,
+    camera_id: &str,
+    frame_id: Option<&str>,
+) -> AppResult<u64> {
     let cam_exists: Option<String> = sqlx::query_scalar("SELECT id FROM cameras WHERE id = ?")
-        .bind(&body.camera_id)
+        .bind(camera_id)
         .fetch_optional(&st.pool)
         .await?;
     if cam_exists.is_none() {
-        return Err(AppError::NotFound(format!(
-            "camera {} not found",
-            body.camera_id
-        )));
+        return Err(AppError::NotFound(format!("camera {camera_id} not found")));
     }
     if body.model.trim().is_empty() {
         return Err(AppError::BadRequest("`model` is required".into()));
@@ -201,7 +212,7 @@ pub async fn ingest_batch(st: &AppState, body: &EmbeddingIngest) -> AppResult<u6
              ON CONFLICT DO NOTHING",
         )
         .bind(&id)
-        .bind(&body.camera_id)
+        .bind(camera_id)
         .bind(&item.detection_id)
         .bind(&item.track_id)
         .bind(&item.label)
@@ -210,7 +221,7 @@ pub async fn ingest_batch(st: &AppState, body: &EmbeddingIngest) -> AppResult<u6
         .bind(body.dim as i64)
         .bind(encode_vec(&item.vec))
         .bind(bbox)
-        .bind(&body.frame_id)
+        .bind(frame_id)
         .bind(&evidence_path)
         .bind(Utc::now())
         .execute(&mut *tx)
@@ -246,33 +257,61 @@ pub struct PendingQuery {
     pub payload: String,
 }
 
-/// Claim up to [`CLAIM_BATCH`] pending queries for a worker (status pending → claimed). Read-only
-/// when the queue is empty — this endpoint is polled every ~1 s per worker, and the SQLite writer
-/// must not be touched on idle polls (see the debounced `last_used_at` precedent in auth.rs).
-/// Two workers racing a claim is possible and harmless: the result POST is first-wins.
-pub async fn claim_queries(pool: &SqlitePool, worker_id: &str) -> AppResult<Vec<PendingQuery>> {
-    let fresh_cutoff = Utc::now() - Duration::seconds(QUERY_DELIVERY_TTL_SECS);
+/// How long a claimed query stays the claimant's before another worker may take it over.
+///
+/// Without this, NOTHING ever flips `'claimed'` back: a worker that crashed between claiming and
+/// answering wedged the row permanently, and the search request blocked on it burned its whole budget
+/// and 503'd. Expiry is a claim-time PREDICATE, not a reaper — no new writer against SQLite.
+const QUERY_CLAIM_LEASE_SECS: i64 = 30;
+
+/// Claim up to [`CLAIM_BATCH`] queries for a worker. Read-only when the queue is empty — this endpoint
+/// is polled every ~1 s per worker, and the SQLite writer must not be touched on idle polls (see the
+/// debounced `last_used_at` precedent in auth.rs).
+///
+/// Eligible rows are `pending`, OR `claimed` with a LAPSED claim lease (the crashed-claimant case).
+/// `claimed_by_key` records the CREDENTIAL, not the self-asserted worker id, and is what
+/// [`submit_query_result`] checks — so worker B cannot poison the vector worker A was asked for.
+pub async fn claim_queries(
+    pool: &SqlitePool,
+    worker_id: &str,
+    claimed_by_key: &str,
+) -> AppResult<Vec<PendingQuery>> {
+    let now = Utc::now();
+    let fresh_cutoff = now - Duration::seconds(QUERY_DELIVERY_TTL_SECS);
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT id, kind, payload FROM embed_queries
-         WHERE status = 'pending' AND created_at > ?
+         WHERE created_at > ?
+           AND (status = 'pending'
+                OR (status = 'claimed'
+                    AND (lease_expires_at IS NULL OR lease_expires_at < ?)))
          ORDER BY created_at ASC LIMIT ?",
     )
     .bind(fresh_cutoff)
+    .bind(now)
     .bind(CLAIM_BATCH)
     .fetch_all(pool)
     .await?;
     if rows.is_empty() {
         return Ok(Vec::new());
     }
+    let lease_until = now + Duration::seconds(QUERY_CLAIM_LEASE_SECS);
     let mut claimed = Vec::with_capacity(rows.len());
     for (id, kind, payload) in rows {
         let res = sqlx::query(
-            "UPDATE embed_queries SET status = 'claimed', claimed_at = ?, claimed_by = ?
-             WHERE id = ? AND status = 'pending'",
+            "UPDATE embed_queries
+                SET status = 'claimed', claimed_at = ?, claimed_by = ?,
+                    claimed_by_key = ?, lease_expires_at = ?
+              WHERE id = ?
+                AND (status = 'pending'
+                     OR (status = 'claimed'
+                         AND (lease_expires_at IS NULL OR lease_expires_at < ?)))",
         )
-        .bind(Utc::now())
+        .bind(now)
         .bind(worker_id)
+        .bind(claimed_by_key)
+        .bind(lease_until)
         .bind(&id)
+        .bind(now)
         .execute(pool)
         .await?;
         if res.rows_affected() > 0 {
@@ -294,19 +333,30 @@ pub struct QueryResult {
 /// Record a worker's query result. First result wins; a late duplicate is a no-op (returns
 /// `false`). An `error` result fails the query so the waiting search 503s immediately instead of
 /// burning its whole timeout budget.
+///
+/// `submitted_by_key` must match the credential that CLAIMED the row. Before this check, any principal
+/// that could reach the route could overwrite any in-flight query's vector — poisoning the operator's
+/// semantic search with an attacker-chosen embedding.
+///
+/// The `claimed_by_key IS NULL` arm is a ONE-RELEASE allowance for rows that were already claimed when
+/// 0012 landed. It MUST be dropped in 0013 (tracked as a follow-up): a forgotten allowance leaves the
+/// hole open behind a column that looks enforced.
 pub async fn submit_query_result(
     pool: &SqlitePool,
     id: &str,
     result: &QueryResult,
+    submitted_by_key: &str,
 ) -> AppResult<bool> {
     let res = if let Some(err) = result.error.as_deref().filter(|e| !e.trim().is_empty()) {
         sqlx::query(
             "UPDATE embed_queries SET status = 'error', error = ?, finished_at = ?
-             WHERE id = ? AND status IN ('pending','claimed')",
+             WHERE id = ? AND status IN ('pending','claimed')
+               AND (claimed_by_key = ? OR claimed_by_key IS NULL)",
         )
         .bind(err)
         .bind(Utc::now())
         .bind(id)
+        .bind(submitted_by_key)
         .execute(pool)
         .await?
     } else {
@@ -332,13 +382,15 @@ pub async fn submit_query_result(
         sqlx::query(
             "UPDATE embed_queries
              SET status = 'done', vec = ?, model = ?, dim = ?, finished_at = ?
-             WHERE id = ? AND status IN ('pending','claimed')",
+             WHERE id = ? AND status IN ('pending','claimed')
+               AND (claimed_by_key = ? OR claimed_by_key IS NULL)",
         )
         .bind(encode_vec(vec))
         .bind(&result.model)
         .bind(dim as i64)
         .bind(Utc::now())
         .bind(id)
+        .bind(submitted_by_key)
         .execute(pool)
         .await?
     };
@@ -806,11 +858,14 @@ mod tests {
             .unwrap();
 
         // Claim delivers the payload and flips status; a second claim gets nothing.
-        let claimed = claim_queries(&pool, "w1").await.unwrap();
+        let claimed = claim_queries(&pool, "w1", "key_a").await.unwrap();
         assert_eq!(claimed.len(), 1);
         assert_eq!(claimed[0].id, id);
         assert_eq!(claimed[0].kind, "text");
-        assert!(claim_queries(&pool, "w2").await.unwrap().is_empty());
+        assert!(claim_queries(&pool, "w2", "key_b")
+            .await
+            .unwrap()
+            .is_empty());
 
         // First result wins; the duplicate is a no-op.
         let ok = submit_query_result(
@@ -822,6 +877,7 @@ mod tests {
                 dim: Some(2),
                 error: None,
             },
+            "key_a",
         )
         .await
         .unwrap();
@@ -835,6 +891,7 @@ mod tests {
                 dim: Some(2),
                 error: None,
             },
+            "key_a",
         )
         .await
         .unwrap();
@@ -853,6 +910,7 @@ mod tests {
                     dim: Some(2),
                     error: None,
                 },
+                "key_a",
             )
             .await,
             Err(AppError::BadRequest(_))
@@ -883,6 +941,7 @@ mod tests {
                 dim: None,
                 error: Some("clip backend unavailable".into()),
             },
+            "key_a",
         )
         .await
         .unwrap();
@@ -934,6 +993,102 @@ mod tests {
         let _ = keep;
     }
 
+    /// NEGATIVE CONTROL: worker B cannot answer worker A's query.
+    ///
+    /// Before the claimant check, any principal that could reach the result route could overwrite an
+    /// in-flight query's vector — poisoning the operator's semantic search with an attacker-chosen
+    /// embedding, and doing so silently (the route returned `updated: true`).
+    #[tokio::test]
+    async fn only_the_claiming_credential_can_answer_a_query() {
+        let pool = mem_pool().await;
+        let id = enqueue_query(&pool, "text", "red pickup truck")
+            .await
+            .unwrap();
+        assert_eq!(claim_queries(&pool, "wA", "key_a").await.unwrap().len(), 1);
+
+        let poisoned = submit_query_result(
+            &pool,
+            &id,
+            &QueryResult {
+                vec: Some(vec![9.0, 9.0]),
+                model: Some("evil".into()),
+                dim: Some(2),
+                error: None,
+            },
+            "key_b",
+        )
+        .await
+        .unwrap();
+        assert!(!poisoned, "a non-claimant answer must not land");
+
+        // The row is untouched: no vector, still claimed.
+        let (status, vec): (String, Option<Vec<u8>>) =
+            sqlx::query_as("SELECT status, vec FROM embed_queries WHERE id = ?")
+                .bind(&id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(status, "claimed");
+        assert!(vec.is_none());
+
+        // The real claimant still can.
+        assert!(submit_query_result(
+            &pool,
+            &id,
+            &QueryResult {
+                vec: Some(vec![0.5, 0.25]),
+                model: Some("m".into()),
+                dim: Some(2),
+                error: None,
+            },
+            "key_a",
+        )
+        .await
+        .unwrap());
+    }
+
+    /// NEGATIVE CONTROL: a crashed claimant must not wedge the row forever.
+    ///
+    /// Nothing ever flipped `'claimed'` back, so a worker that died between claiming and answering
+    /// left the query unanswerable and every search blocked on it burned its full budget and 503'd.
+    #[tokio::test]
+    async fn an_abandoned_claim_becomes_reclaimable_once_its_lease_lapses() {
+        let pool = mem_pool().await;
+        let id = enqueue_query(&pool, "text", "q").await.unwrap();
+        assert_eq!(claim_queries(&pool, "wA", "key_a").await.unwrap().len(), 1);
+        // Still held: nobody else gets it.
+        assert!(claim_queries(&pool, "wB", "key_b")
+            .await
+            .unwrap()
+            .is_empty());
+
+        // The claimant dies. Age its lease past expiry.
+        sqlx::query("UPDATE embed_queries SET lease_expires_at = ? WHERE id = ?")
+            .bind(Utc::now() - Duration::seconds(1))
+            .bind(&id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let reclaimed = claim_queries(&pool, "wB", "key_b").await.unwrap();
+        assert_eq!(reclaimed.len(), 1, "a lapsed claim is reclaimable");
+        assert_eq!(reclaimed[0].id, id);
+        // ...and the NEW claimant is now the one who may answer.
+        assert!(submit_query_result(
+            &pool,
+            &id,
+            &QueryResult {
+                vec: Some(vec![1.0, 0.0]),
+                model: Some("m".into()),
+                dim: Some(2),
+                error: None,
+            },
+            "key_b",
+        )
+        .await
+        .unwrap());
+    }
+
     #[tokio::test]
     async fn stale_pending_queries_are_not_delivered() {
         let pool = mem_pool().await;
@@ -944,7 +1099,10 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        assert!(claim_queries(&pool, "w1").await.unwrap().is_empty());
+        assert!(claim_queries(&pool, "w1", "key_a")
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     async fn seed_camera(pool: &SqlitePool, id: &str) {
@@ -1056,6 +1214,7 @@ mod tests {
             model: "m".into(),
             dim: 2,
             frame_id: Some("t1:f1".into()),
+            frame_ticket: None,
             items: vec![
                 EmbeddingItem {
                     track_id: Some("7".into()),
@@ -1077,9 +1236,19 @@ mod tests {
                 },
             ],
         };
-        assert_eq!(ingest_batch(&st, &body).await.unwrap(), 2);
+        assert_eq!(
+            ingest_batch(&st, &body, "cam1", Some("t1:f1"))
+                .await
+                .unwrap(),
+            2
+        );
         // Redelivery of the same batch is a no-op.
-        assert_eq!(ingest_batch(&st, &body).await.unwrap(), 0);
+        assert_eq!(
+            ingest_batch(&st, &body, "cam1", Some("t1:f1"))
+                .await
+                .unwrap(),
+            0
+        );
         let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM embeddings")
             .fetch_one(&pool)
             .await
@@ -1092,6 +1261,7 @@ mod tests {
             model: "m".into(),
             dim: 2,
             frame_id: None,
+            frame_ticket: None,
             items: Vec::new(),
         };
         for _ in 0..=MAX_INGEST_EMBEDDINGS {
@@ -1106,7 +1276,7 @@ mod tests {
             });
         }
         assert!(matches!(
-            ingest_batch(&st, &too_big).await,
+            ingest_batch(&st, &too_big, "cam1", None).await,
             Err(AppError::BadRequest(_))
         ));
     }

@@ -3,7 +3,7 @@ use axum::http::{header::HOST, HeaderMap};
 use axum::routing::get;
 use axum::{Json, Router};
 
-use crate::auth::Principal;
+use crate::auth::{Cap, Principal};
 use crate::error::AppResult;
 use crate::services::mediamtx::{self, LiveUrls};
 use crate::state::AppState;
@@ -23,7 +23,7 @@ async fn liveview(
     Path(id): Path<String>,
 ) -> AppResult<Json<LiveUrls>> {
     // Operational action (viewer+); the extractor enforces auth when it is enabled.
-    principal.require(principal.can_view(), "view live streams")?;
+    principal.require_cap(Cap::VideoLive, "view live streams")?;
     // The Host the client used lets us hand back stream URLs reachable over the tunnel / LAN.
     let host = headers.get(HOST).and_then(|v| v.to_str().ok());
     Ok(Json(mediamtx::ensure_live(&st, &id, host).await?))

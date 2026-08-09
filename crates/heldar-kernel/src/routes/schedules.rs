@@ -15,10 +15,9 @@ use serde_json::{json, Value};
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::{AppError, AppResult};
 use crate::models::{RecordSchedule, RecordScheduleCreate, RecordScheduleUpdate};
-use crate::routes::cameras::load_camera;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -85,8 +84,8 @@ async fn list_schedules(
     principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<Vec<RecordSchedule>>> {
-    principal.require(principal.can_view(), "list recording schedules")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    principal.require_cap(Cap::CameraRead, "list recording schedules")?;
+    let _ = st.camera_for(&principal, &id).await?;
     let rows = sqlx::query_as::<_, RecordSchedule>(
         "SELECT * FROM camera_schedules WHERE camera_id = ? ORDER BY created_at ASC",
     )
@@ -106,7 +105,7 @@ async fn create_schedule(
         principal.can_manage_registry(),
         "create recording schedules",
     )?;
-    let _ = load_camera(&st.pool, &id).await?;
+    let _ = st.camera_for(&principal, &id).await?;
     validate_days(&body.days)?;
     let time_start = normalize_hhmm(&body.time_start, "time_start")?;
     let time_end = normalize_hhmm(&body.time_end, "time_end")?;

@@ -96,6 +96,8 @@ HELDAR_AUTH_COOKIE_SECURE=true \
 HELDAR_MEDIA_SAME_ORIGIN=true \
 HELDAR_BOOTSTRAP_ADMIN_USER="$ADMIN_USER" \
 HELDAR_BOOTSTRAP_ADMIN_PASSWORD="$ADMIN_PASS" \
+HELDAR_INGEST_PROVENANCE=enforce \
+HELDAR_MACHINE_AUTH=enforce \
 "$CORE" >"$LOG/core.log" 2>&1 & CORE_PID=$!; PIDS+=($CORE_PID)
 
 for _ in $(seq 1 40); do curl -fsS "$API/healthz" >/dev/null 2>&1 && break; sleep 1; done
@@ -126,6 +128,93 @@ for i in $(seq 1 "$NCAMS"); do
     \"segment_seconds\":5,\"retention_hours\":1
   }" >/dev/null || true
 done
+
+# ---------------------------------------------------------------------------------------------------
+# ENFORCE LEG: lease -> ticketed frame -> ingest, against a core running
+# HELDAR_INGEST_PROVENANCE=enforce.
+#
+# This stack is the only CI-gated one that runs with auth ON, so it is the only place the hardened
+# posture can be exercised end to end over real HTTP with a real credential. The plain stack
+# (e2e_stack.sh) runs auth OFF at the default `warn` tier and is deliberately left untouched.
+#
+# Split by what each assertion depends on:
+#   * The REFUSAL assertions need no camera and no frame, so they are UNCONDITIONAL gates — a
+#     regression that reopens ticketless ingest, or that lets `camera_native` be asserted over the
+#     API, fails this suite outright.
+#   * The positive lease->frame->ticket->ingest walk needs the sampler to have produced a JPEG, which
+#     depends on ffmpeg/MediaMTX timing this suite does not otherwise gate. If no frame materializes
+#     the walk is skipped loudly rather than turning a timing artefact into a red build; if a frame
+#     DOES appear, every step of the walk is a hard gate.
+# ---------------------------------------------------------------------------------------------------
+echo "[e2e_tls] enforce leg: lease -> ticketed frame -> ingest"
+ENF_FAIL=0
+enf_pass(){ if [ "$1" = "$2" ]; then echo "[e2e_tls]   PASS $3 ($1)"; else echo "[e2e_tls]   FAIL $3 (got $1, want $2)"; ENF_FAIL=1; fi; }
+enf_code(){ curl -s -o /dev/null -w '%{http_code}' "$@"; }
+enf_json(){ python3 -c "import sys,json;d=json.load(sys.stdin);print($1)" 2>/dev/null; }
+
+# A least-privilege AI credential: exactly the capabilities a real worker needs.
+ENF_KEY=$(curl -fsS -b "$COOKIE" -X POST "$API/api/v1/api-keys" -H 'content-type: application/json' \
+  -d '{"name":"e2e-tls-aiworker","capabilities":["ai:tasks","ai:frames","ai:ingest","camera:read","events:read"]}' \
+  | enf_json 'd["key"]')
+if [ -z "${ENF_KEY:-}" ]; then
+  echo "[e2e_tls] FAIL could not mint a capability-scoped api key (is migration 0012 applied?)"; exit 1
+fi
+
+# UNCONDITIONAL GATE 1: under enforce there is no ingest without a server-issued frame ticket.
+enf_pass "$(enf_code -X POST "$API/api/v1/ai/events" -H "X-API-Key: $ENF_KEY" \
+  -H 'content-type: application/json' \
+  -d '{"camera_id":"cam_tls_1","task_type":"anpr","detections":[]}')" 401 \
+  "ticketless ingest under enforce -> 401"
+
+# UNCONDITIONAL GATE 2: a frame pull WITHOUT ?task= must never emit a ticket (the dashboard's reads
+# are unchanged), and a fabricated ticket must not be accepted.
+enf_pass "$(enf_code -X POST "$API/api/v1/ai/events" -H "X-API-Key: $ENF_KEY" \
+  -H 'content-type: application/json' \
+  -d '{"frame_ticket":"f1.forged.1.9999999999.AAAA","camera_id":"cam_tls_1","task_type":"anpr","detections":[]}')" 401 \
+  "a fabricated frame ticket -> 401"
+
+# Positive walk. Needs a sampled frame, so create an AI task and wait for the sampler.
+ENF_TASK=$(curl -fsS -b "$COOKIE" -X POST "$API/api/v1/cameras/cam_tls_1/ai-tasks" \
+  -H 'content-type: application/json' -d '{"task_type":"anpr","stream_profile":"main","fps":2}' \
+  | enf_json 'd["id"]')
+ENF_TICKET=""
+if [ -n "${ENF_TASK:-}" ]; then
+  for _ in $(seq 1 40); do
+    curl -fsS -o /dev/null "$API/api/v1/cameras/cam_tls_1/frame?profile=main" -H "X-API-Key: $ENF_KEY" 2>/dev/null && break
+    sleep 1
+  done
+  curl -fsS -o /dev/null -X POST "$API/api/v1/ai/leases" -H "X-API-Key: $ENF_KEY" \
+    -H 'content-type: application/json' -d '{"worker_id":"e2e-tls-w1"}' 2>/dev/null || true
+  ENF_TICKET=$(curl -fsS -D - -o /dev/null \
+    "$API/api/v1/cameras/cam_tls_1/frame?profile=main&task=$ENF_TASK" -H "X-API-Key: $ENF_KEY" 2>/dev/null \
+    | tr -d '\r' | awk 'tolower($1)=="x-frame-ticket:"{print $2}')
+fi
+
+if [ -z "$ENF_TICKET" ]; then
+  echo "[e2e_tls]   SKIP lease->frame->ingest walk (no sampled frame yet; the refusal gates above still ran)"
+else
+  enf_pass "$(enf_code -X POST "$API/api/v1/ai/events" -H "X-API-Key: $ENF_KEY" \
+    -H 'content-type: application/json' \
+    -d "{\"frame_ticket\":\"$ENF_TICKET\",\"camera_id\":\"cam_tls_1\",\"task_type\":\"anpr\",
+         \"detections\":[{\"label\":\"vehicle\",\"confidence\":0.9,
+           \"attributes\":{\"plate\":\"TLS0001\",\"source\":\"camera_native\"}}]}")" 200 \
+    "ticketed ingest under enforce -> 200"
+  # THE NEGATIVE CONTROL, over the wire: the batch above ASKED for camera_native.
+  ENF_SRC=$(curl -fsS -b "$COOKIE" "$API/api/v1/cameras/cam_tls_1/detections?limit=1" \
+            | enf_json 'd[0]["attributes"]["source"]')
+  enf_pass "${ENF_SRC:-<none>}" worker "forged attributes.source=camera_native persisted as 'worker'"
+  # A ticket is bound to its camera: re-pointing the body at another camera is a conflict.
+  enf_pass "$(enf_code -X POST "$API/api/v1/ai/events" -H "X-API-Key: $ENF_KEY" \
+    -H 'content-type: application/json' \
+    -d "{\"frame_ticket\":\"$ENF_TICKET\",\"camera_id\":\"cam_tls_2\",\"task_type\":\"anpr\",\"detections\":[]}")" 409 \
+    "a ticket re-pointed at another camera -> 409"
+fi
+
+if [ "$ENF_FAIL" != "0" ]; then
+  echo "[e2e_tls] enforce leg FAILED — ingest provenance/lease enforcement regressed" >&2
+  exit 1
+fi
+echo "[e2e_tls] enforce leg OK"
 
 # Caddy starts LAST, once every camera is registered. That ordering is the readiness contract: the
 # suite gates on HTTPS /healthz, so if TLS answers at all, seeding has already finished. Starting it

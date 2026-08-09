@@ -196,6 +196,19 @@ jobs:
             grep -E '(^|[[:space:]])FAIL ' data/validate_rbac.txt || true
             exit 1
           fi
+      # Ingest-provenance validation is self-contained in the same way: it starts its own
+      # auth-enabled cores on :8011 (enforce) and :8012 (warn) with temp DBs, needs no MediaMTX and no
+      # camera, and prints PASS/FAIL lines. Both tiers are asserted, because "warn behaves exactly as
+      # today" is as much a contract as "enforce refuses a ticketless batch". Same gating style as
+      # validate_rbac.sh: it does not exit non-zero on a failed assertion, so gate on FAIL markers.
+      - name: ingest provenance validation (scripts/validate_ingest_provenance.sh)
+        run: |
+          ./scripts/validate_ingest_provenance.sh
+          if grep -Eq '(^|[[:space:]])FAIL ' data/validate_ingest_provenance.txt; then
+            echo "::error::validate_ingest_provenance.sh reported one or more FAIL assertions"
+            grep -E '(^|[[:space:]])FAIL ' data/validate_ingest_provenance.txt || true
+            exit 1
+          fi
       # Deliberately NOT run in CI (they are not self-contained for a clean runner):
       #   - validate_ai.sh: needs a REAL camera (cam_192_168_0_2) actively streaming so the sampler
       #     produces frames — real hardware, cannot be satisfied synthetically here.
@@ -212,6 +225,7 @@ jobs:
           path: |
             data/validate_report.txt
             data/validate_rbac.txt
+            data/validate_ingest_provenance.txt
             data/validate_logs/
           retention-days: 7
           if-no-files-found: ignore

@@ -1015,8 +1015,10 @@ which itself owns no fact table:
 | GET / POST | `/api/v1/cameras/{id}/ai-tasks` | list a camera's tasks / create a task (`201`) |
 | PATCH / DELETE | `/api/v1/ai-tasks/{task_id}` | partial update / delete (`204`) — both `reconcile()` |
 | GET | `/api/v1/ai/tasks` | **worker discovery**: every enabled task on an enabled camera + its `frame_url`; optional `?worker_id=` shards tasks across concurrent workers (the poll doubles as a liveness heartbeat) — see `docs/AI-WORKERS.md` §5.1 |
+| POST | `/api/v1/ai/leases` | **lease tasks** (acquire *and* renew — one call) for `worker_id`; a lease is what makes a frame pull ticketable — see ADR 0005 |
+| DELETE | `/api/v1/ai/leases/{lease_id}` | release early on graceful shutdown; scoped to the holding credential |
 | GET | `/api/v1/ai/samplers` | per-camera sampler `{camera_id, state, fps}` (effective fps) |
-| GET | `/api/v1/cameras/{id}/frame` | latest sampled JPEG + `x-frame-age-ms` / `x-frame-captured-at` |
+| GET | `/api/v1/cameras/{id}/frame` | latest sampled JPEG + `x-frame-age-ms` / `x-frame-captured-at`; with `?task=` and a live lease, also `x-frame-ticket` |
 | POST | `/api/v1/ai/events` | **ingest**: detections (+ optional event) for a camera |
 | POST | `/api/v1/ai/embeddings` | **embedding ingest** (#38): batched crop embeddings + optional crop thumbs from a worker's `embedding` task (24 MiB body cap) |
 | GET | `/api/v1/ai/embed-queries` | **query-embedding queue** (#38): claims up to 4 pending queries for `?worker_id=` — the worker's fast ~1 s poll; read-only when the queue is empty |
@@ -1038,6 +1040,29 @@ if omitted/unparseable); the response is `{detections_ingested: N}`. An optional
 `repo::log_event`** the kernel uses (default severity `info`), so AI alerts at
 `warning`/`critical` flow straight into the Stage 1 notifier/webhook path (§14.3)
 with no extra wiring.
+
+**Provenance is a parameter, not a payload field (ADR 0005, migration `0012`).**
+`perception_ingest::ingest_batch(st, body, prov)` takes a `Provenance` from its caller and
+**rewrites** every detection's `attributes` before the INSERT: any client `source`/`_prov` is
+stripped and the server's own value written. `routes/ai.rs` can construct only
+`Provenance::Worker` (→ `source = "worker"`), while `services/native_anpr.rs` is the only caller
+able to name the closed-set `Provenance::Kernel { NativeAnpr }` (→ `"camera_native"`). So the value
+the entry engine treats as authoritative is **inexpressible through the HTTP API** — not merely
+validated against. The rewrite lives in the service rather than the handler because `fanout.rs`
+replays crashed batches from the persisted rows, bypassing the handler entirely.
+
+A worker batch is additionally bound to a **task lease** and a **frame ticket**
+(`services/ai_leases.rs`, `services/frame_ticket.rs`): the lease is one row per task renewed ~once a
+minute, the ticket is a stateless per-frame HMAC over
+`(api_key_id, camera_id, task_id, captured_ms, exp)` costing zero writes. Under
+`HELDAR_INGEST_PROVENANCE=enforce` the kernel *derives* `camera_id`, `task_type` and `frame_id`
+from the ticket and cross-checks the body (`409` on disagreement), which also removes the
+client-named-`frame_id` suppression trick against the first-writer-wins outbox dedup. The default
+tier is `warn` — ticketless ingest still works, with one notice per credential per hour — so the
+LAN default, `docker compose up -d` and the existing validators are unaffected. `detections.provenance`,
+`outbox.provenance` and `outbox.produced_by` make the trail SQL-queryable. The reserved-event-prefix
+denylist (`gate_`, `entry_`, `zone_`, `camera_`, `disk_`, `raid_`) and the worker severity clamp are
+unconditional in every tier.
 
 **Embedding ingestion + the query queue (#38, `services/embeddings.rs`).** `POST
 /api/v1/ai/embeddings` takes `{camera_id, model, dim, frame_id?, items[]}` (1…128 items,
@@ -2154,7 +2179,10 @@ HTTP worker path and the kernel-internal producer share one contract: outbox ide
 `(camera_id, frame_id)`, an all-or-nothing detection transaction, and durable consumer fan-out.
 Native reads carry `attributes.source = "camera_native"`; the entry engine weights them to the full
 vote threshold (the device already consolidated frames), while worker-OCR reads still vote one at a
-time. The device picture name is the idempotency key, so replays after a crash never double-count.
+time. That marker is written by the ingest service from `Provenance::Kernel { NativeAnpr }` — this
+poller is the only code that can name it, and the HTTP ingest API cannot express it at all (§15.6,
+ADR 0005). The device picture name is the idempotency key, so replays after a crash never
+double-count.
 
 **On-camera smart events (`services/camera_events.rs`, migration `0008`).** For cameras with
 `native_events_enabled`, the kernel holds one connection to the device's event notification stream
