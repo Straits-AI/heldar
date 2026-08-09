@@ -50,13 +50,25 @@
 	# The read token rides as a query string and is preserved by the rewrite. MediaMTX HLS playlists
 	# reference their segments RELATIVELY, so segment fetches resolve back under /live/hls/... and are
 	# proxied by the same rule.
+	#
+	# The Location rewrite is REQUIRED, not defensive. `handle_path` strips the prefix, so MediaMTX
+	# believes it is mounted at the origin root and its redirects say so: an HLS request is answered
+	# with `302 Location: /<path>/index.m3u8?cookieCheck=1`. Without re-adding the prefix the browser
+	# follows that to the dashboard's SPA fallback, gets index.html with a 200, and the player fails
+	# on HTML it cannot parse — live view silently broken in a way that looks like a camera fault.
+	# `^/` only matches a path-absolute Location, so an absolute URL is left alone.
 	handle_path /live/hls/* {
-		reverse_proxy 127.0.0.1:8888
+		reverse_proxy 127.0.0.1:8888 {
+			header_down Location ^/ /live/hls/
+		}
 	}
 	# WHEP is an HTTP POST (SDP offer -> answer) plus PATCH for ICE trickle; a plain reverse_proxy
-	# carries all of it. Media itself flows over WebRTC/UDP directly, NOT through Caddy.
+	# carries all of it. Media itself flows over WebRTC/UDP directly, NOT through Caddy. Same Location
+	# rewrite, for the same reason.
 	handle_path /live/whep/* {
-		reverse_proxy 127.0.0.1:8889
+		reverse_proxy 127.0.0.1:8889 {
+			header_down Location ^/ /live/whep/
+		}
 	}
 
 	# --- Dashboard + API -----------------------------------------------------------------------

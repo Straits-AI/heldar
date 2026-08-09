@@ -10,6 +10,7 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test:e2e": "playwright test",
+    "test:e2e:tls": "playwright test --config playwright.tls.config.ts",
     "test:e2e:install": "playwright install chromium"
   },
   "dependencies": {

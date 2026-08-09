@@ -56,3 +56,5 @@ infra/mediamtx/*.tar.gz
 # Playwright MCP scratch (screenshots/console logs)
 .playwright-mcp/
 .superpowers/
+infra/caddy/caddy
+infra/caddy/*.tar.gz

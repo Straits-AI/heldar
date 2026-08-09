@@ -120,6 +120,52 @@ jobs:
           path: apps/web/playwright-report/
           retention-days: 7
 
+  # The SECURE counterpart of the job above. It exists because that one runs HTTP with auth off, and
+  # a mixed-content failure is structurally invisible in that configuration: MediaMTX serves HLS/WebRTC
+  # on plaintext ports, so absolute http:// media URLs on an HTTPS dashboard are blocked by the browser
+  # and live view dies. That regression shipped once already. This job serves the dashboard over real
+  # TLS (Caddy, self-signed) with kernel auth ENABLED, so it can see it.
+  e2e-tls:
+    name: playwright e2e (HTTPS + auth)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: provision MediaMTX
+        run: ./scripts/setup_mediamtx.sh
+      # Caddy terminates the TLS the suite is about. The pinned version tracks deploy/compose.tls.yml.
+      - name: provision Caddy
+        run: ./scripts/setup_caddy.sh
+      - name: build heldar-core (debug)
+        run: cargo build --locked --bin heldar-core
+      - name: npm ci
+        working-directory: apps/web
+        run: npm ci
+      - name: build dashboard (dist for the stack)
+        working-directory: apps/web
+        run: npm run build
+      - name: install Playwright chromium + system deps
+        working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+      - name: playwright e2e (TLS)
+        working-directory: apps/web
+        run: npm run test:e2e:tls
+      - name: upload playwright report (TLS)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-tls
+          path: apps/web/playwright-report/
+          retention-days: 7
+
   integration:
     name: integration (validate.sh · rbac against synthetic camera)
     runs-on: ubuntu-latest
