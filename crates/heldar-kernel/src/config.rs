@@ -19,6 +19,15 @@ pub struct Config {
     pub mediamtx_hls_base: String,
     pub mediamtx_rtsp_base: String,
     pub mediamtx_webrtc_base: String,
+    /// Emit SAME-ORIGIN media URLs for live view (`HELDAR_MEDIA_SAME_ORIGIN`).
+    ///
+    /// MediaMTX serves HLS/WebRTC on its own plaintext ports (8888/8889). The default behaviour hands
+    /// the browser an absolute `http://<host>:8888/…` URL, which works on a plain-HTTP LAN dashboard
+    /// but is BLOCKED AS MIXED CONTENT the moment the dashboard is served over HTTPS — so live view
+    /// silently dies behind a TLS terminator. With this set, live URLs become origin-relative
+    /// (`/live/hls/…`, `/live/whep/…`) and the reverse proxy in front is responsible for routing
+    /// those prefixes to MediaMTX. `deploy/compose.tls.yml` sets it; see `deploy/Caddyfile`.
+    pub media_same_origin: bool,
     /// TTL (seconds) of a minted live-view/playback read token (`HELDAR_LIVEVIEW_TOKEN_TTL_SECS`).
     /// Must comfortably outlast a viewing session's reconnects; the dashboard re-fetches `/liveview`
     /// (re-minting) whenever it reopens a stream. Only enforced when kernel auth is enabled.
@@ -502,6 +511,7 @@ impl Config {
             mediamtx_hls_base: var_or("HELDAR_MEDIAMTX_HLS_BASE", "http://127.0.0.1:8888"),
             mediamtx_rtsp_base: var_or("HELDAR_MEDIAMTX_RTSP_BASE", "rtsp://127.0.0.1:8554"),
             mediamtx_webrtc_base: var_or("HELDAR_MEDIAMTX_WEBRTC_BASE", "http://127.0.0.1:8889"),
+            media_same_origin: parse_bool("HELDAR_MEDIA_SAME_ORIGIN", false),
             live_token_ttl_secs: parse_or("HELDAR_LIVEVIEW_TOKEN_TTL_SECS", 3600),
             db_max_connections: parse_or::<u32>("HELDAR_DB_MAX_CONNECTIONS", 16).clamp(2, 256),
             recorder_enabled: parse_bool("HELDAR_RECORDER_ENABLED", true),

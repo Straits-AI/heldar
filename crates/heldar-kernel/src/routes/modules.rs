@@ -123,6 +123,44 @@ const HOP_BY_HOP: &[&str] = &[
     "host",
 ];
 
+/// Response headers a sidecar may NOT project onto the console origin.
+///
+/// The proxy makes a plugin single-origin with the dashboard, which means any header the sidecar sets
+/// is interpreted by the browser as coming from the console itself. These carry authority over the
+/// WHOLE origin, not just the proxied response, so a compromised or malicious plugin must not be able
+/// to set them:
+///   - `set-cookie`/`set-cookie2`: would let a plugin write cookies on the console origin — overwrite
+///     or fixate the session cookie, or shadow it with a same-named cookie on a different path.
+///   - `clear-site-data`: would let a plugin wipe the console's cookies/storage (forced logout).
+///   - `strict-transport-security`: origin-wide, and persists long after the plugin is uninstalled.
+///   - `alt-svc`: redirects the origin's future traffic to a host the plugin chooses.
+///   - `www-authenticate`: pops a browser credential prompt that appears to come from the console.
+///   - `access-control-allow-*`: would let a plugin relax CORS on the console origin so a third-party
+///     site can read proxied responses with the user's session; it also duplicates the headers the
+///     kernel's own CORS layer sets, which browsers reject outright.
+///   - `public-key-pins`: dead in browsers, but origin-wide and permanently bricking where honoured.
+const FORBIDDEN_RESPONSE_HEADERS: &[&str] = &[
+    "set-cookie",
+    "set-cookie2",
+    "clear-site-data",
+    "strict-transport-security",
+    "alt-svc",
+    "www-authenticate",
+    "public-key-pins",
+    "public-key-pins-report-only",
+];
+
+/// Cap on a single proxied sidecar response. Everything served through `/m/{id}/*` is plugin UI assets
+/// (HTML/JS/CSS/images) or JSON, so 8 MiB is generous for a legitimate plugin; without a cap a
+/// malicious or wedged sidecar can stream unbounded bytes and OOM the kernel process, which takes the
+/// recorder and every camera down with it. The body is accumulated incrementally and abandoned the
+/// moment it would cross this line — reading first and checking the length afterwards would already
+/// have allocated the memory the cap exists to bound.
+const MAX_PROXY_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+/// Timeout for one proxied request to a sidecar.
+const PROXY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 async fn proxy_root(
     State(st): State<AppState>,
     principal: Principal,
@@ -166,7 +204,26 @@ async fn forward(
     let query = uri.0.query().map(|q| format!("?{q}")).unwrap_or_default();
     let target = format!("{}/{}{}", row.base_url, rest, query);
 
-    let mut rb = st.http.request(method, &target);
+    // Resolve-validate-PIN the sidecar at REQUEST time, exactly like the health poller does.
+    // `base_url` is screened once at registration and re-checked every 30s by the health sweep, but the
+    // proxy used to issue the real request through the shared, unpinned client — so a hostname
+    // `base_url` only had to look benign at registration/health-check time and could re-resolve to the
+    // cloud metadata endpoint or an internal service by the time a user hit `/m/{id}`. That is the exact
+    // TOCTOU the pinning exists to close. `EgressPolicy::LAN` because sidecars legitimately live on
+    // loopback/the LAN; the link-local/metadata and unspecified ranges are refused under LAN too.
+    let policy = crate::net_guard::EgressPolicy::LAN;
+    let parsed = crate::net_guard::validate_egress_url(&target, &policy).map_err(|e| {
+        tracing::warn!(module = %id, target = %target, error = %e, "modules: proxy target rejected by the egress guard");
+        AppError::Unavailable(format!("module `{id}` proxy target was rejected by the egress guard"))
+    })?;
+    let client = crate::net_guard::resolve_validate_pin(&parsed, &policy, PROXY_TIMEOUT)
+        .await
+        .map_err(|e| {
+            tracing::warn!(module = %id, target = %target, error = %e, "modules: proxy target rejected by the egress guard");
+            AppError::Unavailable(format!("module `{id}` proxy target was rejected by the egress guard"))
+        })?;
+
+    let mut rb = client.request(method, parsed.clone());
     for (k, v) in headers.iter() {
         let name = k.as_str().to_ascii_lowercase();
         // Never forward the console session/credentials to a plugin — it authenticates to the kernel
@@ -201,7 +258,7 @@ async fn forward(
     if !body.is_empty() {
         rb = rb.body(body.to_vec());
     }
-    let resp = rb.send().await.map_err(|e| {
+    let mut resp = rb.send().await.map_err(|e| {
         AppError::Other(anyhow::anyhow!(
             "module `{id}` proxy to {target} failed: {e}"
         ))
@@ -210,17 +267,49 @@ async fn forward(
     let status = resp.status();
     let mut out = Response::builder().status(status);
     for (k, v) in resp.headers().iter() {
-        if HOP_BY_HOP.contains(&k.as_str().to_ascii_lowercase().as_str()) {
+        let name = k.as_str().to_ascii_lowercase();
+        if HOP_BY_HOP.contains(&name.as_str())
+            || FORBIDDEN_RESPONSE_HEADERS.contains(&name.as_str())
+            || name.starts_with("access-control-allow-")
+        {
             continue;
         }
         out = out.header(k, v);
     }
-    let bytes = resp
-        .bytes()
+
+    // Accumulate incrementally so an oversized body is abandoned mid-stream instead of being buffered
+    // in full and measured afterwards (see MAX_PROXY_RESPONSE_BYTES). Dropping `resp` closes the
+    // connection, so the sidecar stops sending.
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = resp
+        .chunk()
         .await
-        .map_err(|e| AppError::Other(anyhow::anyhow!("module `{id}` proxy read failed: {e}")))?;
-    out.body(Body::from(bytes))
+        .map_err(|e| AppError::Other(anyhow::anyhow!("module `{id}` proxy read failed: {e}")))?
+    {
+        push_capped(&mut buf, &chunk, MAX_PROXY_RESPONSE_BYTES).map_err(|e| {
+            tracing::warn!(module = %id, target = %target, "modules: {e}");
+            AppError::Unavailable(format!(
+                "module `{id}` response exceeded the {MAX_PROXY_RESPONSE_BYTES} byte proxy limit"
+            ))
+        })?;
+    }
+
+    out.body(Body::from(buf))
         .map_err(|e| AppError::Other(anyhow::anyhow!("module `{id}` proxy response build: {e}")))
+}
+
+/// Append `chunk` to `buf` unless doing so would exceed `limit`. Checked BEFORE the copy so the
+/// oversized bytes are never allocated. Split out from [`forward`] so the cap is unit-testable without
+/// standing up a sidecar.
+fn push_capped(buf: &mut Vec<u8>, chunk: &[u8], limit: usize) -> Result<(), String> {
+    if buf.len().saturating_add(chunk.len()) > limit {
+        return Err(format!(
+            "response exceeded the {limit} byte proxy limit (aborted after {} bytes)",
+            buf.len()
+        ));
+    }
+    buf.extend_from_slice(chunk);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -464,6 +553,162 @@ mod tests {
         )
         .await;
         assert_eq!(status, 409);
+    }
+
+    // ---------------- reverse proxy: egress guard, header hygiene, response cap ----------------
+
+    /// The response-size cap is enforced BEFORE the bytes are copied, so an oversized body is never
+    /// allocated. Unit-testable without a sidecar.
+    #[test]
+    fn push_capped_aborts_before_allocating_past_the_limit() {
+        let mut buf = Vec::new();
+        assert!(super::push_capped(&mut buf, b"hello", 10).is_ok());
+        assert!(super::push_capped(&mut buf, b"world", 10).is_ok()); // exactly at the limit is fine
+        assert_eq!(buf.len(), 10);
+        // The next byte would cross it: rejected, and nothing was appended.
+        assert!(super::push_capped(&mut buf, b"!", 10).is_err());
+        assert_eq!(buf.len(), 10);
+        // A single oversized chunk is refused outright rather than partially buffered.
+        let mut buf = Vec::new();
+        assert!(super::push_capped(&mut buf, &[0u8; 64], 10).is_err());
+        assert!(buf.is_empty());
+    }
+
+    /// A stand-in sidecar on loopback: one small response carrying headers a plugin must not be able to
+    /// project onto the console origin, and one response larger than the proxy cap.
+    async fn spawn_sidecar() -> (String, tokio::task::JoinHandle<()>) {
+        use axum::http::header;
+        use axum::response::IntoResponse;
+        use axum::routing::get;
+        let app = axum::Router::new()
+            .route(
+                "/small",
+                get(|| async {
+                    (
+                        [
+                            (header::SET_COOKIE, "heldar_session=attacker; Path=/"),
+                            (header::STRICT_TRANSPORT_SECURITY, "max-age=63072000"),
+                            (header::ACCESS_CONTROL_ALLOW_ORIGIN, "https://evil.example"),
+                        ],
+                        "ok",
+                    )
+                        .into_response()
+                }),
+            )
+            .route(
+                "/big",
+                get(|| async {
+                    Body::from(vec![b'x'; super::MAX_PROXY_RESPONSE_BYTES + 1]).into_response()
+                }),
+            );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), handle)
+    }
+
+    /// Send a request through a fresh router and keep the raw response (headers included).
+    async fn send_raw(st: AppState, req: Request<Body>) -> axum::http::Response<Body> {
+        let mut app = super::router().with_state(st);
+        app.call(req).await.unwrap()
+    }
+
+    /// The proxy strips the response headers that would give a plugin authority over the console origin
+    /// (it is single-origin with the dashboard), and refuses a response larger than the cap instead of
+    /// buffering it into kernel memory.
+    #[tokio::test]
+    async fn proxy_strips_origin_authority_headers_and_caps_response_size() {
+        let (origin, server) = spawn_sidecar().await;
+        let st = state_with(vec![]).await;
+        let (status, _) = send(
+            st.clone(),
+            post_json(
+                "/api/v1/modules",
+                json!({ "id": "side", "name": "Side", "base_url": origin, "role": "viewer" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, 201);
+
+        let res = send_raw(
+            st.clone(),
+            Request::builder()
+                .uri("/m/side/small")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), 200);
+        assert!(
+            res.headers().get("set-cookie").is_none(),
+            "a plugin must not be able to set cookies on the console origin"
+        );
+        assert!(res.headers().get("strict-transport-security").is_none());
+        assert!(res.headers().get("access-control-allow-origin").is_none());
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(&bytes[..], b"ok");
+
+        let res = send_raw(
+            st.clone(),
+            Request::builder()
+                .uri("/m/side/big")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), 503);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            json["error"].as_str().unwrap().contains("proxy limit"),
+            "expected the size cap to be the reason, got {json}"
+        );
+
+        server.abort();
+    }
+
+    /// The SSRF guard runs in the PROXY path, at request time — not only at registration and in the
+    /// health poller. A `base_url` that was benign when it was screened but now points at the cloud
+    /// metadata endpoint must be refused before any connection is attempted.
+    #[tokio::test]
+    async fn proxy_re_validates_the_target_at_request_time() {
+        let st = state_with(vec![]).await;
+        let (status, _) = send(
+            st.clone(),
+            post_json(
+                "/api/v1/modules",
+                json!({ "id": "drift", "name": "Drift", "base_url": "http://127.0.0.1:9123", "role": "viewer" }),
+            ),
+        )
+        .await;
+        assert_eq!(status, 201);
+        // Simulate the TOCTOU window: the stored origin now resolves somewhere forbidden.
+        sqlx::query("UPDATE module_registrations SET base_url = ? WHERE id = 'drift'")
+            .bind("http://169.254.169.254")
+            .execute(&st.pool)
+            .await
+            .unwrap();
+
+        let res = send_raw(
+            st.clone(),
+            Request::builder()
+                .uri("/m/drift/latest/meta-data/")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), 503);
+        let bytes = axum::body::to_bytes(res.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(json["error"].as_str().unwrap().contains("egress guard"));
     }
 
     /// Plugin keys are least-privilege: admin/manager/guard are not grantable.

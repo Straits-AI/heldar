@@ -417,23 +417,29 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
         }
     }
 
-    // Allow all origins if configured with "*" or left empty; otherwise restrict to the list.
-    let allow_all = cfg.cors_origins.is_empty() || cfg.cors_origins.iter().any(|o| o == "*");
-    let cors = if allow_all {
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any)
-    } else {
-        let origins: Vec<HeaderValue> = cfg
-            .cors_origins
-            .iter()
-            .filter_map(|o| o.parse::<HeaderValue>().ok())
-            .collect();
-        CorsLayer::new()
-            .allow_origin(origins)
-            .allow_methods(Any)
-            .allow_headers(Any)
+    let cors: Option<CorsLayer> = match cors_mode(&cfg.cors_origins) {
+        // No layer at all: the browser's same-origin policy is the whole rule. The dashboard is
+        // served from this origin, so it needs nothing here.
+        CorsMode::SameOriginOnly => None,
+        CorsMode::AllowAny => Some(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        ),
+        CorsMode::Allowlist => {
+            let origins: Vec<HeaderValue> = cfg
+                .cors_origins
+                .iter()
+                .filter_map(|o| o.parse::<HeaderValue>().ok())
+                .collect();
+            Some(
+                CorsLayer::new()
+                    .allow_origin(origins)
+                    .allow_methods(Any)
+                    .allow_headers(Any),
+            )
+        }
     };
 
     // Open generic apps merge their routers here; the kernel router is unaware of them.
@@ -488,10 +494,13 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
         }
     };
 
-    let app = app
-        .layer(TraceLayer::new_for_http())
-        .layer(cors)
-        .with_state(state);
+    let app = app.layer(TraceLayer::new_for_http());
+    // Same-origin-only attaches NO layer at all, rather than a permissive one.
+    let app = match cors {
+        Some(layer) => app.layer(layer),
+        None => app,
+    };
+    let app = app.with_state(state);
 
     let addr = format!("{}:{}", cfg.api_host, cfg.api_port);
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -510,6 +519,34 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
         .context("server error")?;
 
     Ok(())
+}
+
+/// What the configured origin list means for the CORS layer.
+#[derive(Debug, PartialEq, Eq)]
+enum CorsMode {
+    /// No CORS layer — cross-origin reads are refused by the browser's own same-origin policy.
+    SameOriginOnly,
+    /// `Access-Control-Allow-Origin: *`. Only ever from an explicit `*` entry.
+    AllowAny,
+    /// Restricted to the configured origins.
+    Allowlist,
+}
+
+/// Classify `HELDAR_CORS_ORIGINS` into a posture.
+///
+/// EMPTY MEANS SAME-ORIGIN ONLY. This used to mean allow-ANY, which inverted the documented
+/// behaviour: `.env.production.example` ships `HELDAR_CORS_ORIGINS=` commented "leave empty for
+/// same-origin only", so an operator following the production template got every origin allowed —
+/// and the strict-prod guardrail missed it, because it only ever looked for a literal `*`. Allow-any
+/// now requires deliberately writing `*`.
+fn cors_mode(origins: &[String]) -> CorsMode {
+    if origins.is_empty() {
+        CorsMode::SameOriginOnly
+    } else if origins.iter().any(|o| o == "*") {
+        CorsMode::AllowAny
+    } else {
+        CorsMode::Allowlist
+    }
 }
 
 /// One-shot admin subcommands (run then exit, bypassing the server boot). Usage:
@@ -665,4 +702,43 @@ async fn shutdown_signal(
         m.shutdown().await;
     }
     sampler.shutdown().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn empty_origins_mean_same_origin_only_not_allow_any() {
+        // The regression this guards: empty used to fall through to `allow_origin(Any)`, so the
+        // documented "leave empty for same-origin only" production setting allowed every origin.
+        assert_eq!(cors_mode(&[]), CorsMode::SameOriginOnly);
+    }
+
+    #[test]
+    fn allow_any_requires_an_explicit_wildcard() {
+        assert_eq!(cors_mode(&v(&["*"])), CorsMode::AllowAny);
+        // A wildcard anywhere in the list still widens it — worth stating so it is not read as
+        // "only when it is the sole entry".
+        assert_eq!(
+            cors_mode(&v(&["https://cam.example.com", "*"])),
+            CorsMode::AllowAny
+        );
+    }
+
+    #[test]
+    fn explicit_origins_are_an_allowlist() {
+        assert_eq!(
+            cors_mode(&v(&["https://cam.example.com"])),
+            CorsMode::Allowlist
+        );
+        assert_eq!(
+            cors_mode(&v(&["http://localhost:5173", "https://cam.example.com"])),
+            CorsMode::Allowlist
+        );
+    }
 }
