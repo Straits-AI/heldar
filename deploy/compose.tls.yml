@@ -18,7 +18,9 @@ name: heldar
 
 services:
   caddy:
-    image: caddy:2
+    # Pinned tag + digest, same policy as every other image in the stack (docs/SUPPLY-CHAIN.md).
+    # To bump: `docker buildx imagetools inspect caddy:<tag>` and update both halves.
+    image: caddy:2.10.2@sha256:c3d7ee5d2b11f9dc54f947f68a734c84e9c9666c92c88a7f30b9cba5da182adb
     restart: unless-stopped
     # Host networking: Caddy binds :80/:443 on the host directly and reverse-proxies to the
     # dashboard on 127.0.0.1:8080. Matches the rest of the stack; no bridge/port-map needed.
@@ -41,6 +43,23 @@ services:
     depends_on:
       web:
         condition: service_started
+
+  # With TLS terminating at :443, the cleartext services behind it must not also be reachable from
+  # the network — otherwise the "HTTPS appliance" still answers plain HTTP on 8000/8080 to anyone on
+  # the LAN, and the Secure cookie is the only thing that was actually hardened. Host networking
+  # means these binds are the ONLY thing standing between those ports and the network, so pin both
+  # to loopback; Caddy reaches them over 127.0.0.1.
+  core:
+    environment:
+      HELDAR_API_HOST: 127.0.0.1
+      # Live view must be origin-relative so it inherits https:// from the page — an absolute
+      # http://host:8888 URL is blocked as mixed content. deploy/Caddyfile routes the prefixes.
+      HELDAR_MEDIA_SAME_ORIGIN: "true"
+
+  web:
+    environment:
+      # nginx listens on loopback only; Caddy is the sole network-facing listener.
+      NGINX_LISTEN: 127.0.0.1:8080
 
 volumes:
   caddy-data:

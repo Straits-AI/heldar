@@ -34,12 +34,34 @@ overlay only adds the `caddy` service and two of its own env vars.
 | Host inbound | `80` | ACME HTTP-01 challenge + automatic HTTP->HTTPS redirect |
 | Loopback | `127.0.0.1:8080` | Caddy -> nginx (SPA + proxy). Cleartext, never leaves the host |
 | Loopback | `127.0.0.1:8000` | nginx -> kernel (`/api`, `/media`, `/healthz`) |
+| Loopback | `127.0.0.1:8888` | Caddy `/live/hls/*` -> MediaMTX HLS |
+| Loopback | `127.0.0.1:8889` | Caddy `/live/whep/*` -> MediaMTX WebRTC/WHEP |
 
-Caddy runs with **host networking**, like the rest of the stack. This is deliberate: the media plane
-(MediaMTX / WHEP / RTSP) needs host networking, and it lets Caddy reach the dashboard on `127.0.0.1`
-with no bridge or published-port plumbing. The single cleartext hop (Caddy -> nginx) never leaves
-loopback. Caddy never sits in front of the media ports — the WebRTC remote-access path keeps its own
-host ports untouched.
+Caddy runs with **host networking**, like the rest of the stack: it lets Caddy reach the dashboard and
+the media ports on `127.0.0.1` with no bridge or published-port plumbing.
+
+**The loopback binds are enforced, not assumed.** Under host networking a service's own bind address
+is the only thing between it and the network, so this overlay sets `HELDAR_API_HOST=127.0.0.1` on the
+kernel and `NGINX_LISTEN=127.0.0.1:8080` on the dashboard. Without those the "HTTPS appliance" would
+still answer plain HTTP on 8000/8080 to anyone on the LAN, and the `Secure` cookie would be the only
+thing actually hardened.
+
+### The browser media plane goes through Caddy
+
+Live view is proxied through `:443` — it has to be. MediaMTX serves HLS and WebRTC on plaintext
+8888/8889, and a browser on an `https://` page **blocks** an `http://host:8888/...` URL as mixed
+content, so live view would be dead over TLS. HSTS does not rescue it: it upgrades the media URL to
+`https://host:8888`, where MediaMTX is not serving TLS at all.
+
+So this overlay sets `HELDAR_MEDIA_SAME_ORIGIN=true`, which makes the kernel emit origin-relative
+media URLs (`/live/hls/...`, `/live/whep/...`) that inherit the page's scheme and port, and
+`deploy/Caddyfile` maps those prefixes back onto MediaMTX. The prefixes are a contract with
+`MEDIA_HLS_PREFIX` / `MEDIA_WHEP_PREFIX` in `crates/heldar-kernel/src/services/mediamtx.rs` — change
+one side and you must change the other.
+
+WebRTC **media** still flows directly over UDP and does not pass through Caddy; only the WHEP
+signalling (SDP offer/answer + ICE) is proxied. RTSP is deliberately not proxied — it is not a browser
+protocol and cannot ride the HTTPS origin. The WebRTC remote-access path keeps its own transport.
 
 ---
 

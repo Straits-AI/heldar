@@ -6,9 +6,15 @@
 #
 # Port model: Caddy binds :80 and :443 on the host (host networking) and reverse-proxies CLEARTEXT
 # to the existing nginx dashboard on 127.0.0.1:8080, which in turn proxies /api,/media,/healthz to
-# the kernel on 127.0.0.1:8000. Caddy never touches the media plane (MediaMTX / WHEP / RTSP) — that
-# stays on its own host ports for the WebRTC remote-access path. :80 exists for the ACME HTTP-01
-# challenge and the automatic HTTP->HTTPS redirect; all real traffic is :443.
+# the kernel on 127.0.0.1:8000. :80 exists for the ACME HTTP-01 challenge and the automatic
+# HTTP->HTTPS redirect; all real traffic is :443.
+#
+# The BROWSER media plane (HLS + WHEP) is proxied here too. It has to be: MediaMTX serves those on
+# plaintext 8888/8889, and an `http://host:8888/…` URL on an `https://` page is blocked as mixed
+# content, so live view would be dead over TLS. The kernel emits origin-relative `/live/hls` and
+# `/live/whep` URLs when HELDAR_MEDIA_SAME_ORIGIN=true (set by compose.tls.yml) and this file maps
+# them back onto MediaMTX. RTSP is NOT proxied — it is not a browser protocol and cannot ride the
+# HTTPS origin; the WebRTC remote-access path also keeps its own separate transport.
 {
 	# ACME account / internal-CA root are persisted on the caddy-data volume (see compose.tls.yml)
 	# so certs and the self-signed root survive restarts. Admin API off — nothing should reach it
@@ -36,8 +42,28 @@
 
 	import heldar_security_headers
 
+	# --- Browser media plane -------------------------------------------------------------------
+	# These two prefixes are a contract with the kernel (MEDIA_HLS_PREFIX / MEDIA_WHEP_PREFIX in
+	# crates/heldar-kernel/src/services/mediamtx.rs). Strip the prefix and hand the rest to MediaMTX
+	# on loopback, so the browser only ever talks HTTPS to this origin.
+	#
+	# The read token rides as a query string and is preserved by the rewrite. MediaMTX HLS playlists
+	# reference their segments RELATIVELY, so segment fetches resolve back under /live/hls/... and are
+	# proxied by the same rule.
+	handle_path /live/hls/* {
+		reverse_proxy 127.0.0.1:8888
+	}
+	# WHEP is an HTTP POST (SDP offer -> answer) plus PATCH for ICE trickle; a plain reverse_proxy
+	# carries all of it. Media itself flows over WebRTC/UDP directly, NOT through Caddy.
+	handle_path /live/whep/* {
+		reverse_proxy 127.0.0.1:8889
+	}
+
+	# --- Dashboard + API -----------------------------------------------------------------------
 	# Single cleartext hop to the existing dashboard container (nginx on :8080), loopback only.
 	# Caddy adds X-Forwarded-Proto/-For/Host automatically; the kernel marks the session cookie
 	# Secure from HELDAR_AUTH_COOKIE_SECURE (compose.prod.yml), independent of this hop's scheme.
-	reverse_proxy 127.0.0.1:8080
+	handle {
+		reverse_proxy 127.0.0.1:8080
+	}
 }
