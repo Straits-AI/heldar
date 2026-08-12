@@ -40,4 +40,5 @@ pub mod snapshot_scheduler;
 pub mod storage;
 pub mod webhooks;
 pub mod webrtc_rendezvous;
+pub mod worker_shard;
 pub mod zones;

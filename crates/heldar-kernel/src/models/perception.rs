@@ -153,6 +153,23 @@ impl Provenance {
         }
     }
 
+    /// Namespace a producer-supplied `frame_id` so the idempotency key `(camera_id, frame_id)` cannot
+    /// be claimed across provenance boundaries.
+    ///
+    /// Kernel producers use PREDICTABLE ids — the native-ANPR poller derives `nanpr_<device picture
+    /// name>` — so without this a client can guess one, post it first, and the genuine camera-native
+    /// read that follows is silently absorbed as a redelivery. That suppresses precisely the reads the
+    /// barrier trusts most, and it is available to any ingest-capable credential. Prefixing is
+    /// structural: it needs no list of reserved names to stay correct as producers are added.
+    ///
+    /// Redeliveries still dedup, because the same producer always lands in the same namespace.
+    pub fn namespaced_frame_id(&self, frame_id: &str) -> String {
+        match self {
+            Provenance::Kernel { producer } => format!("k:{}:{frame_id}", producer.as_str()),
+            Provenance::Worker { .. } => format!("w:{frame_id}"),
+        }
+    }
+
     /// The `_prov` object embedded in every detection's attributes, so a consumer reading the batch
     /// (inline or on fan-out replay) sees the same server-authored trail the columns carry.
     pub fn detail(&self) -> Value {
@@ -260,4 +277,58 @@ pub struct ZoneEvent {
     pub dwell_seconds: Option<f64>,
     pub evidence_path: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+#[cfg(test)]
+mod provenance_tests {
+    use super::*;
+
+    #[test]
+    fn a_worker_cannot_claim_a_kernel_frame_id() {
+        let kernel = Provenance::Kernel {
+            producer: KernelProducer::NativeAnpr,
+        };
+        let worker = Provenance::Worker {
+            api_key_id: "key_1".into(),
+            task_id: None,
+            worker_id: None,
+        };
+        // The suppression primitive this closes: the native poller's ids are derived from the device
+        // picture name, so a client can guess one. Posting it first used to claim the shared
+        // `(camera_id, frame_id)` dedup key and silently swallow the genuine camera-native read.
+        let guessed = "nanpr_PIC_00123";
+        assert_ne!(
+            kernel.namespaced_frame_id(guessed),
+            worker.namespaced_frame_id(guessed),
+            "a worker must not be able to occupy a kernel producer's idempotency key"
+        );
+        // Redelivery still dedups — same producer, same key — or at-least-once delivery would
+        // double-count every ANPR vote.
+        assert_eq!(
+            worker.namespaced_frame_id(guessed),
+            worker.namespaced_frame_id(guessed)
+        );
+        // Two kernel producers would also be distinct if another is ever added.
+        assert!(kernel.namespaced_frame_id(guessed).starts_with("k:"));
+        assert!(worker.namespaced_frame_id(guessed).starts_with("w:"));
+    }
+
+    #[test]
+    fn worker_provenance_never_reports_a_kernel_source() {
+        for p in [
+            Provenance::Worker {
+                api_key_id: "k".into(),
+                task_id: None,
+                worker_id: None,
+            },
+            Provenance::Worker {
+                api_key_id: "k".into(),
+                task_id: Some("t".into()),
+                worker_id: Some("w".into()),
+            },
+        ] {
+            assert_eq!(p.source(), "worker");
+            assert_ne!(p.source(), KernelProducer::NativeAnpr.source());
+        }
+    }
 }

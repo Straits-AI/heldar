@@ -260,7 +260,10 @@ struct WorkerTask {
 /// A worker whose `last_seen` is older than this is treated as gone and its tasks reassigned. Workers
 /// must poll `/ai/tasks` more often than this (the default poll interval is 10s), so a live worker is
 /// never dropped between polls; a crashed one is reclaimed within the TTL.
-const WORKER_LIVENESS_TTL_SECS: i64 = 60;
+///
+/// Re-exported from the shard module rather than redeclared: pruning here and the liveness filter used
+/// when leasing must use the SAME cutoff, or a worker can be live for one and gone for the other.
+use crate::services::worker_shard::WORKER_LIVENESS_TTL_SECS;
 
 #[derive(Debug, Deserialize)]
 struct TasksQuery {
@@ -270,17 +273,10 @@ struct TasksQuery {
 }
 
 /// Which of `total` stably-ordered tasks belong to `me`, given the stably-ordered `live` worker set.
-/// Modulo sharding (task `i` → `live[i % n]`): balanced (each worker gets ~total/n) and stable
-/// (reassigns only when the worker SET changes). Defensive: returns ALL indices when `live` is empty or
-/// `me` is absent, so a worker never silently gets nothing due to a race — worst case it redoes tasks,
-/// which the outbox `frame_id` idempotency dedups.
-fn worker_shard(total: usize, live: &[String], me: &str) -> Vec<usize> {
-    let n = live.len();
-    match live.iter().position(|w| w == me) {
-        Some(idx) if n > 0 => (0..total).filter(|i| i % n == idx).collect(),
-        _ => (0..total).collect(),
-    }
-}
+/// Task sharding lives in [`crate::services::worker_shard`] so this path and lease acquisition cannot
+/// drift apart — when they did, discovery sharded while leasing was greedy, and a fleet collapsed to
+/// one active worker.
+use crate::services::worker_shard::assign as worker_shard;
 
 async fn list_all_tasks(
     State(st): State<AppState>,

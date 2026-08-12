@@ -1074,7 +1074,9 @@ mod tests {
 
         // ...and the persisted attribute says `worker`, not what the client asked for.
         let attrs: sqlx::types::Json<Value> =
-            sqlx::query_scalar("SELECT attributes FROM detections WHERE frame_id = 'f_forged'")
+            // `w:` prefix: the ingest path namespaces the idempotency key by provenance, so a client
+            // cannot claim a kernel producer's `(camera_id, frame_id)` and suppress the genuine read.
+            sqlx::query_scalar("SELECT attributes FROM detections WHERE frame_id = 'w:f_forged'")
                 .fetch_one(&pool)
                 .await
                 .unwrap();

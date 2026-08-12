@@ -138,8 +138,21 @@ pub async fn acquire(
     .fetch_all(pool)
     .await?;
 
+    // Lease only THIS worker's shard, using the same modulo assignment `GET /ai/tasks` hands out.
+    //
+    // Task leases are exclusive per task, so without this the first worker to poll takes every task
+    // (the budget defaults to MAX_LEASE_TASKS = 512, far more than any real site has) and keeps
+    // renewing them — every other worker is starved forever, and a fleet silently collapses to one
+    // active node. Sharding here also means discovery and leasing agree: a worker can lease exactly
+    // the tasks it was told to analyze, and no more. Enforcing it server-side rather than trusting a
+    // client-supplied `max_tasks` means a greedy or buggy worker cannot take the whole fleet either.
+    let shard = crate::services::worker_shard::for_worker(pool, candidates.len(), worker_id).await;
+
     let mut taken = Vec::new();
-    for task in candidates {
+    for (idx, task) in candidates.into_iter().enumerate() {
+        if !shard.contains(&idx) {
+            continue;
+        }
         if taken.len() as i64 >= budget {
             break;
         }

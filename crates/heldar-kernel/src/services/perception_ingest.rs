@@ -216,6 +216,19 @@ pub async fn ingest_batch(
         .collect();
     let prov_col = prov.column();
     let produced_by = prov.produced_by();
+    // Namespace the idempotency key by provenance so the two producers can never collide.
+    //
+    // The dedup key is `(camera_id, frame_id)`, and the kernel's own producers use PREDICTABLE ids —
+    // the native-ANPR poller derives `nanpr_<device picture name>`. A client can guess that, post a
+    // batch claiming it first, and the genuine camera-native read that follows is silently swallowed
+    // as a redelivery. That is a suppression primitive against exactly the reads the barrier trusts
+    // most, available to any ingest-capable credential. Prefixing makes the collision structurally
+    // impossible rather than relying on enumerating reserved names. Redeliveries still dedup: the
+    // same producer always lands in the same namespace.
+    let frame_key = body
+        .frame_id
+        .as_deref()
+        .map(|fid| prov.namespaced_frame_id(fid));
 
     let mut inserted = 0u64;
     let mut tx = st.pool.begin().await?;
@@ -230,7 +243,7 @@ pub async fn ingest_batch(
     )
     .bind(&body.camera_id)
     .bind(&cam.site_id)
-    .bind(&body.frame_id)
+    .bind(&frame_key)
     .bind(&body.task_type)
     .bind(body.detections.len() as i64)
     .bind(Utc::now())
@@ -269,7 +282,7 @@ pub async fn ingest_batch(
                 .bind(bbox)
                 .bind(&d.track_id)
                 .bind(attrs)
-                .bind(&body.frame_id)
+                .bind(&frame_key)
                 .bind(Utc::now())
                 .bind(&prov_col);
         }
@@ -291,15 +304,15 @@ pub async fn ingest_batch(
         detections: &detections,
         timestamp: ts,
     };
-    let fanned = crate::services::consumer::fan_out(
-        &st.pool,
-        &st.consumers,
-        &batch,
-        body.frame_id.as_deref(),
-    )
-    .await;
+    // `frame_key`, not the raw id: the outbox row was written under the namespaced key, and
+    // `consumer_fanout`'s at-most-once PRIMARY KEY must agree with it. Binding the raw id here would
+    // leave `fanned_out_at` NULL forever (the UPDATE below would match no row) and the drainer would
+    // replay every batch for ever.
+    let fanned =
+        crate::services::consumer::fan_out(&st.pool, &st.consumers, &batch, frame_key.as_deref())
+            .await;
     if fanned {
-        if let Some(fid) = body.frame_id.as_deref() {
+        if let Some(fid) = frame_key.as_deref() {
             let _ = sqlx::query(
                 "UPDATE outbox SET fanned_out_at = ? \
                  WHERE topic = 'detections' AND camera_id = ? AND frame_id = ? AND fanned_out_at IS NULL",
@@ -411,13 +424,19 @@ mod tests {
         }
     }
 
+    /// Look up a stored batch by its LOGICAL frame id. Persisted ids are namespaced by provenance
+    /// (`w:` / `k:<producer>:`) so a client cannot claim a kernel producer's idempotency key, so the
+    /// suffix match keeps these tests about provenance rather than about the key format.
     async fn stored_source(st: &AppState, frame: &str) -> (String, String) {
-        let (attrs, prov): (SqlxJson<Value>, String) =
-            sqlx::query_as("SELECT attributes, provenance FROM detections WHERE frame_id = ?")
-                .bind(frame)
-                .fetch_one(&st.pool)
-                .await
-                .unwrap();
+        let (attrs, prov): (SqlxJson<Value>, String) = sqlx::query_as(
+            "SELECT attributes, provenance FROM detections
+                 WHERE frame_id = ? OR frame_id LIKE '%:' || ?",
+        )
+        .bind(frame)
+        .bind(frame)
+        .fetch_one(&st.pool)
+        .await
+        .unwrap();
         (
             attrs.0["source"].as_str().unwrap_or_default().to_string(),
             prov,
@@ -445,7 +464,7 @@ mod tests {
 
         // The forged `_prov` is replaced too, not merged into.
         let attrs: SqlxJson<Value> =
-            sqlx::query_scalar("SELECT attributes FROM detections WHERE frame_id = 'f1'")
+            sqlx::query_scalar("SELECT attributes FROM detections WHERE frame_id = 'w:f1'")
                 .fetch_one(&st.pool)
                 .await
                 .unwrap();
@@ -482,7 +501,7 @@ mod tests {
             .await
             .unwrap();
         let (prov, by): (String, Option<String>) =
-            sqlx::query_as("SELECT provenance, produced_by FROM outbox WHERE frame_id = 'f3'")
+            sqlx::query_as("SELECT provenance, produced_by FROM outbox WHERE frame_id = 'w:f3'")
                 .fetch_one(&st.pool)
                 .await
                 .unwrap();
