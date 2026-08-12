@@ -15,7 +15,7 @@ use serde_json::json;
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::{AppError, AppResult};
 use crate::models::{
     ArchiveExportRequest, BackupDestination, BackupDestinationCreate, BackupDestinationUpdate,
@@ -112,7 +112,7 @@ async fn list_destinations(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<BackupDestinationView>>> {
-    principal.require(principal.can_view(), "view backup destinations")?;
+    principal.require_cap(Cap::SystemRead, "view backup destinations")?;
     let rows = sqlx::query_as::<_, BackupDestination>(
         "SELECT * FROM backup_destinations ORDER BY created_at ASC",
     )
@@ -292,7 +292,7 @@ async fn list_policies(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<BackupPolicy>>> {
-    principal.require(principal.can_view(), "view backup policies")?;
+    principal.require_cap(Cap::SystemRead, "view backup policies")?;
     let rows =
         sqlx::query_as::<_, BackupPolicy>("SELECT * FROM backup_policies ORDER BY created_at ASC")
             .fetch_all(&st.pool)
@@ -486,7 +486,7 @@ async fn list_jobs(
     principal: Principal,
     Query(q): Query<JobQuery>,
 ) -> AppResult<Json<Vec<BackupJob>>> {
-    principal.require(principal.can_view(), "view backup jobs")?;
+    principal.require_cap(Cap::SystemRead, "view backup jobs")?;
     let limit = q.limit.unwrap_or(100).clamp(1, 2000);
     let rows = sqlx::query_as::<_, BackupJob>(
         "SELECT * FROM backup_jobs
@@ -509,7 +509,7 @@ async fn get_job(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<Json<BackupJob>> {
-    principal.require(principal.can_view(), "view backup jobs")?;
+    principal.require_cap(Cap::SystemRead, "view backup jobs")?;
     let job = load_job(&st.pool, &id).await?;
     Ok(Json(job))
 }
@@ -592,7 +592,7 @@ async fn list_archive_exports(
     principal: Principal,
     Query(q): Query<LimitQuery>,
 ) -> AppResult<Json<Vec<BackupJob>>> {
-    principal.require(principal.can_view(), "view archive exports")?;
+    principal.require_cap(Cap::SystemRead, "view archive exports")?;
     let limit = q.limit.unwrap_or(100).clamp(1, 2000);
     let rows = sqlx::query_as::<_, BackupJob>(
         "SELECT * FROM backup_jobs WHERE kind = 'on_demand_archive' ORDER BY created_at DESC LIMIT ?",

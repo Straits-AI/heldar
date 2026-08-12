@@ -3,7 +3,7 @@ use axum::routing::get;
 use axum::{Json, Router};
 use serde::Deserialize;
 
-use crate::auth::Principal;
+use crate::auth::{Cap, Principal};
 use crate::error::{AppError, AppResult};
 use crate::models::{CameraStatus, Event};
 use crate::state::AppState;
@@ -19,7 +19,7 @@ async fn list_status(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<CameraStatus>>> {
-    principal.require(principal.can_view(), "view camera health")?;
+    principal.require_cap(Cap::CameraRead, "view camera health")?;
     let mut rows =
         sqlx::query_as::<_, CameraStatus>("SELECT * FROM camera_status ORDER BY camera_id ASC")
             .fetch_all(&st.pool)
@@ -46,7 +46,7 @@ async fn camera_status(
     principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<CameraStatus>> {
-    principal.require(principal.can_view(), "view camera health")?;
+    principal.require_cap(Cap::CameraRead, "view camera health")?;
     let mut row =
         sqlx::query_as::<_, CameraStatus>("SELECT * FROM camera_status WHERE camera_id = ?")
             .bind(&id)
@@ -77,7 +77,7 @@ async fn list_events(
     principal: Principal,
     Query(q): Query<EventQuery>,
 ) -> AppResult<Json<Vec<Event>>> {
-    principal.require(principal.can_view(), "view events")?;
+    principal.require_cap(Cap::EventsRead, "view events")?;
     let limit = q.limit.unwrap_or(200).clamp(1, 2000);
     let rows = sqlx::query_as::<_, Event>(
         "SELECT * FROM events

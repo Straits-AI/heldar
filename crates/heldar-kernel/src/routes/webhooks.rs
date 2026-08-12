@@ -17,7 +17,7 @@ use serde_json::json;
 use sqlx::types::Json as SqlxJson;
 use uuid::Uuid;
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::{AppError, AppResult};
 use crate::models::{
     WebhookDelivery, WebhookSubscription, WebhookSubscriptionCreate, WebhookSubscriptionUpdate,
@@ -95,7 +95,7 @@ async fn list(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<WebhookSubscriptionView>>> {
-    principal.require(principal.can_view(), "view webhook subscriptions")?;
+    principal.require_cap(Cap::EventsRead, "view webhook subscriptions")?;
     let rows = sqlx::query_as::<_, WebhookSubscription>(
         "SELECT * FROM webhook_subscriptions ORDER BY created_at ASC",
     )
@@ -372,7 +372,7 @@ async fn list_deliveries(
     principal: Principal,
     Query(q): Query<DeliveriesQuery>,
 ) -> AppResult<Json<Vec<WebhookDelivery>>> {
-    principal.require(principal.can_view(), "view webhook deliveries")?;
+    principal.require_cap(Cap::EventsRead, "view webhook deliveries")?;
     let _ = load_subscription(&st.pool, &id).await?;
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
     let rows = sqlx::query_as::<_, WebhookDelivery>(
@@ -399,7 +399,7 @@ async fn event_types(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<serde_json::Value>>> {
-    principal.require(principal.can_view(), "view event types")?;
+    principal.require_cap(Cap::EventsRead, "view event types")?;
     let types = vec![
         EventTypeInfo {
             event_type: "camera_offline",

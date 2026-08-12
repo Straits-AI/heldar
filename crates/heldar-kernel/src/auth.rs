@@ -10,7 +10,9 @@
 //! synthetic admin so the existing open API and tooling keep working; when true it requires a valid
 //! token and 401s otherwise. Handlers then assert capabilities with [`Principal::require`].
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::{password_hash::SaltString, Argon2};
@@ -22,7 +24,7 @@ use rand_core::RngCore;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
-use crate::config::Config;
+use crate::config::{Config, EnforcementTier};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
@@ -110,6 +112,274 @@ impl Role {
     }
 }
 
+/// A single grantable capability.
+///
+/// Capabilities replace the old `Principal::can_view()`, which returned `true` UNCONDITIONALLY — so an
+/// integration key minted for an AI worker could read the vehicle registry, the watchlist, live video,
+/// clip export, the network scanner and every sidecar's reverse proxy. The split is drawn where the
+/// blast radius is, not where the router is: `video:live` (mints a MediaMTX token AND starts an ffmpeg
+/// publisher), `video:export` (transcodes and writes a file) and `ai:frames` (the live JPEG of faces and
+/// plates) are three different privileges even though the dashboard treats them as one "media" screen.
+///
+/// `Cap::Admin` is a super-capability: [`Principal::has`] answers true for everything when it is held.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
+pub enum Cap {
+    /// Full administrative control; implies every other capability.
+    Admin,
+    /// Manage the identity registry: vehicles + watchlist (the old `can_manage_registry`).
+    RegistryManage,
+    /// Operate the gate: visitor check-in/out, create passes, confirm/reject entries.
+    GateOperate,
+    /// Read the camera inventory and per-camera device configuration.
+    CameraRead,
+    /// Open a live stream (mints a media read token and can START a transcoding publisher).
+    VideoLive,
+    /// Read recorded video: segments, timelines, playback sessions, snapshots.
+    VideoPlayback,
+    /// Export recorded video off the box: clip transcode + archive export.
+    VideoExport,
+    /// Read the event/detection surface: events, zones, incidents, search, movement, entry events.
+    EventsRead,
+    /// Read identifying records: vehicles, watchlist entries, visitor passes, gate configuration.
+    IdentityRead,
+    /// Read the AI task list (what to analyze, at what fps, on which stream).
+    AiTasks,
+    /// Read sampled camera frames (`/cameras/{id}/frame`) — the actual pixels.
+    AiFrames,
+    /// Post perception results into the ingest pipeline.
+    AiIngest,
+    /// Claim and answer embedding-query work (the operator's pending semantic-search text).
+    AiEmbedWork,
+    /// Read system/operational state: system info, metrics, backups, modules, plugin store.
+    SystemRead,
+    /// Actively scan the network for cameras (an outbound probe sweep, not a read).
+    NetScan,
+    /// Reach a registered sidecar through the kernel's reverse proxy at `/m/{id}/*`.
+    ModuleProxy,
+}
+
+impl Cap {
+    /// Every capability, in declaration order. The single source of truth for `CapSet::ALL`, the
+    /// auth-off sweep test, and the docs table.
+    pub const ALL: [Cap; 16] = [
+        Cap::Admin,
+        Cap::RegistryManage,
+        Cap::GateOperate,
+        Cap::CameraRead,
+        Cap::VideoLive,
+        Cap::VideoPlayback,
+        Cap::VideoExport,
+        Cap::EventsRead,
+        Cap::IdentityRead,
+        Cap::AiTasks,
+        Cap::AiFrames,
+        Cap::AiIngest,
+        Cap::AiEmbedWork,
+        Cap::SystemRead,
+        Cap::NetScan,
+        Cap::ModuleProxy,
+    ];
+
+    pub fn slug(self) -> &'static str {
+        match self {
+            Cap::Admin => "admin",
+            Cap::RegistryManage => "registry:manage",
+            Cap::GateOperate => "gate:operate",
+            Cap::CameraRead => "camera:read",
+            Cap::VideoLive => "video:live",
+            Cap::VideoPlayback => "video:playback",
+            Cap::VideoExport => "video:export",
+            Cap::EventsRead => "events:read",
+            Cap::IdentityRead => "identity:read",
+            Cap::AiTasks => "ai:tasks",
+            Cap::AiFrames => "ai:frames",
+            Cap::AiIngest => "ai:ingest",
+            Cap::AiEmbedWork => "ai:embedwork",
+            Cap::SystemRead => "system:read",
+            Cap::NetScan => "net:scan",
+            Cap::ModuleProxy => "module:proxy",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Cap> {
+        Cap::ALL.into_iter().find(|c| c.slug() == s)
+    }
+
+    const fn bit(self) -> u64 {
+        1u64 << (self as u64)
+    }
+}
+
+/// A set of capabilities, packed into a bitmask so a `Principal` stays cheap to clone per request.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct CapSet(u64);
+
+impl CapSet {
+    pub const NONE: CapSet = CapSet(0);
+
+    /// Every capability. `Principal::system_admin()` holds this, which is how constraint 1 (auth
+    /// disabled keeps working) holds BY CONSTRUCTION rather than by a special case in each handler.
+    pub const ALL: CapSet = {
+        let mut bits = 0u64;
+        let mut i = 0;
+        while i < Cap::ALL.len() {
+            bits |= Cap::ALL[i].bit();
+            i += 1;
+        }
+        CapSet(bits)
+    };
+
+    pub fn of(caps: &[Cap]) -> CapSet {
+        let mut bits = 0u64;
+        for c in caps {
+            bits |= c.bit();
+        }
+        CapSet(bits)
+    }
+
+    pub fn contains(self, c: Cap) -> bool {
+        self.0 & c.bit() != 0
+    }
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+    pub fn with(self, c: Cap) -> CapSet {
+        CapSet(self.0 | c.bit())
+    }
+    pub fn union(self, other: CapSet) -> CapSet {
+        CapSet(self.0 | other.0)
+    }
+    /// Capabilities in `self` that are NOT in `other` — the deny-preview under `warn`.
+    pub fn minus(self, other: CapSet) -> CapSet {
+        CapSet(self.0 & !other.0)
+    }
+    pub fn iter(self) -> impl Iterator<Item = Cap> {
+        Cap::ALL.into_iter().filter(move |c| self.contains(*c))
+    }
+    pub fn slugs(self) -> Vec<&'static str> {
+        self.iter().map(|c| c.slug()).collect()
+    }
+}
+
+/// Every capability that the unconditional `can_view()` used to hand out. Kept as one constant because
+/// the legacy expansion's correctness argument is "this is exactly what `can_view()` unlocked", and that
+/// argument is only checkable if the set is written down once.
+const LEGACY_VIEW_CAPS: CapSet = CapSet::of_const(&[
+    Cap::CameraRead,
+    Cap::VideoLive,
+    Cap::VideoPlayback,
+    Cap::VideoExport,
+    Cap::EventsRead,
+    Cap::IdentityRead,
+    Cap::AiTasks,
+    Cap::AiFrames,
+    Cap::SystemRead,
+    Cap::NetScan,
+    Cap::ModuleProxy,
+]);
+
+impl CapSet {
+    /// `of` in a const context (used for the role tables).
+    pub const fn of_const(caps: &[Cap]) -> CapSet {
+        let mut bits = 0u64;
+        let mut i = 0;
+        while i < caps.len() {
+            bits |= caps[i].bit();
+            i += 1;
+        }
+        CapSet(bits)
+    }
+}
+
+/// Back-compat expansion for a credential with NO explicit capability grant (`capabilities IS NULL`).
+///
+/// This reproduces TODAY'S REACH EXACTLY, so no deployed key changes behaviour when 0012 lands. The
+/// argument, per role:
+///   * `can_view()` was unconditionally true  -> every role gets [`LEGACY_VIEW_CAPS`];
+///   * `can_operate_gate()` was admin|manager|guard;
+///   * `can_manage_registry()` was admin|manager;
+///   * `can_ingest()` was admin|integration — which is why manager does NOT get `ai:ingest` here even
+///     though it otherwise looks like "everything but admin".
+pub fn legacy_caps(role: Role) -> CapSet {
+    match role {
+        Role::Admin => CapSet::ALL,
+        Role::Manager => LEGACY_VIEW_CAPS
+            .with(Cap::GateOperate)
+            .with(Cap::RegistryManage),
+        Role::Guard => LEGACY_VIEW_CAPS.with(Cap::GateOperate),
+        Role::Viewer => LEGACY_VIEW_CAPS,
+        Role::Integration => LEGACY_VIEW_CAPS.with(Cap::AiIngest).with(Cap::AiEmbedWork),
+    }
+}
+
+/// Contained expansion for a legacy credential under `HELDAR_MACHINE_AUTH=enforce`.
+///
+/// Identical to [`legacy_caps`] for the four HUMAN roles — an operator's reach is not what hole (a) is
+/// about. `integration` (the machine role, and the only role a sidecar or worker key is ever minted
+/// with) narrows to what a real AI worker actually calls, losing identity:read, system:read, net:scan,
+/// module:proxy and all three video capabilities. No key is bricked and none needs re-minting.
+pub fn enforced_caps(role: Role) -> CapSet {
+    match role {
+        Role::Integration => CapSet::of(&[
+            Cap::AiTasks,
+            Cap::AiFrames,
+            Cap::AiIngest,
+            Cap::AiEmbedWork,
+            Cap::CameraRead,
+            Cap::EventsRead,
+        ]),
+        other => legacy_caps(other),
+    }
+}
+
+/// Tier selector: which expansion a capability-less credential gets.
+pub fn role_caps(role: Role, tier: EnforcementTier) -> CapSet {
+    match tier {
+        EnforcementTier::Off | EnforcementTier::Warn => legacy_caps(role),
+        EnforcementTier::Enforce => enforced_caps(role),
+    }
+}
+
+/// Parse a stored `capabilities` JSON array into a [`CapSet`] plus the slugs that were not recognized.
+///
+/// An unknown slug is DROPPED with a warning rather than denying the whole key. Dropping grants
+/// nothing, so it is still fail-closed, and it keeps a key minted by a newer kernel usable after a
+/// rollback. This deliberately differs from [`Role::parse`], where denying is correct because the
+/// fallback there would be a capability-BEARING default.
+pub fn parse_capability_slugs(slugs: &[String]) -> (CapSet, Vec<String>) {
+    let mut set = CapSet::NONE;
+    let mut unknown = Vec::new();
+    for s in slugs {
+        let trimmed = s.trim();
+        match Cap::parse(trimmed) {
+            Some(c) => set = set.with(c),
+            None if trimmed.is_empty() => {}
+            None => unknown.push(trimmed.to_string()),
+        }
+    }
+    (set, unknown)
+}
+
+/// Which cameras a credential may address.
+///
+/// `Cameras` exists for a key handed to one integrator covering one lane. There is ZERO tenancy in the
+/// schema (no `site_id` predicate anywhere), so it is refused at mint time in combination with
+/// `events:read` / `identity:read`, which read cross-camera tables it cannot filter.
+#[derive(Clone, Debug)]
+pub enum Scope {
+    All,
+    Cameras(Arc<HashSet<String>>),
+}
+
+impl Scope {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Scope::All => "all",
+            Scope::Cameras(_) => "cameras",
+        }
+    }
+}
+
 /// How a session's expiry behaves, resolved from config.
 ///
 /// `max_lifetime_hours == 0` keeps expiry ABSOLUTE — `expires_at` is fixed at login, so an operator
@@ -159,37 +429,68 @@ pub struct Principal {
     pub name: String,
     pub role: Role,
     pub kind: PrincipalKind,
+    /// What this caller may DO. For a user or a legacy API key this is the role expansion; for a key
+    /// minted with an explicit grant it is exactly that grant.
+    pub caps: CapSet,
+    /// Which cameras this caller may address.
+    pub scope: Scope,
 }
 
 impl Principal {
     /// The implicit principal used when auth is disabled.
+    ///
+    /// Holds [`CapSet::ALL`] and [`Scope::All`], so every `require_cap` / `require_camera` added
+    /// anywhere in the tree passes for it — the LAN-appliance default cannot be broken by adding a
+    /// capability, only by removing one from this constructor. (`auth_off_sweep_grants_every_cap`
+    /// pins that.)
     pub fn system_admin() -> Self {
         Principal {
             id: "system".into(),
             name: "system".into(),
             role: Role::Admin,
             kind: PrincipalKind::System,
+            caps: CapSet::ALL,
+            scope: Scope::All,
         }
     }
 
+    /// A principal whose capabilities come from its role (users, and API keys with no explicit grant).
+    pub fn from_role(
+        id: String,
+        name: String,
+        role: Role,
+        kind: PrincipalKind,
+        caps: CapSet,
+    ) -> Self {
+        Principal {
+            id,
+            name,
+            role,
+            kind,
+            caps,
+            scope: Scope::All,
+        }
+    }
+
+    /// Whether this caller holds `c`. `Cap::Admin` implies everything.
+    pub fn has(&self, c: Cap) -> bool {
+        self.caps.contains(Cap::Admin) || self.caps.contains(c)
+    }
+
     pub fn can_admin(&self) -> bool {
-        self.role == Role::Admin
+        self.caps.contains(Cap::Admin)
     }
     /// Manage the registry: vehicles + watchlist.
     pub fn can_manage_registry(&self) -> bool {
-        matches!(self.role, Role::Admin | Role::Manager)
+        self.has(Cap::RegistryManage)
     }
     /// Operate the gate: visitor check-in/out, create passes, confirm/reject entries.
     pub fn can_operate_gate(&self) -> bool {
-        matches!(self.role, Role::Admin | Role::Manager | Role::Guard)
+        self.has(Cap::GateOperate)
     }
     /// Post perception/ANPR events into the entry pipeline (machine clients + admins).
     pub fn can_ingest(&self) -> bool {
-        matches!(self.role, Role::Admin | Role::Integration)
-    }
-    /// Read the entry surface. Every authenticated principal can read.
-    pub fn can_view(&self) -> bool {
-        true
+        self.has(Cap::AiIngest)
     }
 
     /// Assert a capability, returning 403 with a useful message otherwise.
@@ -200,6 +501,47 @@ impl Principal {
             Err(AppError::Forbidden(format!(
                 "role `{}` is not permitted to {action}",
                 self.role.as_str()
+            )))
+        }
+    }
+
+    /// Assert a named capability. The message names the missing slug so an operator can fix the grant
+    /// without reading the source.
+    pub fn require_cap(&self, c: Cap, action: &str) -> AppResult<()> {
+        if self.has(c) {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden(format!(
+                "role `{}` is not permitted to {action} (missing capability `{}`)",
+                self.role.as_str(),
+                c.slug()
+            )))
+        }
+    }
+
+    /// The camera allowlist, or None when unrestricted — for building an `IN (...)` list predicate.
+    pub fn camera_scope(&self) -> Option<&HashSet<String>> {
+        match &self.scope {
+            Scope::All => None,
+            Scope::Cameras(set) => Some(set),
+        }
+    }
+
+    pub fn camera_allowed(&self, camera_id: &str) -> bool {
+        match &self.scope {
+            Scope::All => true,
+            Scope::Cameras(set) => set.contains(camera_id),
+        }
+    }
+
+    /// Assert camera scope. Deliberately checked BEFORE the camera row is loaded, so an out-of-scope id
+    /// answers 403 whether or not it exists — the boundary must not be an existence oracle.
+    pub fn require_camera(&self, camera_id: &str, action: &str) -> AppResult<()> {
+        if self.camera_allowed(camera_id) {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden(format!(
+                "credential is not scoped to camera `{camera_id}` (cannot {action})"
             )))
         }
     }
@@ -360,26 +702,49 @@ async fn resolve_token(
     pool: &SqlitePool,
     token: &str,
     policy: SessionPolicy,
+    tier: EnforcementTier,
 ) -> AppResult<Option<Principal>> {
     let idle_minutes = policy.idle_minutes;
     let hash = token_hash(token);
     let now = Utc::now();
     if token.starts_with(APIKEY_PREFIX) {
-        let row: Option<(String, String, String, bool)> =
-            sqlx::query_as("SELECT id, name, role, active FROM api_keys WHERE key_hash = ?")
-                .bind(&hash)
-                .fetch_optional(pool)
-                .await?;
-        if let Some((id, name, role, active)) = row {
-            if !active {
+        // The five capability columns ride the EXISTING single seek on `key_hash UNIQUE` — no second
+        // round trip. That is deliberate: the AI worker authenticates on every request, and an extra
+        // query here is paid at worker poll rate.
+        let row: Option<ApiKeyRow> = sqlx::query_as(
+            "SELECT id, name, role, active, capabilities, scope_kind, scope_cameras, expires_at, revoked_at
+               FROM api_keys WHERE key_hash = ?",
+        )
+        .bind(&hash)
+        .fetch_optional(pool)
+        .await?;
+        if let Some(r) = row {
+            if !r.active {
                 return Ok(None);
+            }
+            if let Some(revoked) = r.revoked_at {
+                tracing::debug!(api_key = %r.id, %revoked, "auth: api key is revoked; denying");
+                return Ok(None);
+            }
+            if let Some(exp) = r.expires_at {
+                if exp <= now {
+                    tracing::debug!(api_key = %r.id, %exp, "auth: api key has expired; denying");
+                    return Ok(None);
+                }
             }
             // An unparseable stored role means a corrupt/tampered row — deny rather than fail open
             // to a capability-bearing default.
-            let Some(role) = Role::parse(&role) else {
-                tracing::error!(api_key = %id, role = %role, "auth: api key has unparseable role; denying");
+            let Some(role) = Role::parse(&r.role) else {
+                tracing::error!(api_key = %r.id, role = %r.role, "auth: api key has unparseable role; denying");
                 return Ok(None);
             };
+            let caps = match resolve_key_caps(&r.id, r.capabilities.as_deref(), role, tier) {
+                Some(c) => c,
+                // A malformed capabilities blob is a corrupt/tampered row, and unlike an unknown slug
+                // there is no safe subset to fall back to — deny, same as an unparseable role.
+                None => return Ok(None),
+            };
+            let scope = resolve_key_scope(&r.id, &r.scope_kind, r.scope_cameras.as_deref());
             // Best-effort last-used stamp (does not gate the request). Debounced to once a
             // minute per key: the AI worker authenticates every request with its key, and an
             // unconditional UPDATE put a write on SQLite's single writer for every poll —
@@ -389,15 +754,17 @@ async fn resolve_token(
                  WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)",
             )
             .bind(now)
-            .bind(&id)
+            .bind(&r.id)
             .bind(now - Duration::minutes(1))
             .execute(pool)
             .await;
             return Ok(Some(Principal {
-                id,
-                name,
+                id: r.id,
+                name: r.name,
                 role,
                 kind: PrincipalKind::ApiKey,
+                caps,
+                scope,
             }));
         }
         return Ok(None);
@@ -497,14 +864,129 @@ async fn resolve_token(
                 "auth: could not persist session last_used_at; liveness held in memory only"
             );
         }
-        return Ok(Some(Principal {
-            id: r.uid,
-            name: r.display_name.unwrap_or_default(),
+        return Ok(Some(Principal::from_role(
+            r.uid,
+            r.display_name.unwrap_or_default(),
             role,
-            kind: PrincipalKind::User,
-        }));
+            PrincipalKind::User,
+            role_caps(role, tier),
+        )));
     }
     Ok(None)
+}
+
+/// The api-key row as the auth path reads it — one seek, every column the principal needs.
+#[derive(sqlx::FromRow)]
+struct ApiKeyRow {
+    id: String,
+    name: String,
+    role: String,
+    active: bool,
+    capabilities: Option<String>,
+    scope_kind: String,
+    scope_cameras: Option<String>,
+    expires_at: Option<DateTime<Utc>>,
+    revoked_at: Option<DateTime<Utc>>,
+}
+
+/// Resolve an api key's capability set. `None` means "deny this key" (corrupt row).
+///
+/// An explicit grant is used verbatim. A NULL grant is the LEGACY case and expands from the role under
+/// the current tier — which is what contains already-deployed keys without anyone re-minting them.
+fn resolve_key_caps(
+    key_id: &str,
+    capabilities: Option<&str>,
+    role: Role,
+    tier: EnforcementTier,
+) -> Option<CapSet> {
+    let Some(raw) = capabilities else {
+        // Legacy key. Under `warn`, tell the operator exactly what `enforce` would take away — a tier
+        // flip is otherwise a blind switch.
+        if tier == EnforcementTier::Warn {
+            let would_lose = legacy_caps(role).minus(enforced_caps(role));
+            if !would_lose.is_empty() && should_log_deny_preview(key_id) {
+                tracing::warn!(
+                    target: "heldar::security",
+                    api_key = %key_id,
+                    role = %role.as_str(),
+                    would_be_denied = %would_lose.slugs().join(","),
+                    "HELDAR_MACHINE_AUTH=warn: this key has no explicit capability grant; under \
+                     `enforce` it would LOSE these capabilities. Re-mint it with an explicit \
+                     `capabilities` list before switching."
+                );
+            }
+        }
+        return Some(role_caps(role, tier));
+    };
+    let slugs: Vec<String> = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                api_key = %key_id, error = %e,
+                "auth: api key has an unparseable `capabilities` blob; denying"
+            );
+            return None;
+        }
+    };
+    let (set, unknown) = parse_capability_slugs(&slugs);
+    if !unknown.is_empty() {
+        tracing::warn!(
+            api_key = %key_id, unknown = %unknown.join(","),
+            "auth: dropping unrecognized capability slug(s) on api key (granting nothing for them)"
+        );
+    }
+    Some(set)
+}
+
+/// Resolve an api key's camera scope. Anything we cannot read as an explicit, well-formed allowlist
+/// fails CLOSED (an empty allowlist), never open.
+fn resolve_key_scope(key_id: &str, scope_kind: &str, scope_cameras: Option<&str>) -> Scope {
+    match scope_kind {
+        "all" => Scope::All,
+        "cameras" => {
+            let ids: Vec<String> = scope_cameras
+                .and_then(|raw| match serde_json::from_str(raw) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        tracing::error!(
+                            api_key = %key_id, error = %e,
+                            "auth: api key has an unparseable `scope_cameras` blob; scoping to NO cameras"
+                        );
+                        None
+                    }
+                })
+                .unwrap_or_default();
+            Scope::Cameras(Arc::new(ids.into_iter().collect()))
+        }
+        other => {
+            tracing::error!(
+                api_key = %key_id, scope_kind = %other,
+                "auth: api key has an unrecognized `scope_kind`; scoping to NO cameras"
+            );
+            Scope::Cameras(Arc::new(HashSet::new()))
+        }
+    }
+}
+
+/// Rate-limit the `warn`-tier deny preview to once per key per hour: it fires on the auth path, which
+/// the AI worker walks on every request.
+fn should_log_deny_preview(key_id: &str) -> bool {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, i64>>> =
+        std::sync::OnceLock::new();
+    let now = Utc::now().timestamp();
+    let Ok(mut map) = SEEN.get_or_init(Default::default).lock() else {
+        return false;
+    };
+    match map.get(key_id) {
+        Some(last) if now - *last < 3600 => false,
+        _ => {
+            if map.len() > 1024 {
+                map.retain(|_, last| now - *last < 3600);
+            }
+            map.insert(key_id.to_string(), now);
+            true
+        }
+    }
 }
 
 /// A session joined to its user, for token resolution.
@@ -536,6 +1018,7 @@ async fn resolve_request_principal(
                     ttl_hours: st.cfg.session_ttl_hours,
                     max_lifetime_hours: st.cfg.session_max_lifetime_hours,
                 },
+                st.cfg.machine_auth,
             )
             .await?
             {
@@ -811,7 +1294,7 @@ mod tests {
             ttl_hours: 24,
             max_lifetime_hours: 168,
         };
-        assert!(resolve_token(&pool, &token, policy)
+        assert!(resolve_token(&pool, &token, policy, EnforcementTier::Warn)
             .await
             .unwrap()
             .is_some());
@@ -843,7 +1326,9 @@ mod tests {
                 .await
                 .unwrap();
 
-        let p = resolve_token(&pool, &token, test_policy(45)).await.unwrap();
+        let p = resolve_token(&pool, &token, test_policy(45), EnforcementTier::Warn)
+            .await
+            .unwrap();
         assert!(p.is_some(), "a 10-minute-old session must still resolve");
 
         let after: DateTime<Utc> =
@@ -869,7 +1354,7 @@ mod tests {
         mark_session_seen(&sid, Utc::now(), 45);
 
         assert!(
-            resolve_token(&pool, &token, test_policy(45))
+            resolve_token(&pool, &token, test_policy(45), EnforcementTier::Warn)
                 .await
                 .unwrap()
                 .is_some(),
@@ -885,7 +1370,7 @@ mod tests {
         forget_session_seen(&sid);
 
         assert!(
-            resolve_token(&pool, &token, test_policy(45))
+            resolve_token(&pool, &token, test_policy(45), EnforcementTier::Warn)
                 .await
                 .unwrap()
                 .is_none(),
@@ -932,21 +1417,51 @@ mod tests {
 
     #[test]
     fn capability_matrix() {
-        let admin = Principal {
-            role: Role::Admin,
+        // Build each principal from its ROLE EXPANSION, not from `system_admin()`. Capabilities are
+        // no longer derived from `role`, so `Principal { role, ..system_admin() }` carries CapSet::ALL
+        // and every negative assertion below would silently pass on a principal that can do
+        // everything — a test that reads as a matrix check while pinning nothing.
+        let with = |role: Role, caps: CapSet| Principal {
+            role,
+            caps,
             ..Principal::system_admin()
         };
-        let guard = Principal {
-            role: Role::Guard,
-            ..Principal::system_admin()
-        };
-        let integ = Principal {
-            role: Role::Integration,
-            ..Principal::system_admin()
-        };
+        let admin = with(Role::Admin, legacy_caps(Role::Admin));
+        let guard = with(Role::Guard, legacy_caps(Role::Guard));
+        let integ = with(Role::Integration, legacy_caps(Role::Integration));
+
         assert!(admin.can_admin() && admin.can_ingest() && admin.can_manage_registry());
         assert!(guard.can_operate_gate() && !guard.can_manage_registry() && !guard.can_admin());
         assert!(integ.can_ingest() && !integ.can_operate_gate());
+        // The hole this whole change exists to close: an integration credential must not be an admin
+        // and must not manage the registry, under EITHER expansion.
+        for caps in [
+            legacy_caps(Role::Integration),
+            enforced_caps(Role::Integration),
+        ] {
+            let p = with(Role::Integration, caps);
+            assert!(!p.can_admin(), "integration must never be admin");
+            assert!(
+                !p.can_manage_registry(),
+                "integration must not manage the registry"
+            );
+            assert!(p.can_ingest(), "an AI worker must still be able to ingest");
+        }
+        // `enforce` must actually take reach away from a machine credential, or the tier is cosmetic.
+        let legacy = legacy_caps(Role::Integration);
+        let enforced = enforced_caps(Role::Integration);
+        assert_ne!(
+            legacy, enforced,
+            "enforced_caps must narrow the integration role"
+        );
+        // ...and must not touch the human roles.
+        for role in [Role::Admin, Role::Manager, Role::Guard, Role::Viewer] {
+            assert_eq!(
+                legacy_caps(role),
+                enforced_caps(role),
+                "enforce must not change {role:?}"
+            );
+        }
     }
 
     // ---- require_api_auth middleware (issue #52) --------------------------------------------

@@ -12,7 +12,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::{AppError, AppResult};
 use crate::services::playback_session::{self, PlaybackSession};
 use crate::state::AppState;
@@ -43,7 +43,7 @@ async fn create_session(
     Json(req): Json<CreateSessionRequest>,
 ) -> AppResult<Json<PlaybackSession>> {
     // viewer+: any authenticated principal (the extractor enforces auth when it is enabled).
-    principal.require(principal.can_view(), "create playback sessions")?;
+    principal.require_cap(Cap::VideoPlayback, "create playback sessions")?;
     let from = util::parse_rfc3339(&req.from)
         .ok_or_else(|| AppError::BadRequest("invalid `from` timestamp".into()))?;
     let to = util::parse_rfc3339(&req.to)
@@ -67,7 +67,7 @@ async fn delete_session(
     principal: Principal,
 ) -> AppResult<StatusCode> {
     // viewer+: any authenticated principal.
-    principal.require(principal.can_view(), "delete playback sessions")?;
+    principal.require_cap(Cap::VideoPlayback, "delete playback sessions")?;
     playback_session::delete_session(&st, &session_id).await?;
     auth::audit(
         &st.pool,

@@ -13,10 +13,11 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::auth::{self, Principal, Role};
+use crate::auth::{self, Cap, CapSet, Principal, Role};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    ApiKey, ApiKeyCreate, ApiKeyView, LoginRequest, User, UserCreate, UserUpdate, UserView,
+    ApiKey, ApiKeyCreate, ApiKeyUpdate, ApiKeyView, LoginRequest, User, UserCreate, UserUpdate,
+    UserView,
 };
 use crate::state::AppState;
 
@@ -34,11 +35,23 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/api-keys", get(list_api_keys).post(create_api_key))
         .route(
             "/api/v1/api-keys/{id}",
-            axum::routing::delete(delete_api_key),
+            axum::routing::patch(update_api_key).delete(delete_api_key),
         )
 }
 
 const MIN_PASSWORD_LEN: usize = 8;
+
+/// Capabilities that may only be minted onto a key with an explicit `confirm_privileged: true`.
+///
+/// Before this, `POST /api/v1/api-keys` accepted all five roles silently, so an `admin`-role key — a
+/// non-expiring, non-rotating credential with full control of the box — was one unremarkable JSON field
+/// away and left no distinguishable trace.
+const PRIVILEGED_CAPS: [Cap; 3] = [Cap::Admin, Cap::RegistryManage, Cap::GateOperate];
+
+/// Capabilities that read CROSS-CAMERA tables. There is zero tenancy in the schema (no `site_id`
+/// predicate anywhere), so a camera scope cannot filter them and would be security theatre — refuse the
+/// combination at mint time rather than ship a boundary that silently does not hold.
+const UNSCOPABLE_CAPS: [Cap; 2] = [Cap::EventsRead, Cap::IdentityRead];
 
 async fn login(
     State(st): State<AppState>,
@@ -88,15 +101,16 @@ async fn login(
     }
 
     let (token, expires_at) = auth::issue_session(&st.pool, &st.cfg, &user.id).await?;
-    let principal = Principal {
-        id: user.id.clone(),
-        name: user
-            .display_name
+    let role = Role::parse(&user.role).unwrap_or(Role::Viewer);
+    let principal = Principal::from_role(
+        user.id.clone(),
+        user.display_name
             .clone()
             .unwrap_or_else(|| user.username.clone()),
-        role: Role::parse(&user.role).unwrap_or(Role::Viewer),
-        kind: crate::auth::PrincipalKind::User,
-    };
+        role,
+        crate::auth::PrincipalKind::User,
+        auth::role_caps(role, st.cfg.machine_auth),
+    );
     auth::audit(&st.pool, &principal, "login", "user", &user.id, json!({})).await;
     // Set the session as an HttpOnly cookie (browser auth: not JS-readable, so XSS can't exfiltrate
     // it; the media plane gets it automatically since the SPA is same-origin). The token is still in
@@ -141,12 +155,14 @@ async fn register_login_failure(
     .ok()
     .flatten();
     if new_count == Some(cfg.login_max_failures) {
-        let principal = Principal {
-            id: u.id.clone(),
-            name: u.display_name.clone().unwrap_or_else(|| u.username.clone()),
-            role: Role::parse(&u.role).unwrap_or(Role::Viewer),
-            kind: auth::PrincipalKind::User,
-        };
+        let role = Role::parse(&u.role).unwrap_or(Role::Viewer);
+        let principal = Principal::from_role(
+            u.id.clone(),
+            u.display_name.clone().unwrap_or_else(|| u.username.clone()),
+            role,
+            auth::PrincipalKind::User,
+            auth::role_caps(role, cfg.machine_auth),
+        );
         auth::audit(
             pool,
             &principal,
@@ -415,6 +431,127 @@ async fn delete_user(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Render a stored key for the admin UI, resolving a legacy (NULL-capability) row to the capabilities
+/// it EFFECTIVELY holds under the running tier. Showing `null` there would hide the whole point of the
+/// tier ladder from the one screen an operator uses to audit credentials.
+fn api_key_view(k: ApiKey, tier: crate::config::EnforcementTier) -> ApiKeyView {
+    let role = Role::parse(&k.role);
+    let (caps, unknown, legacy) = match k.capabilities.as_deref() {
+        Some(raw) => match serde_json::from_str::<Vec<String>>(raw) {
+            Ok(slugs) => {
+                let (set, unknown) = auth::parse_capability_slugs(&slugs);
+                (set, unknown, false)
+            }
+            // A corrupt blob denies the key on the auth path; say so here rather than silently
+            // rendering an empty grant that looks intentional.
+            Err(_) => (CapSet::NONE, vec!["<unparseable>".to_string()], false),
+        },
+        None => (
+            role.map(|r| auth::role_caps(r, tier))
+                .unwrap_or(CapSet::NONE),
+            Vec::new(),
+            true,
+        ),
+    };
+    let scope_cameras: Vec<String> = k
+        .scope_cameras
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default();
+    ApiKeyView {
+        id: k.id,
+        name: k.name,
+        key_prefix: k.key_prefix,
+        role: k.role,
+        active: k.active,
+        last_used_at: k.last_used_at,
+        created_at: k.created_at,
+        capabilities: caps.slugs().into_iter().map(str::to_string).collect(),
+        legacy_role_expansion: legacy,
+        unknown_capabilities: unknown,
+        scope_kind: k.scope_kind,
+        scope_cameras,
+        expires_at: k.expires_at,
+        revoked_at: k.revoked_at,
+    }
+}
+
+/// Parse and validate a requested capability grant + camera scope.
+///
+/// Returns `(capability slugs to store, scope_kind, scope camera ids)`. Shared by mint and PATCH so the
+/// two guards cannot drift — a guard enforced only at mint is trivially bypassed by minting then
+/// patching.
+fn validate_grant(
+    capabilities: &[String],
+    scope_kind: &str,
+    scope_cameras: &[String],
+    confirm_privileged: bool,
+) -> AppResult<(Vec<String>, String, Vec<String>)> {
+    let (set, unknown) = auth::parse_capability_slugs(capabilities);
+    if !unknown.is_empty() {
+        return Err(AppError::BadRequest(format!(
+            "unknown capability slug(s): {}. Valid: {}",
+            unknown.join(", "),
+            Cap::ALL
+                .iter()
+                .map(|c| c.slug())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    if set.is_empty() {
+        return Err(AppError::BadRequest(
+            "`capabilities` must not be empty — omit the field entirely to fall back to role expansion"
+                .into(),
+        ));
+    }
+    let privileged: Vec<&str> = PRIVILEGED_CAPS
+        .iter()
+        .filter(|c| set.contains(**c))
+        .map(|c| c.slug())
+        .collect();
+    if !privileged.is_empty() && !confirm_privileged {
+        return Err(AppError::BadRequest(format!(
+            "granting {} to a machine credential requires `confirm_privileged: true`",
+            privileged.join(", ")
+        )));
+    }
+    let scope_kind = match scope_kind {
+        "all" => "all",
+        "cameras" => "cameras",
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "`scope_kind` must be `all` or `cameras` (got `{other}`)"
+            )))
+        }
+    };
+    if scope_kind == "cameras" {
+        let unscopable: Vec<&str> = UNSCOPABLE_CAPS
+            .iter()
+            .filter(|c| set.contains(**c))
+            .map(|c| c.slug())
+            .collect();
+        if !unscopable.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "`scope_kind: cameras` cannot be combined with {} — those capabilities read \
+                 cross-camera tables that carry no camera predicate, so the scope would not hold",
+                unscopable.join(", ")
+            )));
+        }
+        if scope_cameras.is_empty() {
+            return Err(AppError::BadRequest(
+                "`scope_cameras` must list at least one camera when `scope_kind` is `cameras`"
+                    .into(),
+            ));
+        }
+    }
+    Ok((
+        set.slugs().into_iter().map(str::to_string).collect(),
+        scope_kind.to_string(),
+        scope_cameras.to_vec(),
+    ))
+}
+
 async fn list_api_keys(
     State(st): State<AppState>,
     principal: Principal,
@@ -423,7 +560,11 @@ async fn list_api_keys(
     let keys = sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys ORDER BY created_at DESC")
         .fetch_all(&st.pool)
         .await?;
-    Ok(Json(keys.into_iter().map(ApiKeyView::from).collect()))
+    Ok(Json(
+        keys.into_iter()
+            .map(|k| api_key_view(k, st.cfg.machine_auth))
+            .collect(),
+    ))
 }
 
 async fn create_api_key(
@@ -441,12 +582,33 @@ async fn create_api_key(
             "`role` must be admin|manager|guard|viewer|integration".into(),
         ));
     }
+    // Omitting `capabilities` still falls back to role expansion, so the dashboard's existing mint
+    // form and every script that posts `{name, role}` keep working — but the response and the audit row
+    // say so explicitly, because a grant nobody chose is exactly the thing that should be visible.
+    let scope_cameras = body.scope_cameras.clone().unwrap_or_default();
+    let grant = match &body.capabilities {
+        Some(caps) => Some(validate_grant(
+            caps,
+            body.scope_kind.as_deref().unwrap_or("all"),
+            &scope_cameras,
+            body.confirm_privileged,
+        )?),
+        None => {
+            if body.scope_kind.as_deref().is_some_and(|s| s != "all") {
+                return Err(AppError::BadRequest(
+                    "`scope_kind` requires an explicit `capabilities` list".into(),
+                ));
+            }
+            None
+        }
+    };
     let key = auth::random_token(auth::APIKEY_PREFIX);
     let prefix: String = key.chars().take(12).collect();
     let id = format!("key_{}", Uuid::new_v4().simple());
     sqlx::query(
-        "INSERT INTO api_keys (id, name, key_hash, key_prefix, role, active, created_at)
-         VALUES (?,?,?,?,?,1,?)",
+        "INSERT INTO api_keys (id, name, key_hash, key_prefix, role, active, created_at,
+                               capabilities, scope_kind, scope_cameras, expires_at)
+         VALUES (?,?,?,?,?,1,?,?,?,?,?)",
     )
     .bind(&id)
     .bind(body.name.trim())
@@ -454,22 +616,158 @@ async fn create_api_key(
     .bind(&prefix)
     .bind(role)
     .bind(Utc::now())
+    .bind(
+        grant
+            .as_ref()
+            .map(|(caps, _, _)| serde_json::to_string(caps).unwrap_or_else(|_| "[]".into())),
+    )
+    .bind(
+        grant
+            .as_ref()
+            .map(|(_, kind, _)| kind.clone())
+            .unwrap_or_else(|| "all".into()),
+    )
+    .bind(grant.as_ref().and_then(|(_, kind, cams)| {
+        (kind == "cameras").then(|| serde_json::to_string(cams).unwrap_or_else(|_| "[]".into()))
+    }))
+    .bind(body.expires_at)
     .execute(&st.pool)
     .await?;
+    let detail = json!({
+        "role": role,
+        "capabilities": grant.as_ref().map(|(c, _, _)| c.clone()),
+        "legacy_role_expansion": grant.is_none(),
+        "scope_kind": grant.as_ref().map(|(_, k, _)| k.clone()).unwrap_or_else(|| "all".into()),
+        "scope_cameras": grant.as_ref().map(|(_, _, c)| c.clone()).unwrap_or_default(),
+        "expires_at": body.expires_at,
+        "confirm_privileged": body.confirm_privileged,
+    });
     auth::audit(
         &st.pool,
         &principal,
         "create_api_key",
         "api_key",
         &id,
-        json!({ "role": role }),
+        detail.clone(),
     )
     .await;
     // The full key is returned exactly once; only its hash is stored.
     Ok((
         StatusCode::CREATED,
-        Json(json!({ "id": id, "name": body.name.trim(), "role": role, "key": key })),
+        Json(json!({
+            "id": id,
+            "name": body.name.trim(),
+            "role": role,
+            "key": key,
+            "capabilities": grant.as_ref().map(|(c, _, _)| c.clone()),
+            "legacy_role_expansion": grant.is_none(),
+            "scope_kind": grant.as_ref().map(|(_, k, _)| k.clone()).unwrap_or_else(|| "all".into()),
+            "scope_cameras": grant.as_ref().map(|(_, _, c)| c.clone()).unwrap_or_default(),
+            "expires_at": body.expires_at,
+        })),
     ))
+}
+
+/// Amend a key in place: narrow its grant, re-scope it, set an expiry, or SOFT-REVOKE it.
+///
+/// Revocation was previously only a hard `DELETE`, which destroys the audit linkage for everything the
+/// key ever did — precisely when an incident responder needs it. `revoked_at` denies the credential on
+/// the next request while leaving the row (and its `audit_log` references) intact.
+async fn update_api_key(
+    State(st): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(body): Json<ApiKeyUpdate>,
+) -> AppResult<Json<ApiKeyView>> {
+    principal.require(principal.can_admin(), "modify API keys")?;
+    let cur = sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&st.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("api key {id} not found")))?;
+
+    // Re-validate the WHOLE resulting grant, not just the changed field: patching a scope onto an
+    // existing events:read grant must be refused the same way minting the pair is.
+    let (capabilities, scope_kind, scope_cameras) = match (&body.capabilities, &body.scope_kind) {
+        (None, None) if body.scope_cameras.is_none() => {
+            (cur.capabilities.clone(), cur.scope_kind.clone(), None)
+        }
+        _ => {
+            let caps: Vec<String> = match &body.capabilities {
+                Some(c) => c.clone(),
+                None => match cur.capabilities.as_deref() {
+                    Some(raw) => serde_json::from_str(raw).unwrap_or_default(),
+                    None => {
+                        return Err(AppError::BadRequest(
+                            "this key has no explicit capability grant; send `capabilities` \
+                             together with `scope_kind`"
+                                .into(),
+                        ))
+                    }
+                },
+            };
+            let kind = body
+                .scope_kind
+                .clone()
+                .unwrap_or_else(|| cur.scope_kind.clone());
+            let cams = body.scope_cameras.clone().unwrap_or_else(|| {
+                cur.scope_cameras
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str(raw).ok())
+                    .unwrap_or_default()
+            });
+            let (caps, kind, cams) = validate_grant(&caps, &kind, &cams, body.confirm_privileged)?;
+            (
+                Some(serde_json::to_string(&caps).unwrap_or_else(|_| "[]".into())),
+                kind.clone(),
+                (kind == "cameras")
+                    .then(|| serde_json::to_string(&cams).unwrap_or_else(|_| "[]".into())),
+            )
+        }
+    };
+    let scope_cameras = scope_cameras.or_else(|| {
+        (scope_kind == "cameras")
+            .then(|| cur.scope_cameras.clone())
+            .flatten()
+    });
+    let active = body.active.unwrap_or(cur.active);
+    let expires_at = body.expires_at.or(cur.expires_at);
+    let revoked_at = body.revoked_at.or(cur.revoked_at);
+
+    sqlx::query(
+        "UPDATE api_keys SET active=?, capabilities=?, scope_kind=?, scope_cameras=?,
+                             expires_at=?, revoked_at=? WHERE id=?",
+    )
+    .bind(active)
+    .bind(&capabilities)
+    .bind(&scope_kind)
+    .bind(&scope_cameras)
+    .bind(expires_at)
+    .bind(revoked_at)
+    .bind(&id)
+    .execute(&st.pool)
+    .await?;
+    auth::audit(
+        &st.pool,
+        &principal,
+        "update_api_key",
+        "api_key",
+        &id,
+        json!({
+            "active": active,
+            "capabilities": capabilities,
+            "scope_kind": scope_kind,
+            "scope_cameras": scope_cameras,
+            "expires_at": expires_at,
+            "revoked_at": revoked_at,
+        }),
+    )
+    .await;
+    let k = sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = ?")
+        .bind(&id)
+        .fetch_one(&st.pool)
+        .await?;
+    Ok(Json(api_key_view(k, st.cfg.machine_auth)))
 }
 
 async fn delete_api_key(
@@ -537,12 +835,13 @@ mod tests {
     }
 
     fn viewer() -> Principal {
-        Principal {
-            id: "usr_viewer".into(),
-            name: "vee".into(),
-            role: Role::Viewer,
-            kind: auth::PrincipalKind::User,
-        }
+        Principal::from_role(
+            "usr_viewer".into(),
+            "vee".into(),
+            Role::Viewer,
+            auth::PrincipalKind::User,
+            auth::legacy_caps(Role::Viewer),
+        )
     }
 
     #[tokio::test]
@@ -685,6 +984,7 @@ mod tests {
             Json(ApiKeyCreate {
                 name: "k".into(),
                 role: None,
+                ..Default::default()
             }),
         )
         .await
@@ -858,6 +1158,7 @@ mod tests {
             Json(ApiKeyCreate {
                 name: "  ".into(),
                 role: None,
+                ..Default::default()
             }),
         )
         .await
@@ -872,6 +1173,7 @@ mod tests {
             Json(ApiKeyCreate {
                 name: "  cam-bridge  ".into(),
                 role: None,
+                ..Default::default()
             }),
         )
         .await

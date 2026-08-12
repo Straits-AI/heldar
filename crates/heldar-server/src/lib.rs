@@ -115,6 +115,14 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
     if resealed > 0 {
         tracing::info!("sealed {resealed} legacy camera credential(s) at rest");
     }
+    // One boxed banner naming the resolved machine-credential posture and every credential still on a
+    // role expansion. Best-effort: a failed query here must never stop the box from booting.
+    let legacy_keys: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, name FROM api_keys WHERE capabilities IS NULL AND active = 1")
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+    cfg.log_machine_auth_banner(&legacy_keys);
     // Release any transient segment read-locks left by a crash mid clip/snapshot export.
     db::clear_segment_read_locks(&pool)
         .await
@@ -617,18 +625,68 @@ async fn run_subcommand(cmd: &str, cfg: &Config) -> anyhow::Result<()> {
     }
 }
 
+/// The capability a `/media/*` subtree requires, and whether its path names a camera.
+///
+/// `/media/*` serves the SAME footage the API gates, so it must be gated the same way. Resolving a
+/// principal and discarding it — which is what this used to do — meant any authenticated credential,
+/// including a compromised AI worker's, could read every recording, clip, snapshot and backup archive
+/// straight off the media plane while the API surface above it was carefully scoped.
+///
+/// `Some(true)` means the first path segment is a camera id, so camera scope is enforceable here.
+fn media_requirement(path: &str) -> Option<(auth::Cap, bool)> {
+    // Recordings are stored camera-partitioned (`recordings/<camera_id>/<segment>`), so a
+    // camera-scoped credential can be held to its cameras. Clips/snapshots are flat, generated
+    // filenames with no camera in the path; they are gated by capability only (scoping them would
+    // need a DB lookup per byte-range request — tracked as a follow-up, not silently ignored).
+    match path.trim_start_matches('/') {
+        p if p.starts_with("media/recordings") => Some((auth::Cap::VideoPlayback, true)),
+        p if p.starts_with("media/playback") => Some((auth::Cap::VideoPlayback, false)),
+        p if p.starts_with("media/clips") => Some((auth::Cap::VideoExport, false)),
+        p if p.starts_with("media/snapshots") => Some((auth::Cap::VideoPlayback, false)),
+        // Backup archives are a whole-system export — admin only, never a viewer surface.
+        p if p.starts_with("media/archives") => Some((auth::Cap::Admin, false)),
+        _ => None,
+    }
+}
+
+/// The camera id in `/media/recordings/<camera_id>/...`, if present.
+fn media_camera_id(path: &str) -> Option<&str> {
+    path.trim_start_matches('/')
+        .strip_prefix("media/recordings/")?
+        .split('/')
+        .next()
+        .filter(|s| !s.is_empty())
+}
+
 /// Auth guard for the recorded-media plane. When auth is enabled, requires a valid principal (resolved
-/// exactly like the API via the `Principal` extractor — cookie / Bearer / API key); 401 otherwise. A
-/// no-op pass-through when auth is disabled (the LAN-appliance default).
+/// exactly like the API via the `Principal` extractor — cookie / Bearer / API key), the capability that
+/// subtree demands, and — for recordings, whose paths name their camera — that the credential is scoped
+/// to that camera. 401 unauthenticated, 403 without the capability or outside scope. A no-op
+/// pass-through when auth is disabled (the LAN-appliance default).
 async fn media_guard(State(st): State<AppState>, req: Request, next: Next) -> Response {
     if !st.cfg.auth_enabled {
         return next.run(req).await;
     }
+    let path = req.uri().path().to_string();
     let (mut parts, body) = req.into_parts();
-    match auth::Principal::from_request_parts(&mut parts, &st).await {
-        Ok(_) => next.run(Request::from_parts(parts, body)).await,
-        Err(_) => StatusCode::UNAUTHORIZED.into_response(),
+    let principal = match auth::Principal::from_request_parts(&mut parts, &st).await {
+        Ok(p) => p,
+        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
+    };
+    if let Some((cap, scoped)) = media_requirement(&path) {
+        if !principal.has(cap) {
+            return StatusCode::FORBIDDEN.into_response();
+        }
+        if scoped {
+            // A path we cannot attribute to a camera is refused rather than served: an unattributable
+            // recording path under a camera-scoped credential is exactly the case scope exists for.
+            match media_camera_id(&path) {
+                Some(cam) if principal.camera_allowed(cam) => {}
+                _ => return StatusCode::FORBIDDEN.into_response(),
+            }
+        }
     }
+    next.run(Request::from_parts(parts, body)).await
 }
 
 fn init_tracing() {
@@ -728,6 +786,50 @@ mod tests {
             cors_mode(&v(&["https://cam.example.com", "*"])),
             CorsMode::AllowAny
         );
+    }
+
+    #[test]
+    fn media_subtrees_demand_the_right_capability() {
+        use heldar_kernel::auth::Cap;
+        // The hole this closes: every one of these used to be served to ANY authenticated
+        // credential, including a compromised AI worker's, because the guard resolved a principal
+        // and threw it away.
+        assert_eq!(
+            media_requirement("/media/recordings/cam_a/x.mp4"),
+            Some((Cap::VideoPlayback, true))
+        );
+        assert_eq!(
+            media_requirement("/media/playback/pbs_1/index.m3u8"),
+            Some((Cap::VideoPlayback, false))
+        );
+        assert_eq!(
+            media_requirement("/media/clips/abc.mp4"),
+            Some((Cap::VideoExport, false))
+        );
+        assert_eq!(
+            media_requirement("/media/snapshots/s.jpg"),
+            Some((Cap::VideoPlayback, false))
+        );
+        // A whole-system export is admin-only, not a viewer surface.
+        assert_eq!(
+            media_requirement("/media/archives/backup.tar"),
+            Some((Cap::Admin, false))
+        );
+        // Anything outside the media plane is not this guard's business.
+        assert_eq!(media_requirement("/api/v1/cameras"), None);
+    }
+
+    #[test]
+    fn recording_paths_attribute_to_their_camera() {
+        assert_eq!(
+            media_camera_id("/media/recordings/cam_a/2026/x.mp4"),
+            Some("cam_a")
+        );
+        assert_eq!(media_camera_id("/media/recordings/cam_a"), Some("cam_a"));
+        // Unattributable paths must NOT fall through to "allowed" — the guard refuses them, which is
+        // only correct if this returns None rather than guessing.
+        assert_eq!(media_camera_id("/media/recordings/"), None);
+        assert_eq!(media_camera_id("/media/clips/abc.mp4"), None);
     }
 
     #[test]

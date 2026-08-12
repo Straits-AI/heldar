@@ -13,12 +13,11 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use uuid::Uuid;
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::{AppError, AppResult};
 use crate::models::{
     PersistedSnapshot, SnapshotSchedule, SnapshotScheduleCreate, SnapshotScheduleUpdate,
 };
-use crate::routes::cameras::load_camera;
 use crate::state::AppState;
 use crate::util;
 
@@ -45,8 +44,8 @@ async fn list_schedules(
     principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<Vec<SnapshotSchedule>>> {
-    principal.require(principal.can_view(), "list snapshot schedules")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    principal.require_cap(Cap::CameraRead, "list snapshot schedules")?;
+    let _ = st.camera_for(&principal, &id).await?;
     let rows = sqlx::query_as::<_, SnapshotSchedule>(
         "SELECT * FROM snapshot_schedules WHERE camera_id = ? ORDER BY created_at ASC",
     )
@@ -63,7 +62,7 @@ async fn create_schedule(
     Json(body): Json<SnapshotScheduleCreate>,
 ) -> AppResult<(StatusCode, Json<SnapshotSchedule>)> {
     principal.require(principal.can_manage_registry(), "create snapshot schedules")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    let _ = st.camera_for(&principal, &id).await?;
 
     let interval = clamp_interval(body.interval_seconds.unwrap_or(300));
     let enabled = body.enabled.unwrap_or(true);
@@ -209,8 +208,8 @@ async fn list_snapshots(
     Path(id): Path<String>,
     Query(q): Query<SnapshotRangeQuery>,
 ) -> AppResult<Json<Vec<SnapshotView>>> {
-    principal.require(principal.can_view(), "list snapshots")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    principal.require_cap(Cap::VideoPlayback, "list snapshots")?;
+    let _ = st.camera_for(&principal, &id).await?;
     let limit = q.limit.unwrap_or(500).clamp(1, 5000);
     let parse = |s: &Option<String>, field: &str| -> AppResult<Option<DateTime<Utc>>> {
         match s {

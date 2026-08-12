@@ -137,6 +137,21 @@ pub struct Config {
     /// Add `Secure` to the session cookie (require HTTPS). Default false for HTTP LAN/overlay
     /// appliances; set true when the deployment is served over TLS.
     pub auth_cookie_secure: bool,
+    /// Capability enforcement for credentials with NO explicit grant (`HELDAR_MACHINE_AUTH`).
+    ///
+    /// `off` / `warn` (DEFAULT) expand a legacy key from its role to exactly today's reach, so nothing
+    /// deployed changes behaviour; `warn` additionally logs, once per key per hour, every capability
+    /// that `enforce` would take away. `enforce` narrows the `integration` role to what a real AI worker
+    /// calls. Promoted to `enforce` automatically when `HELDAR_DEPLOYMENT_MODE=production*`.
+    pub machine_auth: EnforcementTier,
+    /// Frame-ticket requirement on the AI ingest path (`HELDAR_INGEST_PROVENANCE`). `warn` (DEFAULT)
+    /// accepts a ticketless batch exactly as today; `enforce` requires a server-issued frame ticket.
+    /// Promoted to `enforce` by `HELDAR_DEPLOYMENT_MODE=production*`. Consumed by Stage B.
+    pub ingest_provenance: EnforcementTier,
+    /// TTL (seconds) of a minted per-frame ingest ticket (`HELDAR_FRAME_TICKET_TTL_SECS`). Long enough
+    /// to survive a slow inference pass, short enough that a leaked ticket is worthless. Consumed by
+    /// Stage B.
+    pub frame_ticket_ttl_secs: i64,
     /// Per-account brute-force lockout: lock an account after this many CONSECUTIVE failed logins
     /// (the per-IP Worker rate limit is complementary). 0 disables account lockout.
     pub login_max_failures: i64,
@@ -317,6 +332,61 @@ pub struct Config {
     pub smtp_interval_s: u64,
 }
 
+/// A three-position enforcement switch, the shape already proven by the deployment-mode ladder: ship
+/// today's behaviour by default, give the operator a tier that TELLS them what tightening would do, and
+/// only then bite.
+///
+/// Exactly two of these ship (`HELDAR_MACHINE_AUTH`, `HELDAR_INGEST_PROVENANCE`) and both resolved
+/// postures are printed in one boxed boot banner — multiple interacting silent switches are themselves
+/// a misconfiguration hazard.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum EnforcementTier {
+    /// No enforcement and no logging.
+    Off,
+    /// No enforcement, but log what `Enforce` would have denied. The default.
+    #[default]
+    Warn,
+    /// Enforce.
+    Enforce,
+}
+
+impl EnforcementTier {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            EnforcementTier::Off => "off",
+            EnforcementTier::Warn => "warn",
+            EnforcementTier::Enforce => "enforce",
+        }
+    }
+    pub fn parse(s: &str) -> Option<EnforcementTier> {
+        Some(match s.trim().to_ascii_lowercase().as_str() {
+            "off" | "false" | "0" => EnforcementTier::Off,
+            "warn" | "warning" => EnforcementTier::Warn,
+            "enforce" | "true" | "1" => EnforcementTier::Enforce,
+            _ => return None,
+        })
+    }
+}
+
+/// Read an enforcement tier from the environment: unset → `warn`; unrecognized → `warn` with a loud
+/// warning (never a silent tightening AND never a silent loosening); `production*` promotes to
+/// `enforce` unless the operator named a tier explicitly.
+fn tier_from_env(key: &str, mode_is_production: bool) -> EnforcementTier {
+    match var(key) {
+        Some(raw) if !raw.trim().is_empty() => match EnforcementTier::parse(&raw) {
+            Some(t) => t,
+            None => {
+                tracing::warn!(
+                    "{key}={raw} is not one of off|warn|enforce; falling back to `warn`"
+                );
+                EnforcementTier::Warn
+            }
+        },
+        _ if mode_is_production => EnforcementTier::Enforce,
+        _ => EnforcementTier::Warn,
+    }
+}
+
 /// mTLS material the edge presents to / uses to verify the control plane.
 #[derive(Clone, Debug)]
 pub struct CpTlsCfg {
@@ -454,6 +524,68 @@ impl Config {
         }
     }
 
+    /// Emit the single boxed boot banner reporting the resolved machine-credential posture.
+    ///
+    /// One banner, both switches, and the list of credentials still riding on a role expansion — an
+    /// operator should never have to infer the enforcement posture from which env vars they remember
+    /// setting. `legacy_keys` is `(id, name)` for every api key with `capabilities IS NULL`; the caller
+    /// supplies it because config owns no database handle.
+    pub fn log_machine_auth_banner(&self, legacy_keys: &[(String, String)]) {
+        let legacy = if legacy_keys.is_empty() {
+            "none — every credential carries an explicit grant".to_string()
+        } else {
+            let named: Vec<String> = legacy_keys
+                .iter()
+                .take(20)
+                .map(|(id, name)| format!("{name} ({id})"))
+                .collect();
+            let more = legacy_keys.len().saturating_sub(named.len());
+            let mut s = named.join(", ");
+            if more > 0 {
+                let _ = std::fmt::Write::write_fmt(&mut s, format_args!(" … +{more} more"));
+            }
+            s
+        };
+        let effect = match self.machine_auth {
+            EnforcementTier::Off => "legacy keys keep today's full reach; nothing is logged",
+            EnforcementTier::Warn => {
+                "legacy keys keep today's full reach; each is logged once an hour with what \
+                 `enforce` would deny"
+            }
+            EnforcementTier::Enforce => {
+                "legacy `integration` keys are narrowed to the AI-worker capability set"
+            }
+        };
+        tracing::info!(
+            target: "heldar::security",
+            machine_auth = %self.machine_auth.as_str(),
+            ingest_provenance = %self.ingest_provenance.as_str(),
+            "machine-credential posture resolved\n\
+             ┌──────────────────────────────────────────────────────────────────────────────┐\n\
+             │  MACHINE CREDENTIALS — resolved enforcement posture                           │\n\
+             └──────────────────────────────────────────────────────────────────────────────┘\n\
+             HELDAR_MACHINE_AUTH      = {machine_auth}\n\
+                 {effect}\n\
+             HELDAR_INGEST_PROVENANCE = {ingest_provenance}\n\
+                 frame tickets are {ticket_state} on the AI ingest path\n\
+             deployment mode          = {mode}\n\
+             keys with no explicit capability grant: {legacy}",
+            machine_auth = self.machine_auth.as_str(),
+            ingest_provenance = self.ingest_provenance.as_str(),
+            effect = effect,
+            ticket_state = match self.ingest_provenance {
+                EnforcementTier::Enforce => "REQUIRED",
+                _ => "optional (a ticketless batch is accepted, as today)",
+            },
+            mode = if self.deployment_mode.is_empty() {
+                "(unset)"
+            } else {
+                &self.deployment_mode
+            },
+            legacy = legacy,
+        );
+    }
+
     pub fn from_env() -> Self {
         let data_dir = PathBuf::from(var_or("HELDAR_DATA_DIR", "./data"));
         let recordings_dir = var("HELDAR_RECORDINGS_DIR")
@@ -491,6 +623,13 @@ impl Config {
         } else {
             None
         };
+
+        // Resolved before the struct literal: the two enforcement tiers default to `enforce` when a
+        // production deployment mode is selected, so they need it in hand.
+        let deployment_mode = var_or("HELDAR_DEPLOYMENT_MODE", "")
+            .trim()
+            .to_ascii_lowercase();
+        let mode_is_production = deployment_mode.starts_with("production");
 
         let max_recordings_gb: f64 = parse_or("HELDAR_MAX_RECORDINGS_GB", 20.0);
         let min_free_disk_gb: f64 = parse_or("HELDAR_MIN_FREE_DISK_GB", 5.0);
@@ -553,14 +692,25 @@ impl Config {
             session_idle_timeout_minutes: parse_or("HELDAR_SESSION_IDLE_TIMEOUT_MIN", 0),
             session_max_lifetime_hours: parse_or("HELDAR_SESSION_MAX_LIFETIME_HOURS", 0),
             auth_cookie_secure: parse_bool("HELDAR_AUTH_COOKIE_SECURE", false),
+            machine_auth: tier_from_env("HELDAR_MACHINE_AUTH", mode_is_production),
+            // NOT auto-promoted by deployment mode, unlike `machine_auth`. The frame ticket is a
+            // CLIENT PROTOCOL requirement: enforcing it rejects every worker that does not yet mint
+            // one, including third-party and not-yet-upgraded workers. Inferring that from a
+            // deployment label would mean an operator who followed the hardening advice
+            // (HELDAR_DEPLOYMENT_MODE=production-lan) upgrades and silently loses ALL AI ingest —
+            // detection stops with a healthy-looking box. `machine_auth` is safe to promote because
+            // it is server-side only and `enforced_caps` deliberately keeps every endpoint a real
+            // worker calls. Requiring tickets is an explicit operator decision, taken once the whole
+            // fleet speaks the protocol; until then `warn` reports exactly who would break.
+            ingest_provenance: tier_from_env("HELDAR_INGEST_PROVENANCE", false),
+            frame_ticket_ttl_secs: parse_or::<i64>("HELDAR_FRAME_TICKET_TTL_SECS", 120)
+                .clamp(10, 900),
             login_max_failures: parse_or("HELDAR_LOGIN_MAX_FAILURES", 5),
             login_lockout_min: parse_or("HELDAR_LOGIN_LOCKOUT_MIN", 15),
             secret_key_b64: var("HELDAR_SECRET_KEY"),
             strict_prod: parse_bool("HELDAR_STRICT_PROD", false),
             exposed_declared: parse_bool("HELDAR_INTERNET_EXPOSED", false),
-            deployment_mode: var_or("HELDAR_DEPLOYMENT_MODE", "")
-                .trim()
-                .to_ascii_lowercase(),
+            deployment_mode,
             bootstrap_admin_user: var("HELDAR_BOOTSTRAP_ADMIN_USER"),
             bootstrap_admin_password: var("HELDAR_BOOTSTRAP_ADMIN_PASSWORD"),
             audit_retention_days: parse_or("HELDAR_AUDIT_RETENTION_DAYS", 365),

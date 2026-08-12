@@ -15,7 +15,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use heldar_kernel::auth::{self, Principal};
+use heldar_kernel::auth::{self, Cap, Principal};
 use heldar_kernel::error::{AppError, AppResult};
 use heldar_kernel::state::AppState;
 
@@ -60,7 +60,7 @@ const MOVEMENT_UI_BUNDLE: &str = include_str!("../ui/movement.js");
 /// authenticated viewer may load it — it is inert frontend code; the data it fetches is separately
 /// gated by the kernel's RBAC.
 async fn serve_ui(principal: Principal) -> AppResult<axum::response::Response> {
-    principal.require(principal.can_view(), "load the movement module UI")?;
+    principal.require_cap(Cap::EventsRead, "load the movement module UI")?;
     Ok((
         [
             (
@@ -106,7 +106,7 @@ async fn list_links(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<CameraLink>>> {
-    principal.require(principal.can_view(), "view camera topology")?;
+    principal.require_cap(Cap::EventsRead, "view camera topology")?;
     let rows = sqlx::query_as::<_, CameraLink>(
         "SELECT * FROM camera_links ORDER BY from_camera, to_camera",
     )
@@ -202,7 +202,7 @@ async fn list_candidates(
     principal: Principal,
     Query(q): Query<CandQuery>,
 ) -> AppResult<Json<Vec<MovementCandidate>>> {
-    principal.require(principal.can_view(), "view movement candidates")?;
+    principal.require_cap(Cap::EventsRead, "view movement candidates")?;
     let limit = q.limit.unwrap_or(200).clamp(1, 5000);
     let anchor = q
         .anchor
@@ -301,7 +301,7 @@ async fn list_breaches(
     principal: Principal,
     Query(q): Query<BreachQuery>,
 ) -> AppResult<Json<Vec<BreachAlert>>> {
-    principal.require(principal.can_view(), "view breach alerts")?;
+    principal.require_cap(Cap::EventsRead, "view breach alerts")?;
     let limit = q.limit.unwrap_or(200).clamp(1, 5000);
     let rows = sqlx::query_as::<_, BreachAlert>(
         "SELECT * FROM breach_alerts WHERE (? IS NULL OR status = ?) ORDER BY created_at DESC LIMIT ?",
@@ -376,7 +376,7 @@ async fn search_plate(
     principal: Principal,
     Path(plate): Path<String>,
 ) -> AppResult<Json<Value>> {
-    principal.require(principal.can_view(), "search movement by plate")?;
+    principal.require_cap(Cap::EventsRead, "search movement by plate")?;
     let norm = normalize_plate(&plate);
     if norm.is_empty() {
         return Err(AppError::BadRequest("empty plate".into()));
@@ -419,7 +419,7 @@ async fn search_person(
     principal: Principal,
     Query(q): Query<PersonQuery>,
 ) -> AppResult<Json<Value>> {
-    principal.require(principal.can_view(), "search movement by person track")?;
+    principal.require_cap(Cap::EventsRead, "search movement by person track")?;
     let at = heldar_kernel::util::parse_rfc3339(&q.at)
         .ok_or_else(|| AppError::BadRequest("invalid `at` timestamp".into()))?;
     auth::audit(

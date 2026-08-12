@@ -14,7 +14,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::AppResult;
 use crate::state::AppState;
 
@@ -106,7 +106,7 @@ struct SiteInfo {
 }
 
 async fn site_info(State(st): State<AppState>, principal: Principal) -> AppResult<Json<SiteInfo>> {
-    principal.require(principal.can_view(), "read site info")?;
+    principal.require_cap(Cap::SystemRead, "read site info")?;
     Ok(Json(SiteInfo {
         site_id: st.cfg.site_id.clone(),
         name: "Heldar Core",

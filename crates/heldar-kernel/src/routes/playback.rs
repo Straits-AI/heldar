@@ -7,7 +7,7 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::{AppError, AppResult};
 use crate::services::clip::ClipResult;
 use crate::services::{clip, snapshot};
@@ -33,7 +33,7 @@ async fn export_clip(
     Json(req): Json<ClipRequest>,
 ) -> AppResult<Json<ClipResult>> {
     // Operational action (viewer+); the extractor enforces auth when it is enabled.
-    principal.require(principal.can_view(), "export clips")?;
+    principal.require_cap(Cap::VideoExport, "export clips")?;
     let from = util::parse_rfc3339(&req.from)
         .ok_or_else(|| AppError::BadRequest("invalid `from` timestamp".into()))?;
     let to = util::parse_rfc3339(&req.to)
@@ -64,7 +64,7 @@ async fn snapshot_handler(
     Query(q): Query<SnapshotQuery>,
 ) -> AppResult<Response> {
     // Operational action (viewer+): a snapshot can contain faces/plates.
-    principal.require(principal.can_view(), "capture snapshots")?;
+    principal.require_cap(Cap::VideoPlayback, "capture snapshots")?;
     let bytes = match q.at {
         Some(ref at) => {
             let ts = util::parse_rfc3339(at)

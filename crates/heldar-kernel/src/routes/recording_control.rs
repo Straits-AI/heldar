@@ -14,7 +14,6 @@ use serde_json::json;
 
 use crate::auth::{self, Principal};
 use crate::error::{AppError, AppResult};
-use crate::routes::cameras::load_camera;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -39,7 +38,7 @@ async fn record_trigger(
     principal: Principal,
 ) -> AppResult<Json<TriggerResult>> {
     principal.require(principal.can_manage_registry(), "trigger event recording")?;
-    let cam = load_camera(&st.pool, &id).await?;
+    let cam = st.camera_for(&principal, &id).await?;
     let window_end = st.recorder.trigger(&id, "manual").await.ok_or_else(|| {
         AppError::BadRequest(
             "camera is not in an event recording mode (`event` or `scheduled_event`), or recording is disabled".into(),

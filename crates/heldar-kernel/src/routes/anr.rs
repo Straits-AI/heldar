@@ -14,10 +14,9 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::{AppError, AppResult};
 use crate::models::RecordingGap;
-use crate::routes::cameras::load_camera;
 use crate::state::AppState;
 
 pub fn router() -> Router<AppState> {
@@ -43,8 +42,8 @@ async fn list_gaps(
     principal: Principal,
     Query(q): Query<GapQuery>,
 ) -> AppResult<Json<Vec<RecordingGap>>> {
-    principal.require(principal.can_view(), "view recording gaps")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    principal.require_cap(Cap::VideoPlayback, "view recording gaps")?;
+    let _ = st.camera_for(&principal, &id).await?;
     let limit = q.limit.unwrap_or(500).clamp(1, 5000);
     let rows =
         match q.state.as_deref() {
@@ -77,7 +76,7 @@ async fn retry_gap(
     principal: Principal,
 ) -> AppResult<Json<RecordingGap>> {
     principal.require(principal.can_manage_registry(), "retry recording-gap fill")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    let _ = st.camera_for(&principal, &id).await?;
     let res = sqlx::query(
         "UPDATE recording_gaps
             SET fill_state = 'pending', fill_attempts = 0, last_attempt_at = NULL, filled_at = NULL

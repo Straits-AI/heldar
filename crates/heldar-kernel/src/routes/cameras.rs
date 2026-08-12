@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 use sqlx::types::Json as SqlxJson;
 use sqlx::SqlitePool;
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::camera_url;
 use crate::error::{AppError, AppResult};
 use crate::models::{Camera, CameraCreate, CameraUpdate, CameraView};
@@ -72,10 +72,20 @@ async fn list_cameras(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<CameraView>>> {
-    principal.require(principal.can_view(), "list cameras")?;
-    let cams = sqlx::query_as::<_, Camera>("SELECT * FROM cameras ORDER BY id ASC")
-        .fetch_all(&st.pool)
-        .await?;
+    principal.require_cap(Cap::CameraRead, "list cameras")?;
+    // A camera-scoped credential sees only its cameras here — otherwise the list would be a complete
+    // inventory disclosure that the per-camera 403 then pointlessly guards.
+    let mut sql = "SELECT * FROM cameras WHERE 1=1".to_string();
+    let scope = crate::state::camera_scope_filter(&principal, "id");
+    if let Some((pred, _)) = &scope {
+        sql.push_str(pred);
+    }
+    sql.push_str(" ORDER BY id ASC");
+    let mut q = sqlx::query_as::<_, Camera>(&sql);
+    for id in scope.iter().flat_map(|(_, ids)| ids) {
+        q = q.bind(id);
+    }
+    let cams = q.fetch_all(&st.pool).await?;
     Ok(Json(cams.into_iter().map(CameraView::from).collect()))
 }
 
@@ -84,8 +94,8 @@ async fn get_camera_handler(
     principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<CameraView>> {
-    principal.require(principal.can_view(), "view a camera")?;
-    Ok(Json(load_camera(&st.pool, &id).await?.into()))
+    principal.require_cap(Cap::CameraRead, "view a camera")?;
+    Ok(Json(st.camera_for(&principal, &id).await?.into()))
 }
 
 async fn create_camera(
@@ -247,7 +257,7 @@ async fn create_camera(
     // outputs, built-in detections, on-board ANPR) so the dashboard's Device panel is populated
     // without anyone pressing "Detect features". Best-effort: never blocks or fails the create.
     crate::services::camera_control::spawn_probe(&st, &id);
-    let cam = load_camera(&st.pool, &id).await?;
+    let cam = st.camera_for(&principal, &id).await?;
     auth::audit(
         &st.pool,
         &principal,
@@ -267,7 +277,7 @@ async fn update_camera(
     Json(body): Json<CameraUpdate>,
 ) -> AppResult<Json<CameraView>> {
     principal.require(principal.can_manage_registry(), "update cameras")?;
-    let cur = load_camera(&st.pool, &id).await?;
+    let cur = st.camera_for(&principal, &id).await?;
 
     let record_stream = body.record_stream.unwrap_or(cur.record_stream);
     if !matches!(record_stream.as_str(), "main" | "sub") {
@@ -403,7 +413,7 @@ async fn update_camera(
         json!({}),
     )
     .await;
-    Ok(Json(load_camera(&st.pool, &id).await?.into()))
+    Ok(Json(st.camera_for(&principal, &id).await?.into()))
 }
 
 async fn delete_camera(
@@ -412,7 +422,7 @@ async fn delete_camera(
     principal: Principal,
 ) -> AppResult<StatusCode> {
     principal.require(principal.can_manage_registry(), "delete cameras")?;
-    let _ = load_camera(&st.pool, &id).await?; // 404 if missing
+    let _ = st.camera_for(&principal, &id).await?; // 404 if missing
     st.recorder.stop(&id).await;
     if let Some(m) = &st.mirror {
         m.stop(&id).await;
@@ -477,8 +487,8 @@ async fn test_camera(
     principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<Value>> {
-    principal.require(principal.can_view(), "test camera connectivity")?;
-    let cam = load_camera(&st.pool, &id).await?;
+    principal.require_cap(Cap::CameraRead, "test camera connectivity")?;
+    let cam = st.camera_for(&principal, &id).await?;
     let url = camera_url::record_url(&cam)
         .ok_or_else(|| AppError::BadRequest("camera has no stream URL".into()))?;
 

@@ -97,6 +97,11 @@ HELDAR_MEDIA_SAME_ORIGIN=true \
 HELDAR_BOOTSTRAP_ADMIN_USER="$ADMIN_USER" \
 HELDAR_BOOTSTRAP_ADMIN_PASSWORD="$ADMIN_PASS" \
 "$CORE" >"$LOG/core.log" 2>&1 & CORE_PID=$!; PIDS+=($CORE_PID)
+# HELDAR_INGEST_PROVENANCE / HELDAR_MACHINE_AUTH are deliberately LEFT AT THEIR DEFAULTS here. This
+# suite's job is the HTTPS + auth live-view path, and it should exercise the posture a shipping box
+# actually runs — pinning both to `enforce` meant no CI suite ran the default at all. The two tiers'
+# ingest behaviour is covered explicitly, and separately, by scripts/validate_ingest_provenance.sh,
+# which boots one core per tier.
 
 for _ in $(seq 1 40); do curl -fsS "$API/healthz" >/dev/null 2>&1 && break; sleep 1; done
 curl -fsS "$API/healthz" >/dev/null 2>&1 || { echo "[e2e_tls] core did not start"; tail -30 "$LOG/core.log"; exit 1; }
@@ -126,6 +131,14 @@ for i in $(seq 1 "$NCAMS"); do
     \"segment_seconds\":5,\"retention_hours\":1
   }" >/dev/null || true
 done
+
+# NOTE: the enforce-tier ingest assertions that used to live here were removed deliberately.
+#
+# This stack now runs the DEFAULT enforcement posture, because its job is the HTTPS + auth
+# live-view path and it should exercise what a shipping box actually runs — pinning it to `enforce`
+# meant no CI suite covered the default at all. The lease/ticket/provenance behaviour is covered
+# more thoroughly, at BOTH tiers, by scripts/validate_ingest_provenance.sh, which boots one core per
+# tier and additionally checks cross-credential tickets, unleased cameras and frame_id pre-claiming.
 
 # Caddy starts LAST, once every camera is registered. That ordering is the readiness contract: the
 # suite gates on HTTPS /healthz, so if TLS answers at all, seeding has already finished. Starting it

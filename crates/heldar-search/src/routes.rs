@@ -13,7 +13,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use heldar_kernel::auth::{self, Principal};
+use heldar_kernel::auth::{self, Cap, Principal};
 use heldar_kernel::error::AppResult;
 use heldar_kernel::state::AppState;
 
@@ -46,7 +46,7 @@ const SEARCH_UI_BUNDLE: &str = include_str!("../ui/search.js");
 /// authenticated viewer may load it — it is inert frontend code; the data it fetches is separately
 /// gated by the kernel's RBAC.
 async fn serve_ui(principal: Principal) -> AppResult<axum::response::Response> {
-    principal.require(principal.can_view(), "load the search module UI")?;
+    principal.require_cap(Cap::EventsRead, "load the search module UI")?;
     Ok((
         [
             (
@@ -128,7 +128,7 @@ async fn search_events(
     Extension(cfg): Extension<Arc<SearchConfig>>,
     Json(plan): Json<QueryPlan>,
 ) -> AppResult<Json<Value>> {
-    principal.require(principal.can_view(), "search events")?;
+    principal.require_cap(Cap::EventsRead, "search events")?;
     // Sanitize the caller-supplied plan (clamp out-of-range hours, etc.) before executing — the same
     // guard applied to LLM-produced plans — so a hand-crafted QueryPlan can't smuggle invalid filters.
     let plan = crate::planner::sanitize(plan);
@@ -157,7 +157,7 @@ async fn search_nl(
     Extension(cfg): Extension<Arc<SearchConfig>>,
     Json(body): Json<NlBody>,
 ) -> AppResult<Json<Value>> {
-    principal.require(principal.can_view(), "natural-language search")?;
+    principal.require_cap(Cap::EventsRead, "natural-language search")?;
     let q = body.query.trim();
     if q.is_empty() {
         return Err(heldar_kernel::error::AppError::BadRequest(
@@ -191,7 +191,7 @@ async fn plan_only(
     Json(body): Json<NlBody>,
 ) -> AppResult<Json<Value>> {
     // Dry-run: show how a question is interpreted (no execution, no data) — useful for trust/debug.
-    principal.require(principal.can_view(), "plan a search")?;
+    principal.require_cap(Cap::EventsRead, "plan a search")?;
     let q = body.query.trim();
     if q.is_empty() {
         return Err(heldar_kernel::error::AppError::BadRequest(

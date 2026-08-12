@@ -3,7 +3,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use serde_json::{json, Value};
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::{AppError, AppResult};
 use crate::services::discovery::{self, DiscoverOptions};
 use crate::state::AppState;
@@ -20,7 +20,7 @@ async fn discover_handler(
 ) -> AppResult<Json<Value>> {
     // Scanning the LAN is an operational action (viewer+); auto-registering the cameras it finds is a
     // registry mutation, so it additionally requires manage-registry.
-    principal.require(principal.can_view(), "scan for cameras")?;
+    principal.require_cap(Cap::NetScan, "scan for cameras")?;
     if opts.auto_add {
         principal.require(
             principal.can_manage_registry(),

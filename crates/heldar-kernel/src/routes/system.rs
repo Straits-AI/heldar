@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use crate::auth::Principal;
+use crate::auth::{Cap, Principal};
 use crate::error::{AppError, AppResult};
 use crate::services::remote_access::{self, OverlayStatus};
 use crate::services::settings;
@@ -69,7 +69,7 @@ async fn get_retention(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<RetentionLimits>> {
-    principal.require(principal.can_view(), "view recording limits")?;
+    principal.require_cap(Cap::SystemRead, "view recording limits")?;
     Ok(Json(effective_limits(&st).await))
 }
 
@@ -169,7 +169,7 @@ async fn get_transcode(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<TranscodeSettings>> {
-    principal.require(principal.can_view(), "view transcode settings")?;
+    principal.require_cap(Cap::SystemRead, "view transcode settings")?;
     Ok(Json(transcode_settings(&st).await))
 }
 
@@ -244,7 +244,7 @@ async fn get_db_status(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<DbStatus>> {
-    principal.require(principal.can_view(), "view database status")?;
+    principal.require_cap(Cap::SystemRead, "view database status")?;
     Ok(Json(db_status(&st).await?))
 }
 
@@ -447,7 +447,7 @@ async fn system_info(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<SystemInfo>> {
-    principal.require(principal.can_view(), "view system info")?;
+    principal.require_cap(Cap::SystemRead, "view system info")?;
     let cameras_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cameras")
         .fetch_one(&st.pool)
         .await?;
