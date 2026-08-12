@@ -1,6 +1,6 @@
 [package]
 name = "heldar-kernel"
-version = "0.4.0"
+version = "0.4.1"
 edition = "2021"
 rust-version = "1.85"
 description = "Heldar kernel — media/DVR control plane, perception ingest + sampler, zone engine, auth, and the worker SDK contract. The open, domain-agnostic platform that domain apps build on."

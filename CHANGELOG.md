@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-08-12
+
+### Fixed
+
+- **The container image builds again.** The Rust builder base was pinned to 1.85.1 to match the
+  workspace MSRV, but the locked dependency tree moved past it — `icu_*` 2.2 requires rustc 1.86 —
+  so the v0.4.0 image build failed and no `0.4.0` images were published. The base now tracks what the
+  build actually needs rather than the MSRV. CI builds with `stable`, so the two toolchains disagreed
+  and nothing caught it until a tag ran the image build, which is the only job using that base.
+  v0.4.0's crates and musl binaries are unaffected and remain published; only the container images
+  were missing, and they ship as `0.4.1`.
+
 ## [0.4.0] - 2026-08-12
 
 A security and production-qualification release. Two external audits drove it, and most of the work
