@@ -27,12 +27,15 @@ if [ "$OS" = darwin ] && [ "$ARCH" != amd64 ] && [ "$ARCH" != arm64 ]; then
 fi
 
 # Resolve the latest tag with a portable parser (`grep -oP` is GNU-only and fails on macOS/BSD).
-TAG="${MEDIAMTX_TAG:-$(curl -fsSL https://api.github.com/repos/bluenviron/mediamtx/releases/latest \
+TAG="${MEDIAMTX_TAG:-$(curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors https://api.github.com/repos/bluenviron/mediamtx/releases/latest \
   | sed -n 's/.*"tag_name"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)}"
 [ -n "$TAG" ] || { echo "could not resolve the latest MediaMTX tag (rate-limited?) — retry or set MEDIAMTX_TAG" >&2; exit 1; }
 
+# Retried: the GitHub release CDN returns transient 503s, which have failed CI and blocked a
+# release twice. `--retry-all-errors` is what makes curl retry an HTTP error rather than only a
+# connection failure.
 echo "Installing MediaMTX ${TAG} (${OS}/${ARCH}) -> ${DEST}/mediamtx"
-curl -fsSL -o mediamtx.tar.gz \
+curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o mediamtx.tar.gz \
   "https://github.com/bluenviron/mediamtx/releases/download/${TAG}/mediamtx_${TAG}_${OS}_${ARCH}.tar.gz"
 tar xzf mediamtx.tar.gz mediamtx
 rm -f mediamtx.tar.gz

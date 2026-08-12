@@ -32,8 +32,11 @@ if [ -x ./caddy ] && ./caddy version 2>/dev/null | grep -q "v${VERSION}"; then
   exit 0
 fi
 
+# Retried: the GitHub release CDN returns transient 503s, which have failed CI and blocked a
+# release twice. `--retry-all-errors` is what makes curl retry an HTTP error rather than only a
+# connection failure.
 echo "Installing Caddy v${VERSION} (${OS}/${ARCH}) -> ${DEST}/caddy"
-curl -fsSL -o caddy.tar.gz \
+curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors -o caddy.tar.gz \
   "https://github.com/caddyserver/caddy/releases/download/v${VERSION}/caddy_${VERSION}_${OS}_${ARCH}.tar.gz"
 tar xzf caddy.tar.gz caddy
 rm -f caddy.tar.gz
