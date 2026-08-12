@@ -149,7 +149,11 @@ log ""
 log "## server-derived frame_id (a client cannot name the dedup key)"
 FID=$(echo "$DET" | jqget 'd[0]["frame_id"]')
 CAPMS=$(echo "$TICKET" | cut -d. -f3)
-want "$FID" "$TASK:$CAPMS" "persisted frame_id is server-derived as {task_id}:{captured_ms}"
+# The `w:` prefix namespaces the idempotency key by provenance, so a client cannot claim a kernel
+# producer's `(camera_id, frame_id)` — the native-ANPR poller's ids are derived from the device
+# picture name and are therefore guessable, and claiming one would silently swallow the genuine read.
+want "$FID" "w:$TASK:$CAPMS" \
+  "persisted frame_id is server-derived and provenance-namespaced as w:{task_id}:{captured_ms}"
 
 log ""
 log "## ticket binding"
