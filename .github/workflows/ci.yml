@@ -213,6 +213,20 @@ jobs:
             grep -E '(^|[[:space:]])FAIL ' data/validate_ingest_provenance.txt || true
             exit 1
           fi
+      # Upgrade + disaster-recovery qualification. Boots PREVIOUS RELEASES' musl binaries against a
+      # fresh DB, seeds through their API, then boots the current build on that same database — the only
+      # test that exercises the migration chain against a database an older release actually wrote. Then
+      # backup -> destroy -> restore, with a control boot proving the wipe was real (without it, a
+      # restore that silently did nothing would still pass). Exits non-zero itself, so no FAIL-grep.
+      - name: upgrade + restore drills (scripts/validate_upgrade_restore.sh)
+        run: ./scripts/validate_upgrade_restore.sh
+      - name: upload upgrade/restore report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-restore-report
+          path: data/validate_upgrade_restore.txt
+          retention-days: 7
       # Deliberately NOT run in CI (they are not self-contained for a clean runner):
       #   - validate_ai.sh: needs a REAL camera (cam_192_168_0_2) actively streaming so the sampler
       #     produces frames — real hardware, cannot be satisfied synthetically here.
