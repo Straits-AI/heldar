@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-08-13
+
+Closes the last of the re-audit's code blockers. **Two breaking changes need a decision before you
+upgrade** — read Breaking and Upgrading first.
+
+### Breaking
+
+- **Sidecar plugin UIs no longer share the console's origin.** The iframe sandbox granted
+  `allow-same-origin`, and plugins are served through the `/m/{id}` proxy — on the console's own
+  origin — so a plugin could reach the parent DOM and call the kernel API with the operator's session
+  cookie, far beyond its own minted key. An imported plugin was effectively first-party code whatever
+  its manifest said. The frame now runs in an **opaque origin**: no parent DOM, no storage, and no
+  session cookie on its requests. A `postMessage` host bridge mediates, confining every request to
+  that plugin's own `/m/{id}/` root and forwarding only `content-type`.
+
+  **Plugin UIs that called `/api/v1/*` directly, or touched the parent document, will stop working.**
+  Move them to the bridge (a copy-pasteable shim is in the module-system guide), or fetch kernel data
+  server-side in the sidecar with its own capability-scoped key.
+
+- **Deleting a camera now requires admin, and refuses while evidence is held.** It purges recordings,
+  so it is no longer a manager-level action. A camera with evidence-locked segments returns 409 with
+  the count and how to release the hold.
+
+### Security
+
+- **Interactive media jobs have a concurrency ceiling** (`HELDAR_MEDIA_JOB_CONCURRENCY`, default 3),
+  covering playback session builds, clip exports and snapshots. Each forks ffmpeg and does heavy disk
+  I/O; unbounded, they starve the recorder — the one process that must never miss. A caller that
+  cannot get a slot gets a 503 telling it to retry, rather than being queued indefinitely. Recording
+  itself deliberately takes no permit.
+
+- **Backup destination credentials and webhook signing secrets are sealed at rest.** They were masked
+  as `***` in API responses but written to SQLite in the clear, so a stolen database or a copied DB
+  backup yielded SFTP/FTP passwords, S3 secret keys and HMAC keys outright — the masking only ever
+  protected a shoulder-surfer, not the file. They are sealed with the existing `HELDAR_SECRET_KEY`,
+  unsealed at the point of use, migrated on boot, and covered by `rekey-secrets`.
+
+  An unsealable credential degrades rather than corrupting: a webhook delivers UNSIGNED with an error
+  logged (the alert still arrives), and a backup credential reads as unset so the destination fails
+  its own validation with an actionable message. Neither hands ciphertext to a subprocess.
+
+### Tests
+
+- **The upgrade path is qualified in CI.** A previous release's binary boots against a fresh database
+  and seeds rows through its own API; the current build then boots on that same database. It is the
+  only test that exercises the migration chain against a database an older release actually wrote.
+  The upgraded box must serve, not merely boot.
+
+- **Backups are proven to restore.** Seed, online snapshot via `backup-db`, destroy the database and
+  its WAL/SHM, restore, verify. A control boot on the wiped directory asserts zero rows first —
+  without it, a restore that silently did nothing would still pass.
+
+- **`apps/web` gains a unit lane** (vitest, CI-gated). It had none; it guards the sidecar bridge's
+  containment check, which decides what a sandboxed plugin may ask the host to fetch.
+
+### Upgrading
+
+- **Plugin authors must migrate** — see Breaking. This is the only change that requires action from
+  anyone other than an operator.
+- **Nothing needs re-configuring.** Existing credentials are sealed automatically on first boot when
+  `HELDAR_SECRET_KEY` is set; without a key, behaviour is unchanged (plaintext at rest, as before).
+- **Rotate keys with `heldar-core rekey-secrets`**, which now covers webhook and backup credentials as
+  well as camera passwords. A rotation that moved only camera passwords would leave the others sealed
+  under a retired key, and webhooks would silently start delivering unsigned.
+- **Gate operators:** the v0.4.0 note still applies — a below-threshold ANPR commit-on-prune records a
+  guard-review event instead of opening the barrier.
+
 ## [0.4.1] - 2026-08-12
 
 ### Fixed
