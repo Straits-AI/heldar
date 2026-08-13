@@ -118,7 +118,7 @@ jobs:
         run: npm run test:e2e
       - name: upload playwright report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report
           path: apps/web/playwright-report/
@@ -164,7 +164,7 @@ jobs:
         run: npm run test:e2e:tls
       - name: upload playwright report (TLS)
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-report-tls
           path: apps/web/playwright-report/
@@ -222,7 +222,7 @@ jobs:
         run: ./scripts/validate_upgrade_restore.sh
       - name: upload upgrade/restore report
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: upgrade-restore-report
           path: data/validate_upgrade_restore.txt
@@ -237,7 +237,7 @@ jobs:
       #     seed-core fixture is added.)
       - name: upload validation reports
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: validation-reports
           path: |
