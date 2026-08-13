@@ -74,6 +74,10 @@ jobs:
         working-directory: apps/web
       - run: npm run typecheck
         working-directory: apps/web
+      # Unit lane (vitest). Currently guards the sidecar bridge's containment check — the function that
+      # decides what a sandboxed plugin may ask the host to fetch with the operator's session.
+      - run: npm run test:unit
+        working-directory: apps/web
       - run: npm run build
         working-directory: apps/web
 

@@ -125,5 +125,5 @@ curl http://localhost:8000/api/v1/events \
 
 - 插件由**管理员安装**，**进程外运行**——请像对待任何服务一样对其进行隔离（容器、网络策略，仅在信任链路时才使用非回环地址的 `base_url`）。
 - 控制台**不会将你的 session cookie 转发给 sidecar**；sidecar 仅使用自身生成的密钥向内核进行身份验证。
-- 插件 UI iframe 已沙箱化（`allow-scripts allow-same-origin allow-forms allow-popups`）；它无法导航或操作顶层控制台框架。
+- 插件 UI iframe 已沙箱化，且**不含 `allow-same-origin`**（`allow-scripts allow-forms`），因此运行在不透明源中：无法访问控制台的 DOM 或存储，其请求也不携带会话 Cookie。插件须通过宿主桥接调用自身后端，该桥接会将每个请求限制在该插件自己的 `/m/{id}/` 根路径内。
 - 卸载会完全撤销密钥和订阅，因此已移除的插件不再保留任何持久访问权限。
