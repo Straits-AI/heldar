@@ -214,6 +214,7 @@ mod tests {
             modules: Arc::new(Vec::new()),
             catalog: Arc::new(crate::services::registry::CatalogService::new(&cfg)),
             http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
             started_at: Utc::now(),
             pool: pool.clone(),
             cfg,

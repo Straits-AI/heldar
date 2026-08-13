@@ -32,6 +32,10 @@ pub struct Config {
     /// Must comfortably outlast a viewing session's reconnects; the dashboard re-fetches `/liveview`
     /// (re-minting) whenever it reopens a stream. Only enforced when kernel auth is enabled.
     pub live_token_ttl_secs: i64,
+    /// Max concurrent interactive media jobs — playback session builds, clip exports, snapshots
+    /// (`HELDAR_MEDIA_JOB_CONCURRENCY`). Each forks ffmpeg/ffprobe and does heavy disk I/O; unbounded,
+    /// they starve the RECORDER, which is the one process that must never miss. Clamped to >= 1.
+    pub media_job_concurrency: usize,
     /// Max SQLite pool connections. Tunable per deployment: more absorbs bursts of concurrent
     /// requests (WAL serves reads concurrently; writes still serialize), at the cost of memory.
     pub db_max_connections: u32,
@@ -653,6 +657,8 @@ impl Config {
             media_same_origin: parse_bool("HELDAR_MEDIA_SAME_ORIGIN", false),
             live_token_ttl_secs: parse_or("HELDAR_LIVEVIEW_TOKEN_TTL_SECS", 3600),
             db_max_connections: parse_or::<u32>("HELDAR_DB_MAX_CONNECTIONS", 16).clamp(2, 256),
+            media_job_concurrency: parse_or::<usize>("HELDAR_MEDIA_JOB_CONCURRENCY", 3)
+                .clamp(1, 64),
             recorder_enabled: parse_bool("HELDAR_RECORDER_ENABLED", true),
             mirror_recordings_dir: var("HELDAR_MIRROR_RECORDINGS_DIR").map(PathBuf::from),
             anr_enabled: parse_bool("HELDAR_ANR_ENABLED", false),

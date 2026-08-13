@@ -421,8 +421,31 @@ async fn delete_camera(
     Path(id): Path<String>,
     principal: Principal,
 ) -> AppResult<StatusCode> {
-    principal.require(principal.can_manage_registry(), "delete cameras")?;
+    // Deleting a camera PURGES its recordings, so it is an admin action, not a manager one. It is
+    // also the one path that could destroy footage the retention sweeper is forbidden to touch.
+    principal.require_cap(Cap::Admin, "delete cameras (purges all of their footage)")?;
     let _ = st.camera_for(&principal, &id).await?; // 404 if missing
+
+    // EVIDENCE HOLD. Evidence-locked segments are protected from retention, but nothing stopped a
+    // camera delete from removing the recordings directory out from under them — so the lock held
+    // right up until someone removed the camera, which is precisely when footage under investigation
+    // would be lost. Refuse while a hold exists and say how to release it, rather than destroying
+    // evidence and writing an audit row about it afterwards.
+    let held: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM segments WHERE camera_id = ? AND evidence_locked = 1",
+    )
+    .bind(&id)
+    .fetch_one(&st.pool)
+    .await
+    .unwrap_or(0);
+    if held > 0 {
+        return Err(AppError::Conflict(format!(
+            "camera {id} has {held} evidence-locked segment(s) and cannot be deleted. Release the \
+             hold first (DELETE /api/v1/segments/{{segment_id}}/evidence-lock), then retry \
+             — or keep the camera and disable it instead."
+        )));
+    }
+
     st.recorder.stop(&id).await;
     if let Some(m) = &st.mirror {
         m.stop(&id).await;
@@ -556,6 +579,7 @@ mod tests {
             modules: Arc::new(Vec::new()),
             catalog: Arc::new(crate::services::registry::CatalogService::new(&cfg)),
             http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
             started_at: chrono::Utc::now(),
             pool,
             cfg,
@@ -589,5 +613,77 @@ mod tests {
     #[tokio::test]
     async fn legacy_route_open_when_auth_disabled() {
         assert_eq!(unauthenticated_list_status(false).await, StatusCode::OK);
+    }
+
+    async fn seed_camera_with_segment(st: &AppState, cam: &str, locked: bool) {
+        let now = chrono::Utc::now();
+        sqlx::query("INSERT INTO cameras (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
+            .bind(cam)
+            .bind("Held Camera")
+            .bind(now)
+            .bind(now)
+            .execute(&st.pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO segments (id, camera_id, path, start_time, end_time, duration_s, container,
+                                   size_bytes, created_at, evidence_locked)
+             VALUES ('seg_hold', ?, '/x.mp4', ?, ?, 5.0, 'mp4', 0, ?, ?)",
+        )
+        .bind(cam)
+        .bind(now)
+        .bind(now + chrono::Duration::seconds(5))
+        .bind(now)
+        .bind(locked)
+        .execute(&st.pool)
+        .await
+        .unwrap();
+    }
+
+    async fn delete_camera_status(st: AppState, cam: &str) -> StatusCode {
+        let mut app = super::router().with_state(st);
+        let req = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/v1/cameras/{cam}"))
+            .body(Body::empty())
+            .unwrap();
+        app.call(req).await.unwrap().status()
+    }
+
+    /// An evidence hold outranks a camera delete. Locked segments are protected from the retention
+    /// sweeper, but deleting the camera used to remove the recordings directory anyway — losing
+    /// footage under investigation at exactly the moment someone decommissioned the camera.
+    #[tokio::test]
+    async fn a_camera_with_held_evidence_cannot_be_deleted() {
+        let st = test_state(false).await; // auth off -> system admin, so this is the HOLD, not RBAC
+        seed_camera_with_segment(&st, "cam_held", true).await;
+
+        assert_eq!(
+            delete_camera_status(st.clone(), "cam_held").await,
+            StatusCode::CONFLICT
+        );
+        // ...and the camera is still there. A refused delete must not be a partial delete.
+        let still: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cameras WHERE id = 'cam_held'")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap();
+        assert_eq!(still, 1, "a refused delete must leave the camera intact");
+    }
+
+    /// THE POSITIVE CONTROL: without a hold the delete still works. Over-correcting into "cameras
+    /// can never be deleted" would be its own bug.
+    #[tokio::test]
+    async fn a_camera_without_held_evidence_still_deletes() {
+        let st = test_state(false).await;
+        seed_camera_with_segment(&st, "cam_free", false).await;
+        assert_eq!(
+            delete_camera_status(st.clone(), "cam_free").await,
+            StatusCode::NO_CONTENT
+        );
+        let gone: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cameras WHERE id = 'cam_free'")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap();
+        assert_eq!(gone, 0);
     }
 }

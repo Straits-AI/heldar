@@ -115,6 +115,14 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
     if resealed > 0 {
         tracing::info!("sealed {resealed} legacy camera credential(s) at rest");
     }
+    // Same treatment for the other secret-bearing fields: webhook signing keys and backup destination
+    // credentials were masked in API responses but written to SQLite in the clear.
+    let resealed_creds = services::secrets::reencrypt_stored_credentials(&pool)
+        .await
+        .context("re-encrypt stored credentials")?;
+    if resealed_creds > 0 {
+        tracing::info!("sealed {resealed_creds} legacy webhook/backup credential(s) at rest");
+    }
     // One boxed banner naming the resolved machine-credential posture and every credential still on a
     // role expansion. Best-effort: a failed query here must never stop the box from booting.
     let legacy_keys: Vec<(String, String)> =
@@ -231,6 +239,7 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
         modules,
         catalog: catalog.clone(),
         http,
+        media_jobs: services::media_jobs::MediaJobGovernor::new(cfg.media_job_concurrency),
         started_at: chrono::Utc::now(),
     };
 
@@ -594,8 +603,12 @@ async fn run_subcommand(cmd: &str, cfg: &Config) -> anyhow::Result<()> {
             }
             let pool = db::init_pool(cfg).await.context("open database")?;
             let n = services::admin::rekey_camera_secrets(&pool, &old_key, &new_key).await?;
+            let m = services::admin::rekey_stored_credentials(&pool, &old_key, &new_key).await?;
             pool.close().await;
-            println!("rekey-secrets: re-sealed {n} camera credential(s) under the new key");
+            println!(
+                "rekey-secrets: re-sealed {n} camera credential(s) and {m} webhook/backup \
+                 credential(s) under the new key"
+            );
             Ok(())
         }
         "convert-autovacuum" => {
@@ -616,7 +629,7 @@ async fn run_subcommand(cmd: &str, cfg: &Config) -> anyhow::Result<()> {
                  Usage:\n  \
                  heldar-core                    run the server (default)\n  \
                  heldar-core backup-db <dest>   online snapshot of the metadata DB (SQLite VACUUM INTO)\n  \
-                 heldar-core rekey-secrets      re-seal camera credentials (HELDAR_SECRET_KEY_OLD -> HELDAR_SECRET_KEY)\n  \
+                 heldar-core rekey-secrets      re-seal camera + webhook + backup credentials (HELDAR_SECRET_KEY_OLD -> HELDAR_SECRET_KEY)\n  \
                  heldar-core convert-autovacuum one-time DB auto_vacuum=INCREMENTAL conversion (run with the server stopped)"
             );
             Ok(())

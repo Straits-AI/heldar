@@ -1009,6 +1009,7 @@ mod tests {
             modules: Arc::new(Vec::new()),
             catalog: Arc::new(heldar_kernel::services::registry::CatalogService::new(&cfg)),
             http: heldar_kernel::reqwest::Client::new(),
+            media_jobs: heldar_kernel::services::media_jobs::MediaJobGovernor::new(2),
             started_at: Utc::now(),
             pool: pool.clone(),
             cfg,

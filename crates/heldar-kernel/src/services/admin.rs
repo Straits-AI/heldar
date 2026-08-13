@@ -61,6 +61,83 @@ pub async fn rekey_camera_secrets(
     Ok(rekeyed)
 }
 
+/// Re-seal webhook signing secrets and backup destination credentials from `old_key` to `new_key`.
+///
+/// The counterpart of [`rekey_camera_secrets`] for the other secret-bearing fields. A key rotation
+/// that covered only camera passwords would leave these sealed under a key the operator has just
+/// retired — every webhook would deliver unsigned and every backup destination would fail to
+/// authenticate, with nothing saying why. Idempotent: values already readable with the new key are
+/// skipped, so a re-run after a partial rotation is safe.
+pub async fn rekey_stored_credentials(
+    pool: &SqlitePool,
+    old_key: &[u8; 32],
+    new_key: &[u8; 32],
+) -> Result<usize> {
+    let mut rekeyed = 0usize;
+
+    let hooks: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, secret FROM webhook_subscriptions WHERE secret IS NOT NULL AND secret != ''",
+    )
+    .fetch_all(pool)
+    .await?;
+    for (id, stored) in hooks {
+        if secrets::is_encrypted(&stored) && secrets::decrypt(Some(new_key), &stored).is_ok() {
+            continue;
+        }
+        let plain = secrets::decrypt(Some(old_key), &stored).with_context(|| {
+            format!("decrypt webhook {id} secret with the old key (HELDAR_SECRET_KEY_OLD)")
+        })?;
+        let sealed = secrets::encrypt(Some(new_key), &plain)?;
+        sqlx::query("UPDATE webhook_subscriptions SET secret = ? WHERE id = ?")
+            .bind(&sealed)
+            .bind(&id)
+            .execute(pool)
+            .await?;
+        rekeyed += 1;
+    }
+
+    let dests: Vec<(String, String)> = sqlx::query_as("SELECT id, config FROM backup_destinations")
+        .fetch_all(pool)
+        .await?;
+    for (id, raw) in dests {
+        let Ok(mut cfg) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue;
+        };
+        let mut changed = false;
+        if let Some(obj) = cfg.as_object_mut() {
+            for key in crate::models::BACKUP_SECRET_KEYS {
+                let Some(stored) = obj.get(*key).and_then(|v| v.as_str()).map(str::to_string)
+                else {
+                    continue;
+                };
+                if stored.is_empty()
+                    || (secrets::is_encrypted(&stored)
+                        && secrets::decrypt(Some(new_key), &stored).is_ok())
+                {
+                    continue;
+                }
+                let plain = secrets::decrypt(Some(old_key), &stored).with_context(|| {
+                    format!("decrypt backup destination {id} `{key}` with the old key")
+                })?;
+                obj.insert(
+                    (*key).to_string(),
+                    serde_json::Value::String(secrets::encrypt(Some(new_key), &plain)?),
+                );
+                changed = true;
+            }
+        }
+        if changed {
+            sqlx::query("UPDATE backup_destinations SET config = ? WHERE id = ?")
+                .bind(serde_json::to_string(&cfg)?)
+                .bind(&id)
+                .execute(pool)
+                .await?;
+            rekeyed += 1;
+        }
+    }
+    Ok(rekeyed)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

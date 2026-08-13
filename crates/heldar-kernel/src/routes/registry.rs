@@ -85,6 +85,7 @@ mod tests {
             modules: Arc::new(modules),
             catalog: Arc::new(CatalogService::new(&cfg)),
             http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
             started_at: chrono::Utc::now(),
             pool,
             cfg,
