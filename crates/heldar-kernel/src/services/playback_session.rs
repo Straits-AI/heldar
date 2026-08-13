@@ -131,6 +131,19 @@ pub async fn create_session(
     crate::repo::set_segments_locked(&state.pool, &seg_ids, true).await;
 
     let hls_time = segment_seconds.max(2);
+    // Hold a media-job permit for the BUILD only. A two-hour window probes and remuxes every
+    // overlapping segment — thousands of files at two-second segments — and unbounded concurrency here
+    // starves the recorder. The permit drops with `_permit` at the end of this scope, including on the
+    // error paths below, so a failed build never leaks a slot.
+    let _permit = match state.media_jobs.acquire("playback_session").await {
+        Ok(p) => p,
+        Err(e) => {
+            // Release the read-locks we already took; a rejected job must leave no trace.
+            crate::repo::set_segments_locked(&state.pool, &seg_ids, false).await;
+            let _ = tokio::fs::remove_dir_all(&session_dir).await;
+            return Err(e);
+        }
+    };
     let build = generate_hls(state, &session_dir, &segments, from, requested, hls_time).await;
     if let Err(e) = build {
         // Generation failed: release the locks and remove the half-built dir, then surface the error.
@@ -414,6 +427,7 @@ mod tests {
             modules: std::sync::Arc::new(Vec::new()),
             catalog: std::sync::Arc::new(crate::services::registry::CatalogService::new(&cfg)),
             http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
             started_at: Utc::now(),
             pool,
             cfg,

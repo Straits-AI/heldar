@@ -133,6 +133,13 @@ async fn create(
         .secret
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    // Seal the HMAC key at rest. It was masked on read but stored in the clear, so a copied database
+    // handed over every webhook signing key — and a signing key is enough to forge Heldar's own
+    // signature on events sent to whatever the operator wired up downstream.
+    let secret = secret
+        .as_deref()
+        .map(crate::services::secrets::encrypt_for_storage)
+        .transpose()?;
     let enabled = body.enabled.unwrap_or(true);
     let id = format!("whs_{}", Uuid::new_v4().simple());
     let now = Utc::now();
@@ -228,7 +235,9 @@ async fn update(
             if s.is_empty() {
                 None
             } else {
-                Some(s)
+                // A value carried over from `cur` is already sealed; only a freshly supplied one
+                // needs sealing here.
+                Some(crate::services::secrets::encrypt_for_storage(&s)?)
             }
         }
     };

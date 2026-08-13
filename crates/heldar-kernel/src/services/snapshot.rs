@@ -30,6 +30,10 @@ pub async fn snapshot_at(
     .await?;
     let seg = seg.ok_or_else(|| AppError::NotFound("no footage at that timestamp".into()))?;
 
+    // Snapshots are individually cheap but trivially spammable — one request, one ffmpeg — so they
+    // share the media-job ceiling rather than being an unbounded side channel around it.
+    let _permit = state.media_jobs.acquire("snapshot_at").await?;
+
     // Read-lock the source segment so retention can't delete it out from under ffmpeg (TOCTOU).
     let seg_ids = vec![seg.id.clone()];
     let _read_lock = crate::repo::SegReadLock::acquire(&state.pool, seg_ids).await;
@@ -93,6 +97,8 @@ pub async fn snapshot_live_raw(state: &AppState, camera_id: &str) -> AppResult<V
     let url = camera_url::stream_url(&cam, "sub")
         .or_else(|| camera_url::record_url(&cam))
         .ok_or_else(|| AppError::BadRequest("camera has no stream URL".into()))?;
+
+    let _permit = state.media_jobs.acquire("snapshot_live").await?;
 
     let mut cmd = Command::new(&state.cfg.ffmpeg_bin);
     cmd.kill_on_drop(true)

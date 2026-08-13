@@ -36,6 +36,8 @@ pub struct AppState {
     /// The plugin store's catalog engine (bundled + signed remote registries).
     pub catalog: Arc<crate::services::registry::CatalogService>,
     pub http: reqwest::Client,
+    /// Ceiling on concurrent interactive media jobs, so exports cannot starve the recorder.
+    pub media_jobs: crate::services::media_jobs::MediaJobGovernor,
     pub started_at: DateTime<Utc>,
 }
 

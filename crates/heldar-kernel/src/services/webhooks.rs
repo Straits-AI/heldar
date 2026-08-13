@@ -170,11 +170,30 @@ async fn try_deliver(pool: &SqlitePool, sub: &WebhookSubscription, ev: &Event) -
 
     let delivery_id = format!("whd_{}", Uuid::new_v4().simple());
     let body = event_body(ev);
+    // Unseal the HMAC key. It is stored encrypted at rest, so signing with the stored value directly
+    // would sign with ciphertext — every downstream verifier would reject the signature, silently, on
+    // exactly the alert path an operator relies on. A key that cannot be unsealed (wrong/absent
+    // HELDAR_SECRET_KEY) drops the SIGNATURE, not the delivery: the event still gets through, and the
+    // failure is logged rather than turning a key problem into missed alerts.
+    let secret = match sub.secret.as_deref() {
+        None => None,
+        Some(stored) => match crate::services::secrets::decrypt_stored(stored) {
+            Ok(plain) => Some(plain),
+            Err(e) => {
+                tracing::error!(
+                    subscription = %sub.id,
+                    error = %e,
+                    "webhook: could not decrypt the signing secret; delivering UNSIGNED"
+                );
+                None
+            }
+        },
+    };
     let res = send_event(
         &sub.url,
         &delivery_id,
         &ev.event_type,
-        sub.secret.as_deref(),
+        secret.as_deref(),
         &body,
     )
     .await;

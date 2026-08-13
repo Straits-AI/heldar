@@ -125,6 +125,10 @@ pub async fn export_clip(
         .await
         .map_err(|e| AppError::Other(e.into()))?;
 
+    // A clip export transcodes and writes a file; hold a media-job permit so exports cannot pile up
+    // and starve the recorder. Taken before any file is created so a rejected job leaves nothing behind.
+    let _permit = state.media_jobs.acquire("clip_export").await?;
+
     let id = format!("clip_{}", Uuid::new_v4().simple());
     let filename = format!("{id}.mp4");
     let out_path = state.cfg.clips_dir.join(&filename);
@@ -307,6 +311,7 @@ mod tests {
             modules: std::sync::Arc::new(Vec::new()),
             catalog: std::sync::Arc::new(crate::services::registry::CatalogService::new(&cfg)),
             http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
             started_at: Utc::now(),
             pool,
             cfg,

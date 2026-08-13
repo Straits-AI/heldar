@@ -141,12 +141,17 @@ async fn create_destination(
             "`kind` must be local|sftp|ftp|s3".into(),
         ));
     }
-    let config = body.config.unwrap_or_else(|| json!({}));
+    let mut config = body.config.unwrap_or_else(|| json!({}));
     if !config.is_object() {
         return Err(AppError::BadRequest(
             "`config` must be a JSON object".into(),
         ));
     }
+    // Seal the credential keys before storing. They were masked on read but written to SQLite in the
+    // clear, so a stolen database or a copied DB backup yielded SFTP/FTP passwords and S3 secret keys
+    // outright.
+    crate::services::secrets::seal_json_keys(&mut config, BACKUP_SECRET_KEYS)
+        .map_err(|e| AppError::Other(anyhow::anyhow!("sealing destination credentials: {e}")))?;
     let enabled = body.enabled.unwrap_or(true);
     let id = format!("bkd_{}", Uuid::new_v4().simple());
     let now = Utc::now();
@@ -210,6 +215,11 @@ async fn update_destination(
         }
         None => cur.config.0.clone(),
     };
+    // Values carried over from the stored config are already sealed; `seal_json_keys` is idempotent,
+    // so this only seals a freshly supplied plaintext secret.
+    let mut config = config;
+    crate::services::secrets::seal_json_keys(&mut config, BACKUP_SECRET_KEYS)
+        .map_err(|e| AppError::Other(anyhow::anyhow!("sealing destination credentials: {e}")))?;
     let enabled = body.enabled.unwrap_or(cur.enabled);
 
     sqlx::query(

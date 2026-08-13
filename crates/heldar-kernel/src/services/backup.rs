@@ -796,7 +796,7 @@ async fn build_remote(
                 anyhow::bail!("{kind} destination requires `host`");
             }
             let user = cfg_str(config, "user");
-            let pass = cfg_str(config, "pass");
+            let pass = cfg_secret(config, "pass");
             let port = config
                 .get("port")
                 .and_then(|p| p.as_i64())
@@ -830,7 +830,7 @@ async fn build_remote(
                 anyhow::bail!("s3 destination requires `bucket`");
             }
             let access_key = cfg_str(config, "access_key");
-            let secret_key = cfg_str(config, "secret_key");
+            let secret_key = cfg_secret(config, "secret_key");
             let endpoint = cfg_str(config, "endpoint");
             let region = cfg_str(config, "region");
             let mut parts = vec![":s3".to_string(), "provider=Other".to_string()];
@@ -920,6 +920,31 @@ fn scrub(s: &str, secrets: &[String]) -> String {
         }
     }
     out
+}
+
+/// Read a SECRET config value, unsealing it.
+///
+/// Credentials are sealed at rest, so reading them with [`cfg_str`] would hand rclone the ciphertext
+/// and every transfer would fail to authenticate with a confusing upstream error. An unsealable value
+/// (wrong or absent HELDAR_SECRET_KEY) returns empty rather than ciphertext: the destination then
+/// fails its own "requires `pass`" validation with a message an operator can act on, and ciphertext is
+/// never passed to a subprocess or written into a connection string.
+fn cfg_secret(config: &Value, key: &str) -> String {
+    let stored = cfg_str(config, key);
+    if stored.is_empty() {
+        return stored;
+    }
+    match crate::services::secrets::decrypt_stored(&stored) {
+        Ok(plain) => plain,
+        Err(e) => {
+            tracing::error!(
+                key,
+                error = %e,
+                "backup: could not decrypt a destination credential; treating it as unset"
+            );
+            String::new()
+        }
+    }
 }
 
 fn cfg_str(config: &Value, key: &str) -> String {
