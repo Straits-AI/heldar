@@ -11,7 +11,8 @@
     "preview": "vite preview",
     "test:e2e": "playwright test",
     "test:e2e:tls": "playwright test --config playwright.tls.config.ts",
-    "test:e2e:install": "playwright install chromium"
+    "test:e2e:install": "playwright install chromium",
+    "test:unit": "vitest run"
   },
   "dependencies": {
     "hls.js": "^1.6.16",
@@ -28,8 +29,10 @@
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.5",
+    "jsdom": "^26.1.0",
     "tailwindcss": "^4.3.1",
     "typescript": "^7.0.2",
-    "vite": "^8.2.0"
+    "vite": "^8.2.0",
+    "vitest": "^3.2.7"
   }
 }
