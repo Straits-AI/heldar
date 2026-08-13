@@ -710,11 +710,14 @@ dependencies = [
  "heldar-search",
  "heldar-wasm",
  "reqwest",
+ "serde_json",
  "sqlx",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]

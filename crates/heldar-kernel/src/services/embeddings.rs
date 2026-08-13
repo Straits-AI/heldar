@@ -242,7 +242,19 @@ pub async fn ingest_batch(
             for (name, bytes) in thumbs {
                 if let Err(e) = tokio::fs::write(st.cfg.snapshots_dir.join(&name), &bytes).await {
                     tracing::warn!(file = %name, error = %e, "embeddings: failed to write crop thumb");
+                    continue;
                 }
+                // A crop thumb lands FLAT in snapshots_dir (`snapshots/<emb_id>.jpg`) next to the
+                // camera-partitioned scheduler output, so its path names no camera. Attribute it, or
+                // `/media/snapshots/<emb_id>.jpg` is unscopable and a camera-scoped credential reads
+                // every camera's crops. Only written for a thumb that actually reached the disk.
+                crate::services::media_scope::attribute(
+                    &st.pool,
+                    &format!("snapshots/{name}"),
+                    &[camera_id.to_string()],
+                    crate::services::media_scope::KIND_EMBED_THUMB,
+                )
+                .await;
             }
         }
     }
@@ -804,6 +816,41 @@ pub async fn prune_queries(pool: &SqlitePool) -> AppResult<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A crop thumb is written FLAT (`snapshots/<emb_id>.jpg`) into the same directory the snapshot
+    /// scheduler partitions by camera. Three things must agree or a scoped credential silently 403s
+    /// on its own camera's crops: the file the ingest writes, the `evidence_path` stored on the row
+    /// (which migration 0013 backfills from, stripping the leading `/media/`), and the key the media
+    /// guard derives from a request for that URL.
+    #[test]
+    fn a_crop_thumb_is_a_flat_artifact_whose_key_the_guard_agrees_on() {
+        let id = "emb_deadbeef";
+        let name = format!("{id}.jpg");
+        let stored_evidence_path = format!("/media/snapshots/{id}.jpg"); // written at ingest
+        let written_key = format!("snapshots/{name}"); // what `attribute` records
+                                                       // The backfill's substr(evidence_path, 8) strips exactly "/media/" (7 chars, 1-indexed).
+        assert_eq!(&stored_evidence_path[7..], written_key);
+        assert_eq!(
+            crate::services::media_scope::artifact_key(&stored_evidence_path).as_deref(),
+            Some(written_key.as_str())
+        );
+        // A single-segment snapshots path is a flat ARTIFACT; the scheduler's camera-partitioned
+        // output beneath it stays resolvable by prefix and needs no row.
+        assert_eq!(
+            crate::services::media_scope::requirement(&stored_evidence_path),
+            Some((
+                crate::auth::Cap::VideoPlayback,
+                crate::services::media_scope::MediaKind::Artifact
+            ))
+        );
+        assert_eq!(
+            crate::services::media_scope::requirement("/media/snapshots/cam_a/1700000000.jpg"),
+            Some((
+                crate::auth::Cap::VideoPlayback,
+                crate::services::media_scope::MediaKind::Partitioned
+            ))
+        );
+    }
 
     #[test]
     fn vec_blob_roundtrip() {

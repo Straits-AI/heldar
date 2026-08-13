@@ -17,10 +17,9 @@ use crate::auth::{self, Cap, Principal, PrincipalKind};
 use crate::config::EnforcementTier;
 use crate::error::{AppError, AppResult};
 use crate::models::{AiIngest, AiTask, AiTaskCreate, AiTaskUpdate, Detection, Provenance};
-use crate::routes::cameras::load_camera;
 use crate::services::sampler::SamplerInfo;
 use crate::services::{ai_leases, frame_ticket};
-use crate::state::AppState;
+use crate::state::{camera_scope_filter, AppState, CameraOwned};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -80,7 +79,9 @@ async fn list_camera_tasks(
     principal: Principal,
 ) -> AppResult<Json<Vec<AiTask>>> {
     principal.require_cap(Cap::AiTasks, "view AI tasks")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    // `camera_for`, not the raw loader: scope BEFORE existence, so a camera this credential does not
+    // hold answers 403 whether or not it is on the box.
+    let _ = st.camera_for(&principal, &id).await?;
     let tasks = sqlx::query_as::<_, AiTask>(
         "SELECT * FROM ai_tasks WHERE camera_id = ? ORDER BY created_at ASC",
     )
@@ -97,7 +98,9 @@ async fn create_task(
     Json(body): Json<AiTaskCreate>,
 ) -> AppResult<(StatusCode, Json<AiTask>)> {
     principal.require(principal.can_manage_registry(), "create AI tasks")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    // Scope first: creating a task here spends decode budget on the camera and enrolls it with the
+    // sampler, so an out-of-scope camera must be refused before anything is written.
+    let _ = st.camera_for(&principal, &id).await?;
     if body.task_type.trim().is_empty() {
         return Err(AppError::BadRequest("`task_type` is required".into()));
     }
@@ -172,6 +175,12 @@ async fn update_task(
     Json(body): Json<AiTaskUpdate>,
 ) -> AppResult<Json<AiTask>> {
     principal.require(principal.can_manage_registry(), "update AI tasks")?;
+    // Resolve the OWNING camera before the row is disclosed. A task addressed by its own id cannot use
+    // `camera_for` (there is no camera id in the path yet), and `require_camera(&cur.camera_id, …)`
+    // would answer 404 for a missing task and 403 for another camera's — an id-space oracle.
+    let _ = st
+        .resource_camera(&principal, CameraOwned::AiTask, &task_id, "update AI tasks")
+        .await?;
     let cur = sqlx::query_as::<_, AiTask>("SELECT * FROM ai_tasks WHERE id = ?")
         .bind(&task_id)
         .fetch_optional(&st.pool)
@@ -224,6 +233,11 @@ async fn delete_task(
     principal: Principal,
 ) -> AppResult<StatusCode> {
     principal.require(principal.can_manage_registry(), "delete AI tasks")?;
+    // Before the DELETE, so the 204-vs-404 shape below can no longer be probed for another camera's
+    // task ids (deleting one is a targeted perception denial, and it also reconciles the sampler).
+    let _ = st
+        .resource_camera(&principal, CameraOwned::AiTask, &task_id, "delete AI tasks")
+        .await?;
     let res = sqlx::query("DELETE FROM ai_tasks WHERE id = ?")
         .bind(&task_id)
         .execute(&st.pool)
@@ -287,13 +301,29 @@ async fn list_all_tasks(
     // integration API key). When auth is disabled the principal is the synthetic system admin.
     principal.require_cap(Cap::AiTasks, "discover AI tasks")?;
     // Stable order (by id) so every worker sees the same task sequence and the modulo shard agrees.
-    let tasks = sqlx::query_as::<_, AiTask>(
+    //
+    // The scope filter is `None` for every unscoped credential (every human role, every key minted
+    // without a camera list), so this is byte-identical to the previous query for them. A camera-scoped
+    // credential sees only its own cameras' tasks — otherwise this route hands out the whole roster,
+    // which is the input every camera-keyed route needs.
+    let scope = camera_scope_filter(&principal, "t.camera_id");
+    let mut sql = String::from(
         "SELECT t.* FROM ai_tasks t JOIN cameras c ON c.id = t.camera_id
-         WHERE t.enabled = 1 AND c.enabled = 1
-         ORDER BY t.id ASC",
-    )
-    .fetch_all(&st.pool)
-    .await?;
+         WHERE t.enabled = 1 AND c.enabled = 1",
+    );
+    if let Some((pred, _)) = &scope {
+        sql.push_str(pred);
+    }
+    sql.push_str(" ORDER BY t.id ASC");
+    let mut query = sqlx::query_as::<_, AiTask>(&sql);
+    if let Some((_, binds)) = &scope {
+        // Bind from the RETURNED vector, never from `camera_scope()`: the empty-allowlist arm is
+        // `" AND 0"` with zero binds, and iterating the scope instead would desync the parameters.
+        for b in binds {
+            query = query.bind(b);
+        }
+    }
+    let tasks = query.fetch_all(&st.pool).await?;
 
     // Multi-worker sharding: an identified worker heartbeats itself, stale workers are pruned, and this
     // worker gets only its slice of the tasks. No worker_id → return everything (backward-compatible in
@@ -470,7 +500,12 @@ async fn sampler_status(
     principal: Principal,
 ) -> AppResult<Json<Vec<SamplerInfo>>> {
     principal.require_cap(Cap::AiTasks, "view sampler status")?;
-    Ok(Json(st.sampler.statuses().await))
+    // `SamplerInfo` leads with `camera_id`, so this collection is a camera roster in disguise. Not a
+    // SQL list — the statuses come from the in-process sampler — so it is post-filtered. `camera_allowed`
+    // is `true` for every unscoped credential, making this a no-op retain for them.
+    let mut infos = st.sampler.statuses().await;
+    infos.retain(|s| principal.camera_allowed(&s.camera_id));
+    Ok(Json(infos))
 }
 
 #[derive(Debug, Deserialize)]
@@ -582,7 +617,7 @@ async fn list_detections(
     Query(q): Query<DetectionQuery>,
 ) -> AppResult<Json<Vec<Detection>>> {
     principal.require_cap(Cap::EventsRead, "read detections")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    let _ = st.camera_for(&principal, &id).await?;
     let limit = q.limit.unwrap_or(200).clamp(1, 5000);
     let from = parse_opt_ts(&q.from, "from")?;
     let to = parse_opt_ts(&q.to, "to")?;
@@ -1648,5 +1683,183 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(err, AppError::Unauthorized(_)), "got {err:?}");
+    }
+
+    // ---- camera scope ---------------------------------------------------------------------------
+
+    fn scoped(cameras: &[&str]) -> Principal {
+        let set: std::collections::HashSet<String> =
+            cameras.iter().map(|c| c.to_string()).collect();
+        Principal {
+            scope: crate::auth::Scope::Cameras(std::sync::Arc::new(set)),
+            ..Principal::system_admin()
+        }
+    }
+
+    async fn seed_task(pool: &sqlx::SqlitePool, camera_id: &str, task_id: &str) {
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO cameras (id, name, enabled, created_at, updated_at) VALUES (?,?,1,?,?)",
+        )
+        .bind(camera_id)
+        .bind(camera_id)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ai_tasks (id, camera_id, task_type, enabled, stream_profile, fps, width,
+                                   config, created_at, updated_at)
+             VALUES (?,?,'detection',1,'sub',2.0,640,'{}',?,?)",
+        )
+        .bind(task_id)
+        .bind(camera_id)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// `GET|POST /api/v1/cameras/{id}/ai-tasks` used the RAW `load_camera`, so a scoped key could read
+    /// and create tasks on any camera. They now go through `camera_for` like every other camera path.
+    #[tokio::test]
+    async fn camera_keyed_ai_task_routes_are_scoped() {
+        let st = test_state().await;
+        seed_task(&st.pool, "cam_a", "ai_a").await;
+        seed_task(&st.pool, "cam_sentinel_b", "ai_b").await;
+        let p = scoped(&["cam_a"]);
+
+        assert!(matches!(
+            list_camera_tasks(State(st.clone()), Path("cam_sentinel_b".into()), p.clone())
+                .await
+                .unwrap_err(),
+            AppError::Forbidden(_)
+        ));
+        assert!(matches!(
+            list_detections(
+                State(st.clone()),
+                p.clone(),
+                Path("cam_sentinel_b".into()),
+                Query(DetectionQuery {
+                    from: None,
+                    to: None,
+                    label: None,
+                    limit: None
+                }),
+            )
+            .await
+            .unwrap_err(),
+            AppError::Forbidden(_)
+        ));
+        let create = AiTaskCreate {
+            task_type: "detection".into(),
+            stream_profile: Some("main".into()),
+            fps: None,
+            width: None,
+            config: None,
+            enabled: Some(true),
+        };
+        assert!(matches!(
+            create_task(
+                State(st.clone()),
+                Path("cam_sentinel_b".into()),
+                p.clone(),
+                Json(create),
+            )
+            .await
+            .unwrap_err(),
+            AppError::Forbidden(_)
+        ));
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM ai_tasks WHERE camera_id = ?")
+            .bind("cam_sentinel_b")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "no task was created on the out-of-scope camera");
+
+        // No over-blocking on its own camera.
+        assert!(
+            list_camera_tasks(State(st.clone()), Path("cam_a".into()), p)
+                .await
+                .is_ok()
+        );
+    }
+
+    /// PATCH/DELETE `/api/v1/ai-tasks/{task_id}` are addressed by task id: refuse before the row is
+    /// disclosed, and refuse a missing id identically so the task id space cannot be enumerated.
+    #[tokio::test]
+    async fn task_id_mutations_are_scoped_and_are_not_an_existence_oracle() {
+        let st = test_state().await;
+        seed_task(&st.pool, "cam_a", "ai_a").await;
+        seed_task(&st.pool, "cam_sentinel_b", "ai_b").await;
+        let p = scoped(&["cam_a"]);
+
+        let out_of_scope = delete_task(State(st.clone()), Path("ai_b".into()), p.clone())
+            .await
+            .unwrap_err();
+        let nonexistent = delete_task(State(st.clone()), Path("ai_zzz".into()), p.clone())
+            .await
+            .unwrap_err();
+        assert!(matches!(out_of_scope, AppError::Forbidden(_)));
+        assert_eq!(out_of_scope.to_string(), nonexistent.to_string());
+        assert!(!out_of_scope.to_string().contains("cam_sentinel_b"));
+
+        let disable: AiTaskUpdate = serde_json::from_value(json!({ "enabled": false })).unwrap();
+        assert!(matches!(
+            update_task(State(st.clone()), Path("ai_b".into()), p, Json(disable))
+                .await
+                .unwrap_err(),
+            AppError::Forbidden(_)
+        ));
+        let enabled: i64 = sqlx::query_scalar("SELECT enabled FROM ai_tasks WHERE id = 'ai_b'")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap();
+        assert_eq!(enabled, 1, "another camera's perception is still running");
+
+        // Unscoped keeps the pre-existing 404 text.
+        match delete_task(
+            State(st.clone()),
+            Path("ai_zzz".into()),
+            Principal::system_admin(),
+        )
+        .await
+        .unwrap_err()
+        {
+            AppError::NotFound(m) => assert_eq!(m, "ai task ai_zzz not found"),
+            other => panic!("expected the pre-existing 404, got {other:?}"),
+        }
+    }
+
+    /// `GET /api/v1/ai/tasks` is the worker-discovery roster: fleet-wide for an unscoped credential,
+    /// confined for a scoped one. This is the route that otherwise hands out every camera id on the box.
+    #[tokio::test]
+    async fn worker_discovery_is_confined_to_the_credentials_cameras() {
+        let st = test_state().await;
+        seed_task(&st.pool, "cam_a", "ai_a").await;
+        seed_task(&st.pool, "cam_sentinel_b", "ai_b").await;
+        let q = || Query(TasksQuery { worker_id: None });
+
+        let Json(mine) = list_all_tasks(State(st.clone()), q(), scoped(&["cam_a"]))
+            .await
+            .unwrap();
+        assert_eq!(mine.len(), 1);
+        assert_eq!(mine[0].camera_id, "cam_a");
+        let body = serde_json::to_string(&mine).unwrap();
+        assert!(!body.contains("cam_sentinel_b"), "{body}");
+
+        // An empty scope selects nothing rather than everything.
+        let Json(none) = list_all_tasks(State(st.clone()), q(), scoped(&[]))
+            .await
+            .unwrap();
+        assert!(none.is_empty());
+
+        // Unscoped: unchanged, the whole fleet.
+        let Json(all) = list_all_tasks(State(st.clone()), q(), Principal::system_admin())
+            .await
+            .unwrap();
+        assert_eq!(all.len(), 2);
     }
 }

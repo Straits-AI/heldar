@@ -47,6 +47,10 @@ async fn camera_status(
     Path(id): Path<String>,
 ) -> AppResult<Json<CameraStatus>> {
     principal.require_cap(Cap::CameraRead, "view camera health")?;
+    // Scope BEFORE the status row is read. Health leaks live operational state — recorder state,
+    // last_segment_at, reconnect_count, fps, bitrate, last_error — which is a per-camera activity
+    // feed, and answering 404 for an out-of-scope camera would also disclose whether it exists.
+    st.camera_scope_check(&principal, &id)?;
     let mut row =
         sqlx::query_as::<_, CameraStatus>("SELECT * FROM camera_status WHERE camera_id = ?")
             .bind(&id)

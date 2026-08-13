@@ -14,6 +14,7 @@ use serde_json::json;
 
 use crate::auth::{self, Cap, Principal};
 use crate::error::{AppError, AppResult};
+use crate::services::media_scope;
 use crate::services::playback_session::{self, PlaybackSession};
 use crate::state::AppState;
 use crate::util;
@@ -44,6 +45,10 @@ async fn create_session(
 ) -> AppResult<Json<PlaybackSession>> {
     // viewer+: any authenticated principal (the extractor enforces auth when it is enabled).
     principal.require_cap(Cap::VideoPlayback, "create playback sessions")?;
+    // Camera scope before any footage is touched: creating a session read-locks and transcodes this
+    // camera's segments over an arbitrary window, so capability alone let a scoped credential build a
+    // segment-spanning VOD of a camera it does not hold.
+    st.camera_scope_check(&principal, &id)?;
     let from = util::parse_rfc3339(&req.from)
         .ok_or_else(|| AppError::BadRequest("invalid `from` timestamp".into()))?;
     let to = util::parse_rfc3339(&req.to)
@@ -68,6 +73,27 @@ async fn delete_session(
 ) -> AppResult<StatusCode> {
     // viewer+: any authenticated principal.
     principal.require_cap(Cap::VideoPlayback, "delete playback sessions")?;
+    // A session id names no camera, so scope comes from the session's media attribution — resolved
+    // BEFORE `delete_session` probes the directory, so a session belonging to another camera and a
+    // session that never existed answer with the identical 403 body. Deleting someone else's session
+    // is not a nuisance: it releases the evidence read-locks that session held on their segments.
+    // An unattributed session (no `media_artifacts` row) is refused for a scoped caller, which is the
+    // fail-closed answer; unscoped credentials skip this entirely and behave exactly as before.
+    if principal.camera_scope().is_some() {
+        let key = format!("playback/{session_id}");
+        let held = match media_scope::owners(&st.pool, &key).await {
+            media_scope::Owners::Cameras(cams) => {
+                !cams.is_empty() && cams.iter().all(|c| principal.camera_allowed(c))
+            }
+            media_scope::Owners::Unattributed => false,
+        };
+        if !held {
+            return Err(crate::state::scope_denied_owner(
+                "playback session",
+                "delete playback sessions",
+            ));
+        }
+    }
     playback_session::delete_session(&st, &session_id).await?;
     auth::audit(
         &st.pool,

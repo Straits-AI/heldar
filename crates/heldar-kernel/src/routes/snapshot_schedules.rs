@@ -18,7 +18,7 @@ use crate::error::{AppError, AppResult};
 use crate::models::{
     PersistedSnapshot, SnapshotSchedule, SnapshotScheduleCreate, SnapshotScheduleUpdate,
 };
-use crate::state::AppState;
+use crate::state::{AppState, CameraOwned};
 use crate::util;
 
 pub fn router() -> Router<AppState> {
@@ -107,6 +107,16 @@ async fn update_schedule(
     Json(body): Json<SnapshotScheduleUpdate>,
 ) -> AppResult<Json<SnapshotSchedule>> {
     principal.require(principal.can_manage_registry(), "update snapshot schedules")?;
+    // Owning camera before the row is disclosed — disabling this schedule silences another camera's
+    // scheduled captures.
+    let _ = st
+        .resource_camera(
+            &principal,
+            CameraOwned::SnapshotSchedule,
+            &schedule_id,
+            "update snapshot schedules",
+        )
+        .await?;
     let cur =
         sqlx::query_as::<_, SnapshotSchedule>("SELECT * FROM snapshot_schedules WHERE id = ?")
             .bind(&schedule_id)
@@ -152,6 +162,15 @@ async fn delete_schedule(
     principal: Principal,
 ) -> AppResult<StatusCode> {
     principal.require(principal.can_manage_registry(), "delete snapshot schedules")?;
+    // Before the DELETE, so the 204-vs-404 shape below stops being an id-space oracle.
+    let _ = st
+        .resource_camera(
+            &principal,
+            CameraOwned::SnapshotSchedule,
+            &schedule_id,
+            "delete snapshot schedules",
+        )
+        .await?;
     let res = sqlx::query("DELETE FROM snapshot_schedules WHERE id = ?")
         .bind(&schedule_id)
         .execute(&st.pool)
@@ -245,4 +264,140 @@ async fn list_snapshots(
 
     let views = rows.into_iter().map(SnapshotView::new).collect();
     Ok(Json(views))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::Scope;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    async fn test_state() -> AppState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let cfg = Arc::new(crate::config::Config::from_env());
+        AppState {
+            recorder: crate::services::recorder::RecorderManager::new(pool.clone(), cfg.clone()),
+            sampler: crate::services::sampler::SamplerManager::new(pool.clone(), cfg.clone()),
+            live: crate::services::live_publisher::LivePublisherManager::new(
+                pool.clone(),
+                cfg.clone(),
+                reqwest::Client::new(),
+            ),
+            mirror: None,
+            consumers: Arc::new(Vec::new()),
+            modules: Arc::new(Vec::new()),
+            catalog: Arc::new(crate::services::registry::CatalogService::new(&cfg)),
+            http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
+            started_at: Utc::now(),
+            pool,
+            cfg,
+        }
+    }
+
+    fn scoped(cameras: &[&str]) -> Principal {
+        let set: HashSet<String> = cameras.iter().map(|c| c.to_string()).collect();
+        Principal {
+            scope: Scope::Cameras(Arc::new(set)),
+            ..Principal::system_admin()
+        }
+    }
+
+    async fn seed(pool: &sqlx::SqlitePool, camera_id: &str, schedule_id: &str) {
+        let now = Utc::now();
+        sqlx::query("INSERT INTO cameras (id, name, created_at, updated_at) VALUES (?,?,?,?)")
+            .bind(camera_id)
+            .bind(camera_id)
+            .bind(now)
+            .bind(now)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO snapshot_schedules
+               (id, camera_id, interval_seconds, enabled, last_fired_at, created_at, updated_at)
+             VALUES (?,?,300,1,NULL,?,?)",
+        )
+        .bind(schedule_id)
+        .bind(camera_id)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_scoped_key_cannot_touch_another_cameras_snapshot_schedule() {
+        let st = test_state().await;
+        seed(&st.pool, "cam_a", "snsch_a").await;
+        seed(&st.pool, "cam_sentinel_b", "snsch_b").await;
+        let p = scoped(&["cam_a"]);
+
+        let out_of_scope = delete_schedule(State(st.clone()), Path("snsch_b".into()), p.clone())
+            .await
+            .unwrap_err();
+        let nonexistent = delete_schedule(State(st.clone()), Path("snsch_zzz".into()), p.clone())
+            .await
+            .unwrap_err();
+        assert!(matches!(out_of_scope, AppError::Forbidden(_)));
+        assert_eq!(out_of_scope.to_string(), nonexistent.to_string());
+        assert!(!out_of_scope.to_string().contains("cam_sentinel_b"));
+
+        let update: SnapshotScheduleUpdate =
+            serde_json::from_value(json!({ "enabled": false })).unwrap();
+        assert!(matches!(
+            update_schedule(
+                State(st.clone()),
+                Path("snsch_b".into()),
+                p.clone(),
+                Json(update),
+            )
+            .await
+            .unwrap_err(),
+            AppError::Forbidden(_)
+        ));
+
+        // Still there, still firing.
+        let enabled: i64 =
+            sqlx::query_scalar("SELECT enabled FROM snapshot_schedules WHERE id = 'snsch_b'")
+                .fetch_one(&st.pool)
+                .await
+                .unwrap();
+        assert_eq!(enabled, 1);
+
+        // No over-blocking on its own camera.
+        assert_eq!(
+            delete_schedule(State(st.clone()), Path("snsch_a".into()), p)
+                .await
+                .unwrap(),
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unscoped_principal_is_unaffected() {
+        let st = test_state().await;
+        seed(&st.pool, "cam_sentinel_b", "snsch_b").await;
+        let admin = Principal::system_admin();
+        match delete_schedule(State(st.clone()), Path("snsch_zzz".into()), admin.clone())
+            .await
+            .unwrap_err()
+        {
+            AppError::NotFound(m) => assert_eq!(m, "snapshot schedule snsch_zzz not found"),
+            other => panic!("expected the pre-existing 404, got {other:?}"),
+        }
+        assert_eq!(
+            delete_schedule(State(st.clone()), Path("snsch_b".into()), admin)
+                .await
+                .unwrap(),
+            StatusCode::NO_CONTENT
+        );
+    }
 }

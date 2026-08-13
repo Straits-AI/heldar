@@ -24,6 +24,7 @@ use crate::models::{
 };
 use crate::services::backup;
 use crate::state::AppState;
+use crate::state::{camera_ids_from_json, confine_camera_ids};
 use crate::util;
 use chrono::{DateTime, Utc};
 
@@ -132,6 +133,12 @@ async fn create_destination(
         principal.can_manage_registry(),
         "create backup destinations",
     )?;
+    // A backup destination is an OFF-BOX EGRESS CHANNEL for recorded footage, and it names no camera
+    // to scope by. A camera-scoped credential that could create one — then attach a policy to it —
+    // would exfiltrate footage past every per-route check in this repair, because the bytes leave via
+    // rclone rather than over HTTP, so the /media guard never sees them. Refusing outright is the only
+    // containment available. A no-op for unscoped credentials, which is every human role.
+    crate::routes::cameras::require_fleet_scope(&principal, "create backup destinations")?;
     let name = body.name.trim();
     if name.is_empty() {
         return Err(AppError::BadRequest("`name` is required".into()));
@@ -322,12 +329,11 @@ async fn create_policy(
     }
     // The destination must exist (FK would also reject, but a clean 404 is friendlier).
     let _ = load_destination(&st.pool, &body.destination_id).await?;
-    let camera_ids = body.camera_ids.unwrap_or_else(|| json!([]));
-    if !camera_ids.is_array() {
-        return Err(AppError::BadRequest(
-            "`camera_ids` must be a JSON array of camera ids".into(),
-        ));
-    }
+    // Confine the selection to what this credential holds. An EMPTY list means "every camera on the
+    // box" to `backup::resolve_segments`, so for a camera-scoped caller it must expand to its own
+    // scope rather than the fleet — otherwise the emptiest possible request is the most privileged one.
+    let requested = camera_ids_from_json(&body.camera_ids.unwrap_or_else(|| json!([])))?;
+    let camera_ids = json!(confine_camera_ids(&principal, &requested)?);
     let incident_lock_only = body.incident_lock_only.unwrap_or(false);
     let schedule_interval_s = body.schedule_interval_s.unwrap_or(86_400).max(60);
     let lookback_hours = body.lookback_hours.unwrap_or(0).max(0);
@@ -575,7 +581,8 @@ async fn archive_export(
             return Err(AppError::BadRequest("`from` must be <= `to`".into()));
         }
     }
-    let camera_ids = body.camera_ids;
+    // Same confinement as a policy: an empty list selects the whole box downstream.
+    let camera_ids = confine_camera_ids(&principal, &body.camera_ids)?;
     let incident_lock_only = body.incident_lock_only.unwrap_or(false);
     let trim = body.trim.unwrap_or(false);
     let job =

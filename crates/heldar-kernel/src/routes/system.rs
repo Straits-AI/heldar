@@ -420,6 +420,38 @@ struct SystemInfo {
     last_disk_alert_at: Option<DateTime<Utc>>,
     /// Active live-preview transcode engine (software | vaapi | nvenc).
     live_transcode_engine: String,
+    /// Resolved enforcement posture for the two staged security tiers. Reported rather than inferred:
+    /// `ingest_provenance` is deliberately NOT promoted by `HELDAR_DEPLOYMENT_MODE` (see
+    /// `Config::from_env`), so an operator who hardened the deployment mode and assumed both tiers
+    /// moved would otherwise have no way to see that ticketless AI ingest is still accepted.
+    enforcement: EnforcementPosture,
+}
+
+/// The effective value of each staged enforcement tier, plus whether the deployment mode had any say.
+#[derive(Debug, Serialize)]
+struct EnforcementPosture {
+    /// `off` | `warn` | `enforce` — capability enforcement for credentials with no explicit grant.
+    machine_auth: &'static str,
+    /// `off` | `warn` | `enforce` — frame-ticket requirement on the AI ingest path.
+    ingest_provenance: &'static str,
+    /// True when `ingest_provenance` is `enforce`. Named positively so a dashboard does not have to
+    /// string-compare a tier to decide whether to show the "ticketless ingest is accepted" notice.
+    frame_tickets_required: bool,
+    /// `HELDAR_DEPLOYMENT_MODE` as resolved (empty = unset).
+    deployment_mode: String,
+    /// Whether the deployment mode promotes a tier at all. Only `machine_auth` is ever promoted;
+    /// `ingest_provenance` must be set explicitly because it is a client-protocol requirement.
+    machine_auth_promoted_by_mode: bool,
+}
+
+fn enforcement_posture(st: &AppState) -> EnforcementPosture {
+    EnforcementPosture {
+        machine_auth: st.cfg.machine_auth.as_str(),
+        ingest_provenance: st.cfg.ingest_provenance.as_str(),
+        frame_tickets_required: st.cfg.ingest_provenance == crate::config::EnforcementTier::Enforce,
+        deployment_mode: st.cfg.deployment_mode.clone(),
+        machine_auth_promoted_by_mode: st.cfg.deployment_mode_is_production(),
+    }
 }
 
 /// Health of the WebRTC remote-dashboard relay dial-out (see `services::webrtc_rendezvous`).
@@ -505,5 +537,6 @@ async fn system_info(
         disk_health_ok: recent_disk_alerts == 0,
         last_disk_alert_at,
         live_transcode_engine: crate::services::mediamtx::effective_engine(&st.pool, &st.cfg).await,
+        enforcement: enforcement_posture(&st),
     }))
 }

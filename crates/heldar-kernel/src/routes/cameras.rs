@@ -68,6 +68,29 @@ pub(crate) async fn load_camera(pool: &SqlitePool, id: &str) -> AppResult<Camera
         .ok_or_else(|| AppError::NotFound(format!("camera {id} not found")))
 }
 
+/// Refuse a BOX-LEVEL action to a camera-scoped credential.
+///
+/// The camera-scope loaders ([`AppState::camera_for`], `resource_camera`, `camera_scope_filter`)
+/// all answer the question "may this credential touch camera X". Some actions have no camera to ask
+/// about: a LAN sweep that enrolls whatever it finds, a WS-Discovery probe of the whole segment.
+/// A camera-scoped credential can never legitimately reach those — by construction the devices they
+/// enroll are not in its allowlist, and their results disclose the existence of cameras outside it
+/// (network discovery flags each address `already_registered`, which is the fleet roster in address
+/// space). Refusing outright is the only containment available, exactly as for an off-box backup
+/// destination.
+///
+/// Unscoped credentials — every human role, and every key minted without a camera list — are
+/// unaffected, and with auth disabled the principal is the unscoped system admin, so this is a
+/// structural no-op on the LAN default rather than a promise.
+pub(crate) fn require_fleet_scope(principal: &Principal, action: &str) -> AppResult<()> {
+    if principal.camera_scope().is_some() {
+        return Err(AppError::Forbidden(format!(
+            "credential is scoped to specific cameras and cannot {action}"
+        )));
+    }
+    Ok(())
+}
+
 async fn list_cameras(
     State(st): State<AppState>,
     principal: Principal,
@@ -112,6 +135,15 @@ async fn create_camera(
     if body.name.trim().is_empty() {
         return Err(AppError::BadRequest("`name` is required".into()));
     }
+    // A camera-scoped credential may only mint a camera it ALREADY holds. Without this a
+    // `scope_kind: cameras` key carrying RegistryManage could enroll cameras outside its allowlist —
+    // spawning a recorder, a live publisher and a capability probe for a camera it does not hold, and
+    // then failing the read-back at the end of this handler, leaving an orphan behind.
+    //
+    // Placed BEFORE the existence probe on purpose: the 409 below distinguishes "id taken" from "id
+    // free", so checking scope afterwards would turn camera creation into an id-space oracle. The id
+    // is the caller's own input, so naming it in the refusal discloses nothing.
+    principal.require_camera(&id, "create cameras")?;
 
     let exists: Option<(String,)> = sqlx::query_as("SELECT id FROM cameras WHERE id = ?")
         .bind(&id)
@@ -668,6 +700,159 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(still, 1, "a refused delete must leave the camera intact");
+    }
+
+    fn scoped(cameras: &[&str]) -> crate::auth::Principal {
+        let set: std::collections::HashSet<String> =
+            cameras.iter().map(|c| c.to_string()).collect();
+        crate::auth::Principal {
+            scope: crate::auth::Scope::Cameras(Arc::new(set)),
+            ..crate::auth::Principal::system_admin()
+        }
+    }
+
+    fn create_body(id: &str) -> crate::models::CameraCreate {
+        serde_json::from_value(serde_json::json!({ "id": id, "name": id })).unwrap()
+    }
+
+    /// A `scope_kind: cameras` key carrying RegistryManage could enroll cameras OUTSIDE its
+    /// allowlist: the insert succeeded, the recorder / live publisher / capability probe all started
+    /// for a camera the caller does not hold, and only the read-back at the end of the handler
+    /// failed — leaving an orphan behind. The refusal must come first.
+    #[tokio::test]
+    async fn a_scoped_key_cannot_enroll_a_camera_outside_its_scope() {
+        let st = test_state(false).await;
+        let p = scoped(&["cam_a"]);
+
+        let err = super::create_camera(
+            axum::extract::State(st.clone()),
+            p.clone(),
+            axum::Json(create_body("cam_sentinel_b")),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, crate::error::AppError::Forbidden(_)));
+        // Nothing was created, and no recorder/publisher was reconciled for it.
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cameras WHERE id = 'cam_sentinel_b'")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 0, "a refused create must not be a partial create");
+
+        // No over-blocking: a camera the credential DOES hold still enrolls.
+        let (status, _) = super::create_camera(
+            axum::extract::State(st.clone()),
+            p,
+            axum::Json(create_body("cam_a")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    /// The scope check sits BEFORE the id-collision probe, so `create` cannot be used to ask "does
+    /// this camera id already exist" one probe at a time: a taken out-of-scope id and a free
+    /// out-of-scope id must produce the same refusal, not 409-vs-403.
+    #[tokio::test]
+    async fn camera_create_is_not_an_id_space_oracle() {
+        let st = test_state(false).await;
+        seed_camera_with_segment(&st, "cam_sentinel_b", false).await;
+        let p = scoped(&["cam_a"]);
+
+        let taken = super::create_camera(
+            axum::extract::State(st.clone()),
+            p.clone(),
+            axum::Json(create_body("cam_sentinel_b")),
+        )
+        .await
+        .unwrap_err();
+        let free = super::create_camera(
+            axum::extract::State(st.clone()),
+            p,
+            axum::Json(create_body("cam_zzz")),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(taken, crate::error::AppError::Forbidden(_)));
+        assert!(matches!(free, crate::error::AppError::Forbidden(_)));
+        // Same SHAPE; the messages differ only by the caller's own input id, which it already knows.
+        assert!(taken.to_string().contains("cam_sentinel_b"));
+        assert!(free.to_string().contains("cam_zzz"));
+    }
+
+    /// CONSTRAINT 2: an unscoped credential is unaffected — it still enrolls anything, and a
+    /// duplicate id is still the pre-existing 409.
+    #[tokio::test]
+    async fn an_unscoped_credential_still_enrolls_any_camera() {
+        let st = test_state(false).await;
+        let admin = crate::auth::Principal::system_admin();
+        let (status, _) = super::create_camera(
+            axum::extract::State(st.clone()),
+            admin.clone(),
+            axum::Json(create_body("cam_sentinel_b")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(status, StatusCode::CREATED);
+        let dup = super::create_camera(
+            axum::extract::State(st.clone()),
+            admin,
+            axum::Json(create_body("cam_sentinel_b")),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(dup, crate::error::AppError::Conflict(_)),
+            "{dup:?}"
+        );
+    }
+
+    /// `require_fleet_scope` is the containment for actions that have NO camera to scope by. It must
+    /// be a discriminant compare that is a no-op for every unscoped principal — including the system
+    /// admin the auth-disabled LAN default runs as.
+    #[test]
+    fn require_fleet_scope_is_a_no_op_for_an_unscoped_principal() {
+        assert!(
+            super::require_fleet_scope(&crate::auth::Principal::system_admin(), "scan").is_ok(),
+            "auth-disabled operation must be unchanged"
+        );
+        let err = super::require_fleet_scope(&scoped(&["cam_a"]), "scan").unwrap_err();
+        assert!(matches!(err, crate::error::AppError::Forbidden(_)));
+        // Even an EMPTY camera list is a scope, and is refused rather than read as "unrestricted".
+        assert!(super::require_fleet_scope(&scoped(&[]), "scan").is_err());
+    }
+
+    /// Roster containment for the camera list itself: a scoped credential must not be handed the ids
+    /// of cameras it does not hold, since those ids are the input every camera-keyed route takes.
+    #[tokio::test]
+    async fn the_camera_list_is_confined_to_the_credentials_cameras() {
+        let st = test_state(false).await;
+        seed_camera_with_segment(&st, "cam_a", false).await;
+        sqlx::query("INSERT INTO cameras (id, name, created_at, updated_at) VALUES (?,?,?,?)")
+            .bind("cam_sentinel_b")
+            .bind("B")
+            .bind(chrono::Utc::now())
+            .bind(chrono::Utc::now())
+            .execute(&st.pool)
+            .await
+            .unwrap();
+
+        let scoped_list = super::list_cameras(axum::extract::State(st.clone()), scoped(&["cam_a"]))
+            .await
+            .unwrap()
+            .0;
+        let body = serde_json::to_string(&scoped_list).unwrap();
+        assert!(!body.contains("cam_sentinel_b"), "{body}");
+
+        // ...and the unscoped view is unchanged.
+        let all = super::list_cameras(
+            axum::extract::State(st.clone()),
+            crate::auth::Principal::system_admin(),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(all.len(), 2);
     }
 
     /// THE POSITIVE CONTROL: without a hold the delete still works. Over-correcting into "cameras

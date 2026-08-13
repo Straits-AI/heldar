@@ -150,7 +150,12 @@ pub struct Config {
     pub machine_auth: EnforcementTier,
     /// Frame-ticket requirement on the AI ingest path (`HELDAR_INGEST_PROVENANCE`). `warn` (DEFAULT)
     /// accepts a ticketless batch exactly as today; `enforce` requires a server-issued frame ticket.
-    /// Promoted to `enforce` by `HELDAR_DEPLOYMENT_MODE=production*`. Consumed by Stage B.
+    ///
+    /// **NOT auto-promoted by `HELDAR_DEPLOYMENT_MODE`**, unlike [`Self::machine_auth`] — this is the
+    /// one tier a deployment label must never move, because it is a CLIENT protocol requirement and
+    /// promoting it silently stops all AI ingest on a box that otherwise looks healthy. Only an
+    /// explicit `HELDAR_INGEST_PROVENANCE=enforce` turns it on; see the rationale at the
+    /// `tier_from_env` call site in [`Config::from_env`], and docs/AI-WORKERS.md §5.0.
     pub ingest_provenance: EnforcementTier,
     /// TTL (seconds) of a minted per-frame ingest ticket (`HELDAR_FRAME_TICKET_TTL_SECS`). Long enough
     /// to survive a slow inference pass, short enough that a leaked ticket is worthless. Consumed by
@@ -571,15 +576,28 @@ impl Config {
              HELDAR_MACHINE_AUTH      = {machine_auth}\n\
                  {effect}\n\
              HELDAR_INGEST_PROVENANCE = {ingest_provenance}\n\
-                 frame tickets are {ticket_state} on the AI ingest path\n\
+                 {ticket_state}\n\
              deployment mode          = {mode}\n\
              keys with no explicit capability grant: {legacy}",
             machine_auth = self.machine_auth.as_str(),
             ingest_provenance = self.ingest_provenance.as_str(),
             effect = effect,
+            // State the NON-enforced posture as plainly as the enforced one. An operator who set
+            // HELDAR_DEPLOYMENT_MODE=production reasonably assumes both tiers moved; only
+            // `machine_auth` did, and reading that from the absence of a line is exactly how a box
+            // ends up accepting ticketless ingest while its operator believes otherwise.
             ticket_state = match self.ingest_provenance {
-                EnforcementTier::Enforce => "REQUIRED",
-                _ => "optional (a ticketless batch is accepted, as today)",
+                EnforcementTier::Enforce =>
+                    "ENFORCED — a ticketless ingest batch is rejected (401 frame_ticket_required)",
+                EnforcementTier::Warn =>
+                    "NOT ENFORCED — a ticketless ingest batch is ACCEPTED. Each such credential is \
+                     logged once an hour with what `enforce` would deny. This tier is never \
+                     promoted by HELDAR_DEPLOYMENT_MODE: set HELDAR_INGEST_PROVENANCE=enforce \
+                     explicitly, once that hourly log is empty.",
+                EnforcementTier::Off =>
+                    "NOT ENFORCED and NOT REPORTED — a ticketless ingest batch is ACCEPTED silently. \
+                     This tier is never promoted by HELDAR_DEPLOYMENT_MODE; `warn` at minimum is \
+                     recommended so you can see which credentials are ticketless.",
             },
             mode = if self.deployment_mode.is_empty() {
                 "(unset)"

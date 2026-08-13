@@ -20,6 +20,7 @@ pub mod indexer;
 pub mod live_publisher;
 pub mod live_token;
 pub mod media_jobs;
+pub mod media_scope;
 pub mod mediamtx;
 pub mod metrics;
 pub mod mirror;

@@ -21,7 +21,7 @@ use crate::models::{
 };
 use heldar_kernel::auth::{self, Cap, Principal};
 use heldar_kernel::error::{AppError, AppResult};
-use heldar_kernel::state::AppState;
+use heldar_kernel::state::{camera_scope_filter, scope_denied_owner, AppState};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -62,6 +62,65 @@ pub fn router() -> Router<AppState> {
             axum::routing::put(put_gate_policy).delete(delete_gate_policy),
         )
         .route("/api/v1/entry/gate/open/{camera_id}", post(gate_open))
+}
+
+// ---- Camera scope ---------------------------------------------------------
+//
+// Entry has two kinds of surface. The REGISTRY (vehicles, visitor passes, watchlist) is keyed on
+// plates and people and names no camera at all, so camera scope has nothing to say about it and it is
+// deliberately left alone. The LANE surface — the entry-event feed, the reports built from it, and
+// gate actuation — is camera-keyed, and that is what the helpers below contain.
+//
+// Every helper is a discriminant compare that returns `Ok`/`None`/`true` for `Scope::All`, so every
+// human role, every key minted without a camera list, and the auth-disabled LAN default (whose
+// principal is the unscoped system admin) see no change by construction. None is reachable from a
+// background task: the ANPR consumer and the retention loop hold no `Principal` and keep raw queries.
+
+/// Refuse a BOX-LEVEL action to a camera-scoped credential.
+///
+/// The kernel's equivalent (`routes::cameras::require_fleet_scope`) is `pub(crate)` and so cannot be
+/// called from an app crate; the wording is kept identical on purpose.
+fn require_fleet_scope(principal: &Principal, action: &str) -> AppResult<()> {
+    if principal.camera_scope().is_some() {
+        return Err(AppError::Forbidden(format!(
+            "credential is scoped to specific cameras and cannot {action}"
+        )));
+    }
+    Ok(())
+}
+
+/// Assert camera scope over a resource addressed by its OWN primary key, refusing an out-of-scope
+/// resource BEFORE its existence is disclosed.
+///
+/// This is the app-crate twin of `AppState::resource_camera` (`entry_events` is not one of the
+/// kernel's `CameraOwned` tables, so the kernel loader cannot reach it).
+///
+/// - `Scope::All`: identical to today — the row is looked up and a missing row is the pre-existing
+///   404 with its pre-existing wording. A NULL `camera_id` (a guard-recorded manual check-in, which
+///   never had a lane) is not a refusal.
+/// - `Scope::Cameras`: "another lane's event", "no lane at all" and "does not exist" produce the SAME
+///   [`AppError`] value, byte for byte, so the event id space cannot be enumerated by probing.
+async fn require_event_scope(
+    pool: &sqlx::SqlitePool,
+    principal: &Principal,
+    id: &str,
+    action: &str,
+) -> AppResult<()> {
+    let row: Option<(Option<String>,)> =
+        sqlx::query_as("SELECT camera_id FROM entry_events WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    match &row {
+        Some((Some(cam),)) if principal.camera_allowed(cam) => return Ok(()),
+        // Unscoped: `camera_allowed` is always true above, so we only reach here on a NULL lane.
+        Some(_) if principal.camera_scope().is_none() => return Ok(()),
+        _ => {}
+    }
+    if principal.camera_scope().is_some() {
+        return Err(scope_denied_owner("entry event", action));
+    }
+    Err(AppError::NotFound(format!("entry event {id} not found")))
 }
 
 /// The built entry module UI bundle, embedded at compile time (regenerate with `make module-bundles`
@@ -824,31 +883,41 @@ async fn list_entry_events(
     let from = parse_opt_ts(&q.from, "from")?;
     let to = parse_opt_ts(&q.to, "to")?;
     let plate_norm = q.plate.as_deref().map(normalize_plate);
-    let rows = sqlx::query_as::<_, EntryEvent>(
-        "SELECT * FROM entry_events
+    // The canonical feed carries `camera_id` on every ANPR event, so unfiltered it is the lane roster
+    // indexed by time. `IN (…)` excludes the NULL `camera_id` of a guard-recorded manual check-in,
+    // which is the fail-closed answer for a scoped caller; unscoped callers get no predicate at all.
+    let scope = camera_scope_filter(&principal, "camera_id");
+    let mut sql = "SELECT * FROM entry_events
           WHERE (? IS NULL OR timestamp >= ?)
             AND (? IS NULL OR timestamp <= ?)
             AND (? IS NULL OR plate = ?)
             AND (? IS NULL OR auth_status = ?)
             AND (? IS NULL OR workflow_status = ?)
-            AND (? IS NULL OR event_type = ?)
-          ORDER BY timestamp DESC LIMIT ?",
-    )
-    .bind(from)
-    .bind(from)
-    .bind(to)
-    .bind(to)
-    .bind(&plate_norm)
-    .bind(&plate_norm)
-    .bind(&q.auth_status)
-    .bind(&q.auth_status)
-    .bind(&q.workflow_status)
-    .bind(&q.workflow_status)
-    .bind(&q.event_type)
-    .bind(&q.event_type)
-    .bind(limit)
-    .fetch_all(&st.pool)
-    .await?;
+            AND (? IS NULL OR event_type = ?)"
+        .to_string();
+    if let Some((pred, _)) = &scope {
+        sql.push_str(pred);
+    }
+    sql.push_str(" ORDER BY timestamp DESC LIMIT ?");
+    let mut query = sqlx::query_as::<_, EntryEvent>(&sql)
+        .bind(from)
+        .bind(from)
+        .bind(to)
+        .bind(to)
+        .bind(&plate_norm)
+        .bind(&plate_norm)
+        .bind(&q.auth_status)
+        .bind(&q.auth_status)
+        .bind(&q.workflow_status)
+        .bind(&q.workflow_status)
+        .bind(&q.event_type)
+        .bind(&q.event_type);
+    // Bind from the RETURNED vector, never from `camera_scope()`: the empty-allowlist arm is
+    // `" AND 0"` with ZERO binds, and iterating the scope instead would desync the parameter count.
+    for id in scope.iter().flat_map(|(_, ids)| ids) {
+        query = query.bind(id);
+    }
+    let rows = query.bind(limit).fetch_all(&st.pool).await?;
     Ok(Json(rows))
 }
 
@@ -858,6 +927,9 @@ async fn get_entry_event(
     Path(id): Path<String>,
 ) -> AppResult<Json<EntryEvent>> {
     principal.require_cap(Cap::EventsRead, "view entry events")?;
+    // Before the row is loaded, so the refusal precedes disclosure and a scoped credential cannot
+    // tell "another lane's event" from "no such event".
+    require_event_scope(&st.pool, &principal, &id, "view entry events").await?;
     let ev = sqlx::query_as::<_, EntryEvent>("SELECT * FROM entry_events WHERE id = ?")
         .bind(&id)
         .fetch_optional(&st.pool)
@@ -911,6 +983,9 @@ async fn resolve_event(
     body: ResolveBody,
 ) -> AppResult<Json<EntryEvent>> {
     principal.require(principal.can_operate_gate(), "resolve entry events")?;
+    // A confirm/reject is a durable, attributed judgement on a lane's traffic — scope it before the
+    // row is read, so the pre-existing 404 cannot map the event id space either.
+    require_event_scope(&st.pool, &principal, &id, "resolve entry events").await?;
     let ev = sqlx::query_as::<_, EntryEvent>("SELECT * FROM entry_events WHERE id = ?")
         .bind(&id)
         .fetch_optional(&st.pool)
@@ -989,15 +1064,20 @@ async fn report_entry_log(
     principal.require_cap(Cap::EventsRead, "view reports")?;
     let (from, to) = report_window(&q)?;
     let limit = q.limit.unwrap_or(1000).clamp(1, 10000);
-    let events = sqlx::query_as::<_, EntryEvent>(
-        "SELECT * FROM entry_events WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp DESC LIMIT ?",
-    )
-    .bind(from)
-    .bind(to)
-    .bind(limit)
-    .fetch_all(&st.pool)
-    .await?;
-    let counts = auth_status_counts(&st.pool, from, to).await?;
+    // The daily log is the same rows as the feed, so it gets the same predicate — otherwise the
+    // report is a trivial bypass of `list_entry_events`.
+    let scope = camera_scope_filter(&principal, "camera_id");
+    let mut sql = "SELECT * FROM entry_events WHERE timestamp >= ? AND timestamp < ?".to_string();
+    if let Some((pred, _)) = &scope {
+        sql.push_str(pred);
+    }
+    sql.push_str(" ORDER BY timestamp DESC LIMIT ?");
+    let mut query = sqlx::query_as::<_, EntryEvent>(&sql).bind(from).bind(to);
+    for id in scope.iter().flat_map(|(_, ids)| ids) {
+        query = query.bind(id);
+    }
+    let events = query.bind(limit).fetch_all(&st.pool).await?;
+    let counts = auth_status_counts(&st.pool, &principal, from, to).await?;
     Ok(Json(json!({
         "from": from, "to": to,
         "total": events.len(),
@@ -1016,17 +1096,20 @@ async fn report_exceptions(
     let limit = q.limit.unwrap_or(1000).clamp(1, 10000);
     // Exceptions = anything that is not an automatic clean match: blocked / exception / unmatched,
     // plus any event a guard explicitly rejected.
-    let events = sqlx::query_as::<_, EntryEvent>(
-        "SELECT * FROM entry_events
+    let scope = camera_scope_filter(&principal, "camera_id");
+    let mut sql = "SELECT * FROM entry_events
           WHERE timestamp >= ? AND timestamp < ?
-            AND (auth_status IN ('blocked','exception','unmatched') OR workflow_status = 'rejected')
-          ORDER BY timestamp DESC LIMIT ?",
-    )
-    .bind(from)
-    .bind(to)
-    .bind(limit)
-    .fetch_all(&st.pool)
-    .await?;
+            AND (auth_status IN ('blocked','exception','unmatched') OR workflow_status = 'rejected')"
+        .to_string();
+    if let Some((pred, _)) = &scope {
+        sql.push_str(pred);
+    }
+    sql.push_str(" ORDER BY timestamp DESC LIMIT ?");
+    let mut query = sqlx::query_as::<_, EntryEvent>(&sql).bind(from).bind(to);
+    for id in scope.iter().flat_map(|(_, ids)| ids) {
+        query = query.bind(id);
+    }
+    let events = query.bind(limit).fetch_all(&st.pool).await?;
     Ok(Json(json!({
         "from": from, "to": to,
         "total": events.len(),
@@ -1036,17 +1119,25 @@ async fn report_exceptions(
 
 async fn auth_status_counts(
     pool: &sqlx::SqlitePool,
+    principal: &Principal,
     from: DateTime<Utc>,
     to: DateTime<Utc>,
 ) -> AppResult<Value> {
-    let rows: Vec<(String, i64)> = sqlx::query_as(
-        "SELECT auth_status, COUNT(*) FROM entry_events
-          WHERE timestamp >= ? AND timestamp < ? GROUP BY auth_status",
-    )
-    .bind(from)
-    .bind(to)
-    .fetch_all(pool)
-    .await?;
+    // The aggregate is filtered too: an unfiltered count would report how much traffic the lanes this
+    // credential does NOT hold saw, which is the roster's size and shape without its names.
+    let scope = camera_scope_filter(principal, "camera_id");
+    let mut sql = "SELECT auth_status, COUNT(*) FROM entry_events
+          WHERE timestamp >= ? AND timestamp < ?"
+        .to_string();
+    if let Some((pred, _)) = &scope {
+        sql.push_str(pred);
+    }
+    sql.push_str(" GROUP BY auth_status");
+    let mut query = sqlx::query_as::<_, (String, i64)>(&sql).bind(from).bind(to);
+    for id in scope.iter().flat_map(|(_, ids)| ids) {
+        query = query.bind(id);
+    }
+    let rows: Vec<(String, i64)> = query.fetch_all(pool).await?;
     let mut map = serde_json::Map::new();
     for (k, v) in rows {
         map.insert(k, json!(v));
@@ -1073,25 +1164,37 @@ async fn list_audit(
     let limit = q.limit.unwrap_or(200).clamp(1, 5000);
     let from = parse_opt_ts(&q.from, "from")?;
     let to = parse_opt_ts(&q.to, "to")?;
-    let rows = sqlx::query_as::<_, AuditLog>(
-        "SELECT * FROM audit_log
+    // The audit log is box-level accountability and most of it (vehicles, passes, watchlist) names no
+    // camera — so it is FILTERED rather than refused, which keeps the route useful for a scoped
+    // manager. The one channel that does carry the roster is a camera-targeted row: `target_type =
+    // 'camera'` with the camera id in `target_id`, written by every gate policy edit and manual open.
+    // Those are hidden unless the camera is held. Unscoped callers get no predicate at all.
+    let scope = camera_scope_filter(&principal, "target_id");
+    let mut sql = "SELECT * FROM audit_log
           WHERE (? IS NULL OR created_at >= ?)
             AND (? IS NULL OR created_at <= ?)
             AND (? IS NULL OR actor = ?)
-            AND (? IS NULL OR action = ?)
-          ORDER BY created_at DESC LIMIT ?",
-    )
-    .bind(from)
-    .bind(from)
-    .bind(to)
-    .bind(to)
-    .bind(&q.actor)
-    .bind(&q.actor)
-    .bind(&q.action)
-    .bind(&q.action)
-    .bind(limit)
-    .fetch_all(&st.pool)
-    .await?;
+            AND (? IS NULL OR action = ?)"
+        .to_string();
+    if let Some((pred, _)) = &scope {
+        sql.push_str(" AND (target_type IS NULL OR target_type <> 'camera' OR (1=1");
+        sql.push_str(pred);
+        sql.push_str("))");
+    }
+    sql.push_str(" ORDER BY created_at DESC LIMIT ?");
+    let mut query = sqlx::query_as::<_, AuditLog>(&sql)
+        .bind(from)
+        .bind(from)
+        .bind(to)
+        .bind(to)
+        .bind(&q.actor)
+        .bind(&q.actor)
+        .bind(&q.action)
+        .bind(&q.action);
+    for id in scope.iter().flat_map(|(_, ids)| ids) {
+        query = query.bind(id);
+    }
+    let rows = query.bind(limit).fetch_all(&st.pool).await?;
     Ok(Json(rows))
 }
 
@@ -1104,11 +1207,19 @@ async fn get_gate_state(
 ) -> AppResult<Json<Value>> {
     principal.require_cap(Cap::IdentityRead, "view gate configuration")?;
     let kill_switch = crate::gate::GateActuator::kill_switch(&st.pool).await;
-    let policies = sqlx::query_as::<_, crate::gate::GatePolicy>(
-        "SELECT * FROM gate_policies ORDER BY camera_id ASC",
-    )
-    .fetch_all(&st.pool)
-    .await?;
+    // One row per configured LANE, keyed by camera id — an unfiltered list is the roster of every
+    // camera wired to a barrier, plus its relay port. Unscoped callers see today's full list.
+    let scope = camera_scope_filter(&principal, "camera_id");
+    let mut sql = "SELECT * FROM gate_policies WHERE 1=1".to_string();
+    if let Some((pred, _)) = &scope {
+        sql.push_str(pred);
+    }
+    sql.push_str(" ORDER BY camera_id ASC");
+    let mut query = sqlx::query_as::<_, crate::gate::GatePolicy>(&sql);
+    for id in scope.iter().flat_map(|(_, ids)| ids) {
+        query = query.bind(id);
+    }
+    let policies = query.fetch_all(&st.pool).await?;
     Ok(Json(
         json!({ "kill_switch": kill_switch, "policies": policies }),
     ))
@@ -1126,6 +1237,10 @@ async fn put_gate_settings(
     Json(body): Json<GateSettingsUpdate>,
 ) -> AppResult<Json<Value>> {
     principal.require(principal.can_manage_registry(), "change gate settings")?;
+    // BOX-LEVEL and physical: the kill-switch halts (or re-enables) actuation on EVERY lane on the
+    // box, and there is no camera id to scope it by. A per-building credential must not be able to
+    // freeze — or unfreeze — barriers it does not hold, so containment here is a refusal.
+    require_fleet_scope(&principal, "change the global gate kill-switch")?;
     sqlx::query("UPDATE gate_settings SET kill_switch = ?, updated_at = ? WHERE id = 1")
         .bind(body.kill_switch)
         .bind(Utc::now())
@@ -1161,6 +1276,10 @@ async fn put_gate_policy(
     Json(body): Json<GatePolicyUpdate>,
 ) -> AppResult<Json<crate::gate::GatePolicy>> {
     principal.require(principal.can_manage_registry(), "configure gate policies")?;
+    // BEFORE the existence probe below, which would otherwise answer 404 for a camera that is not on
+    // the box and 200 for one that is — an id-space oracle over the whole fleet. The id is the
+    // caller's own path input, so naming it in the refusal discloses nothing it did not already say.
+    principal.require_camera(&camera_id, "configure gate policies")?;
     // The camera must exist (a policy against a ghost camera can never actuate).
     let known: Option<(String,)> = sqlx::query_as("SELECT id FROM cameras WHERE id = ?")
         .bind(&camera_id)
@@ -1222,6 +1341,9 @@ async fn delete_gate_policy(
     principal: Principal,
 ) -> AppResult<StatusCode> {
     principal.require(principal.can_manage_registry(), "remove gate policies")?;
+    // Before the DELETE: removing another lane's policy disables its auto-open, and the 204-vs-404
+    // split would otherwise report which cameras have a barrier configured.
+    principal.require_camera(&camera_id, "remove gate policies")?;
     let res = sqlx::query("DELETE FROM gate_policies WHERE camera_id = ?")
         .bind(&camera_id)
         .execute(&st.pool)
@@ -1251,6 +1373,10 @@ async fn gate_open(
     principal: Principal,
 ) -> AppResult<Json<Value>> {
     principal.require(principal.can_operate_gate(), "open the gate")?;
+    // The sharpest route in this crate: a PHYSICAL-WORLD side effect on a named lane. Checked before
+    // the actuator is built, so a credential scoped to one building cannot raise another's barrier,
+    // and before `manual_open`'s own BadRequest/NotFound would report whether a lane has a policy.
+    principal.require_camera(&camera_id, "open the gate")?;
     let actuator = crate::gate::GateActuator::new(st.pool.clone(), st.http.clone(), st.cfg.clone());
     let pulse_ms = actuator.manual_open(&camera_id, &principal.id).await?;
     auth::audit(
@@ -1263,4 +1389,376 @@ async fn gate_open(
     )
     .await;
     Ok(Json(json!({ "ok": true, "pulse_ms": pulse_ms })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use heldar_kernel::auth::Scope;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    /// A camera-scoped credential holding every capability — the attacker in the audit report. Only
+    /// `scope` differs from the auth-disabled system admin, so any behaviour difference below is
+    /// attributable to camera scope and to nothing else.
+    fn scoped(cameras: &[&str]) -> Principal {
+        let set: HashSet<String> = cameras.iter().map(|c| c.to_string()).collect();
+        Principal {
+            scope: Scope::Cameras(Arc::new(set)),
+            ..Principal::system_admin()
+        }
+    }
+
+    async fn test_state() -> AppState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        heldar_kernel::db::run_migrations(&pool).await.unwrap();
+        crate::schema::init(&pool).await.unwrap();
+        let cfg = Arc::new(heldar_kernel::config::Config::from_env());
+        AppState {
+            recorder: heldar_kernel::services::recorder::RecorderManager::new(
+                pool.clone(),
+                cfg.clone(),
+            ),
+            sampler: heldar_kernel::services::sampler::SamplerManager::new(
+                pool.clone(),
+                cfg.clone(),
+            ),
+            live: heldar_kernel::services::live_publisher::LivePublisherManager::new(
+                pool.clone(),
+                cfg.clone(),
+                heldar_kernel::reqwest::Client::new(),
+            ),
+            mirror: None,
+            consumers: Arc::new(Vec::new()),
+            modules: Arc::new(Vec::new()),
+            catalog: Arc::new(heldar_kernel::services::registry::CatalogService::new(&cfg)),
+            http: heldar_kernel::reqwest::Client::new(),
+            media_jobs: heldar_kernel::services::media_jobs::MediaJobGovernor::new(2),
+            started_at: Utc::now(),
+            pool,
+            cfg,
+        }
+    }
+
+    async fn camera(pool: &sqlx::SqlitePool, id: &str) {
+        let now = Utc::now();
+        sqlx::query("INSERT INTO cameras (id, name, created_at, updated_at) VALUES (?,?,?,?)")
+            .bind(id)
+            .bind(id)
+            .bind(now)
+            .bind(now)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn event(pool: &sqlx::SqlitePool, id: &str, cam: Option<&str>) {
+        sqlx::query(
+            "INSERT INTO entry_events (id, camera_id, event_type, timestamp, direction, plate,
+                subject, authorization, auth_status, evidence, workflow_status, workflow, audit, created_at)
+             VALUES (?, ?, 'anpr', ?, 'inbound', 'ABC123', '{}', '{}', 'matched', '{}', 'pending', '{}', '{}', ?)",
+        )
+        .bind(id)
+        .bind(cam)
+        .bind(Utc::now())
+        .bind(Utc::now())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn policy(pool: &sqlx::SqlitePool, cam: &str) {
+        sqlx::query(
+            "INSERT INTO gate_policies (camera_id, enabled, output_port, pulse_ms, updated_at)
+             VALUES (?, 1, 1, 1000, ?)",
+        )
+        .bind(cam)
+        .bind(Utc::now())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[test]
+    fn require_fleet_scope_is_a_no_op_for_an_unscoped_principal() {
+        // CONSTRAINT 1 + 2: auth-disabled and every human role are untouched.
+        assert!(require_fleet_scope(&Principal::system_admin(), "flip").is_ok());
+        // Any camera scope, INCLUDING an empty one, is still a scope and is refused.
+        assert!(require_fleet_scope(&scoped(&["cam_a"]), "flip").is_err());
+        assert!(require_fleet_scope(&scoped(&[]), "flip").is_err());
+    }
+
+    #[tokio::test]
+    async fn require_event_scope_is_unchanged_for_an_unscoped_principal() {
+        let st = test_state().await;
+        event(&st.pool, "evt_a", Some("cam_a")).await;
+        event(&st.pool, "evt_manual", None).await;
+        let admin = Principal::system_admin();
+        assert!(require_event_scope(&st.pool, &admin, "evt_a", "view")
+            .await
+            .is_ok());
+        // A guard-recorded manual check-in has no lane and has never been a refusal.
+        assert!(require_event_scope(&st.pool, &admin, "evt_manual", "view")
+            .await
+            .is_ok());
+        let err = require_event_scope(&st.pool, &admin, "evt_zzz", "view")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, AppError::NotFound(_)), "got {err:?}");
+        assert!(err.to_string().contains("entry event evt_zzz not found"));
+    }
+
+    #[tokio::test]
+    async fn require_event_scope_never_becomes_an_existence_oracle() {
+        let st = test_state().await;
+        event(&st.pool, "evt_a", Some("cam_a")).await;
+        event(&st.pool, "evt_b", Some("cam_SENTINEL_B")).await;
+        event(&st.pool, "evt_manual", None).await;
+        let p = scoped(&["cam_a"]);
+
+        assert!(require_event_scope(&st.pool, &p, "evt_a", "view")
+            .await
+            .is_ok());
+        // Another lane's event, a lane-less event, and one that never existed are indistinguishable.
+        let other = require_event_scope(&st.pool, &p, "evt_b", "view")
+            .await
+            .unwrap_err();
+        let laneless = require_event_scope(&st.pool, &p, "evt_manual", "view")
+            .await
+            .unwrap_err();
+        let ghost = require_event_scope(&st.pool, &p, "evt_zzz", "view")
+            .await
+            .unwrap_err();
+        assert!(matches!(other, AppError::Forbidden(_)), "got {other:?}");
+        assert_eq!(other.to_string(), laneless.to_string());
+        assert_eq!(other.to_string(), ghost.to_string());
+        let msg = other.to_string();
+        assert!(!msg.contains("cam_SENTINEL_B"), "{msg}");
+        assert!(!msg.contains("evt_b"), "{msg}");
+    }
+
+    #[tokio::test]
+    async fn the_entry_feed_and_its_reports_are_confined_to_the_credentials_lanes() {
+        let st = test_state().await;
+        event(&st.pool, "evt_a", Some("cam_a")).await;
+        event(&st.pool, "evt_b", Some("cam_SENTINEL_B")).await;
+        event(&st.pool, "evt_manual", None).await;
+        let p = scoped(&["cam_a"]);
+        let eq = || EntryEventQuery {
+            from: None,
+            to: None,
+            plate: None,
+            auth_status: None,
+            workflow_status: None,
+            event_type: None,
+            limit: None,
+        };
+        let rq = || ReportQuery {
+            date: None,
+            from: Some((Utc::now() - Duration::days(1)).to_rfc3339()),
+            to: Some((Utc::now() + Duration::days(1)).to_rfc3339()),
+            limit: None,
+        };
+
+        let feed = list_entry_events(State(st.clone()), p.clone(), Query(eq()))
+            .await
+            .unwrap();
+        assert_eq!(feed.0.len(), 1);
+        assert_eq!(feed.0[0].id, "evt_a");
+        // Roster containment over the SERIALIZED body: the sentinel must appear nowhere.
+        assert!(!serde_json::to_string(&feed.0)
+            .unwrap()
+            .contains("cam_SENTINEL_B"));
+
+        // The report is the same rows, so it must not be a bypass — including its aggregate, which
+        // would otherwise report how much traffic the unheld lanes saw.
+        let rep = report_entry_log(State(st.clone()), p.clone(), Query(rq()))
+            .await
+            .unwrap();
+        assert_eq!(rep.0["total"].as_u64(), Some(1));
+        assert_eq!(rep.0["by_auth_status"]["matched"].as_u64(), Some(1));
+        assert!(!serde_json::to_string(&rep.0)
+            .unwrap()
+            .contains("cam_SENTINEL_B"));
+
+        // CONSTRAINT 2: an unscoped credential still sees every event, lane-less ones included.
+        let admin = Principal::system_admin();
+        assert_eq!(
+            list_entry_events(State(st.clone()), admin.clone(), Query(eq()))
+                .await
+                .unwrap()
+                .0
+                .len(),
+            3
+        );
+        assert_eq!(
+            report_entry_log(State(st.clone()), admin, Query(rq()))
+                .await
+                .unwrap()
+                .0["total"]
+                .as_u64(),
+            Some(3)
+        );
+
+        // An empty allowlist is fail-closed (`" AND 0"`, zero binds) and does not desync the binds.
+        assert!(list_entry_events(State(st), scoped(&[]), Query(eq()))
+            .await
+            .unwrap()
+            .0
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_lane_roster_and_gate_actuation_are_confined() {
+        let st = test_state().await;
+        camera(&st.pool, "cam_a").await;
+        camera(&st.pool, "cam_SENTINEL_B").await;
+        policy(&st.pool, "cam_a").await;
+        policy(&st.pool, "cam_SENTINEL_B").await;
+        let p = scoped(&["cam_a"]);
+
+        // The lane roster: one row per camera wired to a barrier.
+        let state = get_gate_state(State(st.clone()), p.clone()).await.unwrap();
+        let body = serde_json::to_string(&state.0).unwrap();
+        assert!(!body.contains("cam_SENTINEL_B"), "{body}");
+        assert_eq!(state.0["policies"].as_array().unwrap().len(), 1);
+
+        // Physical actuation on a lane this credential does not hold.
+        let err = gate_open(
+            State(st.clone()),
+            Path("cam_SENTINEL_B".to_string()),
+            p.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AppError::Forbidden(_)), "got {err:?}");
+
+        // Configuring and removing another lane's policy, both refused BEFORE the existence probe,
+        // so a camera that is on the box and one that is not answer identically.
+        let cfg_err = put_gate_policy(
+            State(st.clone()),
+            Path("cam_SENTINEL_B".to_string()),
+            p.clone(),
+            Json(GatePolicyUpdate {
+                enabled: Some(false),
+                output_port: None,
+                pulse_ms: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        let ghost_err = put_gate_policy(
+            State(st.clone()),
+            Path("cam_zzz".to_string()),
+            p.clone(),
+            Json(GatePolicyUpdate {
+                enabled: Some(false),
+                output_port: None,
+                pulse_ms: None,
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(cfg_err, AppError::Forbidden(_)), "got {cfg_err:?}");
+        assert!(matches!(ghost_err, AppError::Forbidden(_)));
+        let del_err = delete_gate_policy(
+            State(st.clone()),
+            Path("cam_SENTINEL_B".to_string()),
+            p.clone(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(del_err, AppError::Forbidden(_)));
+        // ...and the policy it targeted is still there.
+        let survivors: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM gate_policies")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap();
+        assert_eq!(survivors.0, 2);
+
+        // The global kill-switch is box-level: refused to a scoped credential in BOTH directions.
+        assert!(put_gate_settings(
+            State(st.clone()),
+            p,
+            Json(GateSettingsUpdate { kill_switch: true })
+        )
+        .await
+        .is_err());
+        assert!(!crate::gate::GateActuator::kill_switch(&st.pool).await);
+
+        // CONSTRAINT 2: an unscoped credential still sees both lanes and still flips the switch.
+        let admin = Principal::system_admin();
+        let all = get_gate_state(State(st.clone()), admin.clone())
+            .await
+            .unwrap();
+        assert_eq!(all.0["policies"].as_array().unwrap().len(), 2);
+        assert!(put_gate_settings(
+            State(st.clone()),
+            admin,
+            Json(GateSettingsUpdate { kill_switch: true })
+        )
+        .await
+        .is_ok());
+        assert!(crate::gate::GateActuator::kill_switch(&st.pool).await);
+    }
+
+    #[tokio::test]
+    async fn the_audit_log_hides_camera_targeted_rows_for_other_lanes() {
+        let st = test_state().await;
+        for (id, target_type, target_id) in [
+            ("aud_1", Some("camera"), Some("cam_a")),
+            ("aud_2", Some("camera"), Some("cam_SENTINEL_B")),
+            ("aud_3", Some("vehicle"), Some("veh_1")),
+            ("aud_4", None, None),
+        ] {
+            sqlx::query(
+                "INSERT INTO audit_log (id, actor, action, target_type, target_id, detail, created_at)
+                 VALUES (?, 'guard', 'gate_manual_open', ?, ?, '{}', ?)",
+            )
+            .bind(id)
+            .bind(target_type)
+            .bind(target_id)
+            .bind(Utc::now())
+            .execute(&st.pool)
+            .await
+            .unwrap();
+        }
+        let q = || AuditQuery {
+            from: None,
+            to: None,
+            actor: None,
+            action: None,
+            limit: None,
+        };
+
+        let rows = list_audit(State(st.clone()), scoped(&["cam_a"]), Query(q()))
+            .await
+            .unwrap();
+        // The non-camera rows survive — this route is filtered, not refused.
+        let ids: Vec<&str> = rows.0.iter().map(|r| r.id.as_str()).collect();
+        assert_eq!(ids, vec!["aud_4", "aud_3", "aud_1"]);
+        assert!(!serde_json::to_string(&rows.0)
+            .unwrap()
+            .contains("cam_SENTINEL_B"));
+
+        // An empty allowlist hides every camera-targeted row and keeps the rest.
+        let none = list_audit(State(st.clone()), scoped(&[]), Query(q()))
+            .await
+            .unwrap();
+        assert_eq!(none.0.len(), 2);
+
+        // CONSTRAINT 2: an unscoped credential still reads the whole log.
+        assert_eq!(
+            list_audit(State(st), Principal::system_admin(), Query(q()))
+                .await
+                .unwrap()
+                .0
+                .len(),
+            4
+        );
+    }
 }

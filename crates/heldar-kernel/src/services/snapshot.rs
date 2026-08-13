@@ -1,5 +1,15 @@
 //! Snapshot extraction: a single JPEG frame either from recorded footage at a timestamp,
 //! or live from the camera stream right now.
+//!
+//! **Media attribution: deliberately none here.** Both entry points return the JPEG *bytes* to the
+//! caller and write nothing to `snapshots_dir`, so there is no artifact on the media plane to
+//! attribute — camera scope for these is enforced at the route (`routes/playback.rs`), which is the
+//! only gate the inline bytes ever pass. The only writer under `snapshots_dir` reached from here is
+//! [`snapshot_live_raw`]'s background caller, `services::snapshot_scheduler`, and it writes
+//! `snapshots/<camera_id>/<taken_at>.jpg` — already camera-partitioned on disk and resolved by
+//! prefix (`media_scope::MediaKind::Partitioned`), so it needs no sidecar row either. The FLAT
+//! writers under `snapshots_dir` (zone evidence, entry/ANPR evidence, embedding crop thumbs) are the
+//! ones that must call `media_scope::attribute`.
 
 use std::process::Stdio;
 use std::time::Duration;
