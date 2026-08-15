@@ -26,7 +26,7 @@ All served by the same Axum process on `HELDAR_API_PORT` (default `8000`).
 |---|---|---|---|
 | GET | `/healthz` | **Liveness** — the process is up. No dependency checks. | `200` always (`{"status":"ok"}`) |
 | GET | `/readyz` | **Readiness** — the SQLite store is reachable (runs `SELECT 1`). | `200 {"ready":true}` / `503 {"ready":false,"reason":"database"}` |
-| GET | `/metrics` | **Prometheus** text exposition (system + per-camera gauges/counters). | `200`, `Content-Type: text/plain; version=0.0.4` |
+| GET | `/metrics` | **Prometheus** text exposition (system + per-camera gauges/counters). Needs `SystemRead` and a **fleet-wide** credential — see below. | `200`, `Content-Type: text/plain; version=0.0.4`; `403` for a camera-scoped credential |
 | GET | `/api/v1/system` | System info incl. the **`storage`** block (disk + footprint + projection). | `200` |
 | GET | `/api/v1/cameras/{id}/gaps?from&to` | Recording-coverage **gaps** for a camera/time window. | `200` (404 if camera unknown) |
 | GET | `/api/v1/health/cameras` | Per-camera live status (`CameraStatus[]`). | `200` |
@@ -87,6 +87,15 @@ All served by the same Axum process on `HELDAR_API_PORT` (default `8000`).
 ---
 
 ## 2. Prometheus metrics
+
+> **Scrape with a fleet-wide credential.** When auth is enabled the scraper must present
+> an API key with `SystemRead`, and that key must **not** be camera-scoped. The exposition
+> carries `heldar_camera_up{camera=…}` (and the per-camera counters) for the whole fleet,
+> so a camera-scoped key is refused with `403` rather than served a filtered body:
+> Prometheus reads a series that stops appearing as a camera that ceased to exist and
+> writes a staleness marker, so filtering would quietly corrupt fleet history with gaps
+> indistinguishable from real outages. With auth disabled (the LAN-appliance default)
+> `/metrics` is open, unchanged. See docs/ACCESS-CONTROL.md §4b.
 
 `GET /metrics` renders the exposition below from `services/metrics.rs`. These are
 the **only** metrics exported — there is no histogram/summary, and (note) **no fps

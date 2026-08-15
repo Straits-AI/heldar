@@ -767,9 +767,11 @@ impl AnprEngine {
                 // camera — a false deny on its own entry evidence.
                 heldar_kernel::services::media_scope::attribute(
                     &self.pool,
-                    &filename,
+                    // MUST match `media_scope::artifact_key` (`snapshots/<file>`); the bare filename
+                    // is a row the guard never finds.
+                    &format!("snapshots/{filename}"),
                     std::slice::from_ref(&camera_id.to_string()),
-                    "snapshot",
+                    heldar_kernel::services::media_scope::KIND_ENTRY_EVIDENCE,
                 )
                 .await;
                 return Some(format!("/media/snapshots/{filename}"));

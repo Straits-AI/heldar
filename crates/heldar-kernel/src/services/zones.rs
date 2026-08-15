@@ -695,9 +695,12 @@ impl ZoneEngine {
             // snapshots dir is flat, so the row is the only camera link a `/media/snapshots/…` GET has.
             crate::services::media_scope::attribute(
                 &self.pool,
-                &filename,
+                // MUST be the key `media_scope::artifact_key` derives from the URL
+                // (`snapshots/<file>`), not the bare filename — a mismatched key is a row the guard
+                // never finds, which is the same false deny it is here to prevent.
+                &format!("snapshots/{filename}"),
                 std::slice::from_ref(&camera_id.to_string()),
-                "snapshot",
+                crate::services::media_scope::KIND_ZONE_EVIDENCE,
             )
             .await;
             Some(format!("/media/snapshots/{filename}"))

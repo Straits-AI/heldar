@@ -102,8 +102,13 @@ fn discover_camera_routes() -> Vec<CameraRoute> {
                 continue;
             };
             let path = &chunk[q1 + 1..q1 + 1 + q2];
-            // Camera-keyed means the FIRST path parameter is the camera id.
-            if !path.starts_with("/api/v1/cameras/{id}") {
+            // Camera-keyed means the path is parameterised by a CAMERA id. The kernel keys on
+            // `/api/v1/cameras/{id}`; the app crates use their own prefixes with an explicit
+            // `{camera_id}` (e.g. `/api/v1/entry/gate/open/{camera_id}`), and missing those was the
+            // whole reason the app crates went unscoped.
+            let kernel_keyed = path.starts_with("/api/v1/cameras/{id}");
+            let app_keyed = path.contains("{camera_id}");
+            if !kernel_keyed && !app_keyed {
                 continue;
             }
             let mut methods = Vec::new();
@@ -123,6 +128,27 @@ fn discover_camera_routes() -> Vec<CameraRoute> {
         }
     }
     found.into_iter().collect()
+}
+
+/// The COMPOSED router — kernel + entry + movement + search — mirroring `heldar_server::run`.
+///
+/// Building only the kernel router was a real coverage hole: the app crates are where 47 routes had
+/// no scope call at all, and a matrix that never routes to them proves nothing about them. If this
+/// drifts from the composition in `lib.rs`, the app-crate assertions silently stop running.
+fn composed_router(st: &AppState) -> axum::Router {
+    let movement_cfg = std::sync::Arc::new(heldar_movement::config::MovementConfig::from_env());
+    let search_cfg = std::sync::Arc::new(heldar_search::config::SearchConfig::from_env());
+    axum::Router::new()
+        .merge(heldar_kernel::routes::api_router())
+        // `/metrics` is mounted at the SERVER layer, not inside `api_router()`. Merging it here keeps
+        // this matrix's router the same shape as the one `heldar_server::build_app` actually serves —
+        // it was invisible to the matrix until it moved, which is how a fleet-wide exposition sat
+        // outside the scope sweep.
+        .merge(heldar_kernel::routes::metrics::router())
+        .merge(heldar_entry::routes::router())
+        .merge(heldar_movement::routes::router(movement_cfg))
+        .merge(heldar_search::routes::router(search_cfg))
+        .with_state(st.clone())
 }
 
 async fn test_state() -> AppState {
@@ -218,7 +244,7 @@ async fn seed_key(st: &AppState, cameras: Option<&[&str]>) -> String {
 }
 
 async fn call(st: &AppState, token: &str, method: &str, path: &str) -> StatusCode {
-    let mut app = heldar_kernel::routes::api_router().with_state(st.clone());
+    let mut app = composed_router(st);
     let needs_body = matches!(method, "POST" | "PATCH" | "PUT");
     let req = Request::builder()
         .method(method)
@@ -258,7 +284,7 @@ async fn camera_scope_holds_on_every_camera_keyed_route() {
 
     for route in &routes {
         for method in &route.methods {
-            let for_cam = |cam: &str| route.path.replace("{id}", cam);
+            let for_cam = |cam: &str| route.path.replace("{id}", cam).replace("{camera_id}", cam);
 
             let b = call(&st, &scoped, method, &for_cam("camera_b")).await;
             // The security property is that the request does not SUCCEED. A 4xx that is not 403 (a
@@ -344,10 +370,18 @@ async fn discovery_finds_the_known_sensitive_routes() {
         .into_iter()
         .map(|r| r.path)
         .collect();
+    // Print the inventory so a coverage regression is visible in CI output, not just in a pass/fail.
+    eprintln!("route matrix covers {} camera-keyed routes:", paths.len());
+    for p in &paths {
+        eprintln!("  {p}");
+    }
     for must in [
         "/api/v1/cameras/{id}/liveview",
         "/api/v1/cameras/{id}/clip",
         "/api/v1/cameras/{id}/snapshot",
+        // The app crates. Gate open is the sharpest: a camera-scoped guard credential physically
+        // opening another camera's barrier is a real-world side effect, not a data leak.
+        "/api/v1/entry/gate/open/{camera_id}",
     ] {
         assert!(
             paths.contains(must),
@@ -365,7 +399,7 @@ async fn call_body(
     path: &str,
     body: &str,
 ) -> (StatusCode, String) {
-    let mut app = heldar_kernel::routes::api_router().with_state(st.clone());
+    let mut app = composed_router(st);
     let req = Request::builder()
         .method(method)
         .uri(path)
@@ -513,6 +547,10 @@ async fn a_scoped_credential_cannot_reach_the_egress_surfaces() {
             "create a webhook",
         ),
         ("GET", "/api/v1/outbox", "", "drain the fleet outbox"),
+        // The exposition carries `heldar_camera_up{camera=…}` for the WHOLE fleet, so it is refused
+        // rather than filtered: a filtered scrape reads to Prometheus as cameras that ceased to
+        // exist, writing staleness gaps indistinguishable from real outages into the fleet history.
+        ("GET", "/metrics", "", "scrape fleet-wide metrics"),
     ] {
         let (status, resp) = call_body(&st, &scoped, method, path, body).await;
         assert_eq!(

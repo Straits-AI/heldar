@@ -243,6 +243,77 @@ which returns **403** (`role 'guard' is not permitted to …`) when denied.
 
 ---
 
+## 4b. Camera scope (per-credential camera restriction)
+
+A capability says *what* a credential may do. A **camera scope** says *which cameras*
+it may do it to. An API key created with a camera list is confined to those cameras;
+a key created without one is **fleet-wide**, which is the default and the only thing
+an interactive user session can be.
+
+Scope is enforced independently of role: it is **not** waived by `admin`. A scoped
+admin key is still scoped. Auth disabled (§5.1) yields the synthetic system principal,
+which is fleet-wide — scope changes nothing about the open LAN appliance.
+
+### What the scope covers
+
+Confining a credential to a camera means more than 403-ing that camera's routes, so
+enforcement has four shapes. The first is the obvious one; the other three exist
+because per-route checks cannot see the escapes:
+
+| Shape | Applies to | Behaviour for a scoped credential |
+|---|---|---|
+| **Per-route check** | anything keyed by a camera id (`…/cameras/{id}/…`, `{camera_id}`) | **403** on a camera outside the scope |
+| **Read confinement** | fleet-wide lists (camera list, health/status, events, search) | results **filtered** to the scope — never a complete inventory disclosure |
+| **Write confinement** | payloads carrying camera ids (backup policies, archive exports) | submitted ids are **intersected** with the scope before use, and re-applied when the policy later runs |
+| **Fleet-only refusal** | credential management, egress config, fleet cursors, `/metrics` | **403** outright — see below |
+
+### Surfaces that refuse a scoped credential outright
+
+Some surfaces have no coherent scoped answer, so they are refused rather than
+filtered:
+
+- **Credential management** (create/update/delete users and API keys). A scoped key
+  that can mint keys can mint an unscoped one — scope would be self-removable.
+- **Egress configuration** (backup destinations, webhooks). These send footage and
+  events *out*; repointing a destination exfiltrates other cameras' data without ever
+  reading them through a scoped route.
+- **The outbox cursor** (`GET /api/v1/outbox`). `seq` is a monotonic fleet cursor;
+  filtering it hands back a sequence with holes that the client reads as delivered.
+- **`GET /metrics`.** The exposition carries `heldar_camera_up{camera=…}` and friends
+  for the whole fleet. A filtered scrape reads to Prometheus as cameras that ceased to
+  exist, writing staleness gaps indistinguishable from real outages into the fleet's
+  history. Scrape with a fleet-wide key.
+
+### The recorded-media plane (`/media/*`)
+
+`/media/*` serves the same footage the API gates, so it carries the same scope
+(`services/media_scope.rs`). Two subtrees name their camera in the path
+(`recordings/<camera_id>/…`, scheduled `snapshots/<camera_id>/…`) and are scoped by
+string alone. The rest — exported clips, playback sessions, evidence frames, archives
+— are **flat**: their filenames carry no camera, so producers register each artifact
+in the `media_artifacts` sidecar (migration 0013) and the guard resolves ownership
+from it.
+
+This fails closed in both directions: an artifact whose producer never registered it
+is `Unattributed`, which is a 403 for a scoped credential (and unchanged for everyone
+else), and a `/media/*` prefix the module does not recognise is refused for **every**
+credential rather than served ungated.
+
+Attribution rows are swept by the retention loop once their file leaves the disk — by
+**existence**, not by age, because the kinds do not share a retention horizon and a
+row dropped early would 403 a scoped credential on its own live evidence.
+
+### How this is kept honest
+
+`crates/heldar-server/tests/route_scope_matrix.rs` builds the **composed** router
+(kernel + metrics + entry + movement + search — the same shape `build_app` serves),
+discovers every camera-keyed route by walking it, and asserts each one 403s a
+credential scoped elsewhere. Coverage is printed on each run, so a new route that
+escapes the sweep is visible in CI output rather than silently unguarded. Sibling
+tests cover the credential surface, the egress surfaces and the fleet-wide reads.
+
+---
+
 ## 5. Authentication setup
 
 ### 5.1 Default: open LAN appliance (`HELDAR_AUTH_ENABLED=false`)

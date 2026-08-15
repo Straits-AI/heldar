@@ -271,6 +271,22 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
     //    runs FIRST so the freed space is reflected before the floor decides how much footage to prune.
     //    (a) Exported clips: `clip_<uuid>.mp4`/`.txt` in clips_dir, older than CLIP_RETENTION.
     let clips_pruned = prune_tree_older_than(&cfg.clips_dir, CLIP_RETENTION).await;
+    // Forget the attribution rows whose artifact is gone. Runs AFTER the prunes above and before
+    // the snapshot/archive prunes below purely to bound growth; correctness does not depend on the
+    // order, because the sweep only drops rows whose file has already left the disk.
+    let forgotten = crate::services::media_scope::sweep_orphans(
+        pool,
+        cfg,
+        // Well clear of any in-flight export: producers attribute before the bytes land.
+        chrono::Duration::hours(1),
+    )
+    .await;
+    if forgotten > 0 {
+        tracing::info!(
+            forgotten,
+            "retention: forgot media attribution rows for deleted artifacts"
+        );
+    }
     if clips_pruned > 0 {
         tracing::info!(
             deleted = clips_pruned,

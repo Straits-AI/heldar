@@ -261,6 +261,88 @@ pub async fn guard(State(st): State<AppState>, req: Request, next: Next) -> Resp
     next.run(Request::from_parts(parts, body)).await
 }
 
+/// Forget attribution rows whose artifact is no longer on disk.
+///
+/// Migration 0013 promised this sweep and nothing implemented it, so `media_artifacts` grew one
+/// permanent row per clip, evidence frame and archive for the life of the box: retention deletes
+/// those files by mtime (or with their owning event row) and has no way to forget them by name.
+///
+/// It sweeps by EXISTENCE rather than by the `(kind, created_at)` the migration sketched, because
+/// the kinds do not share a horizon — clips die at `CLIP_RETENTION`, scheduled snapshots at
+/// `snapshot_retention_hours`, evidence frames whenever their zone/entry event is pruned, archives at
+/// `archive_retention_hours`. Any single age would sweep some kind EARLY, and an early sweep is not a
+/// harmless leak: `owners` would report `Unattributed`, which the guard fails closed on, so a
+/// camera-scoped credential would get a 403 on its own live evidence. Keying on "the file is gone"
+/// makes that unrepresentable — once the bytes are gone every credential gets a 404 anyway, so the
+/// attribution cannot matter.
+///
+/// `min_age` only keeps the sweep clear of artifacts still being written (a clip export or playback
+/// build attributes before the file lands). Rows younger than it are never examined.
+///
+/// Best-effort and non-fatal, like the rest of retention: a failure here must not stop the sweep that
+/// also frees disk.
+pub async fn sweep_orphans(
+    pool: &SqlitePool,
+    cfg: &crate::config::Config,
+    min_age: chrono::Duration,
+) -> u64 {
+    let cutoff = Utc::now() - min_age;
+    let rows = match sqlx::query_as::<_, (String,)>(
+        "SELECT DISTINCT path FROM media_artifacts WHERE created_at < ?",
+    )
+    .bind(cutoff)
+    .fetch_all(pool)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, "media_scope: orphan sweep query failed");
+            return 0;
+        }
+    };
+    let mut removed = 0u64;
+    for (key,) in rows {
+        let Some(path) = artifact_path(cfg, &key) else {
+            // A key no subtree claims can never be resolved by the guard either, so it is dead by
+            // construction. Dropping it is what keeps a renamed subtree from leaking rows forever.
+            continue;
+        };
+        if tokio::fs::metadata(&path).await.is_ok() {
+            continue;
+        }
+        match sqlx::query("DELETE FROM media_artifacts WHERE path = ?")
+            .bind(&key)
+            .execute(pool)
+            .await
+        {
+            Ok(r) => removed += r.rows_affected(),
+            Err(e) => {
+                tracing::warn!(key = %key, error = %e, "media_scope: orphan sweep delete failed")
+            }
+        }
+    }
+    removed
+}
+
+/// Resolve an attribution key back to the file (or session directory) it names.
+///
+/// The exact inverse of [`artifact_key`] — they must be changed together, which is why they sit next
+/// to each other and share a test. A key shape not listed here is unresolvable and is treated as
+/// dead by the sweep.
+fn artifact_path(cfg: &crate::config::Config, key: &str) -> Option<std::path::PathBuf> {
+    let (subtree, rest) = key.split_once('/')?;
+    if rest.is_empty() || rest.contains('/') {
+        return None;
+    }
+    match subtree {
+        "clips" => Some(cfg.clips_dir.join(rest)),
+        "snapshots" => Some(cfg.snapshots_dir.join(rest)),
+        "archives" => Some(cfg.archive_dir.join(rest)),
+        "playback" => Some(cfg.playback_dir.join(rest)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,6 +454,153 @@ mod tests {
             .unwrap();
         crate::db::run_migrations(&pool).await.unwrap();
         pool
+    }
+
+    /// A Config whose media subtrees point at a fresh scratch dir, so the sweep's existence checks
+    /// see only what the test puts there.
+    fn sweep_cfg(root: &std::path::Path) -> crate::config::Config {
+        let mut cfg = crate::config::Config::from_env();
+        cfg.clips_dir = root.join("clips");
+        cfg.snapshots_dir = root.join("snapshots");
+        cfg.archive_dir = root.join("archives");
+        cfg.playback_dir = root.join("playback");
+        for d in [
+            &cfg.clips_dir,
+            &cfg.snapshots_dir,
+            &cfg.archive_dir,
+            &cfg.playback_dir,
+        ] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        cfg
+    }
+
+    async fn backdate(pool: &SqlitePool, key: &str, hours: i64) {
+        sqlx::query("UPDATE media_artifacts SET created_at = ? WHERE path = ?")
+            .bind(Utc::now() - chrono::Duration::hours(hours))
+            .bind(key)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// `artifact_path` must invert `artifact_key` for every subtree — the sweep decides a row is dead
+    /// from this mapping, so a wrong arm here deletes attribution for files that still exist.
+    #[test]
+    fn artifact_path_inverts_artifact_key() {
+        let root = std::env::temp_dir().join("heldar_inv_test");
+        let cfg = sweep_cfg(&root);
+        for (url, expect) in [
+            ("/media/clips/clip_x.mp4", cfg.clips_dir.join("clip_x.mp4")),
+            (
+                "/media/snapshots/zoneevt_x.jpg",
+                cfg.snapshots_dir.join("zoneevt_x.jpg"),
+            ),
+            (
+                "/media/archives/bkp_x.zip",
+                cfg.archive_dir.join("bkp_x.zip"),
+            ),
+            (
+                "/media/playback/pbs_x/index.m3u8",
+                cfg.playback_dir.join("pbs_x"),
+            ),
+        ] {
+            let key = artifact_key(url).expect("guard derives a key");
+            assert_eq!(
+                artifact_path(&cfg, &key),
+                Some(expect),
+                "artifact_path must invert artifact_key for {url}"
+            );
+        }
+        // A key naming no subtree is unresolvable rather than silently mapped somewhere.
+        assert_eq!(artifact_path(&cfg, "recordings/cam_a"), None);
+        assert_eq!(artifact_path(&cfg, "clips"), None);
+        // ..and a key that would climb out of its subtree resolves nowhere.
+        assert_eq!(artifact_path(&cfg, "clips/../../etc/passwd"), None);
+    }
+
+    /// Regression: zone/entry evidence used to attribute under the BARE filename while the guard
+    /// looks the row up under `snapshots/<file>`. The row existed and was never found, so a
+    /// camera-scoped credential got a 403 on its own evidence — the exact false deny attribution is
+    /// there to prevent. Assert the producer's key is the one the guard derives from its URL.
+    #[tokio::test]
+    async fn evidence_is_attributed_under_the_key_the_guard_derives() {
+        let pool = test_pool().await;
+        for (filename, kind) in [
+            ("zoneevt_abc.jpg", KIND_ZONE_EVIDENCE),
+            ("entryevt_abc.jpg", KIND_ENTRY_EVIDENCE),
+        ] {
+            // Exactly what zones.rs / anpr.rs write, and the URL they hand back.
+            attribute(
+                &pool,
+                &format!("snapshots/{filename}"),
+                &["cam_a".to_string()],
+                kind,
+            )
+            .await;
+            let url = format!("/media/snapshots/{filename}");
+            let key = artifact_key(&url).expect("guard derives a key from the served URL");
+            assert_eq!(
+                owners(&pool, &key).await,
+                Owners::Cameras(vec!["cam_a".to_string()]),
+                "the guard must resolve the row the producer wrote for {url}"
+            );
+        }
+    }
+
+    /// The sweep forgets a row only once its file is gone — never on age alone.
+    #[tokio::test]
+    async fn sweep_forgets_only_rows_whose_file_has_left_the_disk() {
+        let pool = test_pool().await;
+        let root = std::env::temp_dir().join(format!("heldar_sweep_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cfg = sweep_cfg(&root);
+        std::fs::write(cfg.clips_dir.join("live.mp4"), b"x").unwrap();
+        std::fs::create_dir_all(cfg.playback_dir.join("pbs_live")).unwrap();
+
+        for key in [
+            "clips/live.mp4",
+            "clips/gone.mp4",
+            "playback/pbs_live",
+            "playback/pbs_gone",
+        ] {
+            attribute(&pool, key, &["cam_a".to_string()], KIND_CLIP).await;
+            backdate(&pool, key, 48).await;
+        }
+        // A row whose file is ALSO gone but which is younger than min_age: still in flight.
+        attribute(
+            &pool,
+            "clips/inflight.mp4",
+            &["cam_a".to_string()],
+            KIND_CLIP,
+        )
+        .await;
+
+        let removed = sweep_orphans(&pool, &cfg, chrono::Duration::hours(1)).await;
+        assert_eq!(
+            removed, 2,
+            "only the two rows with no file may be forgotten"
+        );
+
+        // Live artifacts keep their attribution — losing it is a 403 on footage that still serves.
+        for key in ["clips/live.mp4", "playback/pbs_live", "clips/inflight.mp4"] {
+            assert_eq!(
+                owners(&pool, key).await,
+                Owners::Cameras(vec!["cam_a".to_string()]),
+                "{key} still exists (or is too young to judge) and must stay attributed"
+            );
+        }
+        for key in ["clips/gone.mp4", "playback/pbs_gone"] {
+            assert_eq!(owners(&pool, key).await, Owners::Unattributed, "{key}");
+        }
+
+        // Once the live clip is deleted too, the next sweep collects it — the table is bounded.
+        std::fs::remove_file(cfg.clips_dir.join("live.mp4")).unwrap();
+        assert_eq!(
+            sweep_orphans(&pool, &cfg, chrono::Duration::hours(1)).await,
+            1
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[tokio::test]
