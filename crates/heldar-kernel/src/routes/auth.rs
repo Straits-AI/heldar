@@ -217,6 +217,13 @@ async fn create_user(
     Json(body): Json<UserCreate>,
 ) -> AppResult<(StatusCode, Json<UserView>)> {
     principal.require(principal.can_admin(), "create users")?;
+    // A camera-scoped credential must not touch the credential surface AT ALL. Minting a key, or
+    // widening its own, escapes camera scope in ONE request without going near a camera-keyed route —
+    // and a new key is returned with its plaintext token. Users are worse: they carry Scope::All by
+    // construction. Refusing the whole surface is the containment; a subset check would still let a
+    // scoped key mint a peer with a DIFFERENT camera, and there is no camera to scope this route by.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage users")?;
+
     let username = body.username.trim();
     if username.is_empty() {
         return Err(AppError::BadRequest("`username` is required".into()));
@@ -272,6 +279,9 @@ async fn update_user(
     Json(body): Json<UserUpdate>,
 ) -> AppResult<Json<UserView>> {
     principal.require(principal.can_admin(), "modify users")?;
+    // See create_user: users carry Scope::All by construction, so a camera-scoped credential editing
+    // one is a scope escape with extra steps.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage users")?;
     let cur = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
         .bind(&id)
         .fetch_optional(&st.pool)
@@ -394,6 +404,13 @@ async fn delete_user(
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
     principal.require(principal.can_admin(), "delete users")?;
+    // A camera-scoped credential must not touch the credential surface AT ALL. Minting a key, or
+    // widening its own, escapes camera scope in ONE request without going near a camera-keyed route —
+    // and a new key is returned with its plaintext token. Users are worse: they carry Scope::All by
+    // construction. Refusing the whole surface is the containment; a subset check would still let a
+    // scoped key mint a peer with a DIFFERENT camera, and there is no camera to scope this route by.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage users")?;
+
     if principal.id == id {
         return Err(AppError::BadRequest(
             "cannot delete your own account".into(),
@@ -573,6 +590,13 @@ async fn create_api_key(
     Json(body): Json<ApiKeyCreate>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
     principal.require(principal.can_admin(), "create API keys")?;
+    // A camera-scoped credential must not touch the credential surface AT ALL. Minting a key, or
+    // widening its own, escapes camera scope in ONE request without going near a camera-keyed route —
+    // and a new key is returned with its plaintext token. Users are worse: they carry Scope::All by
+    // construction. Refusing the whole surface is the containment; a subset check would still let a
+    // scoped key mint a peer with a DIFFERENT camera, and there is no camera to scope this route by.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage API keys")?;
+
     if body.name.trim().is_empty() {
         return Err(AppError::BadRequest("`name` is required".into()));
     }
@@ -680,6 +704,13 @@ async fn update_api_key(
     Json(body): Json<ApiKeyUpdate>,
 ) -> AppResult<Json<ApiKeyView>> {
     principal.require(principal.can_admin(), "modify API keys")?;
+    // A camera-scoped credential must not touch the credential surface AT ALL. Minting a key, or
+    // widening its own, escapes camera scope in ONE request without going near a camera-keyed route —
+    // and a new key is returned with its plaintext token. Users are worse: they carry Scope::All by
+    // construction. Refusing the whole surface is the containment; a subset check would still let a
+    // scoped key mint a peer with a DIFFERENT camera, and there is no camera to scope this route by.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage API keys")?;
+
     let cur = sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = ?")
         .bind(&id)
         .fetch_optional(&st.pool)
@@ -776,6 +807,13 @@ async fn delete_api_key(
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
     principal.require(principal.can_admin(), "delete API keys")?;
+    // A camera-scoped credential must not touch the credential surface AT ALL. Minting a key, or
+    // widening its own, escapes camera scope in ONE request without going near a camera-keyed route —
+    // and a new key is returned with its plaintext token. Users are worse: they carry Scope::All by
+    // construction. Refusing the whole surface is the containment; a subset check would still let a
+    // scoped key mint a peer with a DIFFERENT camera, and there is no camera to scope this route by.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage API keys")?;
+
     let res = sqlx::query("DELETE FROM api_keys WHERE id = ?")
         .bind(&id)
         .execute(&st.pool)

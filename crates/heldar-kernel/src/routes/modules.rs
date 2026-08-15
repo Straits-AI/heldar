@@ -50,6 +50,10 @@ async fn register(
     Json(req): Json<ModuleRegisterRequest>,
 ) -> AppResult<(StatusCode, Json<ModuleRegistered>)> {
     principal.require(principal.can_admin(), "register a module")?;
+    // Registering a sidecar MINTS an API key and returns its plaintext token, so it is part of the
+    // credential surface: a camera-scoped credential registering a module would hand itself an
+    // unscoped key. Same containment as /api/v1/api-keys.
+    crate::routes::cameras::require_fleet_scope(&principal, "register modules")?;
     let reserved: Vec<String> = st.modules.iter().map(|m| m.id.clone()).collect();
     let (row, api_key, webhook_secret) =
         services::modules::register(&st.pool, req, &reserved).await?;

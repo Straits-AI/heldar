@@ -20,19 +20,35 @@ async fn list_status(
     principal: Principal,
 ) -> AppResult<Json<Vec<CameraStatus>>> {
     principal.require_cap(Cap::CameraRead, "view camera health")?;
-    let mut rows =
-        sqlx::query_as::<_, CameraStatus>("SELECT * FROM camera_status ORDER BY camera_id ASC")
-            .fetch_all(&st.pool)
-            .await?;
+    // Filtered like `list_cameras`: the per-camera twin of this route is scope-checked, so an
+    // unfiltered list here hands a scoped credential the full roster plus live operational state
+    // (recorder state, last_segment_at, reconnect_count, fps, bitrate, last_error) for every camera.
+    let mut sql = "SELECT * FROM camera_status WHERE 1=1".to_string();
+    let scope = crate::state::camera_scope_filter(&principal, "camera_id");
+    if let Some((pred, _)) = &scope {
+        sql.push_str(pred);
+    }
+    sql.push_str(" ORDER BY camera_id ASC");
+    let mut q = sqlx::query_as::<_, CameraStatus>(&sql);
+    for id in scope.iter().flat_map(|(_, ids)| ids) {
+        q = q.bind(id);
+    }
+    let mut rows = q.fetch_all(&st.pool).await?;
     // A disabled camera's recorder state is irrelevant and can be left stale by the async recorder
     // teardown (e.g. "recording"/"error" right after a disable); report it as "disabled" so the
     // health table is truthful.
+    // Same filter: this roster query is a camera-id list in its own right.
+    let mut dsql = "SELECT id FROM cameras WHERE enabled = 0".to_string();
+    let dscope = crate::state::camera_scope_filter(&principal, "id");
+    if let Some((pred, _)) = &dscope {
+        dsql.push_str(pred);
+    }
+    let mut dq = sqlx::query_scalar::<_, String>(&dsql);
+    for id in dscope.iter().flat_map(|(_, ids)| ids) {
+        dq = dq.bind(id);
+    }
     let disabled: std::collections::HashSet<String> =
-        sqlx::query_scalar::<_, String>("SELECT id FROM cameras WHERE enabled = 0")
-            .fetch_all(&st.pool)
-            .await?
-            .into_iter()
-            .collect();
+        dq.fetch_all(&st.pool).await?.into_iter().collect();
     for r in &mut rows {
         if disabled.contains(&r.camera_id) {
             r.state = "disabled".into();
@@ -83,22 +99,34 @@ async fn list_events(
 ) -> AppResult<Json<Vec<Event>>> {
     principal.require_cap(Cap::EventsRead, "view events")?;
     let limit = q.limit.unwrap_or(200).clamp(1, 2000);
-    let rows = sqlx::query_as::<_, Event>(
-        "SELECT * FROM events
+    // Confine to the caller's cameras. The event feed carries camera_offline, recorder_error,
+    // recording_gap, zone and ingest events for every camera — a per-camera activity feed for the
+    // whole fleet, which is most of what camera scope exists to withhold.
+    //
+    // Events with a NULL camera_id (box-level: disk, RAID, system) are deliberately NOT shown to a
+    // scoped credential: they are not attributable to a camera it holds, and fail-closed is the right
+    // default for a surface whose whole purpose here is confinement.
+    let mut sql = "SELECT * FROM events
          WHERE (? IS NULL OR camera_id = ?)
            AND (? IS NULL OR event_type = ?)
-           AND (? IS NULL OR severity = ?)
-         ORDER BY timestamp DESC LIMIT ?",
-    )
-    .bind(&q.camera_id)
-    .bind(&q.camera_id)
-    .bind(&q.event_type)
-    .bind(&q.event_type)
-    .bind(&q.severity)
-    .bind(&q.severity)
-    .bind(limit)
-    .fetch_all(&st.pool)
-    .await?;
+           AND (? IS NULL OR severity = ?)"
+        .to_string();
+    let scope = crate::state::camera_scope_filter(&principal, "camera_id");
+    if let Some((pred, _)) = &scope {
+        sql.push_str(pred);
+    }
+    sql.push_str(" ORDER BY timestamp DESC LIMIT ?");
+    let mut query = sqlx::query_as::<_, Event>(&sql)
+        .bind(&q.camera_id)
+        .bind(&q.camera_id)
+        .bind(&q.event_type)
+        .bind(&q.event_type)
+        .bind(&q.severity)
+        .bind(&q.severity);
+    for id in scope.iter().flat_map(|(_, ids)| ids) {
+        query = query.bind(id);
+    }
+    let rows = query.bind(limit).fetch_all(&st.pool).await?;
     Ok(Json(rows))
 }
 

@@ -61,6 +61,11 @@ async fn list_outbox(
     Query(q): Query<OutboxQuery>,
 ) -> AppResult<Json<OutboxPage>> {
     principal.require(principal.can_admin(), "read the fleet outbox")?;
+    // Refused rather than filtered. This is a FLEET drain with a monotonic `seq` cursor: filtering it
+    // by camera would punch holes in the sequence, and a consumer that treats `seq` as contiguous
+    // would silently believe it had drained batches it never saw. The surface is fleet-wide by
+    // construction, so a camera-scoped credential has no coherent view of it.
+    crate::routes::cameras::require_fleet_scope(&principal, "read the fleet outbox")?;
     let since = q.since_seq.unwrap_or(0).max(0);
     let limit = q.limit.unwrap_or(100).clamp(1, 1000);
     let entries = sqlx::query_as::<_, OutboxEntry>(

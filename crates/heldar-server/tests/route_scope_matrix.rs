@@ -356,3 +356,198 @@ async fn discovery_finds_the_known_sensitive_routes() {
         );
     }
 }
+
+/// Call helper that returns (status, body) so escalation attempts can be inspected.
+async fn call_body(
+    st: &AppState,
+    token: &str,
+    method: &str,
+    path: &str,
+    body: &str,
+) -> (StatusCode, String) {
+    let mut app = heldar_kernel::routes::api_router().with_state(st.clone());
+    let req = Request::builder()
+        .method(method)
+        .uri(path)
+        .header("X-API-Key", token)
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let res = app.call(req).await.unwrap();
+    let status = res.status();
+    let bytes = axum::body::to_bytes(res.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    (status, String::from_utf8_lossy(&bytes).to_string())
+}
+
+/// PRIVILEGE ESCALATION, not per-route scope.
+///
+/// An adversarial review demonstrated that the camera boundary could be escaped WITHOUT touching a
+/// single camera-keyed route: a scoped credential could PATCH its own key to `scope_kind: "all"`, or
+/// POST a brand-new unscoped key and get the plaintext token back. Per-route scoping cannot see that
+/// class at all, so every exploit it proved is pinned here.
+#[tokio::test]
+async fn a_scoped_credential_cannot_escape_through_the_credential_surface() {
+    let st = test_state().await;
+    seed_camera(&st, "camera_a").await;
+    seed_camera(&st, "camera_b").await;
+    let scoped = seed_key(&st, Some(&["camera_a"])).await;
+
+    // Baseline: the boundary holds before the attempt.
+    let (before, _) = call_body(&st, &scoped, "GET", "/api/v1/cameras/camera_b/health", "").await;
+    assert_eq!(
+        before,
+        StatusCode::FORBIDDEN,
+        "precondition: camera_b must be refused"
+    );
+
+    // 1. Mint a NEW unscoped key.
+    let (mint, body) = call_body(
+        &st,
+        &scoped,
+        "POST",
+        "/api/v1/api-keys",
+        r#"{"name":"escape","role":"admin"}"#,
+    )
+    .await;
+    assert_eq!(
+        mint,
+        StatusCode::FORBIDDEN,
+        "a scoped credential minted a key (body: {body}) — it can hand itself an unscoped token"
+    );
+
+    // 2. Widen ITSELF. The id is discovered from the listing if that is even permitted; either way
+    //    the PATCH surface must be closed to a scoped caller.
+    let (widen, body) = call_body(
+        &st,
+        &scoped,
+        "PATCH",
+        "/api/v1/api-keys/whatever",
+        r#"{"scope_kind":"all"}"#,
+    )
+    .await;
+    assert_eq!(
+        widen,
+        StatusCode::FORBIDDEN,
+        "a scoped credential reached the key-update surface (body: {body})"
+    );
+
+    // 3. Register a module — mints a sidecar key and returns its plaintext token.
+    let (module, body) = call_body(
+        &st,
+        &scoped,
+        "POST",
+        "/api/v1/modules",
+        r#"{"id":"escape2","name":"x","base_url":"http://127.0.0.1:9"}"#,
+    )
+    .await;
+    assert_eq!(
+        module,
+        StatusCode::FORBIDDEN,
+        "a scoped credential registered a module (body: {body}) — module registration mints a key"
+    );
+
+    // 4. Users carry Scope::All by construction.
+    let (user, _) = call_body(
+        &st,
+        &scoped,
+        "POST",
+        "/api/v1/users",
+        r#"{"username":"esc","password":"correct-horse-battery","role":"admin"}"#,
+    )
+    .await;
+    assert_eq!(
+        user,
+        StatusCode::FORBIDDEN,
+        "a scoped credential created a user"
+    );
+
+    // The boundary still holds afterwards — no attempt partially succeeded.
+    let (after, _) = call_body(&st, &scoped, "GET", "/api/v1/cameras/camera_b/health", "").await;
+    assert_eq!(
+        after,
+        StatusCode::FORBIDDEN,
+        "camera_b became reachable after the attempts"
+    );
+}
+
+/// EGRESS, not per-route scope. Backup destinations and webhooks move bytes OFF the box, so the
+/// media guard never sees them. Creation was already refused; the review proved update/trigger were
+/// not, so a scoped credential could repoint an existing destination at attacker storage.
+#[tokio::test]
+async fn a_scoped_credential_cannot_reach_the_egress_surfaces() {
+    let st = test_state().await;
+    seed_camera(&st, "camera_a").await;
+    let scoped = seed_key(&st, Some(&["camera_a"])).await;
+
+    for (method, path, body, what) in [
+        (
+            "POST",
+            "/api/v1/backup/destinations",
+            r#"{"name":"x","kind":"sftp","config":{}}"#,
+            "create a destination",
+        ),
+        (
+            "PATCH",
+            "/api/v1/backup/destinations/bkd_1",
+            r#"{"kind":"sftp","config":{"host":"attacker.example"}}"#,
+            "repoint a destination",
+        ),
+        (
+            "DELETE",
+            "/api/v1/backup/destinations/bkd_1",
+            "",
+            "delete a destination",
+        ),
+        (
+            "POST",
+            "/api/v1/backup/destinations/bkd_1/test",
+            "{}",
+            "probe a destination",
+        ),
+        (
+            "POST",
+            "/api/v1/webhooks",
+            r#"{"name":"x","url":"http://attacker.example/c"}"#,
+            "create a webhook",
+        ),
+        ("GET", "/api/v1/outbox", "", "drain the fleet outbox"),
+    ] {
+        let (status, resp) = call_body(&st, &scoped, method, path, body).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "a camera-scoped credential could {what} ({method} {path}) -> {status}: {resp}"
+        );
+    }
+}
+
+/// Fleet-wide READ surfaces must not hand a scoped credential the roster.
+#[tokio::test]
+async fn fleet_wide_reads_are_confined_to_the_credentials_cameras() {
+    let st = test_state().await;
+    seed_camera(&st, "camera_a").await;
+    seed_camera(&st, "camera_b").await;
+    let scoped = seed_key(&st, Some(&["camera_a"])).await;
+
+    for path in [
+        "/api/v1/health/cameras",
+        "/api/v1/cameras",
+        "/api/v1/events",
+    ] {
+        let (status, body) = call_body(&st, &scoped, "GET", path, "").await;
+        assert!(
+            status.is_success(),
+            "{path} -> {status} (expected a filtered 200): {body}"
+        );
+        assert!(
+            !body.contains("camera_b"),
+            "{path} leaked camera_b to a camera_a-scoped credential: {body}"
+        );
+        assert!(
+            body.contains("camera_a") || body == "[]",
+            "{path} returned nothing for the credential's OWN camera — filtered too hard: {body}"
+        );
+    }
+}

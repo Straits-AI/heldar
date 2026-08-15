@@ -198,6 +198,11 @@ async fn update_destination(
         principal.can_manage_registry(),
         "update backup destinations",
     )?;
+    // A destination is an OFF-BOX EGRESS CHANNEL with no camera to scope by, so the whole surface is
+    // refused to a camera-scoped credential — not just creation. Guarding create alone was the gap: an
+    // existing local destination could be PATCHed to attacker-controlled SFTP/S3 and then triggered,
+    // and the bytes leave via rclone so the media guard never sees them.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage backup destinations")?;
     let cur = load_destination(&st.pool, &id).await?;
 
     let name = body
@@ -262,6 +267,11 @@ async fn delete_destination(
         principal.can_manage_registry(),
         "delete backup destinations",
     )?;
+    // A destination is an OFF-BOX EGRESS CHANNEL with no camera to scope by, so the whole surface is
+    // refused to a camera-scoped credential — not just creation. Guarding create alone was the gap: an
+    // existing local destination could be PATCHed to attacker-controlled SFTP/S3 and then triggered,
+    // and the bytes leave via rclone so the media guard never sees them.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage backup destinations")?;
     let res = sqlx::query("DELETE FROM backup_destinations WHERE id = ?")
         .bind(&id)
         .execute(&st.pool)
@@ -289,6 +299,11 @@ async fn test_destination(
     principal: Principal,
 ) -> AppResult<Json<BackupTestResult>> {
     principal.require(principal.can_manage_registry(), "test backup destinations")?;
+    // A destination is an OFF-BOX EGRESS CHANNEL with no camera to scope by, so the whole surface is
+    // refused to a camera-scoped credential — not just creation. Guarding create alone was the gap: an
+    // existing local destination could be PATCHed to attacker-controlled SFTP/S3 and then triggered,
+    // and the bytes leave via rclone so the media guard never sees them.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage backup destinations")?;
     let dest = load_destination(&st.pool, &id).await?;
     let result = backup::test_destination(&st, &dest).await;
     auth::audit(
@@ -389,16 +404,17 @@ async fn update_policy(
         .destination_id
         .unwrap_or_else(|| cur.destination_id.clone());
     let _ = load_destination(&st.pool, &destination_id).await?;
+    // Confined exactly as create_policy: without this a scoped credential could widen a policy it
+    // just created back to the whole fleet, and an EMPTY list means "every camera on the box"
+    // downstream in `backup::resolve_segments`.
     let camera_ids = match body.camera_ids {
-        Some(v) => {
-            if !v.is_array() {
-                return Err(AppError::BadRequest(
-                    "`camera_ids` must be a JSON array of camera ids".into(),
-                ));
-            }
-            v
-        }
-        None => cur.camera_ids.0.clone(),
+        Some(v) => json!(confine_camera_ids(&principal, &camera_ids_from_json(&v)?)?),
+        // Re-confine the STORED list too. A policy created while unscoped may name the whole fleet,
+        // and a scoped credential editing any other field must not carry that selection forward.
+        None => json!(confine_camera_ids(
+            &principal,
+            &camera_ids_from_json(&cur.camera_ids.0)?
+        )?),
     };
     let incident_lock_only = body.incident_lock_only.unwrap_or(cur.incident_lock_only);
     let schedule_interval_s = body
@@ -472,6 +488,10 @@ async fn trigger_policy(
 ) -> AppResult<(StatusCode, Json<BackupJob>)> {
     principal.require(principal.can_manage_registry(), "trigger backup policies")?;
     let policy = load_policy(&st.pool, &id).await?;
+    // Confine at the moment of ACTUATION, not only at edit time: the policy may have been written by
+    // an unscoped admin, and triggering it is what moves the bytes. `confine_camera_ids` turns an
+    // empty (= whole fleet) selection into the caller's own scope and refuses anything wider.
+    let _ = confine_camera_ids(&principal, &camera_ids_from_json(&policy.camera_ids.0)?)?;
     let job_id = backup::trigger_policy(&st, &policy)
         .await
         .map_err(AppError::Other)?;
