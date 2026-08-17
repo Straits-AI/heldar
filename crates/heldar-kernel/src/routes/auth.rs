@@ -205,6 +205,11 @@ async fn list_users(
     principal: Principal,
 ) -> AppResult<Json<Vec<UserView>>> {
     principal.require(principal.can_admin(), "manage users")?;
+    // Same rule as the key listing and as this file's create/update/delete: a camera-scoped
+    // credential must not touch the credential surface AT ALL, read included. The operator roster is
+    // not camera-scopable — there is no camera to filter it by — so refusal is the only coherent
+    // answer.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage users")?;
     let users = sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY username ASC")
         .fetch_all(&st.pool)
         .await?;
@@ -543,9 +548,15 @@ fn validate_grant(
         }
     };
     if scope_kind == "cameras" {
+        // `expanded()`, not `contains()`: `Cap::Admin` implies every capability at REQUEST time, so a
+        // grant of `admin` is a grant of the unscopable caps whether or not their bits were listed.
+        // Testing the raw bits here let `{"capabilities":["admin"],"scope_kind":"cameras"}` mint
+        // cleanly and then satisfy the very checks this refusal exists to prevent — the refusal was
+        // defeated by construction. Both sides now read the same expansion.
+        let effective = set.expanded();
         let unscopable: Vec<&str> = UNSCOPABLE_CAPS
             .iter()
-            .filter(|c| set.contains(**c))
+            .filter(|c| effective.contains(**c))
             .map(|c| c.slug())
             .collect();
         if !unscopable.is_empty() {
@@ -574,6 +585,11 @@ async fn list_api_keys(
     principal: Principal,
 ) -> AppResult<Json<Vec<ApiKeyView>>> {
     principal.require(principal.can_admin(), "manage API keys")?;
+    // The READ is as much of the credential surface as the writes its siblings guard: `api_key_view`
+    // serialises `scope_cameras`, so this listing hands a camera-scoped caller every other
+    // integrator's camera allowlist — the fleet roster, and the exact ids every camera-keyed route
+    // takes as input. It was the one member of the create/update/delete batch left unguarded.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage API keys")?;
     let keys = sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys ORDER BY created_at DESC")
         .fetch_all(&st.pool)
         .await?;
@@ -836,6 +852,30 @@ async fn delete_api_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `UNSCOPABLE_CAPS` refusal was defeated by construction: it tested the RAW bits, so a grant
+    /// of `admin` — which implies every capability at request time — sailed past a check aimed at
+    /// exactly that combination, then satisfied `require_cap` for the caps it had just been refused.
+    #[test]
+    fn an_admin_grant_cannot_carry_a_camera_scope() {
+        let err =
+            validate_grant(&["admin".into()], "cameras", &["cam_a".into()], true).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("events:read") || msg.contains("identity:read"),
+            "an admin grant must be refused a camera scope, naming the unscopable caps; got {msg}"
+        );
+        // Spelling the cap out was already refused; the point is that `admin` now is too.
+        assert!(
+            validate_grant(&["events:read".into()], "cameras", &["cam_a".into()], false).is_err()
+        );
+        // And the combinations that were always legitimate still are.
+        assert!(validate_grant(&["admin".into()], "all", &[], true).is_ok());
+        assert!(
+            validate_grant(&["camera:read".into()], "cameras", &["cam_a".into()], false).is_ok()
+        );
+    }
+
     use crate::config::Config;
     use crate::services::recorder::RecorderManager;
     use crate::services::sampler::SamplerManager;

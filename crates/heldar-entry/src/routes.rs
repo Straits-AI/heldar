@@ -1164,12 +1164,20 @@ async fn list_audit(
     let limit = q.limit.unwrap_or(200).clamp(1, 5000);
     let from = parse_opt_ts(&q.from, "from")?;
     let to = parse_opt_ts(&q.to, "to")?;
-    // The audit log is box-level accountability and most of it (vehicles, passes, watchlist) names no
-    // camera — so it is FILTERED rather than refused, which keeps the route useful for a scoped
-    // manager. The one channel that does carry the roster is a camera-targeted row: `target_type =
-    // 'camera'` with the camera id in `target_id`, written by every gate policy edit and manual open.
-    // Those are hidden unless the camera is held. Unscoped callers get no predicate at all.
-    let scope = camera_scope_filter(&principal, "target_id");
+    // Scoped on `subject_camera_id` (kernel migration 0014), the column `crate::auth::audit` derives
+    // for every row it writes. The predecessor filtered `target_id` and only where `target_type =
+    // 'camera'`, which masked gate rows and let EVERY other row through — while zones, ai_task,
+    // camera_schedule, snapshot_schedule and recording_gap all name their camera in the free-form
+    // `detail` JSON under a different target_type. `?limit=5000` was therefore the fleet roster plus
+    // which cameras carry zones, AI tasks and schedules. Scope cannot be enforced over schemaless
+    // JSON; a derived column is the only shape a predicate can hold on to.
+    //
+    // Fail-closed: for a scoped caller a NULL subject (fleet-level, or about no camera at all) is
+    // HIDDEN, not shown. `IN (…)` already drops NULLs — `IS NOT NULL` is stated anyway so the
+    // intent survives any future change to the predicate builder. Unscoped callers, which is every
+    // human role and every key minted without a camera list, get no predicate at all and read the
+    // whole log exactly as before.
+    let scope = camera_scope_filter(&principal, "subject_camera_id");
     let mut sql = "SELECT * FROM audit_log
           WHERE (? IS NULL OR created_at >= ?)
             AND (? IS NULL OR created_at <= ?)
@@ -1177,9 +1185,8 @@ async fn list_audit(
             AND (? IS NULL OR action = ?)"
         .to_string();
     if let Some((pred, _)) = &scope {
-        sql.push_str(" AND (target_type IS NULL OR target_type <> 'camera' OR (1=1");
+        sql.push_str(" AND subject_camera_id IS NOT NULL");
         sql.push_str(pred);
-        sql.push_str("))");
     }
     sql.push_str(" ORDER BY created_at DESC LIMIT ?");
     let mut query = sqlx::query_as::<_, AuditLog>(&sql)
@@ -1706,59 +1713,197 @@ mod tests {
         assert!(crate::gate::GateActuator::kill_switch(&st.pool).await);
     }
 
-    #[tokio::test]
-    async fn the_audit_log_hides_camera_targeted_rows_for_other_lanes() {
-        let st = test_state().await;
-        for (id, target_type, target_id) in [
-            ("aud_1", Some("camera"), Some("cam_a")),
-            ("aud_2", Some("camera"), Some("cam_SENTINEL_B")),
-            ("aud_3", Some("vehicle"), Some("veh_1")),
-            ("aud_4", None, None),
-        ] {
-            sqlx::query(
-                "INSERT INTO audit_log (id, actor, action, target_type, target_id, detail, created_at)
-                 VALUES (?, 'guard', 'gate_manual_open', ?, ?, '{}', ?)",
-            )
-            .bind(id)
-            .bind(target_type)
-            .bind(target_id)
-            .bind(Utc::now())
-            .execute(&st.pool)
-            .await
-            .unwrap();
-        }
-        let q = || AuditQuery {
+    fn audit_query() -> AuditQuery {
+        AuditQuery {
             from: None,
             to: None,
             actor: None,
             action: None,
             limit: None,
-        };
+        }
+    }
 
-        let rows = list_audit(State(st.clone()), scoped(&["cam_a"]), Query(q()))
+    /// Write through the REAL writer, never raw SQL.
+    ///
+    /// `auth::audit` is where `subject_camera_id` is derived, so a test that inserted rows by hand
+    /// would be asserting against a column the box never populates that way — it would pass while the
+    /// shipped path leaked. Going through the writer is what makes producer and reader agree.
+    async fn audited(
+        st: &AppState,
+        action: &str,
+        target_type: &str,
+        target_id: &str,
+        detail: Value,
+    ) {
+        let guard = Principal {
+            id: "guard".into(),
+            name: "guard".into(),
+            ..Principal::system_admin()
+        };
+        auth::audit(&st.pool, &guard, action, target_type, target_id, detail).await;
+        // RFC3339 strings sort as text and `Utc::now()` can repeat within one microsecond; a beat
+        // between rows keeps `ORDER BY created_at DESC` deterministic for the assertions below.
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+    }
+
+    fn actions_of(rows: &[AuditLog]) -> Vec<&str> {
+        rows.iter().map(|r| r.action.as_str()).collect()
+    }
+
+    #[tokio::test]
+    async fn the_audit_log_hides_camera_targeted_rows_for_other_lanes() {
+        let st = test_state().await;
+        audited(&st, "open_a", "camera", "cam_a", json!({})).await;
+        audited(&st, "open_b", "camera", "cam_SENTINEL_B", json!({})).await;
+        audited(&st, "delete_vehicle", "vehicle", "veh_1", json!({})).await;
+        audited(&st, "login", "", "", json!({})).await;
+
+        let rows = list_audit(State(st.clone()), scoped(&["cam_a"]), Query(audit_query()))
             .await
             .unwrap();
-        // The non-camera rows survive — this route is filtered, not refused.
-        let ids: Vec<&str> = rows.0.iter().map(|r| r.id.as_str()).collect();
-        assert_eq!(ids, vec!["aud_4", "aud_3", "aud_1"]);
+        // Fail-closed: a scoped caller now sees ONLY rows it can be shown to own. The non-camera rows
+        // that used to survive are hidden too — see
+        // `the_audit_log_never_hands_a_scoped_caller_a_camera_it_does_not_hold` for why they cannot
+        // be waved through: whether a row names a camera is a property of schemaless JSON.
+        assert_eq!(actions_of(&rows.0), vec!["open_a"]);
         assert!(!serde_json::to_string(&rows.0)
             .unwrap()
             .contains("cam_SENTINEL_B"));
 
-        // An empty allowlist hides every camera-targeted row and keeps the rest.
-        let none = list_audit(State(st.clone()), scoped(&[]), Query(q()))
+        // An empty allowlist owns nothing and therefore sees nothing.
+        let none = list_audit(State(st.clone()), scoped(&[]), Query(audit_query()))
             .await
             .unwrap();
-        assert_eq!(none.0.len(), 2);
+        assert!(none.0.is_empty());
 
-        // CONSTRAINT 2: an unscoped credential still reads the whole log.
+        // CONSTRAINT 2: an unscoped credential still reads the whole log, unchanged.
         assert_eq!(
-            list_audit(State(st), Principal::system_admin(), Query(q()))
+            list_audit(State(st), Principal::system_admin(), Query(audit_query()))
                 .await
                 .unwrap()
                 .0
                 .len(),
             4
+        );
+    }
+
+    /// The audit-log camera leak: the owning camera lives in free-form `detail`, not in `target_id`.
+    ///
+    /// The predecessor filter masked rows whose `target_type` was `'camera'` and passed everything
+    /// else. But zones, ai_task, camera_schedule, snapshot_schedule and recording_gap all record
+    /// their camera as `detail.camera_id` under their OWN target_type, so one
+    /// `GET /api/v1/audit?limit=5000` handed a lane-scoped manager the fleet roster plus which
+    /// cameras carry zones, AI tasks and schedules. `detail` is `Json<Value>` with no schema, so no
+    /// predicate can be trusted to read it — the subject has to be a column.
+    #[tokio::test]
+    async fn the_audit_log_never_hands_a_scoped_caller_a_camera_it_does_not_hold() {
+        let st = test_state().await;
+        // Verbatim shapes from routes/zones.rs, ai.rs, schedules.rs, snapshot_schedules.rs, anr.rs.
+        audited(
+            &st,
+            "create_zone",
+            "zone",
+            "zone_1",
+            json!({ "camera_id": "cam_SENTINEL_B", "name": "dock", "kind": "line" }),
+        )
+        .await;
+        audited(
+            &st,
+            "create_ai_task",
+            "ai_task",
+            "task_1",
+            json!({ "camera_id": "cam_SENTINEL_C", "task_type": "anpr" }),
+        )
+        .await;
+        audited(
+            &st,
+            "create_schedule",
+            "camera_schedule",
+            "sch_1",
+            json!({ "camera_id": "cam_SENTINEL_D", "time_start": "08:00" }),
+        )
+        .await;
+        audited(
+            &st,
+            "anr_backfill",
+            "recording_gap",
+            "gap_1",
+            json!({ "camera_id": "cam_SENTINEL_E" }),
+        )
+        .await;
+        // ..and one the caller genuinely owns, so the route is proven filtered rather than emptied.
+        audited(
+            &st,
+            "create_zone_mine",
+            "zone",
+            "zone_2",
+            json!({ "camera_id": "cam_a", "name": "bay" }),
+        )
+        .await;
+
+        let rows = list_audit(State(st.clone()), scoped(&["cam_a"]), Query(audit_query()))
+            .await
+            .unwrap();
+        let body = serde_json::to_string(&rows.0).unwrap();
+        assert!(
+            !body.contains("SENTINEL"),
+            "a camera named only in `detail` still reached a credential scoped elsewhere: {body}"
+        );
+        assert_eq!(actions_of(&rows.0), vec!["create_zone_mine"]);
+
+        // CONSTRAINT 2: nothing changed for an unscoped credential — all five rows, detail intact.
+        assert_eq!(
+            list_audit(State(st), Principal::system_admin(), Query(audit_query()))
+                .await
+                .unwrap()
+                .0
+                .len(),
+            5
+        );
+    }
+
+    /// A row about SEVERAL cameras is fleet-level and is hidden from every scoped caller.
+    ///
+    /// An archive export over four lanes, or an API key mint that lists its own scope, is one act
+    /// about the fleet. Attributing it to any single lane would show that lane's holder a `detail`
+    /// containing the other camera ids — which is the leak again, one row at a time.
+    #[tokio::test]
+    async fn a_fleet_level_audit_row_is_not_visible_to_any_single_lane() {
+        let st = test_state().await;
+        audited(
+            &st,
+            "create_archive_export",
+            "backup_job",
+            "bkp_1",
+            json!({ "camera_ids": ["cam_a", "cam_SENTINEL_B"], "trim": false }),
+        )
+        .await;
+        audited(
+            &st,
+            "create_api_key",
+            "api_key",
+            "key_1",
+            json!({ "scope_kind": "cameras", "scope_cameras": ["cam_a", "cam_SENTINEL_B"] }),
+        )
+        .await;
+
+        for holder in [scoped(&["cam_a"]), scoped(&["cam_SENTINEL_B"])] {
+            let rows = list_audit(State(st.clone()), holder, Query(audit_query()))
+                .await
+                .unwrap();
+            assert!(
+                rows.0.is_empty(),
+                "a multi-camera row must not resolve to one of its cameras: {:?}",
+                actions_of(&rows.0)
+            );
+        }
+        assert_eq!(
+            list_audit(State(st), Principal::system_admin(), Query(audit_query()))
+                .await
+                .unwrap()
+                .0
+                .len(),
+            2
         );
     }
 }

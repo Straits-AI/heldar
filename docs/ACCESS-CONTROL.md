@@ -284,6 +284,30 @@ filtered:
   exist, writing staleness gaps indistinguishable from real outages into the fleet's
   history. Scrape with a fleet-wide key.
 
+### The audit log (`GET /api/v1/audit`)
+
+Read confinement, but it could not be expressed the usual way. The owning camera is
+routinely recorded in the free-form `detail` JSON under a *non-camera* `target_type` —
+zones, AI tasks, record and snapshot schedules and recording gaps all do this — so a
+predicate over `target_id` masked gate rows and let every one of those through. One
+`?limit=5000` returned the fleet roster plus which cameras carry zones, AI tasks and
+schedules. `detail` is `Json<Value>` with no schema and new call sites add keys freely:
+it cannot be a scope boundary.
+
+So camera identity was promoted into an indexed `audit_log.subject_camera_id` column
+(kernel migration 0014), derived in `auth::audit` — the single writer — and backfilled
+for rows already on the box. A scoped credential sees a row iff its subject is non-NULL
+and in scope.
+
+This is **fail-closed**: NULL means fleet-level or about no camera at all, and those
+rows are hidden rather than shown. Multi-camera acts (an archive export, an API-key
+mint, the `'*'` bulk device-config write) resolve to NULL deliberately — attributing
+one to a single lane would both mislabel it and hand that lane's holder the other
+camera ids sitting in the same `detail`. Audit is a manager+ surface where a hidden row
+costs an accountability question and an extra row costs the roster, so hiding is the
+conservative direction. Unscoped credentials — every human role, and every key minted
+without a camera list — read the whole log unchanged.
+
 ### The recorded-media plane (`/media/*`)
 
 `/media/*` serves the same footage the API gates, so it carries the same scope
@@ -292,7 +316,10 @@ filtered:
 string alone. The rest — exported clips, playback sessions, evidence frames, archives
 — are **flat**: their filenames carry no camera, so producers register each artifact
 in the `media_artifacts` sidecar (migration 0013) and the guard resolves ownership
-from it.
+from it. Migration 0013 also carried existing zone and embedding evidence across;
+**entry** migration 0004 does the same for gate evidence, which lives in the app crate
+and was missed the first time — without it an upgraded box 403s a scoped credential on
+its own pre-upgrade gate frame while the byte-identical zone frame beside it serves.
 
 This fails closed in both directions: an artifact whose producer never registered it
 is `Unattributed`, which is a 403 for a scoped credential (and unchanged for everyone
@@ -483,6 +510,9 @@ The immutable operator+system action log. Filters: `from`, `to`, `actor`, `actio
 `limit` (default 200, ≤5000), newest-first. Every registry mutation, pass operation,
 user/key change, login, and entry confirm/reject appends a row
 (`actor`, `actor_name`, `role`, `action`, `target_type`, `target_id`, `detail`).
+
+A **camera-scoped** credential sees only the rows whose subject camera it holds, and
+this is fail-closed — see §4b, "The audit log".
 
 ---
 

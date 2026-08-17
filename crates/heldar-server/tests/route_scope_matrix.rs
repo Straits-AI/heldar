@@ -151,7 +151,32 @@ fn composed_router(st: &AppState) -> axum::Router {
         .with_state(st.clone())
 }
 
+/// The `/media/*` plane merged onto the API router, wired exactly as `heldar_server::run` wires it:
+/// `nest_service` per subtree behind `media_scope::guard`.
+///
+/// The archive tests need this because the defect they pin lives in the SEAM between the producer's
+/// attribution key and the key the guard derives from the served URL. A test that only calls the API
+/// cannot see that seam — only an actual fetch through the guard crosses it.
+fn composed_router_with_media(st: &AppState) -> axum::Router {
+    let media = axum::Router::new()
+        .nest_service(
+            "/media/archives",
+            tower_http::services::ServeDir::new(&st.cfg.archive_dir),
+        )
+        .layer(axum::middleware::from_fn_with_state(
+            st.clone(),
+            heldar_kernel::services::media_scope::guard,
+        ));
+    composed_router(st).merge(media)
+}
+
 async fn test_state() -> AppState {
+    test_state_with(|_| {}).await
+}
+
+/// [`test_state`] with a hook to adjust config before the state is frozen. The archive tests point
+/// `archive_dir` at their own scratch tree so a real export never writes into the developer's box.
+async fn test_state_with(tune: impl FnOnce(&mut heldar_kernel::config::Config)) -> AppState {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
         .connect("sqlite::memory:")
@@ -160,6 +185,7 @@ async fn test_state() -> AppState {
     heldar_kernel::db::run_migrations(&pool).await.unwrap();
     let mut cfg = heldar_kernel::config::Config::from_env();
     cfg.auth_enabled = true;
+    tune(&mut cfg);
     let cfg = std::sync::Arc::new(cfg);
     AppState {
         recorder: heldar_kernel::services::recorder::RecorderManager::new(
@@ -551,6 +577,38 @@ async fn a_scoped_credential_cannot_reach_the_egress_surfaces() {
         // rather than filtered: a filtered scrape reads to Prometheus as cameras that ceased to
         // exist, writing staleness gaps indistinguishable from real outages into the fleet history.
         ("GET", "/metrics", "", "scrape fleet-wide metrics"),
+        // The credential surface — a scoped key that can read it learns every other integrator's
+        // camera allowlist, i.e. the fleet roster. The create/update/delete siblings were guarded in
+        // an earlier pass; the READS were left out of that batch.
+        ("GET", "/api/v1/api-keys", "", "list API keys"),
+        ("GET", "/api/v1/users", "", "list users"),
+        // Box-level settings with no camera to scope by. `retention` is the sharpest: the value is
+        // applied LATER by a sweeper that holds no principal and evicts segments fleet-wide, so a
+        // scope-clean request destroys other cameras' footage after it returns.
+        (
+            "PUT",
+            "/api/v1/system/retention",
+            r#"{"max_recordings_gb": 0.001}"#,
+            "shrink the fleet-wide recording cap",
+        ),
+        (
+            "PUT",
+            "/api/v1/system/transcode",
+            r#"{"engine":"cpu"}"#,
+            "change the transcode engine",
+        ),
+        (
+            "PUT",
+            "/api/v1/system/db",
+            r#"{"max_db_mb": 1}"#,
+            "change the database size cap",
+        ),
+        (
+            "POST",
+            "/api/v1/system/db/convert",
+            "{}",
+            "convert the database",
+        ),
     ] {
         let (status, resp) = call_body(&st, &scoped, method, path, body).await;
         assert_eq!(
@@ -588,4 +646,287 @@ async fn fleet_wide_reads_are_confined_to_the_credentials_cameras() {
             "{path} returned nothing for the credential's OWN camera — filtered too hard: {body}"
         );
     }
+}
+
+/// `/api/v1/system` never names another camera, so no per-route check could catch it — it leaked the
+/// fleet's SHAPE as counts. `cameras_total: 2` beside a one-camera `GET /api/v1/cameras` answers
+/// "how many cameras exist outside your scope", the exact bit the camera list filters away, and
+/// differencing it over time reports fleet changes. Aggregates must be scoped, not merely gated.
+#[tokio::test]
+async fn system_info_aggregates_do_not_disclose_the_fleet_size() {
+    let st = test_state().await;
+    seed_camera(&st, "camera_a").await;
+    seed_camera(&st, "camera_b").await;
+    seed_camera(&st, "camera_c").await;
+    let scoped = seed_key(&st, Some(&["camera_a"])).await;
+    let fleet = seed_key(&st, None).await;
+
+    let (status, body) = call_body(&st, &scoped, "GET", "/api/v1/system", "").await;
+    assert!(
+        status.is_success(),
+        "scoped /api/v1/system -> {status}: {body}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&body).expect("system info is JSON");
+    assert_eq!(
+        v["cameras_total"], 1,
+        "a camera_a-scoped credential must count only its own cameras, not the fleet: {body}"
+    );
+
+    // The unscoped credential still sees the whole box — this must scope the answer, not shrink it
+    // for everyone. A "fix" that reported 1 to every caller would pass the assertion above.
+    let (status, body) = call_body(&st, &fleet, "GET", "/api/v1/system", "").await;
+    assert!(
+        status.is_success(),
+        "fleet /api/v1/system -> {status}: {body}"
+    );
+    let v: serde_json::Value = serde_json::from_str(&body).expect("system info is JSON");
+    assert_eq!(
+        v["cameras_total"], 3,
+        "an unscoped credential must still see every camera: {body}"
+    );
+}
+
+// ---- Archive export: the FALSE DENY side of the boundary ----
+//
+// Every other test here asks whether the boundary lets too much through. These three ask the
+// opposite and equally load-bearing question: does it deny what it just authorised? A scope layer that
+// 403s the owner of an artifact is not "safe by default", it is a broken feature — and because the
+// guard's Unattributed branch answers 403 identically to a genuine scope violation, the breakage
+// looks exactly like enforcement working.
+
+/// A scratch tree removed on drop, so an export in this process never touches the real archive dir.
+struct ScratchDir(PathBuf);
+impl ScratchDir {
+    fn new(tag: &str) -> Self {
+        let p = std::env::temp_dir().join(format!(
+            "heldar-archive-{tag}-{}-{}",
+            std::process::id(),
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir_all(p.join("archives")).unwrap();
+        std::fs::create_dir_all(p.join("recordings")).unwrap();
+        ScratchDir(p)
+    }
+}
+impl Drop for ScratchDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// A camera with one real segment file on disk and the row that points at it, so `create_archive`
+/// has something to actually zip. An archive built from zero segments is a 404, not an artifact.
+async fn seed_segment(st: &AppState, root: &Path, camera_id: &str) {
+    let dir = root.join("recordings").join(camera_id);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("seg.mp4");
+    std::fs::write(&path, format!("footage-of-{camera_id}")).unwrap();
+    let now = chrono::Utc::now();
+    sqlx::query(
+        "INSERT INTO segments (id, camera_id, path, start_time, end_time, duration_s, container,
+                               size_bytes, locked, evidence_locked, created_at)
+         VALUES (?, ?, ?, ?, ?, 60.0, 'mp4', ?, 0, 0, ?)",
+    )
+    .bind(format!("seg_{camera_id}"))
+    .bind(camera_id)
+    .bind(path.to_string_lossy().to_string())
+    .bind(now - chrono::Duration::minutes(5))
+    .bind(now)
+    .bind(std::fs::metadata(&path).unwrap().len() as i64)
+    .bind(now)
+    .execute(&st.pool)
+    .await
+    .unwrap();
+}
+
+/// GET a `/media/*` URL through the guard, exactly as a browser would.
+async fn call_media(st: &AppState, token: &str, path: &str) -> StatusCode {
+    let mut app = composed_router_with_media(st);
+    let req = Request::builder()
+        .method("GET")
+        .uri(path)
+        .header("X-API-Key", token)
+        .body(Body::empty())
+        .unwrap();
+    app.call(req).await.unwrap().status()
+}
+
+/// Export an archive and return the `output_url` the API handed back.
+async fn export_archive(st: &AppState, token: &str, body: &str) -> String {
+    let (status, resp) = call_body(st, token, "POST", "/api/v1/archive/export", body).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "archive export was refused ({body}) -> {status}: {resp}"
+    );
+    serde_json::from_str::<serde_json::Value>(&resp)
+        .unwrap()
+        .get("output_url")
+        .and_then(|v| v.as_str())
+        .unwrap_or_else(|| panic!("export returned no output_url: {resp}"))
+        .to_string()
+}
+
+/// END TO END: an archive a credential is allowed to CREATE must be one it can READ.
+///
+/// The observed failure was `POST /api/v1/archive/export {"camera_ids":["camera_a"]}` -> 201 followed
+/// by `GET /media/archives/<job>.zip` -> 403 for the very credential that made it. `create_archive`
+/// wrote `output_url` and returned without registering the .zip in `media_artifacts`, so the guard
+/// resolved it `Unattributed` and failed closed: every archive ever exported was unreadable to every
+/// camera-scoped credential.
+///
+/// This drives the real pipeline — segment files on disk, `/usr/bin/zip`, `ServeDir` behind the
+/// guard — because the defect lives in the seam between the key the producer writes and the key
+/// `artifact_key` derives from the served URL. Nothing short of a real fetch crosses that seam.
+#[tokio::test]
+async fn an_archive_is_readable_by_the_scoped_credential_that_exported_it() {
+    let root = ScratchDir::new("e2e");
+    let st = test_state_with(|cfg| {
+        cfg.archive_dir = root.0.join("archives");
+        cfg.recordings_dir = root.0.join("recordings");
+    })
+    .await;
+    seed_camera(&st, "camera_a").await;
+    seed_camera(&st, "camera_b").await;
+    seed_segment(&st, &root.0, "camera_a").await;
+    seed_segment(&st, &root.0, "camera_b").await;
+    let scoped_a = seed_key(&st, Some(&["camera_a"])).await;
+    let scoped_b = seed_key(&st, Some(&["camera_b"])).await;
+
+    let url = export_archive(&st, &scoped_a, r#"{"camera_ids":["camera_a"]}"#).await;
+    assert!(
+        url.starts_with("/media/archives/"),
+        "unexpected archive url {url}"
+    );
+
+    // THE REGRESSION. Not a nicety: the export is useless if its own author cannot fetch it.
+    assert_eq!(
+        call_media(&st, &scoped_a, &url).await,
+        StatusCode::OK,
+        "the camera_a-scoped credential that created {url} cannot read it — the scope layer is \
+         denying the export it just authorised"
+    );
+
+    // ...and the subtree did not simply open up: a credential scoped to a DIFFERENT camera is still
+    // refused the same bytes. Without this the fix could be "attribute to every camera" or "stop
+    // guarding archives", both of which would satisfy the assertion above.
+    assert_eq!(
+        call_media(&st, &scoped_b, &url).await,
+        StatusCode::FORBIDDEN,
+        "a camera_b-scoped credential read camera_a's archive {url}"
+    );
+
+    // The attribution names camera_a ONLY — camera_b has a segment on this box and must not have
+    // been swept into an export that never contained its footage.
+    let mut owners = sqlx::query_scalar::<_, String>(
+        "SELECT camera_id FROM media_artifacts WHERE path = ? AND kind = 'archive'",
+    )
+    .bind(url.trim_start_matches("/media/"))
+    .fetch_all(&st.pool)
+    .await
+    .unwrap();
+    owners.sort();
+    assert_eq!(owners, vec!["camera_a".to_string()]);
+}
+
+/// A FLEET-WIDE export sends `camera_ids: []`, and `[]` means "the whole box" downstream. Attributing
+/// the request's list would write zero rows and leave the archive `Unattributed` all over again — the
+/// same 403, reached by a different route. The owners must come from the segments actually zipped.
+#[tokio::test]
+async fn a_fleet_wide_export_is_attributed_to_every_camera_it_contains() {
+    let root = ScratchDir::new("fleet");
+    let st = test_state_with(|cfg| {
+        cfg.archive_dir = root.0.join("archives");
+        cfg.recordings_dir = root.0.join("recordings");
+    })
+    .await;
+    seed_camera(&st, "camera_a").await;
+    seed_camera(&st, "camera_b").await;
+    seed_segment(&st, &root.0, "camera_a").await;
+    seed_segment(&st, &root.0, "camera_b").await;
+    let unscoped = seed_key(&st, None).await;
+    let scoped_a = seed_key(&st, Some(&["camera_a"])).await;
+
+    let url = export_archive(&st, &unscoped, r#"{"camera_ids":[]}"#).await;
+
+    let mut owners = sqlx::query_scalar::<_, String>(
+        "SELECT camera_id FROM media_artifacts WHERE path = ? AND kind = 'archive'",
+    )
+    .bind(url.trim_start_matches("/media/"))
+    .fetch_all(&st.pool)
+    .await
+    .unwrap();
+    owners.sort();
+    assert_eq!(
+        owners,
+        vec!["camera_a".to_string(), "camera_b".to_string()],
+        "a fleet-wide export must be attributed to the cameras whose footage it contains, not to \
+         the empty `camera_ids` the request carried"
+    );
+
+    // The unscoped author reads it; the camera_a credential does not, because the zip also holds
+    // camera_b's footage. Being attributed is not the same as being readable.
+    assert_eq!(call_media(&st, &unscoped, &url).await, StatusCode::OK);
+    assert_eq!(
+        call_media(&st, &scoped_a, &url).await,
+        StatusCode::FORBIDDEN,
+        "a camera_a-scoped credential read a fleet-wide archive containing camera_b"
+    );
+}
+
+/// Deleting the export must take its attribution with it, so `media_artifacts` cannot outlive the
+/// bytes it describes. Retention's mtime prune of `archive_dir` is covered by the existence-based
+/// `media_scope::sweep_orphans`; an operator DELETE is immediate and should not wait a sweep cycle.
+#[tokio::test]
+async fn deleting_an_export_forgets_its_attribution() {
+    let root = ScratchDir::new("del");
+    let st = test_state_with(|cfg| {
+        cfg.archive_dir = root.0.join("archives");
+        cfg.recordings_dir = root.0.join("recordings");
+    })
+    .await;
+    seed_camera(&st, "camera_a").await;
+    seed_segment(&st, &root.0, "camera_a").await;
+    let unscoped = seed_key(&st, None).await;
+
+    let url = export_archive(&st, &unscoped, r#"{"camera_ids":["camera_a"]}"#).await;
+    let key = url.trim_start_matches("/media/").to_string();
+    let job_id = key
+        .trim_start_matches("archives/")
+        .trim_end_matches(".zip")
+        .to_string();
+
+    // "no row after DELETE" is vacuously true on a box that never wrote one, which is precisely the
+    // state this fix removed — so pin the row's EXISTENCE first. Otherwise dropping the attribution
+    // and dropping the forget would both leave this test green.
+    assert_eq!(
+        attribution_rows(&st, &key).await,
+        1,
+        "the export was never attributed, so this test would prove nothing about forgetting it"
+    );
+
+    let (status, body) = call_body(
+        &st,
+        &unscoped,
+        "DELETE",
+        &format!("/api/v1/backup/jobs/{job_id}"),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT, "delete failed: {body}");
+
+    assert_eq!(
+        attribution_rows(&st, &key).await,
+        0,
+        "the archive's attribution outlived the archive itself"
+    );
+}
+
+/// How many `media_artifacts` rows describe `key`.
+async fn attribution_rows(st: &AppState, key: &str) -> i64 {
+    sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM media_artifacts WHERE path = ?")
+        .bind(key)
+        .fetch_one(&st.pool)
+        .await
+        .unwrap()
 }

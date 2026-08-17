@@ -35,7 +35,7 @@ use crate::config::Config;
 use crate::error::{AppError, AppResult};
 use crate::models::{BackupDestination, BackupJob, BackupPolicy, BackupTestResult, Segment};
 use crate::repo;
-use crate::state::AppState;
+use crate::state::{AppState, CameraSelection};
 
 /// Hardcoded archiver (the environment provides /usr/bin/zip + tar).
 const ZIP_BIN: &str = "/usr/bin/zip";
@@ -86,7 +86,11 @@ async fn sweep(state: &AppState) -> anyhow::Result<()> {
         if !due {
             continue;
         }
-        match create_policy_job(state, &p).await {
+        // The scheduler holds no principal, so the policy's stored list IS the authority here and an
+        // empty one legitimately means the whole fleet. The request path must never build a
+        // selection this way — see [`trigger_policy`].
+        let selection = stored_selection(&p);
+        match create_policy_job(state, &p, &selection).await {
             Ok(job_id) => spawn_job(state.clone(), job_id),
             Err(e) => tracing::error!(policy = %p.id, error = %e, "backup: failed to create job"),
         }
@@ -94,11 +98,43 @@ async fn sweep(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The selection a policy's STORED `camera_ids` denotes, where empty means the whole fleet.
+///
+/// Only the unprincipled background sweep may build a selection this way. A request path must derive
+/// it from the CALLER (`state::camera_selection`), because the stored list is attacker-influenced
+/// input the moment a camera-scoped credential can reach the row.
+fn stored_selection(p: &BackupPolicy) -> CameraSelection {
+    let ids = json_to_string_vec(&p.camera_ids.0);
+    if ids.is_empty() {
+        CameraSelection::All
+    } else {
+        CameraSelection::Only(ids)
+    }
+}
+
 /// Insert a `policy` job from a policy and claim the policy (`last_run_at`/`last_job_id`) so the next
 /// tick does not re-trigger it. Returns the new job id.
-async fn create_policy_job(state: &AppState, p: &BackupPolicy) -> anyhow::Result<String> {
+///
+/// The camera selection is a PARAMETER rather than a read of `p.camera_ids`, so the two callers
+/// cannot be confused: the scheduler passes the stored list (fleet-wide is legitimate for it), a
+/// manual trigger passes the list confined to its caller's scope. Reading the policy here is what
+/// let a scoped trigger ship the whole fleet no matter what the caller was entitled to.
+async fn create_policy_job(
+    state: &AppState,
+    p: &BackupPolicy,
+    selection: &CameraSelection,
+) -> anyhow::Result<String> {
     let now = Utc::now();
     let job_id = format!("bkj_{}", Uuid::new_v4().simple());
+    let camera_ids = match selection.ids() {
+        // `[]` is how a job row spells "every camera" to `resolve_segments`, so a selection of
+        // NOTHING has no encoding here and must not be stored as one — it would invert into the
+        // widest job the box can run. Only a caller that confined a selection down to nothing gets
+        // here, and it has nothing it may ship.
+        Some([]) => anyhow::bail!("backup selection names no cameras"),
+        Some(ids) => json_from_strs(ids),
+        None => json_from_strs(&[]),
+    };
     let from_time = if p.lookback_hours > 0 {
         Some(now - chrono::Duration::hours(p.lookback_hours))
     } else {
@@ -114,7 +150,7 @@ async fn create_policy_job(state: &AppState, p: &BackupPolicy) -> anyhow::Result
     .bind(&job_id)
     .bind(&p.id)
     .bind(&p.destination_id)
-    .bind(SqlxJson(p.camera_ids.0.clone()))
+    .bind(SqlxJson(camera_ids))
     .bind(from_time)
     .bind(to_time)
     .bind(p.incident_lock_only)
@@ -134,8 +170,16 @@ async fn create_policy_job(state: &AppState, p: &BackupPolicy) -> anyhow::Result
 }
 
 /// Manually trigger a policy: create its job and dispatch it (returns the job id immediately).
-pub async fn trigger_policy(state: &AppState, policy: &BackupPolicy) -> anyhow::Result<String> {
-    let job_id = create_policy_job(state, policy).await?;
+///
+/// `selection` is the caller's CONFINED camera list, not the policy's stored one. Triggering is the
+/// step that actually moves the bytes, so it is the step that must be scoped: a policy may have been
+/// written fleet-wide by an unscoped admin long before a camera-scoped credential pressed the button.
+pub async fn trigger_policy(
+    state: &AppState,
+    policy: &BackupPolicy,
+    selection: &CameraSelection,
+) -> anyhow::Result<String> {
+    let job_id = create_policy_job(state, policy, selection).await?;
     spawn_job(state.clone(), job_id.clone());
     Ok(job_id)
 }
@@ -517,6 +561,31 @@ pub async fn create_archive(
         }
         Ok(Ok(zip_bytes)) => {
             let url = format!("/media/archives/{job_id}.zip");
+            // Attribute the .zip to the cameras whose footage is inside it. `archives/<job>.zip`
+            // names no camera anywhere on disk, so without this row the media guard resolves it
+            // `Unattributed` and refuses it — including to the credential that just exported it.
+            // That is a FALSE DENY, not a leak: the scope layer would break the very feature it had
+            // authorised, and every archive on the box would be unreadable to every scoped key.
+            //
+            // Owners come from the RESOLVED segments, never from the caller's `camera_ids`: a
+            // fleet-wide export sends that field empty (empty = the whole box downstream), and
+            // attributing an empty list writes nothing at all — landing back on `Unattributed` by a
+            // different road. The segments are what actually went into the zip.
+            //
+            // Keyed `archives/{job_id}.zip` because that is exactly what `media_scope::artifact_key`
+            // derives from the `url` above; a key that does not match is a row the guard never finds,
+            // which is the same 403 with extra steps (the bug fixed for evidence snapshots last round).
+            // Written only after the zip exists, so an attribution never outlives a failed export.
+            let mut owners: Vec<String> = segments.iter().map(|s| s.camera_id.clone()).collect();
+            owners.sort();
+            owners.dedup();
+            crate::services::media_scope::attribute(
+                &state.pool,
+                &format!("archives/{job_id}.zip"),
+                &owners,
+                crate::services::media_scope::KIND_ARCHIVE,
+            )
+            .await;
             sqlx::query(
                 "UPDATE backup_jobs SET status = 'completed', files_copied = ?, bytes_copied = ?, output_path = ?, output_url = ?, finished_at = ? WHERE id = ?",
             )
@@ -982,6 +1051,142 @@ fn json_from_strs(v: &[String]) -> Value {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    async fn test_state() -> AppState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let cfg = Arc::new(Config::from_env());
+        AppState {
+            recorder: crate::services::recorder::RecorderManager::new(pool.clone(), cfg.clone()),
+            sampler: crate::services::sampler::SamplerManager::new(pool.clone(), cfg.clone()),
+            live: crate::services::live_publisher::LivePublisherManager::new(
+                pool.clone(),
+                cfg.clone(),
+                reqwest::Client::new(),
+            ),
+            mirror: None,
+            consumers: Arc::new(Vec::new()),
+            modules: Arc::new(Vec::new()),
+            catalog: Arc::new(crate::services::registry::CatalogService::new(&cfg)),
+            http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
+            started_at: Utc::now(),
+            pool,
+            cfg,
+        }
+    }
+
+    /// A fleet-wide policy: `camera_ids = []`, which `resolve_segments` reads as EVERY camera.
+    async fn seed_fleet_policy(state: &AppState) -> BackupPolicy {
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO backup_destinations (id, name, kind, config, enabled, created_at, updated_at)
+             VALUES ('bkd_1', 'nas', 'local', '{}', 1, ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO backup_policies
+               (id, name, destination_id, camera_ids, incident_lock_only, schedule_interval_s,
+                lookback_hours, enabled, created_at, updated_at)
+             VALUES ('bkp_fleet', 'fleet', 'bkd_1', '[]', 0, 86400, 0, 1, ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&state.pool)
+        .await
+        .unwrap();
+        sqlx::query_as::<_, BackupPolicy>("SELECT * FROM backup_policies WHERE id = 'bkp_fleet'")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap()
+    }
+
+    /// The job must ship the selection it was HANDED, not the one stored on the policy.
+    ///
+    /// This is the shape of the F1 escape: the route confined the policy's camera list, dropped the
+    /// result, and passed the stored policy downstream — so a camera-scoped credential triggering a
+    /// fleet-wide (`[]`) policy ran a backup of every camera on the box. Reading `p.camera_ids` here
+    /// is what made that possible, so the selection is a parameter and this test pins it.
+    #[tokio::test]
+    async fn a_policy_job_ships_the_selection_it_was_given_not_the_stored_one() {
+        let state = test_state().await;
+        let policy = seed_fleet_policy(&state).await;
+
+        let selection = CameraSelection::Only(vec!["cam_a".to_string()]);
+        let job_id = create_policy_job(&state, &policy, &selection)
+            .await
+            .unwrap();
+        let stored: String = sqlx::query_scalar("SELECT camera_ids FROM backup_jobs WHERE id = ?")
+            .bind(&job_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            stored, r#"["cam_a"]"#,
+            "the job widened back to the policy's fleet-wide selection"
+        );
+
+        // The scheduler path is unchanged: no principal, so the stored list is the authority and an
+        // empty one still means the whole fleet.
+        let job_id = create_policy_job(&state, &policy, &stored_selection(&policy))
+            .await
+            .unwrap();
+        let stored: String = sqlx::query_scalar("SELECT camera_ids FROM backup_jobs WHERE id = ?")
+            .bind(&job_id)
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, "[]");
+    }
+
+    /// `Only([])` selects NOTHING but a job row spells "no cameras" as `[]`, which means EVERY
+    /// camera. There is no encoding for it, so it must be refused rather than inverted.
+    #[tokio::test]
+    async fn an_empty_selection_is_refused_rather_than_stored_as_the_whole_fleet() {
+        let state = test_state().await;
+        let policy = seed_fleet_policy(&state).await;
+        let err = create_policy_job(&state, &policy, &CameraSelection::Only(Vec::new()))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("names no cameras"), "{err}");
+        let jobs: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM backup_jobs")
+            .fetch_one(&state.pool)
+            .await
+            .unwrap();
+        assert_eq!(jobs, 0, "a selection of nothing created a job anyway");
+    }
+
+    #[test]
+    fn stored_selection_reads_empty_as_the_whole_fleet() {
+        let mut p = BackupPolicy {
+            id: "bkp_1".into(),
+            name: "p".into(),
+            destination_id: "bkd_1".into(),
+            camera_ids: SqlxJson(json!([])),
+            incident_lock_only: false,
+            schedule_interval_s: 86_400,
+            lookback_hours: 0,
+            last_run_at: None,
+            last_job_id: None,
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        assert_eq!(stored_selection(&p), CameraSelection::All);
+        p.camera_ids = SqlxJson(json!(["cam_a"]));
+        assert_eq!(
+            stored_selection(&p),
+            CameraSelection::Only(vec!["cam_a".to_string()])
+        );
+    }
 
     #[test]
     fn join_path_preserves_leading_slash() {

@@ -1450,7 +1450,7 @@ integrity); registry rows key on a normalized plate.
 | Table | Notes |
 |---|---|
 | `entry_events` | the canonical entry event. Denormalized columns `plate`/`auth_status`/`workflow_status`/`direction`/`timestamp`/`plate_confidence` for fast query+reports; `subject`/`authorization`/`evidence`/`workflow`/`audit` are JSON. `event_type ∈ vehicle_entry\|vehicle_exit\|visitor_checkin\|visitor_checkout`. Indexed on ts/plate/auth_status/workflow_status. |
-| `audit_log` | append-only RBAC accountability: `actor`, `actor_name`, `role`, `action`, `target_type`, `target_id`, `detail` JSON. |
+| `audit_log` | append-only RBAC accountability: `actor`, `actor_name`, `role`, `action`, `target_type`, `target_id`, `detail` JSON, `subject_camera_id` (indexed, nullable). The last is the **camera scope boundary** for `GET /api/v1/audit` and is derived by `auth::audit` — `target_id` when `target_type = 'camera'`, else a string `detail.camera_id`, else NULL. It exists because `detail` is schemaless and most writers name their camera only in there; a scope predicate cannot be held over free-form JSON. NULL means fleet-level (a multi-camera export, an API-key mint, the `'*'` bulk write) and is **hidden** from a camera-scoped credential. |
 
 ### 17.2 The ANPR engine (`services/anpr.rs`)
 
@@ -1598,7 +1598,9 @@ seeds one admin from `HELDAR_BOOTSTRAP_ADMIN_USER`/`_PASSWORD` (password ≥8) w
 auth is enabled and no users exist; a no-op otherwise. **Last-admin protection** in
 `routes/auth.rs` refuses to demote/disable/delete the final active admin (and refuses
 self-deletion). Every mutation across `routes/auth.rs` + `routes/entry.rs` appends an
-`audit_log` row via `auth::audit` (best-effort; never fails the caller).
+`audit_log` row via `auth::audit` (best-effort; never fails the caller). `auth::audit`
+is the **single writer**, which is why it — not its ~100 call sites — derives
+`subject_camera_id`: no writer can forget it and new call sites inherit it.
 
 ### 17.5 HTTP surface (`routes/auth.rs`, `routes/entry.rs`)
 

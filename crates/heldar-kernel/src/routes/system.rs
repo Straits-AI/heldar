@@ -89,6 +89,13 @@ async fn put_retention(
     Json(body): Json<RetentionUpdate>,
 ) -> AppResult<Json<RetentionLimits>> {
     principal.require(principal.can_admin(), "change recording limits")?;
+    // Box-level setting with no camera to scope by, so refusal is the only coherent answer.
+    // This one is the sharpest of the four: the value lands in settings, and the retention sweeper
+    // reads it LATER and evicts the oldest segments FLEET-WIDE (`services/retention.rs`, whose
+    // eviction query carries no camera predicate) with no principal and no scope in scope. A scoped
+    // credential that can shrink this cap deletes other cameras' footage without ever naming them —
+    // the request is scope-clean and the damage happens after it returns.
+    crate::routes::cameras::require_fleet_scope(&principal, "change recording limits")?;
     if let Some(gb) = body.max_recordings_gb {
         if !gb.is_finite() || gb <= 0.0 {
             return Err(AppError::BadRequest(
@@ -189,6 +196,8 @@ async fn put_transcode(
     Json(body): Json<TranscodeUpdate>,
 ) -> AppResult<Json<TranscodeSettings>> {
     principal.require(principal.can_admin(), "change transcode engine")?;
+    // Restarts every publisher on the box — fleet-wide by nature, not scopable.
+    crate::routes::cameras::require_fleet_scope(&principal, "change the transcode engine")?;
     let engine = body.engine.trim().to_lowercase();
     if !crate::services::mediamtx::VALID_ENGINES.contains(&engine.as_str()) {
         return Err(AppError::BadRequest(format!(
@@ -262,6 +271,9 @@ async fn put_db_limit(
     Json(body): Json<DbLimitUpdate>,
 ) -> AppResult<Json<DbStatus>> {
     principal.require(principal.can_admin(), "change database size cap")?;
+    // Same deferred-execution shape as the recording cap: written now, enforced later by a sweep
+    // that has no principal.
+    crate::routes::cameras::require_fleet_scope(&principal, "change the database size cap")?;
     if let Some(gb) = body.max_db_gb {
         if !gb.is_finite() || gb <= 0.0 {
             return Err(AppError::BadRequest(
@@ -297,6 +309,8 @@ async fn post_db_convert(
     principal: Principal,
 ) -> AppResult<Json<DbConvertResult>> {
     principal.require(principal.can_admin(), "convert database auto_vacuum")?;
+    // Rewrites the whole database file; there is no per-camera version of this.
+    crate::routes::cameras::require_fleet_scope(&principal, "convert the database")?;
     if crate::services::db_maintenance::auto_vacuum_mode(&st.pool).await? == 2 {
         return Ok(Json(DbConvertResult {
             status: "already-incremental",
@@ -480,22 +494,87 @@ async fn system_info(
     principal: Principal,
 ) -> AppResult<Json<SystemInfo>> {
     principal.require_cap(Cap::SystemRead, "view system info")?;
-    let cameras_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cameras")
-        .fetch_one(&st.pool)
-        .await?;
-    let cameras_recording: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM camera_status cs JOIN cameras c ON c.id = cs.camera_id WHERE cs.state = 'recording' AND c.enabled = 1")
-            .fetch_one(&st.pool)
-            .await?;
-    let segments_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM segments")
-        .fetch_one(&st.pool)
-        .await?;
-    let recordings_bytes: i64 =
-        sqlx::query_scalar("SELECT COALESCE(SUM(size_bytes), 0) FROM segments")
-            .fetch_one(&st.pool)
-            .await?;
-    let active_recorders = st.recorder.active_ids().await.len();
-    let storage = storage::storage_report(&st.pool, &st.cfg).await?;
+    // These four aggregates are the fleet's shape. Unscoped they answered "how many cameras exist
+    // outside your scope, and how much footage do they hold" — precisely the bit `list_cameras`
+    // filters away, handed back as a count. `cameras_total = 14` next to a one-camera
+    // `GET /api/v1/cameras` is a complete inventory disclosure, and differencing it over time reports
+    // fleet changes. Scope every one of them to the caller's cameras.
+    let cam_scope = crate::state::camera_scope_filter(&principal, "id");
+    let mut cameras_total_sql = "SELECT COUNT(*) FROM cameras WHERE 1=1".to_string();
+    if let Some((pred, _)) = &cam_scope {
+        cameras_total_sql.push_str(pred);
+    }
+    let mut q = sqlx::query_scalar::<_, i64>(&cameras_total_sql);
+    if let Some((_, binds)) = &cam_scope {
+        for b in binds {
+            q = q.bind(b.clone());
+        }
+    }
+    let cameras_total: i64 = q.fetch_one(&st.pool).await?;
+
+    let rec_scope = crate::state::camera_scope_filter(&principal, "cs.camera_id");
+    let mut recording_sql = "SELECT COUNT(*) FROM camera_status cs JOIN cameras c ON c.id = cs.camera_id WHERE cs.state = 'recording' AND c.enabled = 1".to_string();
+    if let Some((pred, _)) = &rec_scope {
+        recording_sql.push_str(pred);
+    }
+    let mut q = sqlx::query_scalar::<_, i64>(&recording_sql);
+    if let Some((_, binds)) = &rec_scope {
+        for b in binds {
+            q = q.bind(b.clone());
+        }
+    }
+    let cameras_recording: i64 = q.fetch_one(&st.pool).await?;
+
+    let seg_scope = crate::state::camera_scope_filter(&principal, "camera_id");
+    let mut segments_sql = "SELECT COUNT(*) FROM segments WHERE 1=1".to_string();
+    if let Some((pred, _)) = &seg_scope {
+        segments_sql.push_str(pred);
+    }
+    let mut q = sqlx::query_scalar::<_, i64>(&segments_sql);
+    if let Some((_, binds)) = &seg_scope {
+        for b in binds {
+            q = q.bind(b.clone());
+        }
+    }
+    let segments_total: i64 = q.fetch_one(&st.pool).await?;
+
+    let mut bytes_sql = "SELECT COALESCE(SUM(size_bytes), 0) FROM segments WHERE 1=1".to_string();
+    if let Some((pred, _)) = &seg_scope {
+        bytes_sql.push_str(pred);
+    }
+    let mut q = sqlx::query_scalar::<_, i64>(&bytes_sql);
+    if let Some((_, binds)) = &seg_scope {
+        for b in binds {
+            q = q.bind(b.clone());
+        }
+    }
+    let recordings_bytes: i64 = q.fetch_one(&st.pool).await?;
+    // Recorder ids are camera ids, so an unfiltered count is another fleet-size oracle.
+    let active_recorders = match principal.camera_scope() {
+        Some(scope) => st
+            .recorder
+            .active_ids()
+            .await
+            .iter()
+            .filter(|id| scope.contains(*id))
+            .count(),
+        None => st.recorder.active_ids().await.len(),
+    };
+    // `storage_report` is fleet-wide by construction and has other callers (retention, capacity
+    // planning) that NEED it that way, so narrow it here rather than changing its signature.
+    // `disk` stays: free/total bytes on the volume are a box-level operator fact and disclose nothing
+    // per-camera. The footage-derived fields do disclose — the retention horizon
+    // (MIN(start_time)/MAX(end_time)) reveals when cameras outside the scope started and last
+    // recorded — so a scoped caller gets its OWN footprint and no fleet horizon or projection.
+    let mut storage = storage::storage_report(&st.pool, &st.cfg).await?;
+    if principal.camera_scope().is_some() {
+        storage.recordings_bytes = recordings_bytes;
+        storage.segment_count = segments_total;
+        storage.oldest_segment = None;
+        storage.newest_segment = None;
+        storage.write_rate_bytes_per_day = 0;
+        storage.projected_days_remaining = None;
+    }
     let limits = effective_limits(&st).await;
 
     // Disk health: the latest disk-health alert (any time) and whether one fired recently (within a
