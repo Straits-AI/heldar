@@ -45,7 +45,13 @@ UPDATE audit_log
 -- The `json_valid` test sits inside a CASE rather than beside the others in the WHERE: AND terms have
 -- no guaranteed evaluation order, and `json_type` on a malformed blob RAISES, which would abort the
 -- migration and brick the upgrade over one hand-edited row. CASE evaluates its branch lazily.
+--
+-- `<> ''` matters: json_type('{"camera_id":""}') is 'text', so without it a pre-upgrade row would
+-- store '' where the live writer (`auth::subject_camera`, which filters empties) stores NULL. Since
+-- '' IS NOT NULL passes the read gate, history would classify one way and new rows another — the
+-- exact property this migration's header promises to preserve.
 UPDATE audit_log
    SET subject_camera_id = json_extract(detail, '$.camera_id')
  WHERE subject_camera_id IS NULL
-   AND CASE WHEN json_valid(detail) THEN json_type(detail, '$.camera_id') END = 'text';
+   AND CASE WHEN json_valid(detail) THEN json_type(detail, '$.camera_id') END = 'text'
+   AND json_extract(detail, '$.camera_id') <> '';

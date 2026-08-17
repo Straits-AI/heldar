@@ -221,6 +221,12 @@ async fn create_vehicle(
     Json(body): Json<VehicleCreate>,
 ) -> AppResult<(StatusCode, Json<Vehicle>)> {
     principal.require(principal.can_manage_registry(), "register vehicles")?;
+    // The identity registry has NO camera column, and the ANPR pipeline reads it by plate alone
+    // (`anpr.rs` looks up watchlist/vehicles/visitor_passes with no camera predicate) before it can
+    // auto-open a barrier. So a row written here acts on EVERY camera on the box: the direct
+    // actuators are scoped, but this is the indirect path into the same relay. Nothing about a
+    // registry row is scopable, so a camera-scoped credential is refused outright.
+    heldar_kernel::routes::cameras::require_fleet_scope(&principal, "register vehicles")?;
     let plate_norm = normalize_plate(&body.plate);
     if plate_norm.is_empty() {
         return Err(AppError::BadRequest("`plate` is required".into()));
@@ -290,6 +296,12 @@ async fn update_vehicle(
     Json(body): Json<VehicleUpdate>,
 ) -> AppResult<Json<Vehicle>> {
     principal.require(principal.can_manage_registry(), "modify vehicles")?;
+    // The identity registry has NO camera column, and the ANPR pipeline reads it by plate alone
+    // (`anpr.rs` looks up watchlist/vehicles/visitor_passes with no camera predicate) before it can
+    // auto-open a barrier. So a row written here acts on EVERY camera on the box: the direct
+    // actuators are scoped, but this is the indirect path into the same relay. Nothing about a
+    // registry row is scopable, so a camera-scoped credential is refused outright.
+    heldar_kernel::routes::cameras::require_fleet_scope(&principal, "modify vehicles")?;
     let cur = sqlx::query_as::<_, Vehicle>("SELECT * FROM vehicles WHERE id = ?")
         .bind(&id)
         .fetch_optional(&st.pool)
@@ -372,6 +384,12 @@ async fn delete_vehicle(
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
     principal.require(principal.can_manage_registry(), "delete vehicles")?;
+    // The identity registry has NO camera column, and the ANPR pipeline reads it by plate alone
+    // (`anpr.rs` looks up watchlist/vehicles/visitor_passes with no camera predicate) before it can
+    // auto-open a barrier. So a row written here acts on EVERY camera on the box: the direct
+    // actuators are scoped, but this is the indirect path into the same relay. Nothing about a
+    // registry row is scopable, so a camera-scoped credential is refused outright.
+    heldar_kernel::routes::cameras::require_fleet_scope(&principal, "delete vehicles")?;
     let res = sqlx::query("DELETE FROM vehicles WHERE id = ?")
         .bind(&id)
         .execute(&st.pool)
@@ -450,6 +468,12 @@ async fn create_pass(
     Json(body): Json<VisitorPassCreate>,
 ) -> AppResult<(StatusCode, Json<VisitorPass>)> {
     principal.require(principal.can_operate_gate(), "create visitor passes")?;
+    // The identity registry has NO camera column, and the ANPR pipeline reads it by plate alone
+    // (`anpr.rs` looks up watchlist/vehicles/visitor_passes with no camera predicate) before it can
+    // auto-open a barrier. So a row written here acts on EVERY camera on the box: the direct
+    // actuators are scoped, but this is the indirect path into the same relay. Nothing about a
+    // registry row is scopable, so a camera-scoped credential is refused outright.
+    heldar_kernel::routes::cameras::require_fleet_scope(&principal, "create visitor passes")?;
     if body.visitor_name.trim().is_empty() {
         return Err(AppError::BadRequest("`visitor_name` is required".into()));
     }
@@ -515,6 +539,12 @@ async fn update_pass(
     Json(body): Json<VisitorPassUpdate>,
 ) -> AppResult<Json<VisitorPass>> {
     principal.require(principal.can_operate_gate(), "modify visitor passes")?;
+    // The identity registry has NO camera column, and the ANPR pipeline reads it by plate alone
+    // (`anpr.rs` looks up watchlist/vehicles/visitor_passes with no camera predicate) before it can
+    // auto-open a barrier. So a row written here acts on EVERY camera on the box: the direct
+    // actuators are scoped, but this is the indirect path into the same relay. Nothing about a
+    // registry row is scopable, so a camera-scoped credential is refused outright.
+    heldar_kernel::routes::cameras::require_fleet_scope(&principal, "modify visitor passes")?;
     let cur = load_pass(&st.pool, &id).await?;
     let status = body.status.unwrap_or_else(|| cur.status.clone());
     if !["active", "checked_in", "checked_out", "expired", "revoked"].contains(&status.as_str()) {
@@ -584,6 +614,12 @@ async fn delete_pass(
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
     principal.require(principal.can_manage_registry(), "delete visitor passes")?;
+    // The identity registry has NO camera column, and the ANPR pipeline reads it by plate alone
+    // (`anpr.rs` looks up watchlist/vehicles/visitor_passes with no camera predicate) before it can
+    // auto-open a barrier. So a row written here acts on EVERY camera on the box: the direct
+    // actuators are scoped, but this is the indirect path into the same relay. Nothing about a
+    // registry row is scopable, so a camera-scoped credential is refused outright.
+    heldar_kernel::routes::cameras::require_fleet_scope(&principal, "delete visitor passes")?;
     let res = sqlx::query("DELETE FROM visitor_passes WHERE id = ?")
         .bind(&id)
         .execute(&st.pool)
@@ -601,6 +637,12 @@ async fn checkin_pass(
     Path(id): Path<String>,
 ) -> AppResult<Json<VisitorPass>> {
     principal.require(principal.can_operate_gate(), "check in visitors")?;
+    // The identity registry has NO camera column, and the ANPR pipeline reads it by plate alone
+    // (`anpr.rs` looks up watchlist/vehicles/visitor_passes with no camera predicate) before it can
+    // auto-open a barrier. So a row written here acts on EVERY camera on the box: the direct
+    // actuators are scoped, but this is the indirect path into the same relay. Nothing about a
+    // registry row is scopable, so a camera-scoped credential is refused outright.
+    heldar_kernel::routes::cameras::require_fleet_scope(&principal, "check in visitors")?;
     let pass = load_pass(&st.pool, &id).await?;
     // Only an active (or already-checked-in, idempotent) pass can be checked in. revoked / expired /
     // checked_out are terminal-ish and must not be silently reactivated.
@@ -630,6 +672,12 @@ async fn checkout_pass(
     Path(id): Path<String>,
 ) -> AppResult<Json<VisitorPass>> {
     principal.require(principal.can_operate_gate(), "check out visitors")?;
+    // The identity registry has NO camera column, and the ANPR pipeline reads it by plate alone
+    // (`anpr.rs` looks up watchlist/vehicles/visitor_passes with no camera predicate) before it can
+    // auto-open a barrier. So a row written here acts on EVERY camera on the box: the direct
+    // actuators are scoped, but this is the indirect path into the same relay. Nothing about a
+    // registry row is scopable, so a camera-scoped credential is refused outright.
+    heldar_kernel::routes::cameras::require_fleet_scope(&principal, "check out visitors")?;
     let pass = load_pass(&st.pool, &id).await?;
     // A revoked / expired pass is terminal — do not flip it to checked_out (which would also let it
     // be resurrected via a later check-in).
@@ -732,6 +780,12 @@ async fn create_watch(
     Json(body): Json<WatchlistCreate>,
 ) -> AppResult<(StatusCode, Json<Watchlist>)> {
     principal.require(principal.can_manage_registry(), "manage the watchlist")?;
+    // The identity registry has NO camera column, and the ANPR pipeline reads it by plate alone
+    // (`anpr.rs` looks up watchlist/vehicles/visitor_passes with no camera predicate) before it can
+    // auto-open a barrier. So a row written here acts on EVERY camera on the box: the direct
+    // actuators are scoped, but this is the indirect path into the same relay. Nothing about a
+    // registry row is scopable, so a camera-scoped credential is refused outright.
+    heldar_kernel::routes::cameras::require_fleet_scope(&principal, "manage the watchlist")?;
     let plate_norm = normalize_plate(&body.plate);
     if plate_norm.is_empty() {
         return Err(AppError::BadRequest("`plate` is required".into()));
@@ -789,6 +843,12 @@ async fn update_watch(
     Json(body): Json<WatchlistUpdate>,
 ) -> AppResult<Json<Watchlist>> {
     principal.require(principal.can_manage_registry(), "manage the watchlist")?;
+    // The identity registry has NO camera column, and the ANPR pipeline reads it by plate alone
+    // (`anpr.rs` looks up watchlist/vehicles/visitor_passes with no camera predicate) before it can
+    // auto-open a barrier. So a row written here acts on EVERY camera on the box: the direct
+    // actuators are scoped, but this is the indirect path into the same relay. Nothing about a
+    // registry row is scopable, so a camera-scoped credential is refused outright.
+    heldar_kernel::routes::cameras::require_fleet_scope(&principal, "manage the watchlist")?;
     let cur = sqlx::query_as::<_, Watchlist>("SELECT * FROM watchlist WHERE id = ?")
         .bind(&id)
         .fetch_optional(&st.pool)
@@ -839,6 +899,12 @@ async fn delete_watch(
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
     principal.require(principal.can_manage_registry(), "manage the watchlist")?;
+    // The identity registry has NO camera column, and the ANPR pipeline reads it by plate alone
+    // (`anpr.rs` looks up watchlist/vehicles/visitor_passes with no camera predicate) before it can
+    // auto-open a barrier. So a row written here acts on EVERY camera on the box: the direct
+    // actuators are scoped, but this is the indirect path into the same relay. Nothing about a
+    // registry row is scopable, so a camera-scoped credential is refused outright.
+    heldar_kernel::routes::cameras::require_fleet_scope(&principal, "manage the watchlist")?;
     let res = sqlx::query("DELETE FROM watchlist WHERE id = ?")
         .bind(&id)
         .execute(&st.pool)

@@ -211,6 +211,14 @@ impl Cap {
 }
 
 /// A set of capabilities, packed into a bitmask so a `Principal` stays cheap to clone per request.
+/// Capabilities that read CROSS-CAMERA tables. There is zero tenancy in the schema (no `site_id`
+/// predicate anywhere), so a camera scope cannot filter them and would be security theatre.
+///
+/// Enforced in TWO places that must not drift: `routes::auth::validate_grant` refuses the
+/// combination at mint time, and `Principal::from_api_key` ignores the scope of a STORED key that
+/// carries it. Mint-time alone was not enough — rows predating the check kept resolving.
+pub const UNSCOPABLE_CAPS: [Cap; 2] = [Cap::EventsRead, Cap::IdentityRead];
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct CapSet(u64);
 
@@ -773,6 +781,41 @@ async fn resolve_token(
                 None => return Ok(None),
             };
             let scope = resolve_key_scope(&r.id, &r.scope_kind, r.scope_cameras.as_deref());
+            // A camera scope combined with a capability that reads CROSS-CAMERA tables is a boundary
+            // that cannot hold — those tables carry no camera predicate to filter on. `validate_grant`
+            // refuses the combination at MINT time, but a refusal that only runs at mint is no
+            // refusal at all: rows written before it existed (every box upgraded through 56ef0b4, and
+            // anything inserted out of band) are still resolved here on every request. Enforce it on
+            // the READ path too, which is the one every request actually walks.
+            //
+            // DENY the key. The two alternatives both fail open, which is why neither is here:
+            // dropping the SCOPE promotes the key to fleet-wide, handing it strictly more than it had
+            // (a remediation that escalates privilege is worse than the leak it patches); and
+            // stripping the unscopable CAPS does nothing when the grant is `admin`, because
+            // `CapSet::allows` re-derives them from Admin. Denying is the only outcome that cannot
+            // end with the caller holding more than the operator intended.
+            //
+            // The blast radius is bounded: this shape is unmintable, so a stored one is either a row
+            // written before the mint-time refusal existed or an out-of-band insert. The fix is to
+            // re-mint — without the unscopable capabilities, or without the camera scope.
+            if matches!(scope, Scope::Cameras(_)) && UNSCOPABLE_CAPS.iter().any(|u| caps.allows(*u))
+            {
+                tracing::error!(
+                    target: "heldar::security",
+                    api_key = %r.id,
+                    caps = %UNSCOPABLE_CAPS
+                        .iter()
+                        .filter(|u| caps.allows(**u))
+                        .map(|c| c.slug())
+                        .collect::<Vec<_>>()
+                        .join(","),
+                    "auth: DENYING api key — it carries a camera scope alongside capabilities that \
+                     read cross-camera tables, which the scope cannot filter. The API refuses to mint \
+                     this combination; re-mint the key without those capabilities, or without the \
+                     camera scope."
+                );
+                return Ok(None);
+            }
             // Best-effort last-used stamp (does not gate the request). Debounced to once a
             // minute per key: the AI worker authenticates every request with its key, and an
             // unconditional UPDATE put a write on SQLite's single writer for every poll —
@@ -1205,11 +1248,23 @@ fn subject_camera(
     if target_type == "camera" && !target_id.is_empty() && target_id != WILDCARD_TARGET {
         return Some(target_id.to_string());
     }
-    detail
+    if let Some(id) = detail
         .get("camera_id")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty())
-        .map(str::to_string)
+    {
+        return Some(id.to_string());
+    }
+    // A one-element `camera_ids` names exactly one subject and is NOT a fleet act. Treating the
+    // plural key as always-fleet hid a scoped caller's own single-camera archive export from its own
+    // audit trail — the multi-camera-is-fleet rule is right, but only from two elements up.
+    match detail.get("camera_ids").and_then(|v| v.as_array()) {
+        Some(ids) if ids.len() == 1 => ids[0]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        _ => None,
+    }
 }
 
 /// Append an immutable audit-log entry (best-effort; never fails the caller).

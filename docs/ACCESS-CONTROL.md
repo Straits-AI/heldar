@@ -267,6 +267,20 @@ because per-route checks cannot see the escapes:
 | **Write confinement** | payloads carrying camera ids (backup policies, archive exports) | submitted ids are **intersected** with the scope before use, and re-applied when the policy later runs |
 | **Fleet-only refusal** | credential management, egress config, fleet cursors, `/metrics` | **403** outright — see below |
 
+### Capabilities that cannot be scoped
+
+`events:read` and `identity:read` read tables with **no camera column** — there is no
+predicate to filter them by — so pairing them with a camera scope would be a
+boundary that silently does not hold. The API **refuses to mint** that combination,
+and a stored key carrying it is **denied at authentication** (it predates the refusal
+or was inserted out of band; re-mint it). `admin` implies every capability, so an
+`admin` grant cannot carry a camera scope either.
+
+The practical consequence: a camera-scoped credential cannot reach `/api/v1/events`,
+the entry identity registry, or anything else gated on those capabilities. That is by
+design, not a gap — the route matrix reports such routes as UNREACHABLE rather than
+counting them as covered.
+
 ### Surfaces that refuse a scoped credential outright
 
 Some surfaces have no coherent scoped answer, so they are refused rather than
@@ -279,6 +293,14 @@ filtered:
   reading them through a scoped route.
 - **The outbox cursor** (`GET /api/v1/outbox`). `seq` is a monotonic fleet cursor;
   filtering it hands back a sequence with holes that the client reads as delivered.
+- **The entry identity registry** (vehicles, watchlist, visitor passes). These tables
+  have no camera column, and the ANPR pipeline matches them **by plate alone** before
+  it can auto-open a barrier — so a row written there acts on every camera on the box.
+  The direct gate actuators are scoped; this is the indirect path into the same relay.
+- **Box-level settings and the module registry** (`/api/v1/system/*` writes, database
+  status, module detail/unregister, plugin-registry refresh, backup destinations).
+  Nothing about them is per-camera, and several are applied **later** by loops that
+  hold no principal.
 - **`GET /metrics`.** The exposition carries `heldar_camera_up{camera=…}` and friends
   for the whole fleet. A filtered scrape reads to Prometheus as cameras that ceased to
   exist, writing staleness gaps indistinguishable from real outages into the fleet's

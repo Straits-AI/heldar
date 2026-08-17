@@ -269,6 +269,12 @@ pub fn camera_selection(
     }
 }
 
+/// Refuse a camera-scoped credential outright.
+///
+/// Re-exported here because this is where the other scope primitives live and where app crates look
+/// for them; the definition stays next to the camera routes that first needed it.
+pub use crate::routes::cameras::require_fleet_scope;
+
 /// SQL predicate + bind values restricting a camera-keyed list query to a principal's scope.
 ///
 /// Returns `None` when the caller is unrestricted (the overwhelming default), so unscoped callers pay

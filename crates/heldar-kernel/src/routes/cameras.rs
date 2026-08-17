@@ -82,7 +82,7 @@ pub(crate) async fn load_camera(pool: &SqlitePool, id: &str) -> AppResult<Camera
 /// Unscoped credentials — every human role, and every key minted without a camera list — are
 /// unaffected, and with auth disabled the principal is the unscoped system admin, so this is a
 /// structural no-op on the LAN default rather than a promise.
-pub(crate) fn require_fleet_scope(principal: &Principal, action: &str) -> AppResult<()> {
+pub fn require_fleet_scope(principal: &Principal, action: &str) -> AppResult<()> {
     if principal.camera_scope().is_some() {
         return Err(AppError::Forbidden(format!(
             "credential is scoped to specific cameras and cannot {action}"

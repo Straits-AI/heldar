@@ -83,6 +83,9 @@ async fn detail(
     Path(id): Path<String>,
 ) -> AppResult<Json<ModuleDetail>> {
     principal.require(principal.can_admin(), "view module detail")?;
+    // Discloses the sidecar's `base_url` and `api_key_id`. `register` already refuses a scoped
+    // credential; detail and unregister are the same surface and were missed.
+    crate::routes::cameras::require_fleet_scope(&principal, "view module detail")?;
     let row = services::modules::get_registered(&st.pool, &id)
         .await?
         .ok_or_else(|| AppError::NotFound(format!("module `{id}` not found")))?;
@@ -96,6 +99,8 @@ async fn unregister(
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
     principal.require(principal.can_admin(), "unregister a module")?;
+    // Destroys a sidecar and revokes its key — box-level, and the inverse of a guarded `register`.
+    crate::routes::cameras::require_fleet_scope(&principal, "unregister a module")?;
     services::modules::unregister(&st.pool, &id).await?;
     auth::audit(
         &st.pool,
@@ -259,6 +264,17 @@ async fn forward(
                 crate::auth::PrincipalKind::System => "system",
             },
         );
+    // The scope travels with the identity, or the sidecar cannot enforce what we just told it to
+    // enforce: without this header a one-camera integration key and a fleet-wide one are
+    // indistinguishable across the proxy, and `Cap::ModuleProxy` is neither privileged nor
+    // unscopable, so a scoped key can hold it. ABSENT means fleet-wide, matching `Scope::All`;
+    // present means "these cameras and no others". An empty value is a scope that permits nothing —
+    // it must not be read as absent.
+    if let Some(cameras) = principal.camera_scope() {
+        let mut ids: Vec<&str> = cameras.iter().map(|s| s.as_str()).collect();
+        ids.sort_unstable();
+        rb = rb.header("x-heldar-camera-scope", ids.join(","));
+    }
     if !body.is_empty() {
         rb = rb.body(body.to_vec());
     }

@@ -48,10 +48,11 @@ const MIN_PASSWORD_LEN: usize = 8;
 /// away and left no distinguishable trace.
 const PRIVILEGED_CAPS: [Cap; 3] = [Cap::Admin, Cap::RegistryManage, Cap::GateOperate];
 
-/// Capabilities that read CROSS-CAMERA tables. There is zero tenancy in the schema (no `site_id`
-/// predicate anywhere), so a camera scope cannot filter them and would be security theatre — refuse the
-/// combination at mint time rather than ship a boundary that silently does not hold.
-const UNSCOPABLE_CAPS: [Cap; 2] = [Cap::EventsRead, Cap::IdentityRead];
+/// Capabilities that read CROSS-CAMERA tables — defined in `auth.rs` beside `Cap` so the mint-time
+/// refusal here and the read-path enforcement in `Principal::from_api_key` share ONE list. They were
+/// briefly enforced by two different tests of the same idea, and that is precisely how the mint-time
+/// refusal came to be defeated by construction.
+use crate::auth::UNSCOPABLE_CAPS;
 
 async fn login(
     State(st): State<AppState>,
@@ -387,6 +388,10 @@ async fn unlock_user(
     Path(id): Path<String>,
 ) -> AppResult<Json<UserView>> {
     principal.require(principal.can_admin(), "unlock users")?;
+    // The ninth credential-surface handler; the other eight already refuse. Undoing a brute-force
+    // lockout on an arbitrary account is a credential-surface write, and the 200-vs-404 is an id
+    // oracle that returns the full UserView on a hit.
+    crate::routes::cameras::require_fleet_scope(&principal, "unlock users")?;
     let res =
         sqlx::query("UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE id = ?")
             .bind(&id)
@@ -570,6 +575,13 @@ fn validate_grant(
             return Err(AppError::BadRequest(
                 "`scope_cameras` must list at least one camera when `scope_kind` is `cameras`"
                     .into(),
+            ));
+        }
+        // An empty id is not a camera. It would sit in the allowlist matching nothing while making
+        // the scope look populated, and it is the value the audit derivation treats as "no subject".
+        if scope_cameras.iter().any(|c| c.trim().is_empty()) {
+            return Err(AppError::BadRequest(
+                "`scope_cameras` must not contain an empty camera id".into(),
             ));
         }
     }

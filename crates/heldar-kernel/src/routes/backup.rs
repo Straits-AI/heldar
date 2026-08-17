@@ -118,6 +118,35 @@ fn owns_selection(principal: &Principal, stored: &serde_json::Value) -> bool {
     }
 }
 
+/// The same visibility rule as [`owns_selection`], as a SQL predicate.
+///
+/// Filtering in Rust after `LIMIT` looks equivalent and is not: the limit then bounds rows EXAMINED,
+/// not rows returned, so a scoped caller's own rows fall off the end behind newer fleet rows. With
+/// no offset or cursor on these endpoints, past the 2000 clamp they become unreachable by any query
+/// the API accepts — and policy jobs accrue a row per policy per tick, so it is only a matter of
+/// uptime. The predicate has to run BEFORE the limit.
+///
+/// Returns `None` for an unscoped caller (no predicate at all — the overwhelming default).
+fn owns_selection_sql(principal: &Principal, column: &str) -> Option<(String, Vec<String>)> {
+    let ids = principal.camera_scope()?;
+    let mut sorted: Vec<String> = ids.iter().cloned().collect();
+    sorted.sort();
+    if sorted.is_empty() {
+        // A scope permitting nothing owns nothing. `AND 0` rather than an empty `IN ()`.
+        return Some((" AND 0".to_string(), Vec::new()));
+    }
+    let placeholders = vec!["?"; sorted.len()].join(",");
+    // Non-empty (an empty stored list means the whole fleet, which is fleet-level) AND every element
+    // held — the subset rule, expressed as "no element falls outside the scope".
+    Some((
+        format!(
+            " AND json_array_length({column}) > 0 \
+              AND NOT EXISTS (SELECT 1 FROM json_each({column}) WHERE json_each.value NOT IN ({placeholders}))"
+        ),
+        sorted,
+    ))
+}
+
 /// Load a policy ON BEHALF OF a caller: existence, then ownership, both missing onto the SAME 404.
 ///
 /// A 403 for the out-of-scope case would turn the handler into an existence oracle over the id
@@ -189,6 +218,10 @@ async fn list_destinations(
     principal: Principal,
 ) -> AppResult<Json<Vec<BackupDestinationView>>> {
     principal.require_cap(Cap::SystemRead, "view backup destinations")?;
+    // All four sibling WRITES refuse a scoped credential because a destination is an off-box egress
+    // channel; the read discloses the same channel — host, path, username, port — and was left out of
+    // that batch. Reading where footage is shipped is most of the value of being able to repoint it.
+    crate::routes::cameras::require_fleet_scope(&principal, "view backup destinations")?;
     let rows = sqlx::query_as::<_, BackupDestination>(
         "SELECT * FROM backup_destinations ORDER BY created_at ASC",
     )
@@ -400,20 +433,23 @@ async fn list_policies(
     principal: Principal,
 ) -> AppResult<Json<Vec<BackupPolicy>>> {
     principal.require_cap(Cap::SystemRead, "view backup policies")?;
-    let rows =
-        sqlx::query_as::<_, BackupPolicy>("SELECT * FROM backup_policies ORDER BY created_at ASC")
-            .fetch_all(&st.pool)
-            .await?;
-    // Ownership is a SUBSET test over a JSON array column, which SQLite cannot express without
-    // `json_each` gymnastics that would be easy to get subtly (and silently) wrong, so it is applied
-    // here instead of in the WHERE clause. Unfiltered, this listing handed a camera-scoped
-    // credential the backup posture of the whole fleet: which cameras are archived where, on what
-    // schedule, and which ones are not backed up at all.
-    Ok(Json(
-        rows.into_iter()
-            .filter(|p| owns_selection(&principal, &p.camera_ids.0))
-            .collect(),
-    ))
+    // Unfiltered, this listing handed a camera-scoped credential the backup posture of the whole
+    // fleet: which cameras are archived where, on what schedule, and which are not backed up at all.
+    // Filtered in SQL like its two siblings — this one has no LIMIT so a post-filter would also be
+    // correct, but one rule with one implementation is what stops the three drifting apart.
+    let scope = owns_selection_sql(&principal, "camera_ids");
+    let mut sql = "SELECT * FROM backup_policies WHERE 1=1".to_string();
+    if let Some((pred, _)) = &scope {
+        sql.push_str(pred);
+    }
+    sql.push_str(" ORDER BY created_at ASC");
+    let mut query = sqlx::query_as::<_, BackupPolicy>(&sql);
+    if let Some((_, binds)) = &scope {
+        for b in binds {
+            query = query.bind(b.clone());
+        }
+    }
+    Ok(Json(query.fetch_all(&st.pool).await?))
 }
 
 async fn create_policy(
@@ -619,28 +655,32 @@ async fn list_jobs(
 ) -> AppResult<Json<Vec<BackupJob>>> {
     principal.require_cap(Cap::SystemRead, "view backup jobs")?;
     let limit = q.limit.unwrap_or(100).clamp(1, 2000);
-    let rows = sqlx::query_as::<_, BackupJob>(
-        "SELECT * FROM backup_jobs
+    // Same subset rule as the policy listing, applied IN SQL so it runs before `LIMIT` — a job row is
+    // more disclosive than a policy (`output_path` is an absolute filesystem path, and
+    // `bytes_copied`/`from_time`/`to_time` describe another camera's footage volume and schedule),
+    // and filtering after the limit made a scoped caller's own rows unreachable behind newer fleet
+    // ones.
+    let scope = owns_selection_sql(&principal, "camera_ids");
+    let mut sql = "SELECT * FROM backup_jobs
          WHERE (? IS NULL OR policy_id = ?)
-           AND (? IS NULL OR status = ?)
-         ORDER BY created_at DESC LIMIT ?",
-    )
-    .bind(&q.policy_id)
-    .bind(&q.policy_id)
-    .bind(&q.status)
-    .bind(&q.status)
-    .bind(limit)
-    .fetch_all(&st.pool)
-    .await?;
-    // Same subset rule as the policy listing. `limit` therefore bounds the work done, not the rows
-    // returned — a scoped caller may get fewer than it asked for, which is the harmless direction.
-    // A job row is more disclosive than a policy: `output_path` is an absolute filesystem path and
-    // `bytes_copied`/`from_time`/`to_time` describe another camera's footage volume and schedule.
-    Ok(Json(
-        rows.into_iter()
-            .filter(|j| owns_selection(&principal, &j.camera_ids.0))
-            .collect(),
-    ))
+           AND (? IS NULL OR status = ?)"
+        .to_string();
+    if let Some((pred, _)) = &scope {
+        sql.push_str(pred);
+    }
+    sql.push_str(" ORDER BY created_at DESC LIMIT ?");
+    let mut query = sqlx::query_as::<_, BackupJob>(&sql)
+        .bind(&q.policy_id)
+        .bind(&q.policy_id)
+        .bind(&q.status)
+        .bind(&q.status);
+    if let Some((_, binds)) = &scope {
+        for b in binds {
+            query = query.bind(b.clone());
+        }
+    }
+    let rows = query.bind(limit).fetch_all(&st.pool).await?;
+    Ok(Json(rows))
 }
 
 async fn get_job(
@@ -754,20 +794,24 @@ async fn list_archive_exports(
 ) -> AppResult<Json<Vec<BackupJob>>> {
     principal.require_cap(Cap::SystemRead, "view archive exports")?;
     let limit = q.limit.unwrap_or(100).clamp(1, 2000);
-    let rows = sqlx::query_as::<_, BackupJob>(
-        "SELECT * FROM backup_jobs WHERE kind = 'on_demand_archive' ORDER BY created_at DESC LIMIT ?",
-    )
-    .bind(limit)
-    .fetch_all(&st.pool)
-    .await?;
     // A scoped credential legitimately CREATES exports here (`archive_export` confines the list it
     // stores), so this is a subset filter and not a refusal: it must keep seeing its own exports —
     // including the `/media/archives/…` URL it needs to fetch them — while the fleet's stay hidden.
-    Ok(Json(
-        rows.into_iter()
-            .filter(|j| owns_selection(&principal, &j.camera_ids.0))
-            .collect(),
-    ))
+    // In SQL, so its own export cannot be pushed off the end of the page by newer fleet exports.
+    let scope = owns_selection_sql(&principal, "camera_ids");
+    let mut sql = "SELECT * FROM backup_jobs WHERE kind = 'on_demand_archive'".to_string();
+    if let Some((pred, _)) = &scope {
+        sql.push_str(pred);
+    }
+    sql.push_str(" ORDER BY created_at DESC LIMIT ?");
+    let mut query = sqlx::query_as::<_, BackupJob>(&sql);
+    if let Some((_, binds)) = &scope {
+        for b in binds {
+            query = query.bind(b.clone());
+        }
+    }
+    let rows = query.bind(limit).fetch_all(&st.pool).await?;
+    Ok(Json(rows))
 }
 
 #[cfg(test)]

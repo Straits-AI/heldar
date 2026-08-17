@@ -248,25 +248,88 @@ async fn seed_key(st: &AppState, cameras: Option<&[&str]>) -> String {
         ),
         None => ("all", None),
     };
-    // `admin` + no explicit capability grant: the STRONGEST adversary. Capabilities are orthogonal to
-    // scope (`camera_allowed` does not exempt Cap::Admin), so this isolates the scope boundary — if a
-    // route lets this key through, only the missing scope check can be responsible.
+    // The strongest adversary that can ACTUALLY EXIST. Capabilities are orthogonal to scope
+    // (`camera_allowed` does not exempt Cap::Admin), so a maximal cap set isolates the scope boundary:
+    // if a route lets this key through, only a missing scope check can be responsible.
+    //
+    // It is deliberately NOT `admin` + no grant, which is what this fixture used to insert. That
+    // combination is now refused at mint AND denied on the read path (a camera scope cannot filter
+    // the cross-camera reads Admin implies), so a test built on it would assert against a principal
+    // that cannot authenticate — vacuously, and silently. Everything except `admin` and the two
+    // unscopable caps, which is exactly the widest grant the product will pair with a camera scope.
+    let caps = serde_json::to_string(&[
+        "registry:manage",
+        "gate:operate",
+        "camera:read",
+        "video:live",
+        "video:playback",
+        "video:export",
+        "ai:tasks",
+        "ai:frames",
+        "ai:ingest",
+        "ai:embedwork",
+        "system:read",
+        "net:scan",
+        "module:proxy",
+    ])
+    .unwrap();
+    let caps = if cameras.is_some() { Some(caps) } else { None };
     sqlx::query(
         "INSERT INTO api_keys (id, name, key_hash, key_prefix, role, active, created_at,
                                capabilities, scope_kind, scope_cameras, expires_at)
-         VALUES (?,?,?,?,'admin',1,?,NULL,?,?,NULL)",
+         VALUES (?,?,?,?,'admin',1,?,?,?,?,NULL)",
     )
     .bind(&id)
     .bind("matrix")
     .bind(heldar_kernel::auth::token_hash(&token))
     .bind(&token[..8])
     .bind(chrono::Utc::now())
+    .bind(caps)
     .bind(kind)
     .bind(list)
     .execute(&st.pool)
     .await
     .unwrap();
     token
+}
+
+/// Mint a credential the way a real operator does — `POST /api/v1/api-keys` through the router —
+/// so the test exercises a shape the product can actually issue.
+///
+/// `seed_key` above writes to `api_keys` DIRECTLY, and writes `role='admin'` with no capability grant.
+/// That is a deliberate over-privileged adversary for the ESCAPE direction (a superset adversary
+/// proves more, not less), but it is worthless in the DENIAL direction: `validate_grant` now refuses
+/// `admin` + `scope_kind: cameras` outright, so that fixture is a credential no deployment can hold.
+/// A false-deny test built on it asserts against a principal that does not exist in production — which
+/// is exactly how the archive false-deny shipped inert with this suite green. Anything asserting that
+/// a scoped credential CAN do something must mint here.
+async fn mint_key(st: &AppState, caps: &[&str], cameras: Option<&[&str]>) -> String {
+    // A real unscoped admin has to exist to mint anything; that is the bootstrap, not the subject.
+    let admin = seed_key(st, None).await;
+    let (kind, list) = match cameras {
+        Some(c) => ("cameras", serde_json::json!(c)),
+        None => ("all", serde_json::json!([])),
+    };
+    let body = serde_json::json!({
+        "name": "minted",
+        "role": "integration",
+        "capabilities": caps,
+        "scope_kind": kind,
+        "scope_cameras": list,
+        "confirm_privileged": true,
+    })
+    .to_string();
+    let (status, resp) = call_body(st, &admin, "POST", "/api/v1/api-keys", &body).await;
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "the API refused to mint {caps:?} scoped to {cameras:?} — a denial-direction test cannot be \
+         written against a credential the product will not issue: {resp}"
+    );
+    serde_json::from_str::<serde_json::Value>(&resp)
+        .ok()
+        .and_then(|v| v.get("key").and_then(|k| k.as_str()).map(String::from))
+        .unwrap_or_else(|| panic!("mint response carried no plaintext key: {resp}"))
 }
 
 async fn call(st: &AppState, token: &str, method: &str, path: &str) -> StatusCode {
@@ -307,6 +370,9 @@ async fn camera_scope_holds_on_every_camera_keyed_route() {
     let mut oracles: Vec<String> = Vec::new();
     let mut vacuous: Vec<String> = Vec::new();
     let mut unproven: Vec<String> = Vec::new();
+    // Routes a camera-scoped credential can never reach because their capability is unscopable. Not
+    // a failure — a fact about the product worth printing, so the count moving is visible in CI.
+    let mut unreachable: Vec<String> = Vec::new();
 
     for route in &routes {
         for method in &route.methods {
@@ -336,9 +402,22 @@ async fn camera_scope_holds_on_every_camera_keyed_route() {
                 ));
             }
             // Control: the scope must not be denying the credential its OWN camera.
-            let a = call(&st, &scoped, method, &for_cam("camera_a")).await;
+            //
+            // A 403 can mean two different things and only one of them is a bug here. If the body
+            // says `missing capability`, the route is gated on something this credential does not
+            // hold — and for the UNSCOPABLE caps (events:read, identity:read) no camera-scoped
+            // credential can EVER hold it, so the route is out of reach by design rather than
+            // wrongly denied. Only a 403 that survives with the capability present indicts the scope.
+            let (a, a_body) = call_body(&st, &scoped, method, &for_cam("camera_a"), "{}").await;
             if a == StatusCode::FORBIDDEN {
-                vacuous.push(format!("{method} {} -> camera_a wrongly 403", route.path));
+                if a_body.contains("missing capability") {
+                    unreachable.push(format!(
+                        "{method} {} -> gated on a capability a scoped credential cannot hold",
+                        route.path
+                    ));
+                } else {
+                    vacuous.push(format!("{method} {} -> camera_a wrongly 403", route.path));
+                }
             }
         }
     }
@@ -368,6 +447,15 @@ async fn camera_scope_holds_on_every_camera_keyed_route() {
              send a valid body to cover them):\n  {}",
             unproven.len(),
             unproven.join("\n  ")
+        );
+    }
+
+    if !unreachable.is_empty() {
+        eprintln!(
+            "route-scope matrix: {} route(s) UNREACHABLE by any camera-scoped credential (gated on \
+             an unscopable capability — by design, not a gap):\n  {}",
+            unreachable.len(),
+            unreachable.join("\n  ")
         );
     }
 
@@ -627,11 +715,10 @@ async fn fleet_wide_reads_are_confined_to_the_credentials_cameras() {
     seed_camera(&st, "camera_b").await;
     let scoped = seed_key(&st, Some(&["camera_a"])).await;
 
-    for path in [
-        "/api/v1/health/cameras",
-        "/api/v1/cameras",
-        "/api/v1/events",
-    ] {
+    // `/api/v1/events` is deliberately absent: it needs `events:read`, which is UNSCOPABLE, so no
+    // camera-scoped credential can reach it to be filtered. Its refusal is asserted with the other
+    // fleet-only surfaces instead.
+    for path in ["/api/v1/health/cameras", "/api/v1/cameras"] {
         let (status, body) = call_body(&st, &scoped, "GET", path, "").await;
         assert!(
             status.is_success(),
@@ -646,6 +733,73 @@ async fn fleet_wide_reads_are_confined_to_the_credentials_cameras() {
             "{path} returned nothing for the credential's OWN camera — filtered too hard: {body}"
         );
     }
+}
+
+/// A scoped caller's own rows must survive PAGINATION, not just filtering. Filtering after `LIMIT`
+/// bounds rows examined rather than rows returned, so newer fleet rows push a scoped caller's own
+/// export off the end — and with no offset or cursor on these endpoints, past the clamp it is
+/// unreachable by any query the API accepts.
+#[tokio::test]
+async fn a_scoped_callers_own_rows_survive_a_page_full_of_fleet_rows() {
+    let root = ScratchDir::new("page");
+    let st = test_state_with(|cfg| {
+        cfg.archive_dir = root.0.join("archives");
+        cfg.recordings_dir = root.0.join("recordings");
+    })
+    .await;
+    seed_camera(&st, "camera_a").await;
+    seed_camera(&st, "camera_b").await;
+    seed_segment(&st, &root.0, "camera_a").await;
+    seed_segment(&st, &root.0, "camera_b").await;
+    let admin = seed_key(&st, None).await;
+    let scoped = mint_key(
+        &st,
+        &[
+            "video:export",
+            "system:read",
+            "registry:manage",
+            "camera:read",
+        ],
+        Some(&["camera_a"]),
+    )
+    .await;
+
+    // The scoped caller's own export goes in FIRST, so every fleet row that follows is newer.
+    let (status, _) = call_body(
+        &st,
+        &scoped,
+        "POST",
+        "/api/v1/archive/export",
+        r#"{"camera_ids":["camera_a"]}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED, "scoped export must be allowed");
+    for _ in 0..3 {
+        let (status, _) = call_body(
+            &st,
+            &admin,
+            "POST",
+            "/api/v1/archive/export",
+            r#"{"camera_ids":["camera_b"]}"#,
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    // A page smaller than the number of newer fleet rows: the filter has to run in SQL to survive it.
+    let (status, body) =
+        call_body(&st, &scoped, "GET", "/api/v1/archive/exports?limit=2", "").await;
+    assert!(status.is_success(), "{status}: {body}");
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&body).expect("a JSON array");
+    assert_eq!(
+        rows.len(),
+        1,
+        "the scoped caller's own export fell off the end of the page: {body}"
+    );
+    assert!(
+        body.contains("camera_a") && !body.contains("camera_b"),
+        "wrong rows returned: {body}"
+    );
 }
 
 /// `/api/v1/system` never names another camera, so no per-route check could catch it — it leaked the
@@ -790,8 +944,28 @@ async fn an_archive_is_readable_by_the_scoped_credential_that_exported_it() {
     seed_camera(&st, "camera_b").await;
     seed_segment(&st, &root.0, "camera_a").await;
     seed_segment(&st, &root.0, "camera_b").await;
-    let scoped_a = seed_key(&st, Some(&["camera_a"])).await;
-    let scoped_b = seed_key(&st, Some(&["camera_b"])).await;
+    let scoped_a = mint_key(
+        &st,
+        &[
+            "video:export",
+            "system:read",
+            "registry:manage",
+            "camera:read",
+        ],
+        Some(&["camera_a"]),
+    )
+    .await;
+    let scoped_b = mint_key(
+        &st,
+        &[
+            "video:export",
+            "system:read",
+            "registry:manage",
+            "camera:read",
+        ],
+        Some(&["camera_b"]),
+    )
+    .await;
 
     let url = export_archive(&st, &scoped_a, r#"{"camera_ids":["camera_a"]}"#).await;
     assert!(
@@ -845,7 +1019,17 @@ async fn a_fleet_wide_export_is_attributed_to_every_camera_it_contains() {
     seed_segment(&st, &root.0, "camera_a").await;
     seed_segment(&st, &root.0, "camera_b").await;
     let unscoped = seed_key(&st, None).await;
-    let scoped_a = seed_key(&st, Some(&["camera_a"])).await;
+    let scoped_a = mint_key(
+        &st,
+        &[
+            "video:export",
+            "system:read",
+            "registry:manage",
+            "camera:read",
+        ],
+        Some(&["camera_a"]),
+    )
+    .await;
 
     let url = export_archive(&st, &unscoped, r#"{"camera_ids":[]}"#).await;
 

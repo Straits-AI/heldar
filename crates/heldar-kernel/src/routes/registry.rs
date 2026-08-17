@@ -35,6 +35,8 @@ async fn refresh(
     principal: Principal,
 ) -> AppResult<Json<RegistryView>> {
     principal.require(principal.can_admin(), "refresh the plugin registry")?;
+    // Box-level catalogue refresh — nothing about it is per-camera.
+    crate::routes::cameras::require_fleet_scope(&principal, "refresh the plugin registry")?;
     st.catalog.refresh().await;
     auth::audit(
         &st.pool,

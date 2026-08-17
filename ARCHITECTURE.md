@@ -1719,7 +1719,24 @@ fails closed on, so a scoped credential would get a 403 on its own live evidence
 Keying on "the file is gone" makes that unrepresentable — once the bytes are gone every
 credential gets a 404 anyway.
 
-**Keeping it honest.** `crates/heldar-server/tests/route_scope_matrix.rs` builds the
+**Two enforcement points, one list.** `UNSCOPABLE_CAPS` (`auth.rs`) names the capabilities that read
+cross-camera tables. `routes::auth::validate_grant` refuses them alongside a camera scope at MINT
+time, and `Principal::from_api_key` DENIES a stored key that carries the combination. Mint-time alone
+was not enough: rows written before the check existed kept resolving on every request. The remediation
+is denial rather than dropping the scope, because dropping it would promote the key to fleet-wide —
+a fix that escalates privilege is worse than the leak. Likewise `CapSet::expanded()` is the single
+definition of "admin implies everything", consumed by both the mint-time and request-time checks;
+they were once two different tests of the same idea, which is exactly how the refusal came to be
+defeated by construction.
+
+**Keeping it honest.** Test credentials must be MINTABLE. The matrix's fixture once inserted `role='admin'` with a camera
+scope directly into `api_keys` — a shape the API now refuses — so every assertion that a scoped
+credential CAN do something was passing against a principal no deployment could hold. That is how the
+archive false deny shipped inert with the suite green. Denial-direction tests mint through
+`POST /api/v1/api-keys`; the escape-direction fixture is the widest grant the product will actually
+pair with a camera scope.
+
+`crates/heldar-server/tests/route_scope_matrix.rs` builds the
 *composed* router (kernel + metrics + entry + movement + search — the shape `build_app`
 serves), walks it to discover every camera-keyed route, and asserts each 403s a
 credential scoped elsewhere; it prints its coverage count so a route that escapes the

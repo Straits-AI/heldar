@@ -163,10 +163,21 @@ pub fn requirement(path: &str) -> Option<(Cap, MediaKind)> {
             }
             _ => Some((Cap::VideoPlayback, MediaKind::Denied)),
         },
-        // Backup archives are a whole-system export — admin only, never a viewer surface.
+        // Backup archives are an export of footage, so they gate on `VideoExport` exactly as `clips`
+        // does — NOT on `Cap::Admin`.
+        //
+        // Admin here made the attribution below unreachable and the whole subtree a permanent false
+        // deny: a camera scope can no longer be combined with an admin grant (`validate_grant`
+        // refuses it, since Admin implies the unscopable caps), so NO credential the API can mint is
+        // both camera-scoped and Admin-capable. Every scoped caller failed this line before the
+        // owners check ever ran — including on the archive it had just been authorised to create.
+        //
+        // This is not a widening: the `Artifact` arm below requires the caller to hold EVERY camera
+        // the archive is attributed to, so a fleet-wide archive still needs a fleet-wide credential.
+        // An archive of one camera is readable by exactly the credential that could have exported it.
         "archives" => match rest.len() {
-            1 => Some((Cap::Admin, MediaKind::Artifact)),
-            _ => Some((Cap::Admin, MediaKind::Denied)),
+            1 => Some((Cap::VideoExport, MediaKind::Artifact)),
+            _ => Some((Cap::VideoExport, MediaKind::Denied)),
         },
         _ => None,
     }
@@ -385,9 +396,17 @@ mod tests {
             requirement("/media/playback/pbs_x/concat.txt"),
             Some((Cap::VideoPlayback, MediaKind::Denied))
         );
+        // Archives gate on VideoExport, NOT Admin. Admin made the subtree unreachable for every
+        // camera-scoped credential — a scope can no longer be combined with an admin grant, so the
+        // cap check refused before the attribution below could ever allow. Pin it: reverting this to
+        // Admin silently restores a permanent false deny that no attribution fix can reach past.
         assert_eq!(
             requirement("/media/archives/bkp_x.zip"),
-            Some((Cap::Admin, MediaKind::Artifact))
+            Some((Cap::VideoExport, MediaKind::Artifact))
+        );
+        assert_eq!(
+            requirement("/media/archives/nested/x.zip"),
+            Some((Cap::VideoExport, MediaKind::Denied))
         );
     }
 

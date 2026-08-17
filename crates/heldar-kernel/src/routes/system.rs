@@ -254,6 +254,10 @@ async fn get_db_status(
     principal: Principal,
 ) -> AppResult<Json<DbStatus>> {
     principal.require_cap(Cap::SystemRead, "view database status")?;
+    // `db_bytes` grows with the fleet's cameras, segments and events — the same fleet-shape signal
+    // that was just removed from `GET /api/v1/system`, one path segment away. Scoping a single
+    // aggregate is meaningless, so refuse.
+    crate::routes::cameras::require_fleet_scope(&principal, "view database status")?;
     Ok(Json(db_status(&st).await?))
 }
 
@@ -560,8 +564,10 @@ async fn system_info(
             .count(),
         None => st.recorder.active_ids().await.len(),
     };
-    // `storage_report` is fleet-wide by construction and has other callers (retention, capacity
-    // planning) that NEED it that way, so narrow it here rather than changing its signature.
+    // `storage_report` is fleet-wide by construction, so narrow it here. (An earlier version of this
+    // comment justified that by "other callers need it that way" — there are none; this is its only
+    // call site. The reason is that its fleet-wide numbers are correct for the unscoped caller, not
+    // that anything else depends on them.)
     // `disk` stays: free/total bytes on the volume are a box-level operator fact and disclose nothing
     // per-camera. The footage-derived fields do disclose — the retention horizon
     // (MIN(start_time)/MAX(end_time)) reveals when cameras outside the scope started and last
