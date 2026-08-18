@@ -1729,7 +1729,23 @@ definition of "admin implies everything", consumed by both the mint-time and req
 they were once two different tests of the same idea, which is exactly how the refusal came to be
 defeated by construction.
 
-**Keeping it honest.** Test credentials must be MINTABLE. The matrix's fixture once inserted `role='admin'` with a camera
+**Keeping it honest.** **The census is what makes coverage default-closed.** `every_route_is_accounted_for` enumerates all
+151 registered routes and requires each to fall into one of three classes: camera-keyed (swept by the
+matrix), *proven* to refuse a camera-scoped credential (probed right there), or declared scope-neutral
+in `SCOPE_NEUTRAL` with a written reason. A route in none of them FAILS. Adding an unguarded route is
+therefore a CI failure by default rather than a silent gap — which is the actual defect behind
+`/metrics`, `/backup/*`, `/system`, `/api-keys` and `/audit` all going uncovered: each was fixed by
+naming the missing route by hand, which cannot catch the next one.
+
+Two supporting pieces keep it honest. `PROBE_BODIES` supplies bodies that satisfy a handler's
+extractor so the probe reaches the GUARD instead of dying at 422 — without it a route with a required
+body looks unprovable when it is merely unprobed. `CENSUS_UNPROVEN` names the routes the harness
+genuinely cannot reach (a resource id needing a seeded fixture, a domain payload, an app-crate schema
+the test router does not init), each with its reason: named debt, deliberately not counted as
+coverage. Both lists are stale-checked, because a declaration outliving its route silently
+pre-authorises whatever later claims that path.
+
+Test credentials must be MINTABLE. The matrix's fixture once inserted `role='admin'` with a camera
 scope directly into `api_keys` — a shape the API now refuses — so every assertion that a scoped
 credential CAN do something was passing against a principal no deployment could hold. That is how the
 archive false deny shipped inert with the suite green. Denial-direction tests mint through

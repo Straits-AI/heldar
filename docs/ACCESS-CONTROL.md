@@ -354,6 +354,10 @@ row dropped early would 403 a scoped credential on its own live evidence.
 
 ### How this is kept honest
 
+Coverage is **default-closed**: a census test enumerates every registered route and fails unless each
+is camera-keyed, provably refuses a scoped credential, or is declared scope-neutral with a reason. A
+new route that consults no scope breaks CI without anyone having to remember it.
+
 `crates/heldar-server/tests/route_scope_matrix.rs` builds the **composed** router
 (kernel + metrics + entry + movement + search — the same shape `build_app` serves),
 discovers every camera-keyed route by walking it, and asserts each one 403s a
