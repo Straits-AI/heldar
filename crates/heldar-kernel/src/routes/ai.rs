@@ -377,11 +377,26 @@ async fn list_all_tasks(
                 .bind(now - chrono::Duration::seconds(WORKER_LIVENESS_TTL_SECS))
                 .execute(&st.pool)
                 .await;
-            let live: Vec<String> =
-                sqlx::query_scalar("SELECT worker_id FROM ai_workers ORDER BY worker_id ASC")
-                    .fetch_all(&st.pool)
-                    .await
-                    .unwrap_or_default();
+            // Partitioned by CREDENTIAL, matching `ai_leases::acquire`. `tasks` here is already
+            // camera-filtered, so dividing it by every worker on the box counts workers that are
+            // dividing a different list — discovery and leasing then disagree about who owns what,
+            // and the comment in `ai_leases` claiming they agree was simply wrong. Same partition on
+            // both sides is what makes that comment true.
+            let live: Vec<String> = sqlx::query_scalar(
+                "SELECT worker_id FROM ai_workers WHERE api_key_id IS ? ORDER BY worker_id ASC",
+            )
+            .bind(credential_id(&principal))
+            .fetch_all(&st.pool)
+            .await
+            .unwrap_or_default();
+            let live = if live.iter().any(|w| w == worker_id) {
+                live
+            } else {
+                let mut v = live;
+                v.push(worker_id.to_string());
+                v.sort();
+                v
+            };
             worker_shard(tasks.len(), &live, worker_id)
         }
     };

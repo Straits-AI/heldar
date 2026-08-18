@@ -1729,7 +1729,30 @@ definition of "admin implies everything", consumed by both the mint-time and req
 they were once two different tests of the same idea, which is exactly how the refusal came to be
 defeated by construction.
 
-**Keeping it honest.** **The census is what makes coverage default-closed.** `every_route_is_accounted_for` enumerates all
+**Keeping it honest.** **Guards are not the whole boundary: what runs LATER has no principal.** Three rounds of hunting
+fixed request-time guards; a fourth found the class they cannot cover. A camera-scoped credential
+PATCHes `retention_hours` on its OWN camera (authorised, 200) so that footage stops aging out, and the
+retention sweeper — holding no principal — then evicts the globally oldest segments, which belong to
+somebody else. Evidence locks did the same through a fleet-wide `protected_bytes` subtracted from a
+shared budget. Neither is a missing check; every check answered correctly.
+
+The fix is eviction POLICY, in `services/retention.rs`: the disk is genuinely shared, so something
+must go when it fills, but a camera may only spend its OWN share. `most_over_share` splits the cap
+across the cameras holding footage (weighted by `storage_quota_bytes` where set), charges each
+camera's evidence locks against its own share, and evicts from the camera furthest over. When the
+over-share camera holds nothing deletable, the sweep WARNS AND STOPS rather than taking a compliant
+camera's footage to pay for it. `retention_hours` also gained an upper clamp, but that is
+belt-and-braces — the policy is the fix.
+
+The AI task plane had the same shape: `ai_leases` sharded over a fleet-wide candidate list and
+filtered by camera afterwards, while discovery filtered first and sharded over the result. Two index
+spaces, under a comment asserting they agreed. A scoped worker joining a fleet left another camera's
+task leased by nobody and discovered by nobody — analysis silently stopped on a camera nobody
+attacked. Both sides now filter first and shard within one credential (`worker_shard::for_credential`),
+because `assign`'s "every task owned exactly once" invariant only holds while every worker divides the
+same list.
+
+**The census is what makes coverage default-closed.** `every_route_is_accounted_for` enumerates all
 151 registered routes and requires each to fall into one of three classes: camera-keyed (swept by the
 matrix), *proven* to refuse a camera-scoped credential (probed right there), or declared scope-neutral
 in `SCOPE_NEUTRAL` with a written reason. A route in none of them FAILS. Adding an unguarded route is

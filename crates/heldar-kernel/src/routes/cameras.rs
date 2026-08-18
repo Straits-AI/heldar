@@ -349,9 +349,15 @@ async fn update_camera(
         .segment_seconds
         .map(|v| v.clamp(2, 3600))
         .unwrap_or(cur.segment_seconds);
+    // Clamped at both ends. The upper bound is belt-and-braces rather than the real fix — retention
+    // eviction is now fair-share, so a camera opting out of age-pruning only spends its OWN share of
+    // the disk instead of pushing deletion onto whoever is next-oldest. But an unbounded value is
+    // still nonsense (10 years on a 2 TB box), and the pre-fix version of this line was the write
+    // that a scoped credential used to destroy another camera's footage entirely.
+    const MAX_RETENTION_HOURS: i64 = 24 * 365 * 5;
     let retention = body
         .retention_hours
-        .map(|v| v.max(1))
+        .map(|v| v.clamp(1, MAX_RETENTION_HOURS))
         .unwrap_or(cur.retention_hours);
     let storage_quota_bytes = body.storage_quota_bytes.or(cur.storage_quota_bytes);
     let record_audio = body.record_audio.unwrap_or(cur.record_audio);
