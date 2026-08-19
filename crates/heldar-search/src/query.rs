@@ -97,6 +97,56 @@ fn want(plan: &QueryPlan, src: &str) -> bool {
     plan.sources.is_empty() || plan.sources.iter().any(|s| s == src)
 }
 
+/// SQL predicate confining a source fetch to `plan.cameras`, or `None` when the plan names none.
+///
+/// The camera filter has to run in SQL rather than only in the Rust field-filter below, because every
+/// source is fetched `ORDER BY <ts> DESC LIMIT fetch_cap`. A post-fetch filter bounds ROWS EXAMINED,
+/// not rows returned: newer rows from cameras the caller did not name consume the page, and the
+/// caller's own older in-window matches never reach the filter at all. These routes carry no offset
+/// or cursor, so past the cap those rows are unreachable by any query the API accepts — and for a
+/// camera-scoped credential, whose `cameras` list is its SCOPE (`routes::confine_requested_cameras`),
+/// that is the scope layer denying the caller its own data.
+///
+/// It also makes `truncated` honest. Raised from the UNFILTERED row count, `truncated: true` beside
+/// `count: 0` reported the FLEET's in-window volume — a bit about cameras the caller does not hold,
+/// differencable over a swept window into the fleet's event-rate profile. Computed from the confined
+/// fetch it says what it claims to say: the CALLER'S OWN matches may be incomplete.
+///
+/// `column` is a compile-time constant at every call site (never caller input), and the ids are
+/// bound. `IN (…)` never matches NULL, which is exactly what the Rust filter did
+/// (`camera_id … .unwrap_or(false)`), so a camera-less row stays excluded rather than newly appearing.
+/// An empty list still means "every camera" for every caller, so an unconfined query is unchanged.
+///
+/// Returns the predicate together with the ids to bind, and callers MUST bind from the RETURNED
+/// vector rather than from `plan.cameras`: the two differ (deduped, capped), and binding from the
+/// input would desync the parameter count from the placeholders.
+///
+/// `plan.cameras` is caller-supplied and `planner::sanitize` does not bound it, so a 100k-element
+/// list would otherwise become 100k SQL variables and fail the statement outright — turning a slow
+/// request into a 500. Over [`CAMERA_PRED_MAX`] DISTINCT ids the pushdown is skipped and the Rust
+/// filter below carries the whole load, exactly as it did before: the ANSWER is identical either way
+/// (the filter is applied twice by design), only the page-eviction and `truncated` honesty are lost —
+/// and no real deployment, let alone a camera scope, names a thousand cameras.
+fn camera_pred(plan: &QueryPlan, column: &str) -> Option<(String, Vec<String>)> {
+    if plan.cameras.is_empty() {
+        return None;
+    }
+    let mut ids: Vec<String> = plan.cameras.clone();
+    // `IN (…)` is a set test and so is the Rust filter's `any(==)`, so deduping cannot change the
+    // result set — it only stops a repeated id from inflating the bind count.
+    ids.sort();
+    ids.dedup();
+    if ids.len() > CAMERA_PRED_MAX {
+        return None;
+    }
+    let placeholders = vec!["?"; ids.len()].join(",");
+    Some((format!(" AND {column} IN ({placeholders})"), ids))
+}
+
+/// Distinct camera ids above which the pushdown is skipped — see [`camera_pred`]. Far above any real
+/// fleet, far below SQLite's variable ceiling.
+const CAMERA_PRED_MAX: usize = 1000;
+
 /// The effective [from, to) the executor will actually scan, after applying the default window. Shown
 /// in the proof so the caller sees the real window even when the plan left it unset.
 pub fn window(plan: &QueryPlan) -> (DateTime<Utc>, DateTime<Utc>) {
@@ -127,16 +177,18 @@ pub async fn execute(pool: &SqlitePool, plan: &QueryPlan, max: i64) -> sqlx::Res
     let mut truncated = false;
 
     if want(plan, "entry") {
-        let rows: Vec<EntryRow> = sqlx::query_as(
+        let cams = camera_pred(plan, "camera_id");
+        let sql = format!(
             "SELECT id, timestamp, camera_id, event_type, plate, subject, auth_status, evidence
-               FROM entry_events_read WHERE timestamp >= ? AND timestamp <= ?
+               FROM entry_events_read WHERE timestamp >= ? AND timestamp <= ?{}
               ORDER BY timestamp DESC LIMIT ?",
-        )
-        .bind(from)
-        .bind(to)
-        .bind(fetch_cap)
-        .fetch_all(pool)
-        .await?;
+            cams.as_ref().map(|(p, _)| p.as_str()).unwrap_or("")
+        );
+        let mut q = sqlx::query_as::<_, EntryRow>(&sql).bind(from).bind(to);
+        for c in cams.iter().flat_map(|(_, ids)| ids) {
+            q = q.bind(c);
+        }
+        let rows: Vec<EntryRow> = q.bind(fetch_cap).fetch_all(pool).await?;
         truncated |= rows.len() as i64 >= fetch_cap;
         for r in rows {
             let ev_path = r
@@ -162,18 +214,20 @@ pub async fn execute(pool: &SqlitePool, plan: &QueryPlan, max: i64) -> sqlx::Res
         }
     }
     if want(plan, "zone") {
-        let rows: Vec<ZoneRow> = sqlx::query_as(
+        let cams = camera_pred(plan, "ze.camera_id");
+        let sql = format!(
             "SELECT ze.id, ze.timestamp, ze.camera_id, ze.event_type, ze.label, ze.zone_name,
                     z.kind AS kind, ze.evidence_path
                FROM zone_events ze LEFT JOIN zones z ON z.id = ze.zone_id
-              WHERE ze.timestamp >= ? AND ze.timestamp <= ?
+              WHERE ze.timestamp >= ? AND ze.timestamp <= ?{}
               ORDER BY ze.timestamp DESC LIMIT ?",
-        )
-        .bind(from)
-        .bind(to)
-        .bind(fetch_cap)
-        .fetch_all(pool)
-        .await?;
+            cams.as_ref().map(|(p, _)| p.as_str()).unwrap_or("")
+        );
+        let mut q = sqlx::query_as::<_, ZoneRow>(&sql).bind(from).bind(to);
+        for c in cams.iter().flat_map(|(_, ids)| ids) {
+            q = q.bind(c);
+        }
+        let rows: Vec<ZoneRow> = q.bind(fetch_cap).fetch_all(pool).await?;
         truncated |= rows.len() as i64 >= fetch_cap;
         for r in rows {
             hits.push(SearchHit {
@@ -193,16 +247,18 @@ pub async fn execute(pool: &SqlitePool, plan: &QueryPlan, max: i64) -> sqlx::Res
         }
     }
     if want(plan, "breach") {
-        let rows: Vec<BreachRow> = sqlx::query_as(
+        let cams = camera_pred(plan, "camera_id");
+        let sql = format!(
             "SELECT id, created_at, camera_id, rule, subject_type, subject, zone_name, severity, evidence_path
-               FROM breach_alerts_read WHERE created_at >= ? AND created_at <= ?
+               FROM breach_alerts_read WHERE created_at >= ? AND created_at <= ?{}
               ORDER BY created_at DESC LIMIT ?",
-        )
-        .bind(from)
-        .bind(to)
-        .bind(fetch_cap)
-        .fetch_all(pool)
-        .await?;
+            cams.as_ref().map(|(p, _)| p.as_str()).unwrap_or("")
+        );
+        let mut q = sqlx::query_as::<_, BreachRow>(&sql).bind(from).bind(to);
+        for c in cams.iter().flat_map(|(_, ids)| ids) {
+            q = q.bind(c);
+        }
+        let rows: Vec<BreachRow> = q.bind(fetch_cap).fetch_all(pool).await?;
         truncated |= rows.len() as i64 >= fetch_cap;
         for r in rows {
             hits.push(SearchHit {

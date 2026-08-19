@@ -623,9 +623,17 @@ async fn trigger_policy(
     // caller. `CameraSelection` is what keeps that from being expressible again: only an unscoped
     // principal can produce `All`.
     let selection = camera_selection(&principal, &camera_ids_from_json(&policy.camera_ids.0)?)?;
-    let job_id = backup::trigger_policy(&st, &policy, &selection)
-        .await
-        .map_err(AppError::Other)?;
+    // The confinement above is a decision made HERE, but the transfer runs on after this handler
+    // returns 202. Recording the pressing credential is what lets the running job be told that the
+    // decision was withdrawn — revoked, deactivated, or narrowed off one of these very cameras.
+    let job_id = backup::trigger_policy(
+        &st,
+        &policy,
+        &selection,
+        &backup::JobCreator::of(&principal),
+    )
+    .await
+    .map_err(AppError::Other)?;
     auth::audit(
         &st.pool,
         &principal,
@@ -646,6 +654,23 @@ struct JobQuery {
     policy_id: Option<String>,
     status: Option<String>,
     limit: Option<i64>,
+}
+
+/// Blank the ordering principal's id for a camera-scoped reader.
+///
+/// `created_by` exists so the transfer can re-check the credential that ordered it; it is not
+/// something a camera-scoped caller needs, and it is a credential-surface identifier. That caller is
+/// refused outright on `/api/v1/api-keys` and `/api/v1/users` — handing it an unscoped admin's key id
+/// through a backup row gives back part of what those refusals withhold. Unscoped readers, who can
+/// read the credential surface anyway, see it unchanged.
+fn redact_creator(principal: &Principal, mut jobs: Vec<BackupJob>) -> Vec<BackupJob> {
+    if principal.camera_scope().is_some() {
+        for j in &mut jobs {
+            j.created_by = None;
+            j.created_by_kind = None;
+        }
+    }
+    jobs
 }
 
 async fn list_jobs(
@@ -680,7 +705,7 @@ async fn list_jobs(
         }
     }
     let rows = query.bind(limit).fetch_all(&st.pool).await?;
-    Ok(Json(rows))
+    Ok(Json(redact_creator(&principal, rows)))
 }
 
 async fn get_job(
@@ -691,7 +716,11 @@ async fn get_job(
     principal.require_cap(Cap::SystemRead, "view backup jobs")?;
     // 404 for an out-of-scope job, identical to an unknown id — see `job_for`.
     let job = job_for(&st.pool, &principal, &id).await?;
-    Ok(Json(job))
+    Ok(Json(
+        redact_creator(&principal, vec![job])
+            .pop()
+            .expect("one job"),
+    ))
 }
 
 async fn delete_job(
@@ -768,8 +797,16 @@ async fn archive_export(
     let camera_ids = stored_camera_ids(&principal, &body.camera_ids)?;
     let incident_lock_only = body.incident_lock_only.unwrap_or(false);
     let trim = body.trim.unwrap_or(false);
-    let job =
-        backup::create_archive(&st, camera_ids.clone(), from, to, incident_lock_only, trim).await?;
+    let job = backup::create_archive(
+        &st,
+        camera_ids.clone(),
+        from,
+        to,
+        incident_lock_only,
+        trim,
+        &backup::JobCreator::of(&principal),
+    )
+    .await?;
     auth::audit(
         &st.pool,
         &principal,
@@ -811,7 +848,7 @@ async fn list_archive_exports(
         }
     }
     let rows = query.bind(limit).fetch_all(&st.pool).await?;
-    Ok(Json(rows))
+    Ok(Json(redact_creator(&principal, rows)))
 }
 
 #[cfg(test)]

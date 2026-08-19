@@ -1600,7 +1600,14 @@ auth is enabled and no users exist; a no-op otherwise. **Last-admin protection**
 self-deletion). Every mutation across `routes/auth.rs` + `routes/entry.rs` appends an
 `audit_log` row via `auth::audit` (best-effort; never fails the caller). `auth::audit`
 is the **single writer**, which is why it — not its ~100 call sites — derives
-`subject_camera_id`: no writer can forget it and new call sites inherit it.
+`subject_camera_id`: no writer can forget it and new call sites inherit it. What a call site
+still owes it is a `detail.camera_id` when the act HAS one camera. `heldar-movement` passed
+`{}` everywhere, so every movement act was NULL-subject and therefore hidden from a
+camera-scoped reader — including a breach that reader's own operator had just acknowledged.
+The rule the crate now follows (`routes::audit_subject`): an act about exactly one camera
+names it; an act spanning two (a `camera_links` row, a `movement_candidates` row) stays NULL
+**by design**, because a single column cannot say "both ends" and naming either one would
+disclose adjacency to a credential holding only that end — see §19.9.
 
 ### 17.5 HTTP surface (`routes/auth.rs`, `routes/entry.rs`)
 
@@ -1668,8 +1675,8 @@ so a scoped admin key is still scoped. The operator-facing rules are in
 the implementation.
 
 **Why per-route checks are not sufficient.** The obvious enforcement — 403 a route
-whose `{camera_id}` is outside the scope — leaves three escape classes that the route
-itself cannot see, so there are four enforcement shapes:
+whose `{camera_id}` is outside the scope — leaves four escape classes that the route
+itself cannot see, so there are five enforcement shapes:
 
 | Shape | Helper | Where |
 |---|---|---|
@@ -1677,12 +1684,19 @@ itself cannot see, so there are four enforcement shapes:
 | Read confinement | `camera_scope_filter` (SQL predicate) | fleet-wide lists: cameras, health/status, events, search |
 | Write confinement | `confine_camera_ids`, `camera_ids_from_json` | payloads carrying camera ids (backup policies, archive exports), re-applied when a stored policy later runs |
 | Fleet-only refusal | `require_fleet_scope` | credential management, egress config, the outbox cursor, `/metrics` |
+| Re-check after the request | `backup::creator_standing` over `auth::api_key_principal_now` | the detached backup transfer, which keeps shipping footage off-box long after the 202 |
 
 The fourth shape refuses instead of filtering because those surfaces have no coherent
 scoped answer: a scoped key that can mint keys can mint an unscoped one; an egress
 destination exfiltrates footage the credential never reads through a scoped route; and
 a filtered monotonic cursor or Prometheus exposition is silently *wrong* rather than
 merely partial.
+
+The fifth exists because a scope decision has a *lifetime*. Most of this repo re-decides on every
+request — there is no principal cache, and `/media/*` re-resolves the credential on every byte — but
+detached work does not get another request to re-decide on. `docs/ACCESS-CONTROL.md` tabulates how
+long each surface's decision actually lasts, including the one real exception (the live-view token,
+which MediaMTX honours with no credential to check).
 
 **The media plane.** `/media/*` serves the same footage the API gates, so the
 `ServeDir` mounts sit behind `services/media_scope.rs` (auth + scope, `Principal`
@@ -1751,6 +1765,30 @@ task leased by nobody and discovered by nobody — analysis silently stopped on 
 attacked. Both sides now filter first and shard within one credential (`worker_shard::for_credential`),
 because `assign`'s "every task owned exactly once" invariant only holds while every worker divides the
 same list.
+
+**...and what runs later on a principal's BEHALF can outlive that principal.** The retention/AI cases
+above are work with no principal at all. The mirror-image case is work that still belongs to one:
+`services/backup::spawn_job` detaches, answers 202, and keeps copying for up to
+`HELDAR_BACKUP_JOB_TIMEOUT_S` (default an hour) — to `sftp`/`ftp`/`s3` destinations, so the bytes
+leave the box for good. Every scope decision about that job was made once, at request time, and the
+job row had no way back to the credential that made it. Revoking a compromised key, or narrowing its
+`scope_cameras` off one of the cameras the job covers, did nothing to footage already in flight.
+`backup_jobs` now carries `created_by` / `created_by_kind` (kernel migration 0015) and the transfer
+re-checks before the first byte and every few seconds after (`creator_standing`). The re-check shares
+`auth::principal_from_key_row` with the request path, so "still a valid credential" cannot come to
+mean one thing at the door and another an hour into a transfer. It fails **open** on a database read
+error and closed only on a definite answer — the recorder shares that SQLite, and turning routine
+busy-timeouts into destroyed backups would be a worse defect than the one being fixed. Jobs with no
+creator (the scheduler; pre-upgrade rows) and jobs created with auth disabled are never withdrawn.
+
+The counterpart worth stating because it is easy to assume the opposite: the RECORDED-media plane has
+no such gap. `media_scope::guard` runs outside the `/api/v1` auth floor, so it re-resolves the
+credential from the database on **every** `/media/*` request — a playback session, clip or archive
+URL is not a bearer capability, and a re-scope takes effect on the next byte. The LIVE plane is the
+one real exception: MediaMTX authorizes from a signed URL token with no credential to re-check, so a
+revoked key keeps streaming for up to `HELDAR_LIVEVIEW_TOKEN_TTL_SECS` (default 3600 s, and an
+established WebRTC session is not bounded by it at all). That limit is measured and documented on
+`services/live_token.rs` rather than quietly assumed away.
 
 **The census is what makes coverage default-closed**, and it lives in `heldar-testkit` rather than in
 a test file, because an integration test cannot be imported. Proprietary verticals compose over the
@@ -1996,8 +2034,7 @@ The three **privacy gates** are enforced in code: (1) candidate `confirm`/`rejec
 assertion**; (2) both `search/*` endpoints call `auth::audit(...)` **before** querying, so
 no identity-like lookup can run without an audit-log record; (3) both search responses
 carry a `note` re-stating the result is probabilistic and requires human judgement, not
-legal identity. The review mutations and `links` create are audited too (link **delete** is
-capability-gated but not audit-logged).
+legal identity. The review mutations and both `links` create **and** delete are audited too.
 
 ### 19.7 How it composes (composed, not welded) + retention + isolation
 
@@ -2039,6 +2076,36 @@ an auto-decision; and **cross-camera person journeys are low-confidence, human-t
 only** (never auto-proposed, capped at 0.4, always audited). This is a **scene/event
 graph** applied to security: a typed, evidence-backed, audited cross-camera
 correlation that stays explicitly probabilistic.
+
+### 19.9 Camera scope — the both-ends rule
+
+An API key may carry a camera allowlist (`Scope::Cameras`). Movement is the one surface whose
+subject matter IS the relationship between two cameras, so the containment rule differs from
+the kernel's: **a resource naming two cameras is visible and actionable only to a credential
+holding BOTH ends.** Anything less lets a credential scoped to `cam_a` learn that `cam_b`
+exists, is physically adjacent, and how long the walk between them takes — the camera roster
+plus the site's layout. Half-held, not held at all, and does-not-exist all answer with the
+same `AppError` value (`require_resource_scope`), so the id space cannot be probed either.
+The rule runs backwards too: a credential holding both ends must be able to work its own
+links, candidates and breaches, and `POST /movement/run` is refused outright because it
+sweeps every link and zone event on the box and takes no camera id to scope by.
+
+Two consequences follow from the rule rather than from convenience:
+
+* **Audit subjects.** A breach (one camera) names its camera in the audit `detail`; a link or
+  a candidate (two cameras) writes no subject and stays fleet-only — `audit_log.subject_camera_id`
+  is a single column and naming either end would disclose adjacency to that end's holder (§17.4).
+* **Reads are capability-unreachable, not merely filtered.** Every movement read is gated on
+  `Cap::EventsRead`, which is in `auth::UNSCOPABLE_CAPS`, so no camera-scoped credential can
+  hold it: `validate_grant` refuses the combination at mint and `Principal::from_api_key`
+  denies a stored key carrying both. The `camera_scope_filter` confinement inside those
+  handlers is therefore **defence in depth behind a capability wall**, not the live boundary.
+
+`crates/heldar-server/tests/movement_scope_e2e.rs` drives every movement route end to end
+against credentials minted through the real `POST /api/v1/api-keys` — unscoped, scoped to both
+ends of a link, scoped to one end, scoped to neither — asserting both directions (no
+cross-camera read or act; no false deny on the credential's own cameras) and recording per
+route which of the two properties above it satisfied.
 
 ---
 
@@ -2124,13 +2191,23 @@ per requested source**, capped at `fetch_cap = (max×5).clamp(100, 20_000)` — 
 a unified `SearchHit` (`claim_level = "event"`). The cross-app sources are the owner-published
 `*_read` contract views (guarded by the owner's `tests/read_contract.rs` and the
 `scripts/check-read-seam.sh` CI lint; `docs/DESIGN-PRINCIPLES.md` #9); `zone_events`/`zones`
-are kernel tables. (3) applies the remaining plan fields as
-**deterministic Rust filters** (`hits.retain`: cameras, UTC hour bounds, plate, colour/type
-on `subject`, lenient `subject_type`, `auth_status`, `event_type`, `zone_kind`, lowercased
-`text` substring); (4) **merges, sorts newest-first, and truncates** to
-`limit.unwrap_or(max).clamp(1, max)`. Only the time window and the fetch cap touch SQL (so
-the query is always indexed and bounded); everything else is in-process. `breakdown(hits)`
-computes counts by source / by day for the proof's aggregate.
+are kernel tables. `plan.cameras` is the one field applied in **both** places: it is pushed
+into each source query as a bound `camera_id IN (…)` (`camera_pred`) *as well as* being kept
+in the Rust filter. It has to be, because `fetch_cap` bounds ROWS EXAMINED, not rows
+returned — filtering only afterwards let newer rows from cameras the caller did not name eat
+the page, so the caller's own older in-window matches never reached the filter and, with no
+offset or cursor on these routes, were unreachable by any query the API accepts. For a
+camera-scoped credential that list IS its scope (`routes::confine_requested_cameras`), so the
+same ordering made `truncated` report the FLEET's in-window volume beside a `count` of 0.
+Both are properties of the confined fetch now. The pushdown dedupes and is skipped above
+`CAMERA_PRED_MAX` distinct ids, so an absurd caller-supplied list degrades to the Rust filter
+(same answer) instead of blowing SQLite's variable ceiling. (3) applies the remaining plan
+fields as **deterministic Rust filters** (`hits.retain`: cameras, UTC hour bounds, plate,
+colour/type on `subject`, lenient `subject_type`, `auth_status`, `event_type`, `zone_kind`,
+lowercased `text` substring); (4) **merges, sorts newest-first, and truncates** to
+`limit.unwrap_or(max).clamp(1, max)`. Only the time window, the camera confinement and the
+fetch cap touch SQL (so the query is always indexed and bounded); everything else is
+in-process. `breakdown(hits)` computes counts by source / by day for the proof's aggregate.
 
 ### 20.2 The planner — rules by default, LLM as an optional seam (`planner.rs`)
 

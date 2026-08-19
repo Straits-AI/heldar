@@ -218,6 +218,25 @@ fn dishonest_path(path: &str) -> bool {
 
 /// Auth + camera-scope guard for the recorded-media plane.
 ///
+/// # This runs on EVERY request, and that is the expiry story for the whole recorded-media plane
+///
+/// `/media/*` sits OUTSIDE the `/api/v1` auth floor, so `Principal::from_request_parts` finds no
+/// pre-resolved principal in the request extensions and goes to the database — every playlist poll,
+/// every `seg_*.m4s`, every byte-range of a clip. Two consequences worth stating so they are not
+/// re-litigated:
+///
+/// - A playback session, clip export or archive CANNOT outlive the scope that created it. Its URL is
+///   not a bearer capability: re-scope the credential and the next fetch is 403; revoke it and the
+///   next fetch is 401. That is why none of those producers needs an expiry, a session token, or a
+///   revocation list of its own. Pinned by
+///   `a_media_artifact_stops_being_readable_the_moment_its_credential_changes`.
+/// - The cost is one credential lookup per media request. It is an indexed seek on `key_hash`/session
+///   id and only the scoped path adds the `media_artifacts` read; do not "optimize" it into a cache
+///   without replacing the property above with something equivalent.
+///
+/// The LIVE plane is deliberately different and weaker — MediaMTX streams direct from a signed URL
+/// with no credential to re-check. See `services::live_token`.
+///
 /// Ordering is load-bearing:
 /// 1. auth disabled -> untouched pass-through (the LAN-appliance default);
 /// 2. no credential -> 401;

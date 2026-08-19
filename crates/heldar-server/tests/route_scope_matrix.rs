@@ -176,6 +176,12 @@ async fn test_state() -> AppState {
 
 /// [`test_state`] with a hook to adjust config before the state is frozen. The archive tests point
 /// `archive_dir` at their own scratch tree so a real export never writes into the developer's box.
+///
+/// Runs the APP crates' schemas as well as the kernel's, exactly as `heldar_server::run` does. It
+/// did not, and the cost was invisible: seven app routes answered 500 from a missing table, which is
+/// neither a pass nor a fail, so they were parked in the census as "app schema not init in harness"
+/// and no assertion ever reached their guards. A harness that only migrates half the composition
+/// cannot say anything about the other half.
 async fn test_state_with(tune: impl FnOnce(&mut heldar_kernel::config::Config)) -> AppState {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
@@ -183,6 +189,9 @@ async fn test_state_with(tune: impl FnOnce(&mut heldar_kernel::config::Config)) 
         .await
         .unwrap();
     heldar_kernel::db::run_migrations(&pool).await.unwrap();
+    heldar_entry::schema::init(&pool).await.unwrap();
+    heldar_movement::schema::init(&pool).await.unwrap();
+    heldar_search::schema::init(&pool).await.unwrap();
     let mut cfg = heldar_kernel::config::Config::from_env();
     cfg.auth_enabled = true;
     tune(&mut cfg);
@@ -304,6 +313,16 @@ async fn seed_key(st: &AppState, cameras: Option<&[&str]>) -> String {
 /// is exactly how the archive false-deny shipped inert with this suite green. Anything asserting that
 /// a scoped credential CAN do something must mint here.
 async fn mint_key(st: &AppState, caps: &[&str], cameras: Option<&[&str]>) -> String {
+    mint_key_with_id(st, caps, cameras).await.0
+}
+
+/// [`mint_key`] that also returns the key's ID, which is what the credential-lifecycle tests need:
+/// re-scoping or revoking a key mid-flight goes through `PATCH /api/v1/api-keys/{id}`.
+async fn mint_key_with_id(
+    st: &AppState,
+    caps: &[&str],
+    cameras: Option<&[&str]>,
+) -> (String, String) {
     // A real unscoped admin has to exist to mint anything; that is the bootstrap, not the subject.
     let admin = seed_key(st, None).await;
     let (kind, list) = match cameras {
@@ -326,10 +345,56 @@ async fn mint_key(st: &AppState, caps: &[&str], cameras: Option<&[&str]>) -> Str
         "the API refused to mint {caps:?} scoped to {cameras:?} — a denial-direction test cannot be \
          written against a credential the product will not issue: {resp}"
     );
-    serde_json::from_str::<serde_json::Value>(&resp)
-        .ok()
-        .and_then(|v| v.get("key").and_then(|k| k.as_str()).map(String::from))
+    let v: serde_json::Value = serde_json::from_str(&resp)
+        .unwrap_or_else(|e| panic!("mint response was not JSON ({e}): {resp}"));
+    let key = v
+        .get("key")
+        .and_then(|k| k.as_str())
         .unwrap_or_else(|| panic!("mint response carried no plaintext key: {resp}"))
+        .to_string();
+    let id = v
+        .get("id")
+        .and_then(|k| k.as_str())
+        .unwrap_or_else(|| panic!("mint response carried no key id: {resp}"))
+        .to_string();
+    (key, id)
+}
+
+/// Re-scope a live key through the REAL `PATCH /api/v1/api-keys/{id}`, as an operator does when a
+/// camera changes hands. `caps` must be re-sent: the route re-validates the WHOLE resulting grant.
+async fn rescope_key(st: &AppState, key_id: &str, caps: &[&str], cameras: &[&str]) {
+    let admin = seed_key(st, None).await;
+    let body = serde_json::json!({
+        "capabilities": caps,
+        "scope_kind": "cameras",
+        "scope_cameras": cameras,
+        "confirm_privileged": true,
+    })
+    .to_string();
+    let (status, resp) = call_body(
+        st,
+        &admin,
+        "PATCH",
+        &format!("/api/v1/api-keys/{key_id}"),
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "re-scope failed: {resp}");
+}
+
+/// Soft-revoke a live key through the REAL PATCH.
+async fn revoke_key(st: &AppState, key_id: &str) {
+    let admin = seed_key(st, None).await;
+    let body = serde_json::json!({ "revoked_at": chrono::Utc::now() }).to_string();
+    let (status, resp) = call_body(
+        st,
+        &admin,
+        "PATCH",
+        &format!("/api/v1/api-keys/{key_id}"),
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "revoke failed: {resp}");
 }
 
 async fn call(st: &AppState, token: &str, method: &str, path: &str) -> StatusCode {
@@ -1106,6 +1171,154 @@ async fn deleting_an_export_forgets_its_attribution() {
     );
 }
 
+// ---- Authorization that outlives the request ----
+//
+// Everything above asks whether a scope holds at the moment a request arrives. These ask what
+// happens to a decision AFTERWARDS — when the credential behind it is re-scoped or revoked while
+// something it started is still running or still fetchable. A boundary that is only checked on the
+// way in is a boundary with a shelf life, and these tests pin how long each one actually lasts.
+
+/// The `/media/*` plane re-authorizes EVERY request; a URL is not a capability.
+///
+/// It matters because the artifacts are long-lived and the URLs are handed to a browser: an archive
+/// zip, an HLS playlist and its segments, a clip — all fetched many times, over minutes, from a page
+/// that was authorized once. `media_scope::guard` runs OUTSIDE the `/api/v1` auth floor, so it has no
+/// pre-resolved principal to reuse and resolves the credential from the database on every hit. That
+/// is what makes a re-scope take effect on the next byte rather than at the end of the session, and
+/// it is why playback sessions and clip exports need no expiry of their own.
+///
+/// Both directions are asserted: narrowed -> 403 (still a valid credential, no longer this camera's),
+/// revoked -> 401 (no credential at all). A single 4xx assertion would pass on either alone.
+#[tokio::test]
+async fn a_media_artifact_stops_being_readable_the_moment_its_credential_changes() {
+    let root = ScratchDir::new("outlives");
+    let st = test_state_with(|cfg| {
+        cfg.archive_dir = root.0.join("archives");
+        cfg.recordings_dir = root.0.join("recordings");
+    })
+    .await;
+    seed_camera(&st, "camera_a").await;
+    seed_camera(&st, "camera_b").await;
+    seed_segment(&st, &root.0, "camera_a").await;
+    const CAPS: &[&str] = &[
+        "video:export",
+        "video:playback",
+        "system:read",
+        "registry:manage",
+        "camera:read",
+    ];
+    let (scoped_a, key_id) = mint_key_with_id(&st, CAPS, Some(&["camera_a"])).await;
+
+    let url = export_archive(&st, &scoped_a, r#"{"camera_ids":["camera_a"]}"#).await;
+    assert_eq!(
+        call_media(&st, &scoped_a, &url).await,
+        StatusCode::OK,
+        "the exporting credential cannot read its own archive; the rest of this test would be vacuous"
+    );
+
+    // The camera changes hands. The archive is unchanged, the URL is unchanged, the capability is
+    // unchanged — only the scope moved, and that alone must end the access.
+    rescope_key(&st, &key_id, CAPS, &["camera_b"]).await;
+    assert_eq!(
+        call_media(&st, &scoped_a, &url).await,
+        StatusCode::FORBIDDEN,
+        "a credential re-scoped off camera_a kept reading camera_a's archive at {url} — the guard is \
+         serving a decision made before the re-scope"
+    );
+
+    // ...and revocation ends it as a credential, not merely as a scope.
+    revoke_key(&st, &key_id).await;
+    assert_eq!(
+        call_media(&st, &scoped_a, &url).await,
+        StatusCode::UNAUTHORIZED,
+        "a revoked credential still fetched {url}"
+    );
+}
+
+/// Seed an enabled AI task on an enabled camera, so lease acquisition has something to hand out.
+async fn seed_ai_task(st: &AppState, camera_id: &str, task_id: &str) {
+    let now = chrono::Utc::now();
+    sqlx::query(
+        "INSERT INTO ai_tasks (id, camera_id, task_type, enabled, stream_profile, fps, width,
+                               config, created_at, updated_at)
+         VALUES (?, ?, 'anpr', 1, 'sub', 5, 1280, '{}', ?, ?)",
+    )
+    .bind(task_id)
+    .bind(camera_id)
+    .bind(now)
+    .bind(now)
+    .execute(&st.pool)
+    .await
+    .unwrap();
+}
+
+/// The camera ids in a lease response, sorted.
+fn leased_cameras(resp: &str) -> Vec<String> {
+    let mut v: Vec<String> = serde_json::from_str::<serde_json::Value>(resp)
+        .unwrap_or_else(|e| panic!("lease response was not JSON ({e}): {resp}"))
+        .get("tasks")
+        .and_then(|t| t.as_array())
+        .unwrap_or_else(|| panic!("lease response carried no tasks array: {resp}"))
+        .iter()
+        .filter_map(|t| {
+            t.get("camera_id")
+                .and_then(|c| c.as_str())
+                .map(String::from)
+        })
+        .collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
+/// A worker cannot renew a lease onto a camera its credential has lost.
+///
+/// Acquire and renew are the SAME call, which is what makes this cheap to get right and easy to get
+/// wrong: if renewal extended whatever the worker already held, a lease taken while the key was wide
+/// would keep being renewed forever after the key was narrowed, and the frame endpoint would keep
+/// ticketing it. It does not — `ai_leases::acquire` rebuilds its candidate list from the CURRENT
+/// scope on every call, so the lost camera simply stops being offered, and the stale lease row lapses
+/// on its own TTL (<= 300 s) without ever being an authorization: both the frame pull and the ingest
+/// re-check `require_camera` against the live principal.
+#[tokio::test]
+async fn a_narrowed_credential_cannot_renew_its_lease_onto_the_camera_it_lost() {
+    let st = test_state().await;
+    seed_camera(&st, "camera_a").await;
+    seed_camera(&st, "camera_b").await;
+    seed_ai_task(&st, "camera_a", "ai_outlives_a").await;
+    seed_ai_task(&st, "camera_b", "ai_outlives_b").await;
+    const CAPS: &[&str] = &["ai:tasks", "ai:frames", "camera:read"];
+    let (worker, key_id) = mint_key_with_id(&st, CAPS, Some(&["camera_a", "camera_b"])).await;
+
+    let body = r#"{"worker_id":"w_outlives"}"#;
+    let (status, resp) = call_body(&st, &worker, "POST", "/api/v1/ai/leases", body).await;
+    assert_eq!(status, StatusCode::OK, "lease acquire failed: {resp}");
+    assert_eq!(
+        leased_cameras(&resp),
+        vec!["camera_a".to_string(), "camera_b".to_string()],
+        "the fixture must start with BOTH cameras leased, or the narrowing below proves nothing"
+    );
+
+    rescope_key(&st, &key_id, CAPS, &["camera_a"]).await;
+
+    // The same renew call the worker's poll loop makes every tick.
+    let (status, resp) = call_body(&st, &worker, "POST", "/api/v1/ai/leases", body).await;
+    assert_eq!(status, StatusCode::OK, "lease renew failed: {resp}");
+    assert_eq!(
+        leased_cameras(&resp),
+        vec!["camera_a".to_string()],
+        "the worker renewed a lease on camera_b after its credential was scoped off it"
+    );
+
+    // ...and the frame pull that a lease exists to enable is refused for the lost camera, so the
+    // stale lease row cannot be turned into a ticket either.
+    assert_eq!(
+        call(&st, &worker, "GET", "/api/v1/cameras/camera_b/frame").await,
+        StatusCode::FORBIDDEN,
+        "a lost camera's frames were still served to the holder of its stale lease"
+    );
+}
+
 /// How many `media_artifacts` rows describe `key`.
 async fn attribution_rows(st: &AppState, key: &str) -> i64 {
     sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM media_artifacts WHERE path = ?")
@@ -1113,6 +1326,114 @@ async fn attribution_rows(st: &AppState, key: &str) -> i64 {
         .fetch_one(&st.pool)
         .await
         .unwrap()
+}
+
+/// `DELETE /api/v1/ai/leases/{lease_id}` is the one resource-addressed route in the tree whose guard
+/// is NOT camera scope, which is why the census declares it scope-neutral rather than proving it
+/// alongside the others — and a declaration with nothing behind it is how this suite has been wrong
+/// before. This is what is behind it.
+///
+/// `release` deletes on `lease_id AND api_key_id`, so a lease id is not a capability on its own. Two
+/// things have to hold for that to contain a camera-scoped credential, and both are asserted here:
+/// another credential's lease is neither dropped NOR distinguishable from one that never existed, and
+/// the credential's OWN lease still releases (a containment that also blocked the legitimate case
+/// would be a worker that can never shut down cleanly).
+#[tokio::test]
+async fn a_scoped_credential_cannot_release_another_credentials_lease() {
+    let st = test_state().await;
+    seed_camera(&st, "camera_a").await;
+    seed_camera(&st, "camera_b").await;
+    seed_ai_task(&st, "camera_a", "task_a").await;
+    seed_ai_task(&st, "camera_b", "task_b").await;
+
+    // A live lease on camera_b's task, held by a DIFFERENT credential — the shape a guessed lease id
+    // would target.
+    let now = chrono::Utc::now();
+    sqlx::query(
+        "INSERT INTO ai_task_leases (task_id, lease_id, api_key_id, worker_id, camera_id, task_type,
+                                     acquired_at, renewed_at, expires_at)
+         VALUES ('task_b','lse_of_camera_b','key_of_camera_b','worker_b','camera_b','detection',?,?,?)",
+    )
+    .bind(now)
+    .bind(now)
+    .bind(now + chrono::Duration::minutes(5))
+    .execute(&st.pool)
+    .await
+    .unwrap();
+
+    // Minted through the real endpoint: this assertion runs in the DENIAL direction and in the
+    // false-deny direction, and both are vacuous against a credential the API refuses to issue.
+    let scoped = mint_key(&st, &["ai:tasks"], Some(&["camera_a"])).await;
+
+    let (foreign_status, foreign_body) = call_body(
+        &st,
+        &scoped,
+        "DELETE",
+        "/api/v1/ai/leases/lse_of_camera_b",
+        "",
+    )
+    .await;
+    let (absent_status, absent_body) = call_body(
+        &st,
+        &scoped,
+        "DELETE",
+        "/api/v1/ai/leases/lse_does_not_exist",
+        "",
+    )
+    .await;
+    assert_eq!(
+        (foreign_status, &foreign_body),
+        (absent_status, &absent_body),
+        "another credential's live lease answers differently from a lease id that names nothing, so \
+         the route can be walked to learn which lease ids are real"
+    );
+
+    // The answer being identical is not enough on its own — it must be identical because NOTHING
+    // HAPPENED. A release that dropped the row and still reported `released: 0` would satisfy the
+    // assertion above while stopping another camera's worker dead.
+    let survivors: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM ai_task_leases WHERE lease_id = ?")
+            .bind("lse_of_camera_b")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        survivors, 1,
+        "a camera_a-scoped credential released camera_b's lease: {foreign_status} {foreign_body}"
+    );
+
+    // FALSE DENY control: its own lease, acquired through the real endpoint, still releases.
+    let (status, resp) = call_body(
+        &st,
+        &scoped,
+        "POST",
+        "/api/v1/ai/leases",
+        r#"{"worker_id":"w1"}"#,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "acquire was refused: {resp}");
+    let acquired: serde_json::Value = serde_json::from_str(&resp).unwrap();
+    let own_lease = acquired["lease_id"].as_str().unwrap().to_string();
+    assert_eq!(
+        acquired["tasks"].as_array().map(Vec::len),
+        Some(1),
+        "the scoped credential leased {} tasks, so the release below would prove nothing: {resp}",
+        acquired["tasks"].as_array().map(Vec::len).unwrap_or(0)
+    );
+    let (status, resp) = call_body(
+        &st,
+        &scoped,
+        "DELETE",
+        &format!("/api/v1/ai/leases/{own_lease}"),
+        "",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "own release was refused: {resp}");
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&resp).unwrap()["released"],
+        serde_json::json!(1),
+        "the credential could not release the lease it had just acquired on its OWN camera: {resp}"
+    );
 }
 
 // ---- The census: no route may be silently uncovered ----
@@ -1156,6 +1477,16 @@ const SCOPE_NEUTRAL: &[(&str, &str)] = &[
         "/api/v1/ai/leases",
         "acquire passes the camera scope into the candidate query",
     ),
+    (
+        // Release is keyed on `lease_id AND api_key_id`, so the ONLY leases a credential can drop are
+        // its own — and acquire (above) already confines a scoped credential's leases to its own
+        // cameras, so its own leases can never name another camera. Another credential's lease id is
+        // a no-op answering `released: 0`, byte-identical to a lease that never existed. Pinned in
+        // `a_scoped_credential_cannot_release_another_credentials_lease`, including that the row it
+        // did not own is still there afterwards.
+        "/api/v1/ai/leases/{lease_id}",
+        "release is confined to the caller's OWN credential, not to a camera",
+    ),
     // --- box-level facts that name no camera ---
     ("/api/v1/site", "site id, product name, version, uptime"),
     (
@@ -1174,6 +1505,19 @@ const SCOPE_NEUTRAL: &[(&str, &str)] = &[
         "/api/v1/system/transcode",
         "reads back the box transcode engine",
     ),
+    // --- the module proxy: a module id is not a camera resource ---
+    // `Cap::ModuleProxy` is scopable, so a camera-scoped credential may legitimately proxy. Scope is
+    // not dropped at the boundary — `forward` sends `x-heldar-camera-scope` (absent = fleet-wide)
+    // alongside the principal headers, so the sidecar enforces the same confinement. A 404 here is an
+    // unknown MODULE, which is not a camera-scope answer either way.
+    (
+        "/m/{id}",
+        "module proxy; scope is forwarded to the sidecar, not resolved here",
+    ),
+    (
+        "/m/{id}/",
+        "module proxy; scope is forwarded to the sidecar, not resolved here",
+    ),
     // --- about the caller itself, not about any camera ---
     ("/api/v1/auth/me", "describes the caller"),
     ("/api/v1/auth/logout", "ends the caller's own session"),
@@ -1181,113 +1525,310 @@ const SCOPE_NEUTRAL: &[(&str, &str)] = &[
 
 /// Routes the census cannot PROVE, with the reason — named debt, deliberately not counted as
 /// coverage. A route may only sit here if the probe genuinely cannot reach its guard; shrink it by
-/// adding a probe body or a real fixture.
+/// correcting a probe body or seeding a real fixture.
+///
+/// This list was 26 entries. Twenty-two of them were not facts about the product at all: seven app
+/// routes 500ed because the harness ran the kernel migrations and not the app crates', nine were
+/// addressed by a resource id the census had no way to fill, and six carried a probe body their own
+/// extractor rejected — so each was parked with a plausible reason and never probed again. Named
+/// debt decays into that if nobody keeps testing whether it is still true.
 const CENSUS_UNPROVEN: &[(&str, &str)] = &[
-    // Path parameter naming a RESOURCE, not a camera. The handler resolves the owning camera via
-    // `resource_camera`/`CameraOwned`; a synthetic id 404s before that runs.
-    (
-        "/api/v1/ai-tasks/{task_id}",
-        "resource id; needs a seeded task",
-    ),
-    (
-        "/api/v1/ai/leases/{lease_id}",
-        "resource id; needs a seeded lease",
-    ),
-    (
-        "/api/v1/zones/{zone_id}",
-        "resource id; needs a seeded zone",
-    ),
-    (
-        "/api/v1/schedules/{schedule_id}",
-        "resource id; needs a seeded schedule",
-    ),
-    (
-        "/api/v1/snapshot-schedules/{schedule_id}",
-        "resource id; needs a seeded schedule",
-    ),
-    (
-        "/api/v1/playback/sessions/{session_id}",
-        "resource id; needs a seeded session",
-    ),
-    (
-        "/api/v1/incidents/{incident_id}/segments",
-        "resource id; needs a seeded incident",
-    ),
-    (
-        "/api/v1/movement/search/plate/{plate}",
-        "the parameter is a PLATE, not a camera",
-    ),
     (
         "/m/{id}/{*rest}",
-        "the module proxy; wildcard tail is unprobeable here",
+        "the module proxy: a wildcard tail is not one id, so no fixture fills it",
     ),
-    // Bodies needing domain fixtures the harness does not build.
-    ("/api/v1/ai/embeddings", "needs a valid embedding batch"),
-    ("/api/v1/ai/events", "needs a valid detection batch"),
+    // The census fills a PATH and posts a BODY. These three are held up by neither.
     (
         "/api/v1/ai/embed-queries",
-        "needs worker_id + a queued query",
+        "gated on a `worker_id` QUERY parameter, which the census does not supply",
     ),
     (
         "/api/v1/ai/embed-queries/{id}/result",
-        "needs a queued query and a vector",
-    ),
-    (
-        "/api/v1/cameras/config/bulk",
-        "needs a valid bulk action payload",
-    ),
-    ("/api/v1/discover", "needs a discovery target spec"),
-    (
-        "/api/v1/movement/links",
-        "needs two real cameras and a link spec",
+        "an embed query is a SEARCH query, not a camera resource; submission is checked against the \
+         CLAIMING credential, so proving it needs a claimed row and a second credential",
     ),
     (
         "/api/v1/movement/search/person",
-        "needs a `camera` query parameter",
-    ),
-    (
-        "/api/v1/search/nl",
-        "needs a natural-language query payload",
-    ),
-    ("/api/v1/search/plan", "needs a search plan payload"),
-    // App-crate handlers that 500 here because `composed_router` does not run their schema init.
-    // A harness gap, NOT a product finding — but the guard was never reached.
-    (
-        "/api/v1/entry-events/{id}/confirm",
-        "app schema not init in harness",
-    ),
-    (
-        "/api/v1/entry-events/{id}/reject",
-        "app schema not init in harness",
-    ),
-    (
-        "/api/v1/movement/breaches/{id}/ack",
-        "app schema not init in harness",
-    ),
-    (
-        "/api/v1/movement/breaches/{id}/resolve",
-        "app schema not init in harness",
-    ),
-    (
-        "/api/v1/movement/candidates/{id}/confirm",
-        "app schema not init in harness",
-    ),
-    (
-        "/api/v1/movement/candidates/{id}/reject",
-        "app schema not init in harness",
-    ),
-    (
-        "/api/v1/movement/links/{id}",
-        "app schema not init in harness",
+        "gated on a `camera` QUERY parameter, which the census does not supply",
     ),
 ];
 
+// ---- Seeded fixtures for the resource-addressed routes ----
+//
+// A route keyed by its own primary key rather than a camera id is the shape that hid four defects in
+// an earlier round, and it is the shape a synthetic probe id cannot test at all: the handler 404s on
+// the missing row before the guard it is meant to exercise ever runs. Sixteen routes sat in
+// CENSUS_UNPROVEN for exactly that reason.
+//
+// So seed the resource — owned by camera_b, which the probing credential does NOT hold — and hand
+// the census both that id and one of the same shape that names nothing. It then requires the two
+// answers to be INDISTINGUISHABLE, which is the actual property: "refused" is not enough when 404 is
+// itself the leak.
+//
+// Every id below is written by [`seed_census_fixtures`], and the census re-proves that with the
+// unscoped control credential on every run. A fixture that was never really seeded agrees with
+// itself perfectly, and reports a clean census having asserted nothing.
+
+/// A resource id that exists, owned by camera_b, and one of the same shape that does not.
+const FX_TASK: (&str, &str) = ("task_of_camera_b", "task_does_not_exist");
+const FX_ZONE: (&str, &str) = ("zone_of_camera_b", "zone_does_not_exist");
+const FX_SCHEDULE: (&str, &str) = ("sched_of_camera_b", "sched_does_not_exist");
+const FX_SNAP_SCHEDULE: (&str, &str) = ("snapsched_of_camera_b", "snapsched_does_not_exist");
+// The playback session id must satisfy `is_valid_session_id` (pbs_ + alphanumerics), or the handler
+// answers 400 for BOTH ids and the agreement proves only that the validator rejects them.
+const FX_PLAYBACK: (&str, &str) = ("pbs_ofcamerab", "pbs_doesnotexist");
+const FX_INCIDENT: (&str, &str) = ("inc_of_camera_b", "inc_does_not_exist");
+const FX_PLATE: (&str, &str) = ("PLATEB", "PLATEZZZZ");
+const FX_ENTRY_EVENT: (&str, &str) = ("ev_of_camera_b", "ev_does_not_exist");
+const FX_BREACH: (&str, &str) = ("breach_of_camera_b", "breach_does_not_exist");
+const FX_CANDIDATE: (&str, &str) = ("cand_of_camera_b", "cand_does_not_exist");
+// Backup policies and jobs are camera-owned via their stored `camera_ids` (`owns_selection`), and
+// `policy_for`/`job_for` collapse out-of-scope onto the same 404 a missing id gets. That collapse is
+// the property worth proving, and until these fixtures existed the census counted the routes as
+// covered purely because a synthetic id 404s — which an entirely unguarded route would also do.
+// One row per DESTRUCTIVE route. The census's control credential really does perform the mutation it
+// probes — that is what proves the fixture was reachable at all — so a single shared id is consumed
+// by the first DELETE and every later route then sees a missing row, which silently degrades those
+// probes to "agreed about nothing". Separate ids keep each route's evidence its own.
+const FX_POLICY: (&str, &str) = ("bkp_of_camera_b", "bkp_does_not_exist");
+const FX_POLICY_DEL: (&str, &str) = ("bkp_del_of_camera_b", "bkp_del_does_not_exist");
+const FX_JOB: (&str, &str) = ("bkj_of_camera_b", "bkj_does_not_exist");
+const FX_JOB_DEL: (&str, &str) = ("bkj_del_of_camera_b", "bkj_del_does_not_exist");
+const FX_LINK: (&str, &str) = ("lnk_of_camera_b", "lnk_does_not_exist");
+
+/// Seed one row per resource-addressed route, all owned by camera_b.
+///
+/// Written straight to the tables on purpose: these are the SUBJECT of the probe, not the credential
+/// making it. The rule that a fixture must be minted through the real API is about principals — an
+/// assertion against a credential the product refuses to issue is vacuous. A row is just a row, and
+/// the census's control credential proves each one is really there.
+async fn seed_census_fixtures(st: &AppState, root: &Path) {
+    // A destination + a policy + a completed job, all owned by camera_b alone.
+    let now = chrono::Utc::now();
+    sqlx::query(
+        "INSERT INTO backup_destinations (id, name, kind, config, enabled, created_at, updated_at)
+         VALUES ('bkd_census','census','local','{\"path\":\"/tmp/census-dest\"}',1,?,?)",
+    )
+    .bind(now)
+    .bind(now)
+    .execute(&st.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO backup_policies (id, name, destination_id, camera_ids, enabled,
+                                      incident_lock_only, created_at, updated_at)
+         VALUES (?, 'census policy', 'bkd_census', '[\"camera_b\"]', 1, 0, ?, ?)",
+    )
+    .bind(FX_POLICY.0)
+    .bind(now)
+    .bind(now)
+    .execute(&st.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO backup_policies (id, name, destination_id, camera_ids, enabled,
+                                      incident_lock_only, created_at, updated_at)
+         VALUES (?, 'census policy (delete)', 'bkd_census', '[\"camera_b\"]', 1, 0, ?, ?)",
+    )
+    .bind(FX_POLICY_DEL.0)
+    .bind(now)
+    .bind(now)
+    .execute(&st.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO backup_jobs (id, policy_id, destination_id, kind, camera_ids, status,
+                                  files_total, files_copied, bytes_copied, incident_lock_only,
+                                  created_at)
+         VALUES (?, ?, 'bkd_census', 'policy', '[\"camera_b\"]', 'completed', 0, 0, 0, 0, ?)",
+    )
+    .bind(FX_JOB.0)
+    .bind(FX_POLICY.0)
+    .bind(now)
+    .execute(&st.pool)
+    .await
+    .unwrap();
+    sqlx::query(
+        "INSERT INTO backup_jobs (id, policy_id, destination_id, kind, camera_ids, status,
+                                  files_total, files_copied, bytes_copied, incident_lock_only,
+                                  created_at)
+         VALUES (?, ?, 'bkd_census', 'policy', '[\"camera_b\"]', 'completed', 0, 0, 0, 0, ?)",
+    )
+    .bind(FX_JOB_DEL.0)
+    .bind(FX_POLICY.0)
+    .bind(now)
+    .execute(&st.pool)
+    .await
+    .unwrap();
+
+    let now = chrono::Utc::now();
+    let pool = &st.pool;
+
+    sqlx::query(
+        "INSERT INTO ai_tasks (id, camera_id, task_type, created_at, updated_at) VALUES (?,?,?,?,?)",
+    )
+    .bind(FX_TASK.0)
+    .bind("camera_b")
+    .bind("detection")
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO zones (id, camera_id, name, polygon, created_at, updated_at)
+         VALUES (?,?,?,?,?,?)",
+    )
+    .bind(FX_ZONE.0)
+    .bind("camera_b")
+    .bind("gate")
+    .bind("[[0.1,0.1],[0.9,0.1],[0.9,0.9]]")
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO camera_schedules (id, camera_id, time_start, time_end, created_at, updated_at)
+         VALUES (?,?,'08:00','18:00',?,?)",
+    )
+    .bind(FX_SCHEDULE.0)
+    .bind("camera_b")
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO snapshot_schedules (id, camera_id, created_at, updated_at) VALUES (?,?,?,?)",
+    )
+    .bind(FX_SNAP_SCHEDULE.0)
+    .bind("camera_b")
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // A playback session is a DIRECTORY plus its media attribution; the guard reads the attribution
+    // and the delete reads the directory, so a fixture missing either one is only half a session.
+    std::fs::create_dir_all(root.join("playback").join(FX_PLAYBACK.0)).unwrap();
+    sqlx::query("INSERT INTO media_artifacts (path, camera_id, kind, created_at) VALUES (?,?,?,?)")
+        .bind(format!("playback/{}", FX_PLAYBACK.0))
+        .bind("camera_b")
+        .bind("playback")
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+
+    // An incident is not a table: it is a tag on camera_b's segments, which is exactly why the route
+    // has to filter by camera rather than trust the tag.
+    let seg_path = root.join("recordings").join("camera_b_incident.mp4");
+    std::fs::write(&seg_path, b"footage").unwrap();
+    sqlx::query(
+        "INSERT INTO segments (id, camera_id, path, start_time, end_time, duration_s, container,
+                               size_bytes, locked, evidence_locked, incident_id, created_at)
+         VALUES (?,?,?,?,?,60.0,'mp4',7,0,0,?,?)",
+    )
+    .bind("seg_incident_b")
+    .bind("camera_b")
+    .bind(seg_path.to_string_lossy().to_string())
+    .bind(now - chrono::Duration::minutes(5))
+    .bind(now)
+    .bind(FX_INCIDENT.0)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // camera_b's lane sighting of FX_PLATE: the row behind BOTH the entry-event workflow routes and
+    // the plate trail (which reads it through the `entry_events_read` contract view).
+    sqlx::query(
+        "INSERT INTO entry_events (id, camera_id, event_type, timestamp, direction, plate,
+                                   auth_status, created_at)
+         VALUES (?,?,'anpr',?,'inbound',?,'matched',?)",
+    )
+    .bind(FX_ENTRY_EVENT.0)
+    .bind("camera_b")
+    .bind(now)
+    .bind(FX_PLATE.0)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO breach_alerts (id, camera_id, rule, created_at) VALUES (?,?,'red_zone_entry',?)",
+    )
+    .bind(FX_BREACH.0)
+    .bind("camera_b")
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    // Both ends on cameras the probing credential does not hold — a movement row that names two
+    // cameras is visible only to a credential holding BOTH.
+    sqlx::query(
+        "INSERT INTO movement_candidates (id, subject_type, anchor, from_camera, to_camera,
+                                          from_ref, to_ref, created_at)
+         VALUES (?,'vehicle',?,?,?,?,?,?)",
+    )
+    .bind(FX_CANDIDATE.0)
+    .bind(FX_PLATE.0)
+    .bind("camera_b")
+    .bind("camera_c")
+    .bind("ref_b")
+    .bind("ref_c")
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+
+    sqlx::query(
+        "INSERT INTO camera_links (id, from_camera, to_camera, created_at, updated_at)
+         VALUES (?,?,?,?,?)",
+    )
+    .bind(FX_LINK.0)
+    .bind("camera_b")
+    .bind("camera_c")
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap();
+}
+
 #[tokio::test]
 async fn every_route_is_accounted_for() {
-    let st = test_state().await;
+    let root = ScratchDir::new("census");
+    let st = test_state_with(|cfg| {
+        // The census MUTATES: its control credential deletes a playback session and writes segment
+        // read-locks. Point both trees at scratch so nothing here can touch a developer's box.
+        cfg.playback_dir = root.0.join("playback");
+        cfg.recordings_dir = root.0.join("recordings");
+        // A successful control PATCH of a recording schedule calls `recorder.reconcile`, and a
+        // control DELETE of an AI task calls `sampler.reconcile`. Both would spawn a real ffmpeg
+        // against a camera that does not exist. Nothing in the census reads either flag — only
+        // `/api/v1/system` reports them, and it is declared scope-neutral.
+        cfg.recorder_enabled = false;
+        cfg.ai_enabled = false;
+    })
+    .await;
     seed_camera(&st, "camera_a").await;
     seed_camera(&st, "camera_b").await;
+    // The far end of camera_b's link and candidate. A movement row naming two cameras is held only
+    // by a credential holding both, so the second camera has to be a real one.
+    seed_camera(&st, "camera_c").await;
+    seed_census_fixtures(&st, &root.0).await;
     let scoped = seed_key(&st, Some(&["camera_a"])).await;
+    // The control. Not an adversary and not the subject of any assertion: it exists so a fixture that
+    // was never really seeded is caught being invisible to a credential that holds every camera.
+    let unscoped = seed_key(&st, None).await;
 
     let census = heldar_testkit::Census::new(vec![
         repo_root().join("crates/heldar-kernel/src"),
@@ -1301,11 +1842,11 @@ async fn every_route_is_accounted_for() {
     // hold — so the assertion is a scope test and not merely a capability test.
     .probe_body(
         "/api/v1/ai/embeddings",
-        r#"{"camera_id":"camera_b","items":[]}"#,
+        r#"{"camera_id":"camera_b","model":"clip","dim":2,"items":[]}"#,
     )
     .probe_body(
         "/api/v1/ai/events",
-        r#"{"camera_id":"camera_b","detections":[]}"#,
+        r#"{"camera_id":"camera_b","task_type":"detection","detections":[]}"#,
     )
     .probe_body("/api/v1/ai/leases", r#"{"worker_id":"w1"}"#)
     .probe_body("/api/v1/api-keys", r#"{"name":"probe","role":"viewer"}"#)
@@ -1315,9 +1856,9 @@ async fn every_route_is_accounted_for() {
     )
     .probe_body(
         "/api/v1/cameras/config/bulk",
-        r#"{"action":"reboot","camera_ids":["camera_b"]}"#,
+        r#"{"camera_ids":["camera_b"],"action":{"type":"sync_time"}}"#,
     )
-    .probe_body("/api/v1/discover", r#"{"targets":["127.0.0.1"]}"#)
+    .probe_body("/api/v1/discover", r#"{"targets":"127.0.0.1"}"#)
     .probe_body("/api/v1/entry/gate/settings", r#"{"kill_switch":true}"#)
     .probe_body(
         "/api/v1/modules",
@@ -1325,8 +1866,10 @@ async fn every_route_is_accounted_for() {
     )
     .probe_body(
         "/api/v1/movement/links",
-        r#"{"from_camera":"camera_b","to_camera":"camera_b"}"#,
+        r#"{"from_camera":"camera_b","to_camera":"camera_c"}"#,
     )
+    .probe_body("/api/v1/search/nl", r#"{"query":"red car at the gate"}"#)
+    .probe_body("/api/v1/search/plan", r#"{"query":"red car at the gate"}"#)
     .probe_body("/api/v1/passes", r#"{"visitor_name":"probe"}"#)
     .probe_body("/api/v1/vehicles", r#"{"plate":"PROBE1"}"#)
     .probe_body("/api/v1/watchlist", r#"{"plate":"PROBE1","kind":"block"}"#)
@@ -1339,19 +1882,229 @@ async fn every_route_is_accounted_for() {
         r#"{"username":"probe","password":"pw","role":"viewer"}"#,
     )
     .probe_body("/api/v1/system/transcode", r#"{"engine":"cpu"}"#)
+    // Routes addressed by a RESOURCE id. Each names a row seeded on camera_b (which the probing
+    // credential does not hold) and an id of the same shape naming nothing; the census requires the
+    // two answers to be indistinguishable, so a 404 cannot be used to walk the id space.
+    .fixture("/api/v1/ai-tasks/{task_id}", FX_TASK.0, FX_TASK.1)
+    .fixture(
+        "/api/v1/backup/policies/{id}",
+        FX_POLICY_DEL.0,
+        FX_POLICY_DEL.1,
+    )
+    .fixture(
+        "/api/v1/backup/policies/{id}/trigger",
+        FX_POLICY.0,
+        FX_POLICY.1,
+    )
+    .fixture("/api/v1/backup/jobs/{id}", FX_JOB.0, FX_JOB.1)
+    .fixture("/api/v1/zones/{zone_id}", FX_ZONE.0, FX_ZONE.1)
+    .fixture(
+        "/api/v1/schedules/{schedule_id}",
+        FX_SCHEDULE.0,
+        FX_SCHEDULE.1,
+    )
+    .fixture(
+        "/api/v1/snapshot-schedules/{schedule_id}",
+        FX_SNAP_SCHEDULE.0,
+        FX_SNAP_SCHEDULE.1,
+    )
+    .fixture(
+        "/api/v1/playback/sessions/{session_id}",
+        FX_PLAYBACK.0,
+        FX_PLAYBACK.1,
+    )
+    .fixture(
+        "/api/v1/incidents/{incident_id}/segments",
+        FX_INCIDENT.0,
+        FX_INCIDENT.1,
+    )
+    .fixture(
+        "/api/v1/movement/search/plate/{plate}",
+        FX_PLATE.0,
+        FX_PLATE.1,
+    )
+    .fixture(
+        "/api/v1/entry-events/{id}/confirm",
+        FX_ENTRY_EVENT.0,
+        FX_ENTRY_EVENT.1,
+    )
+    .fixture(
+        "/api/v1/entry-events/{id}/reject",
+        FX_ENTRY_EVENT.0,
+        FX_ENTRY_EVENT.1,
+    )
+    .fixture(
+        "/api/v1/movement/breaches/{id}/ack",
+        FX_BREACH.0,
+        FX_BREACH.1,
+    )
+    .fixture(
+        "/api/v1/movement/breaches/{id}/resolve",
+        FX_BREACH.0,
+        FX_BREACH.1,
+    )
+    .fixture(
+        "/api/v1/movement/candidates/{id}/confirm",
+        FX_CANDIDATE.0,
+        FX_CANDIDATE.1,
+    )
+    .fixture(
+        "/api/v1/movement/candidates/{id}/reject",
+        FX_CANDIDATE.0,
+        FX_CANDIDATE.1,
+    )
+    .fixture("/api/v1/movement/links/{id}", FX_LINK.0, FX_LINK.1)
     // The open build composes 151 routes; a scan finding far fewer is broken, and a census over an
     // empty set would otherwise pass triumphantly.
     .min_routes(100);
 
     let report = census
-        .run(|method, path, body| {
-            let st = st.clone();
-            let scoped = scoped.clone();
-            async move {
-                let (status, resp) = call_body(&st, &scoped, &method, &path, &body).await;
-                (status.as_u16(), resp)
-            }
-        })
+        .run_with_control(
+            |method, path, body| {
+                let st = st.clone();
+                let scoped = scoped.clone();
+                async move {
+                    let (status, resp) = call_body(&st, &scoped, &method, &path, &body).await;
+                    (status.as_u16(), resp)
+                }
+            },
+            |method, path, body| {
+                let st = st.clone();
+                let unscoped = unscoped.clone();
+                async move {
+                    let (status, resp) = call_body(&st, &unscoped, &method, &path, &body).await;
+                    (status.as_u16(), resp)
+                }
+            },
+        )
         .await;
     report.assert_clean();
+}
+
+// ---- The live plane: a stream token is withdrawable ----
+//
+// MediaMTX serves video directly to the browser and calls the kernel back to authorize each read.
+// That callback used to consult ONLY the token's signature, so revoking the key that opened a stream
+// did not stop it — measured at the time as `200 OK` on a replayed token from a revoked key. These
+// drive `POST /internal/mediamtx-auth` exactly as MediaMTX does.
+
+/// Ask the callback the same question MediaMTX asks.
+async fn mediamtx_auth(st: &AppState, path: &str, token: &str, action: &str) -> StatusCode {
+    let body = serde_json::json!({
+        "action": action,
+        "path": path,
+        "query": format!("token={token}"),
+        "ip": "10.0.0.9",
+        "user": "",
+        "password": "",
+        "protocol": "hls",
+        "id": "sess_probe",
+    })
+    .to_string();
+    let mut app = composed_router(st);
+    let resp = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/mediamtx-auth")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    resp.status()
+}
+
+// `/liveview` cannot be driven here: `ensure_live` provisions a path against a real MediaMTX API and
+// waits for it to go ready. So these mint the token through the SAME public function that endpoint
+// uses — `live_token::mint` with `Subject::of(principal)` — and then ask the callback what MediaMTX
+// asks. The mapping from principal to subject is pinned separately in `live_token`'s own tests; what
+// is proven here is the half that was missing entirely: the callback withdrawing the read.
+
+fn stream_token(key_id: &str, path: &str) -> String {
+    heldar_kernel::services::live_token::mint(
+        path,
+        chrono::Utc::now().timestamp(),
+        3600,
+        &heldar_kernel::services::live_token::Subject::ApiKey(key_id.to_string()),
+    )
+}
+
+#[tokio::test]
+async fn revoking_the_key_that_opened_a_stream_stops_the_stream() {
+    let st = test_state_with(|cfg| cfg.auth_enabled = true).await;
+    seed_camera(&st, "camera_a").await;
+    let (_key, key_id) = mint_key_with_id(
+        &st,
+        &["camera:read", "video:live", "system:read"],
+        Some(&["camera_a"]),
+    )
+    .await;
+    let path = "cam_camera_a";
+    let token = stream_token(&key_id, path);
+
+    // While the credential stands, MediaMTX is told to serve.
+    assert_eq!(
+        mediamtx_auth(&st, path, &token, "read").await,
+        StatusCode::OK,
+        "a live credential's own stream was refused"
+    );
+
+    // The operator burns the key. The token is still cryptographically valid and unexpired — the
+    // ONLY thing that changed is the credential behind it.
+    revoke_key(&st, &key_id).await;
+    assert_eq!(
+        mediamtx_auth(&st, path, &token, "read").await,
+        StatusCode::UNAUTHORIZED,
+        "a revoked key kept streaming: the token outlived the credential that minted it"
+    );
+}
+
+#[tokio::test]
+async fn narrowing_a_scope_off_the_camera_stops_its_stream() {
+    let st = test_state_with(|cfg| cfg.auth_enabled = true).await;
+    seed_camera(&st, "camera_a").await;
+    seed_camera(&st, "camera_b").await;
+    let (_key, key_id) = mint_key_with_id(
+        &st,
+        &["camera:read", "video:live", "system:read"],
+        Some(&["camera_a", "camera_b"]),
+    )
+    .await;
+    let path = "cam_camera_b";
+    let token = stream_token(&key_id, path);
+    assert_eq!(
+        mediamtx_auth(&st, path, &token, "read").await,
+        StatusCode::OK
+    );
+
+    // Re-scope the key off camera_b WITHOUT revoking it: still a perfectly valid credential, it
+    // simply no longer holds this camera.
+    let admin = seed_key(&st, None).await;
+    let body =
+        serde_json::json!({ "scope_kind": "cameras", "scope_cameras": ["camera_a"] }).to_string();
+    let (status, resp) = call_body(
+        &st,
+        &admin,
+        "PATCH",
+        &format!("/api/v1/api-keys/{key_id}"),
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "re-scope failed: {resp}");
+
+    assert_eq!(
+        mediamtx_auth(&st, path, &token, "read").await,
+        StatusCode::UNAUTHORIZED,
+        "the key kept streaming a camera it no longer holds"
+    );
+    // ...and the camera it DOES still hold keeps working: withdrawal must be per-camera, not a
+    // blanket kill of every stream the credential opened.
+    let still_held = stream_token(&key_id, "cam_camera_a");
+    assert_eq!(
+        mediamtx_auth(&st, "cam_camera_a", &still_held, "read").await,
+        StatusCode::OK,
+        "re-scoping killed a stream on a camera the credential still holds"
+    );
 }

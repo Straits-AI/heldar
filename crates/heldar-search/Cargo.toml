@@ -36,3 +36,8 @@ anyhow = "1.0.104"
 base64 = "0.23"
 # Background query-log retention loop.
 tokio = { version = "1.53.1", features = ["time"] }
+
+[dev-dependencies]
+# `tests/camera_confinement.rs` drives the executor against a real pool, so it needs a runtime and
+# the test macro on top of the `time` feature the retention loop uses.
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }

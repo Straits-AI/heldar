@@ -112,6 +112,21 @@ pub struct Acquired {
 /// Eligibility mirrors `GET /ai/tasks` exactly (enabled task on an enabled camera, ordered by id), so a
 /// leased worker and a legacy `/ai/tasks` worker see the same universe of work.
 ///
+/// # A lease is NOT an authorization, which is what makes renewal safe
+///
+/// Renew being the same call as acquire could have been the hole: if renewal extended whatever the
+/// holder already had, a lease taken while a key was wide would go on being renewed forever after the
+/// key was narrowed. It does not — the candidate list below is rebuilt from the `camera_scope` passed
+/// in on THIS call, so a lost camera simply stops being offered
+/// (`a_narrowed_credential_cannot_renew_its_lease_onto_the_camera_it_lost`).
+///
+/// The row for the lost camera does survive until its TTL lapses (<= `MAX_LEASE_TTL_SECS`, 300 s),
+/// and so does its [`CACHE`] entry. Neither grants anything: every surface that consults a lease
+/// re-checks the LIVE principal's scope beside it — the frame pull is camera-keyed and calls
+/// `require_camera` on the path id, and ingest calls `require_camera(&lease.camera_id)` after
+/// resolving the ticket. The only real effect is that the task stays unclaimable by another
+/// credential for up to the TTL, which is a self-healing availability wrinkle and not a boundary.
+///
 /// The claim is the compare-and-swap shape proven by `embeddings::claim_queries`, plus the expiry that
 /// one lacks: a row is taken only if its lease has LAPSED or is already ours.
 pub async fn acquire(

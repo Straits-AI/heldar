@@ -31,5 +31,15 @@ async fn liveview(
     st.camera_scope_check(&principal, &id)?;
     // The Host the client used lets us hand back stream URLs reachable over the tunnel / LAN.
     let host = headers.get(HOST).and_then(|v| v.to_str().ok());
-    Ok(Json(mediamtx::ensure_live(&st, &id, host).await?))
+    // The token is minted FOR this caller: revoking or re-scoping the credential that opened the
+    // stream now stops it, instead of it running to the TTL.
+    Ok(Json(
+        mediamtx::ensure_live(
+            &st,
+            &id,
+            host,
+            crate::services::live_token::Subject::of(&principal),
+        )
+        .await?,
+    ))
 }
