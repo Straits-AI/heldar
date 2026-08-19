@@ -1980,3 +1980,131 @@ async fn every_route_is_accounted_for() {
         .await;
     report.assert_clean();
 }
+
+// ---- The live plane: a stream token is withdrawable ----
+//
+// MediaMTX serves video directly to the browser and calls the kernel back to authorize each read.
+// That callback used to consult ONLY the token's signature, so revoking the key that opened a stream
+// did not stop it — measured at the time as `200 OK` on a replayed token from a revoked key. These
+// drive `POST /internal/mediamtx-auth` exactly as MediaMTX does.
+
+/// Ask the callback the same question MediaMTX asks.
+async fn mediamtx_auth(st: &AppState, path: &str, token: &str, action: &str) -> StatusCode {
+    let body = serde_json::json!({
+        "action": action,
+        "path": path,
+        "query": format!("token={token}"),
+        "ip": "10.0.0.9",
+        "user": "",
+        "password": "",
+        "protocol": "hls",
+        "id": "sess_probe",
+    })
+    .to_string();
+    let mut app = composed_router(st);
+    let resp = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/internal/mediamtx-auth")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    resp.status()
+}
+
+// `/liveview` cannot be driven here: `ensure_live` provisions a path against a real MediaMTX API and
+// waits for it to go ready. So these mint the token through the SAME public function that endpoint
+// uses — `live_token::mint` with `Subject::of(principal)` — and then ask the callback what MediaMTX
+// asks. The mapping from principal to subject is pinned separately in `live_token`'s own tests; what
+// is proven here is the half that was missing entirely: the callback withdrawing the read.
+
+fn stream_token(key_id: &str, path: &str) -> String {
+    heldar_kernel::services::live_token::mint(
+        path,
+        chrono::Utc::now().timestamp(),
+        3600,
+        &heldar_kernel::services::live_token::Subject::ApiKey(key_id.to_string()),
+    )
+}
+
+#[tokio::test]
+async fn revoking_the_key_that_opened_a_stream_stops_the_stream() {
+    let st = test_state_with(|cfg| cfg.auth_enabled = true).await;
+    seed_camera(&st, "camera_a").await;
+    let (_key, key_id) = mint_key_with_id(
+        &st,
+        &["camera:read", "video:live", "system:read"],
+        Some(&["camera_a"]),
+    )
+    .await;
+    let path = "cam_camera_a";
+    let token = stream_token(&key_id, path);
+
+    // While the credential stands, MediaMTX is told to serve.
+    assert_eq!(
+        mediamtx_auth(&st, path, &token, "read").await,
+        StatusCode::OK,
+        "a live credential's own stream was refused"
+    );
+
+    // The operator burns the key. The token is still cryptographically valid and unexpired — the
+    // ONLY thing that changed is the credential behind it.
+    revoke_key(&st, &key_id).await;
+    assert_eq!(
+        mediamtx_auth(&st, path, &token, "read").await,
+        StatusCode::UNAUTHORIZED,
+        "a revoked key kept streaming: the token outlived the credential that minted it"
+    );
+}
+
+#[tokio::test]
+async fn narrowing_a_scope_off_the_camera_stops_its_stream() {
+    let st = test_state_with(|cfg| cfg.auth_enabled = true).await;
+    seed_camera(&st, "camera_a").await;
+    seed_camera(&st, "camera_b").await;
+    let (_key, key_id) = mint_key_with_id(
+        &st,
+        &["camera:read", "video:live", "system:read"],
+        Some(&["camera_a", "camera_b"]),
+    )
+    .await;
+    let path = "cam_camera_b";
+    let token = stream_token(&key_id, path);
+    assert_eq!(
+        mediamtx_auth(&st, path, &token, "read").await,
+        StatusCode::OK
+    );
+
+    // Re-scope the key off camera_b WITHOUT revoking it: still a perfectly valid credential, it
+    // simply no longer holds this camera.
+    let admin = seed_key(&st, None).await;
+    let body =
+        serde_json::json!({ "scope_kind": "cameras", "scope_cameras": ["camera_a"] }).to_string();
+    let (status, resp) = call_body(
+        &st,
+        &admin,
+        "PATCH",
+        &format!("/api/v1/api-keys/{key_id}"),
+        &body,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "re-scope failed: {resp}");
+
+    assert_eq!(
+        mediamtx_auth(&st, path, &token, "read").await,
+        StatusCode::UNAUTHORIZED,
+        "the key kept streaming a camera it no longer holds"
+    );
+    // ...and the camera it DOES still hold keeps working: withdrawal must be per-camera, not a
+    // blanket kill of every stream the credential opened.
+    let still_held = stream_token(&key_id, "cam_camera_a");
+    assert_eq!(
+        mediamtx_auth(&st, "cam_camera_a", &still_held, "read").await,
+        StatusCode::OK,
+        "re-scoping killed a stream on a camera the credential still holds"
+    );
+}

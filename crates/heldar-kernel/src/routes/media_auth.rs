@@ -110,23 +110,26 @@ async fn authorize(State(st): State<AppState>, Json(req): Json<AuthRequest>) -> 
         "publish" | "api" | "metrics" | "pprof" => is_loopback(&req),
         // Reads/playback: token-gated when auth is on; LAN-IP-gated when auth is off (LAN default).
         //
-        // NOTE what this arm does NOT consult: any credential. MediaMTX presents a stream URL, not a
-        // session, so the only thing to check is the signature — which means a token keeps working
-        // after the key that minted it is revoked or re-scoped, for up to
-        // HELDAR_LIVEVIEW_TOKEN_TTL_SECS. That is a known, measured limit of the LIVE plane and is
-        // written up in full on `services::live_token`; the recorded-media plane re-authorizes every
-        // request instead (`services::media_scope::guard`). Do not "fix" it by widening this arm.
+        // Two questions, not one: is the token authentic, and does its subject STILL stand? The
+        // signature alone used to be the whole answer, which is why a revoked key kept streaming to
+        // the TTL. `verify` returns the subject precisely so this arm cannot forget to ask the
+        // second question.
+        //
+        // What this bounds: a transport is re-authorized as often as it re-presents the token. HLS
+        // does that per segment, so withdrawal bites in seconds; an ESTABLISHED WebRTC session is
+        // negotiated once and keeps flowing regardless. See `services::live_token`.
         "read" | "playback" => {
             if st.cfg.auth_enabled {
-                token_of(&req)
-                    .map(|t| {
-                        crate::services::live_token::verify(
-                            &req.path,
-                            &t,
-                            chrono::Utc::now().timestamp(),
-                        )
-                    })
-                    .unwrap_or(false)
+                match token_of(&req).and_then(|t| {
+                    crate::services::live_token::verify(
+                        &req.path,
+                        &t,
+                        chrono::Utc::now().timestamp(),
+                    )
+                }) {
+                    Some(subject) => subject_still_stands(&st, &subject, &req.path).await,
+                    None => false,
+                }
             } else {
                 is_lan_client(&req)
             }
@@ -137,6 +140,57 @@ async fn authorize(State(st): State<AppState>, Json(req): Json<AuthRequest>) -> 
         StatusCode::OK
     } else {
         StatusCode::UNAUTHORIZED
+    }
+}
+
+/// Does the credential that opened this stream still stand, and still hold this camera?
+///
+/// Fail-OPEN on a database read failure, deliberately and loudly: the recorder shares this SQLite and
+/// a busy timeout under write load is routine. Turning routine contention into a black video wall
+/// across the whole site is a worse failure than the exposure it would prevent — the same trade the
+/// backup creator re-check makes, for the same reason.
+async fn subject_still_stands(
+    st: &AppState,
+    subject: &crate::services::live_token::Subject,
+    path: &str,
+) -> bool {
+    use crate::services::live_token::Subject;
+    match subject {
+        // No withdrawable credential behind it: auth-disabled boxes and the site-token rendezvous.
+        Subject::Site => true,
+        Subject::User(id) => {
+            match sqlx::query_scalar::<_, bool>("SELECT active FROM users WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&st.pool)
+                .await
+            {
+                Ok(Some(active)) => active,
+                // Deleted: withdrawn.
+                Ok(None) => false,
+                Err(e) => {
+                    tracing::warn!(user = %id, error = %e, "media_auth: could not re-check the streaming user; allowing");
+                    true
+                }
+            }
+        }
+        Subject::ApiKey(id) => {
+            match crate::auth::api_key_principal_now(&st.pool, id, st.cfg.machine_auth).await {
+                // Still a valid credential — but it must ALSO still hold this camera, or narrowing
+                // `scope_cameras` would leave the stream running. `path` is the MediaMTX path
+                // (`cam_<camera_id>`), which is what the token is scoped to.
+                Ok(Some(principal)) => match path.strip_prefix("cam_") {
+                    Some(camera_id) => principal.camera_allowed(camera_id),
+                    // A path shape this kernel did not mint a camera token for.
+                    None => false,
+                },
+                // Revoked, deactivated, expired or deleted.
+                Ok(None) => false,
+                Err(e) => {
+                    tracing::warn!(api_key = %id, error = %e, "media_auth: could not re-check the streaming key; allowing");
+                    true
+                }
+            }
+        }
     }
 }
 

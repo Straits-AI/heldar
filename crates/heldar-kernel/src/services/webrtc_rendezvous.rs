@@ -101,9 +101,16 @@ async fn bridge_to_local_whep(
         Some(false) => anyhow::bail!("camera {camera_id} is disabled — not bridging"),
         Some(true) => {}
     }
-    let live = mediamtx::ensure_live(state, camera_id, None)
-        .await
-        .map_err(|e| anyhow::anyhow!("ensure_live({camera_id}) failed: {e}"))?;
+    // The rendezvous holds a SITE token, not a `Principal`: there is no per-camera credential to
+    // re-check, and a remote viewer must not lose their stream because an unrelated key was revoked.
+    let live = mediamtx::ensure_live(
+        state,
+        camera_id,
+        None,
+        crate::services::live_token::Subject::Site,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("ensure_live({camera_id}) failed: {e}"))?;
     let whep = format!("{}/whep", live.webrtc_url);
     let answer = state
         .http

@@ -152,6 +152,7 @@ pub async fn ensure_live(
     state: &AppState,
     camera_id: &str,
     request_host: Option<&str>,
+    subject: crate::services::live_token::Subject,
 ) -> AppResult<LiveUrls> {
     let cam: Option<Camera> = sqlx::query_as::<_, Camera>("SELECT * FROM cameras WHERE id = ?")
         .bind(camera_id)
@@ -202,10 +203,13 @@ pub async fn ensure_live(
     // (configured with HTTP external auth) calls the kernel back per read; when kernel auth is enabled
     // the read is refused unless the URL carries this token — so the browser streaming directly from
     // MediaMTX is still gated by kernel auth. Token chars are URL-safe (base64url + digits + dots).
+    // Bound to the SUBJECT that asked for it, so the callback can withdraw the read when that
+    // credential is revoked, deactivated or re-scoped off this camera.
     let token = crate::services::live_token::mint(
         &name,
         chrono::Utc::now().timestamp(),
         state.cfg.live_token_ttl_secs,
+        &subject,
     );
     let (hls_url, webrtc_url) =
         browser_media_urls(state.cfg.media_same_origin, hls, webrtc, &name, &token);
