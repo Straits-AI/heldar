@@ -32,6 +32,13 @@ pub struct Config {
     /// Must comfortably outlast a viewing session's reconnects; the dashboard re-fetches `/liveview`
     /// (re-minting) whenever it reopens a stream. Only enforced when kernel auth is enabled.
     pub live_token_ttl_secs: i64,
+    /// How often to re-check the credentials behind LIVE MediaMTX sessions and kick the withdrawn.
+    ///
+    /// This is the revocation latency for transports that never re-present their token — WebRTC
+    /// authorizes once at negotiation, RTSP readers once at connect. HLS is unaffected: it
+    /// re-presents per segment, so the auth callback already stops it. Trades that latency against
+    /// MediaMTX API chatter; 0 disables the reaper entirely.
+    pub live_reaper_interval_s: u64,
     /// Max concurrent interactive media jobs — playback session builds, clip exports, snapshots
     /// (`HELDAR_MEDIA_JOB_CONCURRENCY`). Each forks ffmpeg/ffprobe and does heavy disk I/O; unbounded,
     /// they starve the RECORDER, which is the one process that must never miss. Clamped to >= 1.
@@ -674,6 +681,7 @@ impl Config {
             mediamtx_webrtc_base: var_or("HELDAR_MEDIAMTX_WEBRTC_BASE", "http://127.0.0.1:8889"),
             media_same_origin: parse_bool("HELDAR_MEDIA_SAME_ORIGIN", false),
             live_token_ttl_secs: parse_or("HELDAR_LIVEVIEW_TOKEN_TTL_SECS", 3600),
+            live_reaper_interval_s: parse_or("HELDAR_LIVE_REAPER_INTERVAL_S", 15),
             db_max_connections: parse_or::<u32>("HELDAR_DB_MAX_CONNECTIONS", 16).clamp(2, 256),
             media_job_concurrency: parse_or::<usize>("HELDAR_MEDIA_JOB_CONCURRENCY", 3)
                 .clamp(1, 64),

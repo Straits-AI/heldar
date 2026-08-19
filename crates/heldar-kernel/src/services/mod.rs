@@ -18,6 +18,7 @@ pub mod frame_ticket;
 pub mod health;
 pub mod indexer;
 pub mod live_publisher;
+pub mod live_reaper;
 pub mod live_token;
 pub mod media_jobs;
 pub mod media_scope;
