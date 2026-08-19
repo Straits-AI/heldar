@@ -352,6 +352,45 @@ Attribution rows are swept by the retention loop once their file leaves the disk
 **existence**, not by age, because the kinds do not share a retention horizon and a
 row dropped early would 403 a scoped credential on its own live evidence.
 
+### How long a scope decision lasts
+
+Scope is checked when a request arrives. Anything that reads that decision *later* — after the
+response, or on a second request — needs a stated lifetime, because a credential can be re-scoped or
+revoked in between (`PATCH /api/v1/api-keys/{id}`). Every surface that does so, and how long its
+decision survives:
+
+| Surface | When authorization is established | How long it lasts |
+|---|---|---|
+| Any `/api/v1` request | on the request | that request. `Principal` is resolved from the database every time; there is no principal cache |
+| `/media/*` — clips, playback sessions, archives, evidence | on **every** fetch | until the next fetch. Re-scope → 403, revoke → 401, mid-scrub. A media URL is not a bearer capability |
+| Backup / archive **job rows** | at trigger, confined into the job row | the job ships the confined list, never the policy's |
+| Backup **transfer** (detached, off-box) | at trigger, **re-checked while running** | ≤ ~5 s after the credential is withdrawn (kernel migration 0015) |
+| Archive export (`/api/v1/archive/export`) | on the request | the request — it runs inline and its `.zip` is re-guarded on every fetch |
+| AI **leases** | on each acquire/renew (they are one call) | the lost camera stops being offered on the next renew; the stale row lapses on its TTL (≤ 300 s) and authorizes nothing on its own |
+| AI **frame tickets** | at frame pull, bound to key id + camera | ≤ ticket TTL, and ingest re-checks `require_camera` against the live principal anyway |
+| **Live view** token (MediaMTX) | at `/liveview` | **up to `HELDAR_LIVEVIEW_TOKEN_TTL_SECS` (default 3600 s)** — see the caveat below |
+
+**The detached backup transfer.** `services/backup::spawn_job` answers 202 and keeps copying for up
+to `HELDAR_BACKUP_JOB_TIMEOUT_S` (default an hour), and for `sftp`/`ftp`/`s3` destinations the bytes
+leave the box entirely, where no later guard of ours can reach them. Revoking the key is the operator
+saying *this credential is compromised*; it used to do nothing to footage already in flight. The job
+row now records **who ordered it** (`created_by`, `created_by_kind`) and the transfer re-asks before
+the first byte and every few seconds after, aborting with the reason on the job. Withdrawal means
+revoked, deactivated, deleted, expired — or re-scoped off any camera the job covers. Jobs with no
+creator (the **scheduler**, which holds no principal, and pre-upgrade rows) and jobs created with auth
+disabled are never withdrawn; a mechanism about revoking credentials must not touch deployments that
+have none.
+
+**Live view is the weak one, deliberately and knowably.** The browser streams direct from MediaMTX,
+which has no session to present, so `/internal/mediamtx-auth` authorizes on a signed, path-scoped URL
+token and **consults no credential at all**. A revoked or re-scoped key therefore keeps streaming
+until the token expires — measured, with auth enabled and the key soft-revoked: `200 OK`. HLS
+re-presents the token per segment so it stops within the TTL; an established **WebRTC** session does
+not re-present anything and is not bounded by it. Lower `HELDAR_LIVEVIEW_TOKEN_TTL_SECS` if
+revocation needs to bite promptly; restarting the kernel invalidates every outstanding token at once
+(the signing key is per boot). The full analysis, and why binding the token to its principal is not a
+drive-by change, is on `services/live_token.rs`.
+
 ### How this is kept honest
 
 Coverage is **default-closed**: a census enumerates every registered route and fails unless each is
@@ -359,6 +398,20 @@ camera-keyed, provably refuses a scoped credential, or is declared scope-neutral
 route that consults no scope breaks CI without anyone having to remember it. The census ships as the
 `heldar-testkit` crate so a deployment composing proprietary verticals runs the same rule over its own
 composed router rather than a copy that drifts.
+
+A route addressed by its **own primary key** (`/api/v1/zones/{zone_id}`, `/api/v1/ai-tasks/{task_id}`,
+the movement and entry review workflows) needs more than a probe with a made-up id, which 404s before
+the guard ever runs. For those the census takes a **seeded fixture**: a real resource owned by a camera
+the probing credential does not hold, plus an id of the same shape that names nothing. The route passes
+only when the two answers are **indistinguishable** — refusing is not enough, because answering 404 for
+a missing resource and 403 for someone else's is itself the leak. An unscoped *control* credential
+re-proves on every run that the fixture really exists, so an id that was never seeded is reported
+instead of quietly agreeing with itself.
+
+Refusals that happen at the **capability gate** are counted separately from refusals that reach the
+scope check. Both are real denials — a camera-scoped credential can never hold `UNSCOPABLE_CAPS`, so
+those routes are out of its reach entirely — but only the second says anything about camera scope, and
+one combined figure reads as though it did.
 
 `crates/heldar-server/tests/route_scope_matrix.rs` builds the **composed** router
 (kernel + metrics + entry + movement + search — the same shape `build_app` serves),

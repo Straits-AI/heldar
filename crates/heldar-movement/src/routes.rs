@@ -79,7 +79,8 @@ fn require_fleet_scope(principal: &Principal, action: &str) -> AppResult<()> {
 }
 
 /// Assert camera scope over a resource addressed by its OWN primary key, refusing an out-of-scope
-/// resource BEFORE its existence is disclosed.
+/// resource BEFORE its existence is disclosed. Returns the row's non-NULL camera columns, which the
+/// caller needs to attribute its audit entry (see [`audit_subject`]).
 ///
 /// This is the app-crate twin of `AppState::resource_camera`. `cameras_sql` must select exactly the
 /// row's camera columns for `WHERE id = ?` — one for `breach_alerts`, two for `camera_links` and
@@ -99,22 +100,28 @@ async fn require_resource_scope(
     id: &str,
     noun: &str,
     action: &str,
-) -> AppResult<()> {
+) -> AppResult<Vec<String>> {
     use sqlx::Row as _;
     let row = sqlx::query(cameras_sql)
         .bind(id)
         .fetch_optional(pool)
         .await?;
-    let all_held = row.as_ref().is_some_and(|r| {
-        (0..r.columns().len()).all(|i| {
-            r.try_get::<Option<String>, _>(i)
-                .ok()
-                .flatten()
-                .is_some_and(|c| principal.camera_allowed(&c))
+    let cameras: Vec<Option<String>> = row
+        .as_ref()
+        .map(|r| {
+            (0..r.columns().len())
+                .map(|i| r.try_get::<Option<String>, _>(i).ok().flatten())
+                .collect()
         })
-    });
+        .unwrap_or_default();
+    let all_held = row.is_some()
+        && cameras
+            .iter()
+            .all(|c| c.as_deref().is_some_and(|c| principal.camera_allowed(c)));
+    // Only the columns that actually carry a camera; an unscoped caller may hold a row with none.
+    let held: Vec<String> = cameras.iter().flatten().cloned().collect();
     if all_held {
-        return Ok(());
+        return Ok(held);
     }
     if principal.camera_scope().is_some() {
         // Missing and out-of-scope are deliberately indistinguishable.
@@ -123,8 +130,35 @@ async fn require_resource_scope(
     match row {
         // Unscoped: `camera_allowed` is always true, so we only land here on a NULL camera column,
         // which has never been a refusal and must not become one.
-        Some(_) => Ok(()),
+        Some(_) => Ok(held),
         None => Err(AppError::NotFound(format!("{noun} {id} not found"))),
+    }
+}
+
+/// The audit `detail` naming the camera an action is ABOUT, for `crate::auth::audit`'s
+/// `subject_camera_id` derivation.
+///
+/// The kernel derives that column from `detail.camera_id` (or a ONE-element `camera_ids`), and
+/// `GET /api/v1/audit` filters on it fail-closed: for a camera-scoped reader a NULL subject is
+/// HIDDEN. Movement audited every one of its actions with `{}`, so every movement act — including a
+/// breach a scoped operator acknowledged on its OWN camera — was invisible in that operator's own
+/// audit trail while the fleet auditor saw it. That is the same accountability hole the kernel's
+/// archive export had, described in `auth::subject_camera`, reached from this crate instead.
+///
+/// The rule this encodes, and why it is not "name the first camera":
+///
+/// * Exactly ONE camera ⇒ name it. The act is about that camera and its holder is entitled to see
+///   it, whoever performed it.
+/// * TWO cameras (a link, a candidate) ⇒ NULL, deliberately. `subject_camera_id` is a single column
+///   and cannot express "both ends", so naming either one would show the row to a credential holding
+///   only that end — telling it that its camera is adjacent to something, which is exactly the
+///   inference the both-ends rule above exists to deny. Fail closed instead: a cross-camera act is a
+///   fleet act, visible in the fleet audit trail only.
+/// * NO camera ⇒ NULL, unchanged (a camera-less breach is about no camera).
+fn audit_subject(cameras: &[String]) -> Value {
+    match cameras {
+        [only] => json!({ "camera_id": only }),
+        _ => json!({}),
     }
 }
 
@@ -237,7 +271,10 @@ async fn create_link(
             "`from_camera` and `to_camera` are required".into(),
         ));
     }
-    if body.from_camera == body.to_camera {
+    // Compared TRIMMED, because the trimmed values are what `require_camera` checks and what the
+    // INSERT below binds. Comparing the raw fields let `{"from_camera":"cam_a","to_camera":" cam_a"}`
+    // past this guard and then store the self-link it forbids.
+    if body.from_camera.trim() == body.to_camera.trim() {
         return Err(AppError::BadRequest(
             "a camera cannot link to itself".into(),
         ));
@@ -262,13 +299,18 @@ async fn create_link(
     .bind(now)
     .execute(&st.pool)
     .await?;
+    // A link names TWO cameras, so it carries no single audit SUBJECT — `subject_camera` resolves a
+    // multi-camera `camera_ids` to NULL deliberately, because naming one end would disclose adjacency
+    // to that end's holder. Recording BOTH ids is what lets `list_audit` show the row to a caller
+    // holding every camera involved: it already knows both, and it performed the act. Without this
+    // the act was invisible in its own audit trail.
     auth::audit(
         &st.pool,
         &principal,
         "movement_link_create",
         "camera_link",
         &id,
-        json!({}),
+        json!({ "camera_ids": [body.from_camera.trim(), body.to_camera.trim()] }),
     )
     .await;
     let link = sqlx::query_as::<_, CameraLink>("SELECT * FROM camera_links WHERE id = ?")
@@ -295,6 +337,13 @@ async fn delete_link(
         "edit camera topology",
     )
     .await?;
+    // Read the pair BEFORE the delete: the audit row needs both ids, and after the DELETE the row
+    // that names them is gone.
+    let pair: Option<(String, String)> =
+        sqlx::query_as("SELECT from_camera, to_camera FROM camera_links WHERE id = ?")
+            .bind(&id)
+            .fetch_optional(&st.pool)
+            .await?;
     let res = sqlx::query("DELETE FROM camera_links WHERE id = ?")
         .bind(&id)
         .execute(&st.pool)
@@ -302,13 +351,18 @@ async fn delete_link(
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound(format!("camera link {id} not found")));
     }
+    // Two cameras ⇒ no single audit subject, same as the create above; both ids recorded so a
+    // both-ends holder can see its own deletion.
     auth::audit(
         &st.pool,
         &principal,
         "movement_link_delete",
         "camera_link",
         &id,
-        json!({}),
+        json!({ "camera_ids": pair
+            .as_ref()
+            .map(|(f, t)| vec![f.as_str(), t.as_str()])
+            .unwrap_or_default() }),
     )
     .await;
     Ok(StatusCode::NO_CONTENT)
@@ -424,6 +478,7 @@ async fn resolve_candidate(
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound(format!("candidate {id} not found")));
     }
+    // A candidate is a claim about TWO cameras ⇒ no single audit subject, same as a link.
     auth::audit(
         &st.pool,
         &principal,
@@ -499,7 +554,7 @@ async fn set_breach_status(
     principal.require(principal.can_operate_gate(), "work breach alerts")?;
     // Before the UPDATE: acknowledging or resolving another camera's alert silently retires an open
     // incident for the operator who owns it, and the 404-on-no-rows would map the alert id space.
-    require_resource_scope(
+    let cameras = require_resource_scope(
         &st.pool,
         &principal,
         "SELECT camera_id FROM breach_alerts WHERE id = ?",
@@ -525,13 +580,17 @@ async fn set_breach_status(
     if res.rows_affected() == 0 {
         return Err(AppError::NotFound(format!("breach {id} not found")));
     }
+    // A breach names ONE camera, so the act has a subject and the camera's holder is entitled to see
+    // it in `GET /api/v1/audit` — whoever worked the alert. Retiring an open incident is precisely
+    // the kind of durable, attributed judgement whose accountability must not depend on holding a
+    // fleet-wide credential. `require_resource_scope` above already proved the caller may act on it.
     auth::audit(
         &st.pool,
         &principal,
         &format!("breach_{status}"),
         "breach_alert",
         &id,
-        json!({}),
+        audit_subject(&cameras),
     )
     .await;
     let b = sqlx::query_as::<_, BreachAlert>("SELECT * FROM breach_alerts WHERE id = ?")
@@ -553,7 +612,9 @@ async fn search_plate(
     if norm.is_empty() {
         return Err(AppError::BadRequest("empty plate".into()));
     }
-    // Privacy gate: every identity-like query is audited.
+    // Privacy gate: every identity-like query is audited. A plate trail is anchored on a PLATE and
+    // spans whatever cameras saw it, so there is no one camera it is about — no audit subject, and
+    // the entry stays fleet-only. Same for the plate-anchored candidate filter above.
     auth::audit(
         &st.pool,
         &principal,
@@ -607,13 +668,16 @@ async fn search_person(
     principal.require_camera(&q.camera, "search movement by person track")?;
     let at = heldar_kernel::util::parse_rfc3339(&q.at)
         .ok_or_else(|| AppError::BadRequest("invalid `at` timestamp".into()))?;
+    // Anchored on ONE camera — the one `require_camera` just proved the caller holds — so the search
+    // has an audit subject. Without it, "someone ran an identity-like search over a person track on
+    // your camera" was readable only by a fleet-wide credential.
     auth::audit(
         &st.pool,
         &principal,
         "movement_search_person",
         "track",
         &format!("{}:{}", q.camera, q.track),
-        json!({ "at": q.at }),
+        json!({ "at": q.at, "camera_id": q.camera }),
     )
     .await;
 

@@ -10,6 +10,29 @@
 //! `?token=…` to the stream URL by `mediamtx::ensure_live` (after `can_view` passes). The signing key
 //! is process-global and random per boot: tokens expire on restart, which is harmless because the
 //! dashboard re-fetches `/liveview` (and re-mints) when it (re)opens a stream.
+//!
+//! # KNOWN LIMIT: this token OUTLIVES the credential that minted it
+//!
+//! Read [`verify`]: the decision is a pure function of `(path, exp, signature)`. It names no
+//! credential, and [`crate::routes::media_auth`] performs no lookup of one — MediaMTX has no session
+//! to present. So revoking the API key that opened a stream, or narrowing its `scope_cameras` off
+//! that camera, does NOT stop the stream. Measured (auth enabled, key soft-revoked through
+//! `PATCH /api/v1/api-keys/{id}`, token replayed to `POST /internal/mediamtx-auth`): `200 OK`.
+//!
+//! The exposure is bounded by `HELDAR_LIVEVIEW_TOKEN_TTL_SECS`, default **3600 s**, and only for
+//! transports that re-present the token per request — HLS does (playlist + each segment), so it
+//! stops within the TTL. WebRTC does NOT: the token authorizes the WHEP negotiation, after which
+//! media flows over the established peer connection and no further authorization is asked for at
+//! all. An operator who needs revocation to bite promptly should lower the TTL; restarting the
+//! kernel invalidates every outstanding token at once (the signing key is per boot).
+//!
+//! Closing this properly means binding the token to its principal and having the callback re-resolve
+//! it, which is a change to the live plane — `ensure_live` is also driven by
+//! `services::webrtc_rendezvous`, which holds a site token rather than a `Principal`, and a user
+//! session that idles out mid-watch would start killing live view. It is deliberately NOT done as a
+//! side effect of an audit pass. Recorded here so the next reader finds the analysis rather than
+//! repeating it; the recorded-media plane (`/media/*`) has the opposite property and re-authorizes
+//! every single request — see `services::media_scope::guard`.
 
 use std::sync::OnceLock;
 

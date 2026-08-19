@@ -32,13 +32,23 @@
 //!     .scope_neutral(&[("/api/v1/vertical/thing", "camera_scope_filter on camera_id")])
 //!     // Bodies that satisfy a handler's extractor so the probe reaches its GUARD rather than
 //!     // dying at 422 — an unprobed route is not a proven one.
-//!     .probe_body("/api/v1/vertical/thing", r#"{"name":"probe"}"#);
+//!     .probe_body("/api/v1/vertical/thing", r#"{"name":"probe"}"#)
+//!     // Routes addressed by a RESOURCE id: seed one owned by a camera the probing credential does
+//!     // not hold, and name an id of the same shape that does not exist. The census requires the
+//!     // two to be indistinguishable — the property `.unproven()` cannot express.
+//!     .fixture("/api/v1/vertical/thing/{thing_id}", &seeded_id, "thing_does_not_exist");
 //!
 //! let report = census
-//!     .run(|method, path, body| async move { call(&state, &token, &method, &path, &body).await })
+//!     .run_with_control(
+//!         |method, path, body| async move { call(&state, &scoped, &method, &path, &body).await },
+//!         |method, path, body| async move { call(&state, &unscoped, &method, &path, &body).await },
+//!     )
 //!     .await;
 //! report.assert_clean();
 //! ```
+//!
+//! Use `.run(probe)` when you have no fixtures; a fixture needs the unscoped control, which is what
+//! stops an id that was never seeded from agreeing with itself and reporting a clean census.
 //!
 //! Scan the roots of BOTH workspaces so the census sees the composed surface. Enumerating only your
 //! own routes while the kernel enumerates only its own leaves the union — the thing that actually
@@ -62,6 +72,12 @@ pub enum Class {
     CameraKeyed,
     /// Probed, and it refused a camera-scoped credential. Proven here, not asserted elsewhere.
     Refuses,
+    /// Probed against a SEEDED out-of-scope resource and answered exactly as it answers for one that
+    /// does not exist. The strongest thing this harness can say about a resource-addressed route.
+    Indistinguishable,
+    /// Refused, but at the CAPABILITY gate, by a capability a camera-scoped credential can never
+    /// hold. A real denial — but it says nothing about the scope check behind it.
+    CapabilityGated,
     /// Declared to legitimately answer a scoped credential, with a reason.
     Declared(String),
     /// Declared unprovable by this harness, with a reason. Named debt, NOT coverage.
@@ -70,12 +86,31 @@ pub enum Class {
     Unclassified(String),
 }
 
+/// A seeded resource that makes a route addressed by its OWN primary key probeable.
+///
+/// A route keyed by a resource id rather than a camera id is the shape that hid four defects here:
+/// the handler must load the row to learn which camera owns it, and the obvious implementation
+/// answers 404 for a missing id and 403 for someone else's — an oracle over the id space. A probe
+/// with a synthetic id cannot see any of that, because it 404s before the guard runs.
+///
+/// So the fixture names two ids of the SAME shape: one a real row owned by a camera the probing
+/// credential does NOT hold, one that names nothing at all. The census requires the two answers to
+/// be indistinguishable.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Fixture {
+    /// Id of a REAL resource owned by a camera the probing credential does not hold.
+    pub out_of_scope: String,
+    /// A plausible id of the same shape, naming nothing.
+    pub missing: String,
+}
+
 /// The census configuration: where to look, and what is declared safe.
 pub struct Census {
     source_roots: Vec<PathBuf>,
     scope_neutral: Vec<(String, String)>,
     unproven: Vec<(String, String)>,
     probe_bodies: Vec<(String, String)>,
+    fixtures: Vec<(String, Fixture)>,
     camera_keys: Vec<String>,
     min_routes: usize,
 }
@@ -88,6 +123,7 @@ impl Census {
             scope_neutral: Vec::new(),
             unproven: Vec::new(),
             probe_bodies: Vec::new(),
+            fixtures: Vec::new(),
             // The kernel keys on `/api/v1/cameras/{id}`; app crates use an explicit `{camera_id}`
             // under their own prefix. Missing the latter is why the app crates went unscoped.
             camera_keys: vec!["/api/v1/cameras/{id}".into(), "{camera_id}".into()],
@@ -112,6 +148,24 @@ impl Census {
     /// A body that satisfies a handler's extractor so the probe reaches its guard.
     pub fn probe_body(mut self, path: &str, body: &str) -> Self {
         self.probe_bodies.push((path.to_string(), body.to_string()));
+        self
+    }
+
+    /// Make a resource-addressed route probeable by naming a SEEDED resource for it.
+    ///
+    /// `out_of_scope` must be the id of a row you actually seeded, owned by a camera the probing
+    /// credential does not hold; `missing` an id of the same shape that names nothing. See
+    /// [`Fixture`] for why both are needed, and [`Census::run_with_control`] for how the seeding is
+    /// verified — a fixture that was never really seeded makes every assertion about it vacuous,
+    /// which is the single most expensive mistake this harness can make.
+    pub fn fixture(mut self, path: &str, out_of_scope: &str, missing: &str) -> Self {
+        self.fixtures.push((
+            path.to_string(),
+            Fixture {
+                out_of_scope: out_of_scope.to_string(),
+                missing: missing.to_string(),
+            },
+        ));
         self
     }
 
@@ -225,10 +279,43 @@ impl Census {
     /// CREDENTIAL, returning `(status, body)`. Mint that credential through the real key-creation
     /// endpoint: a fixture written straight into the credentials table can be a shape the product
     /// refuses to issue, and an assertion against a principal no deployment can hold is vacuous.
+    ///
+    /// Panics if any [`Census::fixture`] is configured — a fixture needs the control credential that
+    /// only [`Census::run_with_control`] supplies.
     pub async fn run<F, Fut>(&self, probe: F) -> Report
     where
         F: Fn(String, String, String) -> Fut,
         Fut: Future<Output = (u16, String)>,
+    {
+        assert!(
+            self.fixtures.is_empty(),
+            "a seeded fixture needs a CONTROL credential to prove it was really seeded — call \
+             run_with_control instead of run"
+        );
+        self.run_with_control(probe, |_m, _p, _b| async { (0u16, String::new()) })
+            .await
+    }
+
+    /// [`Census::run`], plus a fleet-wide CONTROL credential used to prove each seeded fixture exists.
+    ///
+    /// `control` is called the same way as `probe` and must issue the request as an UNSCOPED
+    /// credential. Nothing it returns is a pass or a fail on its own; it exists to defeat the one
+    /// failure mode a fixture-based probe cannot see by itself. If the resource was never really
+    /// seeded — a typo in the id, a table the harness forgot to migrate — then the "out of scope"
+    /// probe is secretly a "does not exist" probe, the two answers agree trivially, and the route is
+    /// reported as proven while nothing about its guard was exercised. That is not hypothetical
+    /// bookkeeping: a fixture asserting against a credential the API refuses to mint is exactly how
+    /// an earlier round of this suite shipped a page of vacuous assertions, green.
+    ///
+    /// So the fixture must be VISIBLE to the control: the two ids must produce different answers for
+    /// a credential that holds every camera. If they do not, the census reports the fixture as
+    /// unseeded rather than counting it.
+    pub async fn run_with_control<F, Fut, G, Gut>(&self, probe: F, control: G) -> Report
+    where
+        F: Fn(String, String, String) -> Fut,
+        Fut: Future<Output = (u16, String)>,
+        G: Fn(String, String, String) -> Gut,
+        Gut: Future<Output = (u16, String)>,
     {
         let routes = self.discover();
         let mut report = Report {
@@ -250,6 +337,11 @@ impl Census {
                 report.unproven.push((route.path.clone(), why.clone()));
                 continue;
             }
+            if let Some((_, fx)) = self.fixtures.iter().find(|(p, _)| *p == route.path) {
+                self.probe_fixture(route, fx, &probe, &control, &mut report)
+                    .await;
+                continue;
+            }
             for method in &route.methods {
                 let path = route
                     .path
@@ -264,19 +356,41 @@ impl Census {
                     ));
                     continue;
                 }
-                let body = self
-                    .probe_bodies
-                    .iter()
-                    .find(|(p, _)| *p == route.path)
-                    .map(|(_, b)| b.clone())
-                    .unwrap_or_else(|| "{}".to_string());
+                let body = self.probe_body_for(&route.path);
                 let (status, resp) = probe(method.clone(), path, body).await;
                 // 403 is the refusal; 401 means the auth floor caught it first, which is also a
-                // denial. 404 on a filled placeholder names nothing and carries no signal.
-                let refused =
-                    status == 403 || status == 401 || (status == 404 && route.path.contains('{'));
+                // denial.
+                //
+                // A 404 on a SYNTHETIC id is NOT a refusal, and counting it as one was this harness
+                // asserting exactly what its own comment said it could not: "names nothing and
+                // carries no signal". A camera-owned row addressed by its own primary key answers 404
+                // both when it is out of scope and when it does not exist — that indistinguishability
+                // is the property worth proving, and a probe against an id that was never seeded
+                // proves only the second half. Five backup routes were counted as coverage on that
+                // basis. Such a route now needs a `.fixture()` (which compares seeded-vs-missing) or
+                // an explicit declaration; absent both it is reported, not counted.
+                let refused = status == 403 || status == 401;
+                if status == 404 && route.path.contains('{') {
+                    report.needs_fixture.push(format!(
+                        "{method} {} -> 404 on a synthetic id, which proves nothing: the row may be \
+                         out of scope or may simply not exist. Add a .fixture() naming a real \
+                         out-of-scope row and a missing one, or declare it.",
+                        route.path
+                    ));
+                    continue;
+                }
                 if refused {
-                    report.refuses += 1;
+                    // Split out the refusals that happened at the CAPABILITY gate. Still a denial —
+                    // a camera-scoped credential cannot hold `UNSCOPABLE_CAPS`, so it can never
+                    // reach these at all — but the scope check behind the gate was never exercised,
+                    // and a single "refuses" figure quietly reads as though it had been.
+                    if status == 403 && resp.contains("missing capability") {
+                        report
+                            .capability_gated
+                            .push(format!("{method} {} (capability gate)", route.path));
+                    } else {
+                        report.refuses += 1;
+                    }
                 } else {
                     report.unclassified.push(format!(
                         "{method} {} -> {status} for a camera-scoped credential (not camera-keyed, \
@@ -293,12 +407,128 @@ impl Census {
         report.stale = self
             .scope_neutral
             .iter()
-            .chain(self.unproven.iter())
             .map(|(p, _)| p.clone())
+            .chain(self.unproven.iter().map(|(p, _)| p.clone()))
+            // A fixture outlives its route the same way a declaration does, and a stale one is worse
+            // than useless: it seeds and probes a path nothing serves.
+            .chain(self.fixtures.iter().map(|(p, _)| p.clone()))
             .filter(|p| !live.contains(p.as_str()))
             .collect();
         report
     }
+
+    /// The body configured for this route, or the empty object.
+    fn probe_body_for(&self, path: &str) -> String {
+        self.probe_bodies
+            .iter()
+            .find(|(p, _)| *p == path)
+            .map(|(_, b)| b.clone())
+            .unwrap_or_else(|| "{}".to_string())
+    }
+
+    /// Drive one route against its seeded fixture.
+    ///
+    /// The property asserted is NOT "the scoped credential was refused" — a 404 is also a refusal and
+    /// a 404 is precisely the leak. It is that the SEEDED out-of-scope resource and a resource that
+    /// does not exist produce the SAME answer, so the route cannot be walked to learn which ids are
+    /// real. Everything else here is about making sure that agreement means something.
+    async fn probe_fixture<F, Fut, G, Gut>(
+        &self,
+        route: &Route,
+        fx: &Fixture,
+        probe: &F,
+        control: &G,
+        report: &mut Report,
+    ) where
+        F: Fn(String, String, String) -> Fut,
+        Fut: Future<Output = (u16, String)>,
+        G: Fn(String, String, String) -> Gut,
+        Gut: Future<Output = (u16, String)>,
+    {
+        let (Some(real), Some(absent)) = (
+            fill(&route.path, &fx.out_of_scope),
+            fill(&route.path, &fx.missing),
+        ) else {
+            report.unclassified.push(format!(
+                "{} -> a wildcard path parameter cannot be filled by one resource id; declare it",
+                route.path
+            ));
+            return;
+        };
+        let body = self.probe_body_for(&route.path);
+
+        // The SCOPED probes run first, all of them, before the control touches anything: a refused
+        // probe cannot disturb the fixture, but a fleet-wide DELETE genuinely deletes it, and a
+        // fixture consumed by an earlier method would make the later ones vacuous.
+        let mut proven: Vec<&String> = Vec::new();
+        for method in &route.methods {
+            let (s_real, b_real) = probe(method.clone(), real.clone(), body.clone()).await;
+            let (s_gone, b_gone) = probe(method.clone(), absent.clone(), body.clone()).await;
+            // Fold the probed id out of both answers. A handler echoing the caller's OWN input
+            // discloses nothing; one echoing the resource still differs after folding.
+            let f_real = b_real.replace(&fx.out_of_scope, "{id}");
+            let f_gone = b_gone.replace(&fx.missing, "{id}");
+            if (s_real, &f_real) != (s_gone, &f_gone) {
+                report.unclassified.push(format!(
+                    "{method} {} -> a SEEDED out-of-scope resource answers {s_real} but a missing \
+                     one answers {s_gone}; that difference is an oracle over the id space. real: {} \
+                     | missing: {}",
+                    route.path,
+                    f_real.chars().take(120).collect::<String>(),
+                    f_gone.chars().take(120).collect::<String>(),
+                ));
+                continue;
+            }
+            if s_real == 403 && f_real.contains("missing capability") {
+                // A real denial, but the credential never reached the scope check behind it. Counted
+                // apart so it is never read as evidence about that check.
+                report.capability_gated.push(format!(
+                    "{method} {} (refused at the capability gate)",
+                    route.path
+                ));
+            } else {
+                report.indistinguishable += 1;
+            }
+            proven.push(method);
+        }
+
+        // The control: whatever the scoped credential just proved, prove that there was something
+        // there to prove. An unseeded fixture agrees with itself perfectly.
+        for method in proven {
+            let (c_real, cb_real) = control(method.clone(), real.clone(), body.clone()).await;
+            let (c_gone, cb_gone) = control(method.clone(), absent.clone(), body.clone()).await;
+            let f_real = cb_real.replace(&fx.out_of_scope, "{id}");
+            let f_gone = cb_gone.replace(&fx.missing, "{id}");
+            if (c_real, &f_real) == (c_gone, &f_gone) {
+                report.unclassified.push(format!(
+                    "{method} {} -> fixture `{}` is INDISTINGUISHABLE FROM MISSING for an UNSCOPED \
+                     credential too ({c_real}), so the scoped probe agreed with itself about \
+                     nothing. Seed the resource, or declare the route with a reason",
+                    route.path, fx.out_of_scope,
+                ));
+            }
+        }
+    }
+}
+
+/// Substitute every `{placeholder}` in a route path with `value`.
+///
+/// `None` for a wildcard capture (`{*rest}`): it swallows an arbitrary tail, so no single resource id
+/// stands in for it and pretending otherwise would probe a path the router never matches.
+fn fill(path: &str, value: &str) -> Option<String> {
+    let mut out = String::new();
+    let mut rest = path;
+    while let Some(open) = rest.find('{') {
+        let close = open + rest[open..].find('}')?;
+        if rest[open + 1..close].starts_with('*') {
+            return None;
+        }
+        out.push_str(&rest[..open]);
+        out.push_str(value);
+        rest = &rest[close + 1..];
+    }
+    out.push_str(rest);
+    Some(out)
 }
 
 /// The outcome of a census run.
@@ -307,9 +537,16 @@ pub struct Report {
     pub total: usize,
     pub camera_keyed: usize,
     pub refuses: usize,
+    /// (method, route) pairs where a SEEDED out-of-scope resource answered exactly as a missing one.
+    pub indistinguishable: usize,
+    /// Refused, but at the capability gate — the scope check behind it was never reached. Listed
+    /// rather than counted, because each entry is a claim someone should be able to read and check.
+    pub capability_gated: Vec<String>,
     pub declared: Vec<(String, String)>,
     pub unproven: Vec<(String, String)>,
     pub unclassified: Vec<String>,
+    /// Resource-addressed routes whose only evidence was a 404 against an id nobody seeded.
+    pub needs_fixture: Vec<String>,
     pub stale: Vec<String>,
     min_routes: usize,
 }
@@ -317,14 +554,19 @@ pub struct Report {
 impl Report {
     /// One line naming what was covered and, separately, what is only DECLARED unprovable. The two
     /// are printed apart on purpose: rounding named debt up into a coverage figure is how a report
-    /// starts reassuring instead of informing.
+    /// starts reassuring instead of informing. The capability-gated count is split out for the same
+    /// reason in the other direction: it is a real denial, but not evidence about the scope check.
     pub fn summary(&self) -> String {
         format!(
-            "route census: {} routes — {} camera-keyed, {} refuse a scoped credential, {} declared \
-             scope-neutral, {} declared UNPROVEN (named debt, not coverage)",
+            "route census: {} routes — {} camera-keyed, {} refuse a scoped credential, {} answer a \
+             seeded out-of-scope resource exactly as a missing one, {} refuse at the capability gate \
+             (a scoped credential can never hold it — proves nothing about the scope check), {} \
+             declared scope-neutral, {} declared UNPROVEN (named debt, not coverage)",
             self.total,
             self.camera_keyed,
             self.refuses,
+            self.indistinguishable,
+            self.capability_gated.len(),
             self.declared.len(),
             self.unproven.len()
         )
@@ -345,6 +587,14 @@ impl Report {
             "the census declares routes that no longer exist, so the declaration now pre-authorises \
              whatever next claims that path:\n  {}",
             self.stale.join("\n  ")
+        );
+        assert!(
+            self.needs_fixture.is_empty(),
+            "{} resource-addressed route(s) answered 404 to a synthetic id and nothing else. That is \
+             not proof of a scope check — an unguarded route answers it identically. Seed the row and \
+             add a .fixture():\n  {}",
+            self.needs_fixture.len(),
+            self.needs_fixture.join("\n  ")
         );
         assert!(
             self.unclassified.is_empty(),

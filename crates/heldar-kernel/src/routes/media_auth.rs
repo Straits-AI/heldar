@@ -109,6 +109,13 @@ async fn authorize(State(st): State<AppState>, Json(req): Json<AuthRequest>) -> 
         // Publishing + the control/metrics surfaces stay loopback-only.
         "publish" | "api" | "metrics" | "pprof" => is_loopback(&req),
         // Reads/playback: token-gated when auth is on; LAN-IP-gated when auth is off (LAN default).
+        //
+        // NOTE what this arm does NOT consult: any credential. MediaMTX presents a stream URL, not a
+        // session, so the only thing to check is the signature — which means a token keeps working
+        // after the key that minted it is revoked or re-scoped, for up to
+        // HELDAR_LIVEVIEW_TOKEN_TTL_SECS. That is a known, measured limit of the LIVE plane and is
+        // written up in full on `services::live_token`; the recorded-media plane re-authorizes every
+        // request instead (`services::media_scope::guard`). Do not "fix" it by widening this arm.
         "read" | "playback" => {
             if st.cfg.auth_enabled {
                 token_of(&req)

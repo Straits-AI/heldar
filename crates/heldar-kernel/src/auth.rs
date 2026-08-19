@@ -747,96 +747,35 @@ async fn resolve_token(
         // The five capability columns ride the EXISTING single seek on `key_hash UNIQUE` — no second
         // round trip. That is deliberate: the AI worker authenticates on every request, and an extra
         // query here is paid at worker poll rate.
-        let row: Option<ApiKeyRow> = sqlx::query_as(
-            "SELECT id, name, role, active, capabilities, scope_kind, scope_cameras, expires_at, revoked_at
-               FROM api_keys WHERE key_hash = ?",
-        )
+        let row: Option<ApiKeyRow> = sqlx::query_as(&format!(
+            "SELECT {API_KEY_COLUMNS} FROM api_keys WHERE key_hash = ?"
+        ))
         .bind(&hash)
         .fetch_optional(pool)
         .await?;
         if let Some(r) = row {
-            if !r.active {
-                return Ok(None);
-            }
-            if let Some(revoked) = r.revoked_at {
-                tracing::debug!(api_key = %r.id, %revoked, "auth: api key is revoked; denying");
-                return Ok(None);
-            }
-            if let Some(exp) = r.expires_at {
-                if exp <= now {
-                    tracing::debug!(api_key = %r.id, %exp, "auth: api key has expired; denying");
-                    return Ok(None);
-                }
-            }
-            // An unparseable stored role means a corrupt/tampered row — deny rather than fail open
-            // to a capability-bearing default.
-            let Some(role) = Role::parse(&r.role) else {
-                tracing::error!(api_key = %r.id, role = %r.role, "auth: api key has unparseable role; denying");
+            let key_id = r.id.clone();
+            let Some(principal) = principal_from_key_row(r, tier, now) else {
                 return Ok(None);
             };
-            let caps = match resolve_key_caps(&r.id, r.capabilities.as_deref(), role, tier) {
-                Some(c) => c,
-                // A malformed capabilities blob is a corrupt/tampered row, and unlike an unknown slug
-                // there is no safe subset to fall back to — deny, same as an unparseable role.
-                None => return Ok(None),
-            };
-            let scope = resolve_key_scope(&r.id, &r.scope_kind, r.scope_cameras.as_deref());
-            // A camera scope combined with a capability that reads CROSS-CAMERA tables is a boundary
-            // that cannot hold — those tables carry no camera predicate to filter on. `validate_grant`
-            // refuses the combination at MINT time, but a refusal that only runs at mint is no
-            // refusal at all: rows written before it existed (every box upgraded through 56ef0b4, and
-            // anything inserted out of band) are still resolved here on every request. Enforce it on
-            // the READ path too, which is the one every request actually walks.
-            //
-            // DENY the key. The two alternatives both fail open, which is why neither is here:
-            // dropping the SCOPE promotes the key to fleet-wide, handing it strictly more than it had
-            // (a remediation that escalates privilege is worse than the leak it patches); and
-            // stripping the unscopable CAPS does nothing when the grant is `admin`, because
-            // `CapSet::allows` re-derives them from Admin. Denying is the only outcome that cannot
-            // end with the caller holding more than the operator intended.
-            //
-            // The blast radius is bounded: this shape is unmintable, so a stored one is either a row
-            // written before the mint-time refusal existed or an out-of-band insert. The fix is to
-            // re-mint — without the unscopable capabilities, or without the camera scope.
-            if matches!(scope, Scope::Cameras(_)) && UNSCOPABLE_CAPS.iter().any(|u| caps.allows(*u))
-            {
-                tracing::error!(
-                    target: "heldar::security",
-                    api_key = %r.id,
-                    caps = %UNSCOPABLE_CAPS
-                        .iter()
-                        .filter(|u| caps.allows(**u))
-                        .map(|c| c.slug())
-                        .collect::<Vec<_>>()
-                        .join(","),
-                    "auth: DENYING api key — it carries a camera scope alongside capabilities that \
-                     read cross-camera tables, which the scope cannot filter. The API refuses to mint \
-                     this combination; re-mint the key without those capabilities, or without the \
-                     camera scope."
-                );
-                return Ok(None);
-            }
             // Best-effort last-used stamp (does not gate the request). Debounced to once a
             // minute per key: the AI worker authenticates every request with its key, and an
             // unconditional UPDATE put a write on SQLite's single writer for every poll —
             // observed live stalling 1–2s each under recorder/ingest write load.
+            //
+            // Outside `principal_from_key_row` on purpose: that function answers "what is this key
+            // entitled to", and [`api_key_principal_now`] asks it about a key that is NOT making a
+            // request. Stamping there would record a background re-check as usage.
             let _ = sqlx::query(
                 "UPDATE api_keys SET last_used_at = ?
                  WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)",
             )
             .bind(now)
-            .bind(&r.id)
+            .bind(&key_id)
             .bind(now - Duration::minutes(1))
             .execute(pool)
             .await;
-            return Ok(Some(Principal {
-                id: r.id,
-                name: r.name,
-                role,
-                kind: PrincipalKind::ApiKey,
-                caps,
-                scope,
-            }));
+            return Ok(Some(principal));
         }
         return Ok(None);
     }
@@ -958,6 +897,118 @@ struct ApiKeyRow {
     scope_cameras: Option<String>,
     expires_at: Option<DateTime<Utc>>,
     revoked_at: Option<DateTime<Utc>>,
+}
+
+/// The columns [`principal_from_key_row`] needs. One string so the token seek and the by-id re-check
+/// cannot select different sets and then disagree about what a key is.
+const API_KEY_COLUMNS: &str =
+    "id, name, role, active, capabilities, scope_kind, scope_cameras, expires_at, revoked_at";
+
+/// What a stored api-key row is entitled to, or `None` to DENY it.
+///
+/// The single definition of that question. It used to live inline in [`resolve_token`], which was
+/// fine while a bearer token was the only way to ask — but authorization that outlives its request
+/// (the detached backup transfer in `services::backup`) has to ask it again LATER, about a key id
+/// rather than a token, and a second implementation of "is this key still good" is exactly the kind
+/// of duplicate this file has already watched drift apart once (`CapSet::contains` vs `allows`).
+///
+/// Deliberately side-effect free: no `last_used_at` stamp, no logging of "usage". A background
+/// re-check is not a request.
+fn principal_from_key_row(
+    r: ApiKeyRow,
+    tier: EnforcementTier,
+    now: DateTime<Utc>,
+) -> Option<Principal> {
+    if !r.active {
+        return None;
+    }
+    if let Some(revoked) = r.revoked_at {
+        tracing::debug!(api_key = %r.id, %revoked, "auth: api key is revoked; denying");
+        return None;
+    }
+    if let Some(exp) = r.expires_at {
+        if exp <= now {
+            tracing::debug!(api_key = %r.id, %exp, "auth: api key has expired; denying");
+            return None;
+        }
+    }
+    // An unparseable stored role means a corrupt/tampered row — deny rather than fail open
+    // to a capability-bearing default.
+    let Some(role) = Role::parse(&r.role) else {
+        tracing::error!(api_key = %r.id, role = %r.role, "auth: api key has unparseable role; denying");
+        return None;
+    };
+    // A malformed capabilities blob is a corrupt/tampered row, and unlike an unknown slug there is
+    // no safe subset to fall back to — deny, same as an unparseable role.
+    let caps = resolve_key_caps(&r.id, r.capabilities.as_deref(), role, tier)?;
+    let scope = resolve_key_scope(&r.id, &r.scope_kind, r.scope_cameras.as_deref());
+    // A camera scope combined with a capability that reads CROSS-CAMERA tables is a boundary
+    // that cannot hold — those tables carry no camera predicate to filter on. `validate_grant`
+    // refuses the combination at MINT time, but a refusal that only runs at mint is no
+    // refusal at all: rows written before it existed (every box upgraded through 56ef0b4, and
+    // anything inserted out of band) are still resolved here on every request. Enforce it on
+    // the READ path too, which is the one every request actually walks.
+    //
+    // DENY the key. The two alternatives both fail open, which is why neither is here:
+    // dropping the SCOPE promotes the key to fleet-wide, handing it strictly more than it had
+    // (a remediation that escalates privilege is worse than the leak it patches); and
+    // stripping the unscopable CAPS does nothing when the grant is `admin`, because
+    // `CapSet::allows` re-derives them from Admin. Denying is the only outcome that cannot
+    // end with the caller holding more than the operator intended.
+    //
+    // The blast radius is bounded: this shape is unmintable, so a stored one is either a row
+    // written before the mint-time refusal existed or an out-of-band insert. The fix is to
+    // re-mint — without the unscopable capabilities, or without the camera scope.
+    if matches!(scope, Scope::Cameras(_)) && UNSCOPABLE_CAPS.iter().any(|u| caps.allows(*u)) {
+        tracing::error!(
+            target: "heldar::security",
+            api_key = %r.id,
+            caps = %UNSCOPABLE_CAPS
+                .iter()
+                .filter(|u| caps.allows(**u))
+                .map(|c| c.slug())
+                .collect::<Vec<_>>()
+                .join(","),
+            "auth: DENYING api key — it carries a camera scope alongside capabilities that \
+             read cross-camera tables, which the scope cannot filter. The API refuses to mint \
+             this combination; re-mint the key without those capabilities, or without the \
+             camera scope."
+        );
+        return None;
+    }
+    Some(Principal {
+        id: r.id,
+        name: r.name,
+        role,
+        kind: PrincipalKind::ApiKey,
+        caps,
+        scope,
+    })
+}
+
+/// Re-resolve an api key BY ID: what it is entitled to RIGHT NOW, not when it last authenticated.
+///
+/// For work that outlives the request that authorized it. `Ok(None)` is the operator's answer — the
+/// key was deleted, deactivated, revoked or has expired (or its stored grant is one the read path
+/// refuses) — and is what a caller must treat as "stop". `Err` is a DATABASE read failure and says
+/// nothing about the key; a caller aborting real work on it would be turning a transient SQLite busy
+/// into a security decision, so the two are kept distinguishable here rather than flattened.
+///
+/// The token seek in [`resolve_token`] and this share [`principal_from_key_row`] and
+/// [`API_KEY_COLUMNS`], so "revoked" cannot come to mean one thing at the door and another an hour
+/// into a transfer.
+pub async fn api_key_principal_now(
+    pool: &SqlitePool,
+    key_id: &str,
+    tier: EnforcementTier,
+) -> sqlx::Result<Option<Principal>> {
+    let row: Option<ApiKeyRow> = sqlx::query_as(&format!(
+        "SELECT {API_KEY_COLUMNS} FROM api_keys WHERE id = ?"
+    ))
+    .bind(key_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|r| principal_from_key_row(r, tier, Utc::now())))
 }
 
 /// Resolve an api key's capability set. `None` means "deny this key" (corrupt row).

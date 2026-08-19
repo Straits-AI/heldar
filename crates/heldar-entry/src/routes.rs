@@ -980,6 +980,8 @@ async fn list_entry_events(
         .bind(&q.event_type);
     // Bind from the RETURNED vector, never from `camera_scope()`: the empty-allowlist arm is
     // `" AND 0"` with ZERO binds, and iterating the scope instead would desync the parameter count.
+    // Bound TWICE, in predicate order: once for the subject arm, once for the `camera_ids`
+    // containment arm added alongside it.
     for id in scope.iter().flat_map(|(_, ids)| ids) {
         query = query.bind(id);
     }
@@ -1250,9 +1252,36 @@ async fn list_audit(
             AND (? IS NULL OR actor = ?)
             AND (? IS NULL OR action = ?)"
         .to_string();
-    if let Some((pred, _)) = &scope {
-        sql.push_str(" AND subject_camera_id IS NOT NULL");
-        sql.push_str(pred);
+    if let Some((pred, binds)) = &scope {
+        // A row is visible when its derived subject is held, OR — for an act naming SEVERAL cameras,
+        // where one column cannot say "both ends" and the subject is therefore NULL — when every
+        // camera it names is held.
+        //
+        // Without the second arm a credential holding BOTH ends of a movement link could create and
+        // delete that link (both allowed, it owns both cameras) and then find its own acts absent
+        // from its own audit trail. The reason multi-camera rows carry no subject is that naming
+        // ONE end would disclose adjacency to a half-holder — an argument that says nothing about a
+        // caller who already holds every camera involved and performed the act itself.
+        //
+        // Still fail-closed: `json_each` over `detail.camera_ids` yields nothing for a NULL, absent
+        // or non-array value, so `NOT EXISTS(... NOT IN scope)` is paired with a non-empty test
+        // rather than standing alone — otherwise every subject-less row would match.
+        //
+        // `json_valid` sits inside a CASE, not beside the other AND terms: AND has no guaranteed
+        // evaluation order and `json_type` RAISES on a malformed blob, which would turn one
+        // hand-edited row into a 500 for the whole endpoint. Same guard, same reason, as the backfill
+        // in migration 0014.
+        let placeholders = vec!["?"; binds.len()].join(",");
+        sql.push_str(&format!(
+            " AND ((subject_camera_id IS NOT NULL{pred})
+                   OR (subject_camera_id IS NULL
+                       AND CASE WHEN json_valid(detail)
+                                THEN json_type(detail, '$.camera_ids') END = 'array'
+                       AND json_array_length(detail, '$.camera_ids') > 0
+                       AND NOT EXISTS (
+                             SELECT 1 FROM json_each(detail, '$.camera_ids')
+                              WHERE json_each.value NOT IN ({placeholders}))))"
+        ));
     }
     sql.push_str(" ORDER BY created_at DESC LIMIT ?");
     let mut query = sqlx::query_as::<_, AuditLog>(&sql)
@@ -1264,7 +1293,13 @@ async fn list_audit(
         .bind(&q.actor)
         .bind(&q.action)
         .bind(&q.action);
-    for id in scope.iter().flat_map(|(_, ids)| ids) {
+    // Bound TWICE, in predicate order: once for the subject arm, once for the `camera_ids`
+    // containment arm added alongside it.
+    for id in scope
+        .iter()
+        .flat_map(|(_, ids)| ids)
+        .chain(scope.iter().flat_map(|(_, ids)| ids))
+    {
         query = query.bind(id);
     }
     let rows = query.bind(limit).fetch_all(&st.pool).await?;

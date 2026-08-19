@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Revoking an API key now stops the backup transfer it left running.** `POST /backup/policies/{id}/trigger`
+  answers 202 and detaches the copy, which keeps moving footage for up to `HELDAR_BACKUP_JOB_TIMEOUT_S`
+  (default an hour) — and for `sftp`/`ftp`/`s3` destinations, off the box entirely, where no later
+  guard can reach it. Every authorization for that job was made once, at request time, and the job row
+  carried no way back to the credential that made it, so revocation — the operator saying "this
+  credential is compromised" — did nothing to bytes already in flight. Narrowing `scope_cameras` was
+  the same defect against the camera boundary: the job went on shipping a camera the credential no
+  longer held.
+
+  `backup_jobs` now records **who ordered the job** (`created_by`, `created_by_kind`; kernel migration
+  0015) and the transfer re-checks that credential before the first byte and every few seconds after,
+  aborting with the reason recorded on the job. Withdrawn means revoked, deactivated, deleted, expired,
+  or re-scoped off a camera the job covers. Files already copied are left in place — they are backups,
+  not spoils.
+
+  **No behaviour change** for the scheduler (it holds no principal, so its jobs record no creator),
+  for boxes running with auth disabled, or for jobs created before the upgrade. A database read failure
+  during the re-check lets the transfer continue, loudly: the recorder shares that SQLite and a busy
+  timeout must not destroy a backup.
+
+### Documented
+
+- **How long a scope decision lasts**, per surface, in `docs/ACCESS-CONTROL.md`. `/media/*` re-authorizes
+  every single request, so a clip, playback session or archive URL is not a bearer capability and a
+  re-scope bites mid-scrub; AI leases re-derive their candidate list from the current scope on every
+  renew. The exception is **live view**: MediaMTX authorizes from a signed URL token and consults no
+  credential, so a revoked key keeps streaming for up to `HELDAR_LIVEVIEW_TOKEN_TTL_SECS` (default
+  3600 s) — and an established WebRTC session is not bounded by it at all. Lower the TTL if revocation
+  needs to bite promptly.
+- **A camera-confined search no longer loses the caller's own rows to a page of other cameras'.**
+  `heldar-search`'s executor fetched each source `ORDER BY <ts> DESC LIMIT fetch_cap` and applied
+  `plan.cameras` afterwards in Rust, so the cap bounded rows EXAMINED rather than rows returned:
+  newer rows from cameras the caller did not name ate the page and the caller's own older in-window
+  matches never reached the filter — unreachable afterwards, since these routes carry no offset or
+  cursor. For a camera-scoped credential that list is its scope, so this was the scope layer denying
+  the caller its own data. The same ordering made `truncated` report the FLEET's in-window volume
+  beside a `count` of 0. The confinement is now pushed into each source query (deduped, and skipped
+  above 1000 distinct ids so an absurd caller-supplied list degrades to the Rust filter instead of
+  exhausting SQLite's variable ceiling).
+
+- **Movement's audit entries name the camera they are about, so a scoped operator can see its own
+  work.** `GET /api/v1/audit` filters on `audit_log.subject_camera_id` and hides NULL subjects from a
+  camera-scoped reader; `heldar-movement` audited every action with an empty `detail`, so every
+  movement act — including a breach acknowledged on the reader's own camera — was visible only to a
+  fleet-wide credential. Breach ack/resolve and the person search now carry their camera. Acts naming
+  TWO cameras (link create/delete, candidate confirm/reject) deliberately still carry none: a single
+  column cannot say "both ends", and naming either one would disclose adjacency to that end's holder.
+
+### Fixed
+
+- **A whitespace-padded camera id could create a self-link.** `POST /api/v1/movement/links` compared
+  the raw `from_camera`/`to_camera` while the insert bound the trimmed values, so
+  `{"from_camera":"cam_a","to_camera":" cam_a"}` stored the `cam_a → cam_a` link the guard forbids.
+
+### Testing
+
+- **`heldar-movement` is driven end to end** (`crates/heldar-server/tests/movement_scope_e2e.rs`):
+  every route, against credentials minted through the real `POST /api/v1/api-keys` — unscoped, scoped
+  to both ends of a link, to one end, and to neither — asserting no cross-camera read or act and no
+  false deny on the credential's own cameras. It records per route whether the scope filter answered
+  or an unholdable capability refused, so the seven movement routes the route census could only list
+  as named debt are now actually exercised.
+
 ## [0.5.0] - 2026-08-13
 
 Closes the last of the re-audit's code blockers. **Two breaking changes need a decision before you

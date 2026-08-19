@@ -159,6 +159,14 @@ pub struct BackupJob {
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// Principal id that ORDERED this job — an api key id, a user id, or `system` when auth is off.
+    /// NULL for the background scheduler (it holds no principal) and for rows predating migration
+    /// 0015. A detached transfer re-checks this credential while it runs; see
+    /// [`crate::services::backup::creator_standing`].
+    pub created_by: Option<String>,
+    /// `api_key` | `user` | `system`, deciding HOW `created_by` is re-checked. NULL alongside a NULL
+    /// `created_by`.
+    pub created_by_kind: Option<String>,
 }
 
 /// Request body for POST /api/v1/archive/export — zip a selection of recorded footage on demand.
