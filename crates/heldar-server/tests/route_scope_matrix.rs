@@ -1117,26 +1117,16 @@ async fn attribution_rows(st: &AppState, key: &str) -> i64 {
 
 // ---- The census: no route may be silently uncovered ----
 //
-// Everything above tests routes this file already knows about. That is the wrong default, and it has
-// now failed three times: `/metrics` was invisible because it mounts at the server layer, and the
-// whole of `/backup/*`, `/system`, `/api-keys` and `/audit` were invisible because
-// `discover_camera_routes` only admits paths containing a camera id. Each time the fix was to name
-// the missing routes by hand — which cannot catch route N+1 in a file nobody thought about.
+// The rule and its rationale now live in `heldar-testkit`, so a private workspace composing
+// proprietary verticals over the `Verticals` seam runs the SAME rule over the SAME composed router
+// instead of reimplementing it — and a reimplementation of this particular rule drifts back to
+// "we test the routes we thought of", which is the failure it exists to prevent.
 //
-// This test inverts the default. It enumerates EVERY registered route and requires each to fall into
-// one of three classes:
-//
-//   1. camera-keyed          — swept by `camera_scope_holds_on_every_camera_keyed_route`
-//   2. refuses a scoped credential — proven right here by probing it (fleet-only surfaces)
-//   3. declared scope-neutral — in `SCOPE_NEUTRAL` below, WITH a written reason
-//
-// A route in none of them fails the test. Adding an unguarded route is therefore a CI failure by
-// default, and the only way to silence it is to state, in the table below, why it is safe.
+// What stays here is what is specific to THIS composition: which routes are declared safe, which the
+// harness cannot reach, and the bodies that get a probe past an extractor to the guard.
 
 /// Routes that legitimately answer a camera-scoped credential, each with the reason it is safe.
-///
-/// This is the ONLY escape hatch in the census, so an entry here is a security assertion. Adding one
-/// should feel heavier than adding a guard.
+/// The only escape hatch in the census, so an entry is a security assertion.
 const SCOPE_NEUTRAL: &[(&str, &str)] = &[
     // --- unauthenticated by design ---
     ("/healthz", "liveness; no data, no auth"),
@@ -1164,7 +1154,7 @@ const SCOPE_NEUTRAL: &[(&str, &str)] = &[
     ("/api/v1/ai/samplers", "retain on camera_allowed"),
     (
         "/api/v1/ai/leases",
-        "acquire_lease passes principal.camera_scope() into the lease service",
+        "acquire passes the camera scope into the candidate query",
     ),
     // --- box-level facts that name no camera ---
     ("/api/v1/site", "site id, product name, version, uptime"),
@@ -1189,155 +1179,12 @@ const SCOPE_NEUTRAL: &[(&str, &str)] = &[
     ("/api/v1/auth/logout", "ends the caller's own session"),
 ];
 
-/// Bodies that satisfy a handler's extractor so the probe reaches its GUARD.
-///
-/// Without these the census sends `{}`, the `Json` extractor rejects it with 422, and the route is
-/// recorded as unproven — the request never reaches the scope check at all. Every entry here turns an
-/// unproven route into a proven one, so this table is worth extending whenever a route lands in
-/// `CENSUS_UNPROVEN` for want of a body.
-///
-/// Where a body names a CAMERA it names `camera_b` — the one the probing credential does not hold —
-/// so the assertion is a real scope test and not merely a capability test.
-const PROBE_BODIES: &[(&str, &str)] = &[
-    (
-        "/api/v1/ai/embeddings",
-        r#"{"camera_id":"camera_b","items":[]}"#,
-    ),
-    (
-        "/api/v1/ai/events",
-        r#"{"camera_id":"camera_b","detections":[]}"#,
-    ),
-    ("/api/v1/ai/leases", r#"{"worker_id":"w1"}"#),
-    ("/api/v1/api-keys", r#"{"name":"probe","role":"viewer"}"#),
-    (
-        "/api/v1/backup/destinations",
-        r#"{"name":"probe","kind":"sftp","config":{}}"#,
-    ),
-    (
-        "/api/v1/cameras/config/bulk",
-        r#"{"action":"reboot","camera_ids":["camera_b"]}"#,
-    ),
-    ("/api/v1/discover", r#"{"targets":["127.0.0.1"]}"#),
-    ("/api/v1/entry/gate/settings", r#"{"kill_switch":true}"#),
-    (
-        "/api/v1/modules",
-        r#"{"id":"probe","base_url":"http://127.0.0.1:1"}"#,
-    ),
-    (
-        "/api/v1/movement/links",
-        r#"{"from_camera":"camera_b","to_camera":"camera_b"}"#,
-    ),
-    ("/api/v1/passes", r#"{"visitor_name":"probe"}"#),
-    ("/api/v1/vehicles", r#"{"plate":"PROBE1"}"#),
-    ("/api/v1/watchlist", r#"{"plate":"PROBE1","kind":"block"}"#),
-    (
-        "/api/v1/webhooks",
-        r#"{"name":"probe","url":"http://127.0.0.1:1/h"}"#,
-    ),
-    (
-        "/api/v1/users",
-        r#"{"username":"probe","password":"pw","role":"viewer"}"#,
-    ),
-    ("/api/v1/system/transcode", r#"{"engine":"cpu"}"#),
-];
-
-/// Recursive route scan over production code. Non-recursive scanning missed nested modules, and
-/// truncating at `#[cfg(test)]` keeps routers declared inside test modules out of the census.
-fn all_route_sources() -> Vec<PathBuf> {
-    fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
-        let Ok(entries) = std::fs::read_dir(dir) else {
-            return;
-        };
-        for e in entries.flatten() {
-            let p = e.path();
-            if p.is_dir() {
-                walk(&p, out);
-            } else if p.extension().map(|x| x == "rs").unwrap_or(false) {
-                out.push(p);
-            }
-        }
-    }
-    let root = repo_root();
-    let mut out = Vec::new();
-    for c in [
-        "crates/heldar-kernel/src",
-        "crates/heldar-entry/src",
-        "crates/heldar-movement/src",
-        "crates/heldar-search/src",
-    ] {
-        walk(&root.join(c), &mut out);
-    }
-    assert!(!out.is_empty(), "found no sources to scan");
-    out
-}
-
-/// Every `.route("<path>", …)` in production code, with its methods.
-fn discover_all_routes() -> Vec<CameraRoute> {
-    let mut found: BTreeSet<CameraRoute> = BTreeSet::new();
-    for file in all_route_sources() {
-        let full = std::fs::read_to_string(&file).unwrap_or_default();
-        // Routers declared inside `#[cfg(test)]` are fixtures, not product surface. In every file in
-        // this workspace the test module is last, so truncating there is exact.
-        let src = match full.find("#[cfg(test)]") {
-            Some(i) => &full[..i],
-            None => &full[..],
-        };
-        for (idx, _) in src.match_indices(".route(") {
-            let tail = &src[idx..];
-            let mut depth = 0i32;
-            let mut end = tail.len();
-            for (i, c) in tail.char_indices() {
-                match c {
-                    '(' => depth += 1,
-                    ')' => {
-                        depth -= 1;
-                        if depth == 0 {
-                            end = i + 1;
-                            break;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            let chunk = &tail[..end];
-            let Some(q1) = chunk.find('"') else { continue };
-            let Some(q2) = chunk[q1 + 1..].find('"') else {
-                continue;
-            };
-            let path = &chunk[q1 + 1..q1 + 1 + q2];
-            if !path.starts_with('/') {
-                continue;
-            }
-            let mut methods = Vec::new();
-            for m in ["get", "post", "patch", "delete", "put"] {
-                if chunk[q1 + q2..].contains(&format!("{m}(")) {
-                    methods.push(m.to_uppercase());
-                }
-            }
-            if methods.is_empty() {
-                methods.push("GET".into());
-            }
-            found.insert(CameraRoute {
-                path: path.to_string(),
-                methods,
-            });
-        }
-    }
-    found.into_iter().collect()
-}
-
-/// Routes the census cannot PROVE, with the reason it cannot, so the debt is named rather than
-/// silently counted as covered.
-///
-/// This is a baseline, not an exemption: a route may only sit here if the probe genuinely cannot
-/// reach its guard. It must still be covered by something — most of these are camera-keyed by their
-/// BODY or by a resource id that resolves to a camera, and are asserted in the targeted tests above.
-/// Shrink it by adding a `PROBE_BODIES` entry or a real fixture; a new route may NOT be added here
-/// without a reason that survives review.
+/// Routes the census cannot PROVE, with the reason — named debt, deliberately not counted as
+/// coverage. A route may only sit here if the probe genuinely cannot reach its guard; shrink it by
+/// adding a probe body or a real fixture.
 const CENSUS_UNPROVEN: &[(&str, &str)] = &[
     // Path parameter naming a RESOURCE, not a camera. The handler resolves the owning camera via
-    // `resource_camera`/`CameraOwned`; a synthetic id 404s before that runs, so the probe proves
-    // nothing. Real coverage needs a seeded resource per route.
+    // `resource_camera`/`CameraOwned`; a synthetic id 404s before that runs.
     (
         "/api/v1/ai-tasks/{task_id}",
         "resource id; needs a seeded task",
@@ -1374,8 +1221,7 @@ const CENSUS_UNPROVEN: &[(&str, &str)] = &[
         "/m/{id}/{*rest}",
         "the module proxy; wildcard tail is unprobeable here",
     ),
-    // Bodies this harness cannot satisfy: the extractor rejects the probe before the guard runs, and
-    // a valid body needs domain fixtures (embeddings vectors, detection payloads, search plans).
+    // Bodies needing domain fixtures the harness does not build.
     ("/api/v1/ai/embeddings", "needs a valid embedding batch"),
     ("/api/v1/ai/events", "needs a valid detection batch"),
     (
@@ -1404,8 +1250,8 @@ const CENSUS_UNPROVEN: &[(&str, &str)] = &[
         "needs a natural-language query payload",
     ),
     ("/api/v1/search/plan", "needs a search plan payload"),
-    // App-crate handlers that 500 in this harness because `composed_router` does not run their
-    // schema init. A harness gap, NOT a product finding — but it means the guard was never reached.
+    // App-crate handlers that 500 here because `composed_router` does not run their schema init.
+    // A harness gap, NOT a product finding — but the guard was never reached.
     (
         "/api/v1/entry-events/{id}/confirm",
         "app schema not init in harness",
@@ -1443,99 +1289,69 @@ async fn every_route_is_accounted_for() {
     seed_camera(&st, "camera_b").await;
     let scoped = seed_key(&st, Some(&["camera_a"])).await;
 
-    let routes = discover_all_routes();
-    assert!(
-        routes.len() > 100,
-        "census found only {} routes — the scan is broken, not the product",
-        routes.len()
-    );
+    let census = heldar_testkit::Census::new(vec![
+        repo_root().join("crates/heldar-kernel/src"),
+        repo_root().join("crates/heldar-entry/src"),
+        repo_root().join("crates/heldar-movement/src"),
+        repo_root().join("crates/heldar-search/src"),
+    ])
+    .scope_neutral(SCOPE_NEUTRAL)
+    .unproven(CENSUS_UNPROVEN)
+    // Where a body names a CAMERA it names camera_b — the one the probing credential does not
+    // hold — so the assertion is a scope test and not merely a capability test.
+    .probe_body(
+        "/api/v1/ai/embeddings",
+        r#"{"camera_id":"camera_b","items":[]}"#,
+    )
+    .probe_body(
+        "/api/v1/ai/events",
+        r#"{"camera_id":"camera_b","detections":[]}"#,
+    )
+    .probe_body("/api/v1/ai/leases", r#"{"worker_id":"w1"}"#)
+    .probe_body("/api/v1/api-keys", r#"{"name":"probe","role":"viewer"}"#)
+    .probe_body(
+        "/api/v1/backup/destinations",
+        r#"{"name":"probe","kind":"sftp","config":{}}"#,
+    )
+    .probe_body(
+        "/api/v1/cameras/config/bulk",
+        r#"{"action":"reboot","camera_ids":["camera_b"]}"#,
+    )
+    .probe_body("/api/v1/discover", r#"{"targets":["127.0.0.1"]}"#)
+    .probe_body("/api/v1/entry/gate/settings", r#"{"kill_switch":true}"#)
+    .probe_body(
+        "/api/v1/modules",
+        r#"{"id":"probe","base_url":"http://127.0.0.1:1"}"#,
+    )
+    .probe_body(
+        "/api/v1/movement/links",
+        r#"{"from_camera":"camera_b","to_camera":"camera_b"}"#,
+    )
+    .probe_body("/api/v1/passes", r#"{"visitor_name":"probe"}"#)
+    .probe_body("/api/v1/vehicles", r#"{"plate":"PROBE1"}"#)
+    .probe_body("/api/v1/watchlist", r#"{"plate":"PROBE1","kind":"block"}"#)
+    .probe_body(
+        "/api/v1/webhooks",
+        r#"{"name":"probe","url":"http://127.0.0.1:1/h"}"#,
+    )
+    .probe_body(
+        "/api/v1/users",
+        r#"{"username":"probe","password":"pw","role":"viewer"}"#,
+    )
+    .probe_body("/api/v1/system/transcode", r#"{"engine":"cpu"}"#)
+    // The open build composes 151 routes; a scan finding far fewer is broken, and a census over an
+    // empty set would otherwise pass triumphantly.
+    .min_routes(100);
 
-    let mut unclassified: Vec<String> = Vec::new();
-    let mut camera_keyed = 0usize;
-    let mut refuses = 0usize;
-    let mut declared = 0usize;
-    let mut unproven_declared = 0usize;
-
-    for route in &routes {
-        if route.path.starts_with("/api/v1/cameras/{id}") || route.path.contains("{camera_id}") {
-            camera_keyed += 1;
-            continue;
-        }
-        if SCOPE_NEUTRAL.iter().any(|(p, _)| *p == route.path) {
-            declared += 1;
-            continue;
-        }
-        if CENSUS_UNPROVEN.iter().any(|(p, _)| *p == route.path) {
-            unproven_declared += 1;
-            continue;
-        }
-        // Not camera-keyed and not declared: it must REFUSE a camera-scoped credential on every
-        // method. A 403 is the refusal; a 401 means the auth floor caught it first, which is also a
-        // denial. Anything else means the route answered a credential whose scope it never consulted.
-        for method in &route.methods {
-            let path = route
-                .path
-                .replace("{id}", "probe_id")
-                .replace("{name}", "probe")
-                .replace("{key}", "probe");
-            if path.contains('{') {
-                // A parameter we cannot fill; probing would test the extractor, not the guard.
-                unclassified.push(format!(
-                    "{method} {} -> UNPROBEABLE (unfillable path parameter; declare it or key it by camera)",
-                    route.path
-                ));
-                continue;
+    let report = census
+        .run(|method, path, body| {
+            let st = st.clone();
+            let scoped = scoped.clone();
+            async move {
+                let (status, resp) = call_body(&st, &scoped, &method, &path, &body).await;
+                (status.as_u16(), resp)
             }
-            let probe_body = PROBE_BODIES
-                .iter()
-                .find(|(p, _)| *p == route.path)
-                .map(|(_, b)| *b)
-                .unwrap_or("{}");
-            let (status, body) = call_body(&st, &scoped, method, &path, probe_body).await;
-            let refused = status == StatusCode::FORBIDDEN || status == StatusCode::UNAUTHORIZED;
-            if refused {
-                refuses += 1;
-            } else if status == StatusCode::NOT_FOUND && route.path.contains('{') {
-                // A filled-in placeholder that names nothing — the guard may be fine; no signal.
-                refuses += 1;
-            } else {
-                unclassified.push(format!(
-                    "{method} {} -> {status} for a camera-scoped credential (not camera-keyed, not \
-                     declared scope-neutral, and does not refuse): {}",
-                    route.path,
-                    body.chars().take(160).collect::<String>()
-                ));
-            }
-        }
-    }
-
-    // Stale entries are their own hazard: a declaration outliving its route silently pre-authorises
-    // whatever later claims that path.
-    let live: BTreeSet<&str> = routes.iter().map(|r| r.path.as_str()).collect();
-    let stale: Vec<&str> = SCOPE_NEUTRAL
-        .iter()
-        .chain(CENSUS_UNPROVEN.iter())
-        .map(|(p, _)| *p)
-        .filter(|p| !live.contains(p))
-        .collect();
-
-    eprintln!(
-        "route census: {} routes — {camera_keyed} camera-keyed, {refuses} refuse a scoped \
-         credential, {declared} declared scope-neutral, {unproven_declared} declared UNPROVEN \
-         (see CENSUS_UNPROVEN — these are named debt, not coverage)",
-        routes.len()
-    );
-    assert!(
-        stale.is_empty(),
-        "SCOPE_NEUTRAL declares routes that no longer exist:\n  {}",
-        stale.join("\n  ")
-    );
-    assert!(
-        unclassified.is_empty(),
-        "{} route(s) are neither camera-keyed, nor refuse a camera-scoped credential, nor declared \
-         scope-neutral. Each one answered a credential whose scope it never consulted — guard it, or \
-         add it to SCOPE_NEUTRAL with a reason:\n  {}",
-        unclassified.len(),
-        unclassified.join("\n  ")
-    );
+        })
+        .await;
+    report.assert_clean();
 }

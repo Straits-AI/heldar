@@ -45,6 +45,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
 
 [dev-dependencies]
+heldar-testkit = { path = "../heldar-testkit" }
 # The matrix drives the COMPOSED router, so it needs the app crates the server merges.
 # The route-scope matrix drives the COMPOSED router (kernel + app crates) in-process.
 tower = "0.5"

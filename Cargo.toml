@@ -13,6 +13,7 @@ members = [
     "crates/heldar-movement",
     "crates/heldar-search",
     "crates/heldar-server",
+    "crates/heldar-testkit",
     "crates/heldar-wasm",
 ]
 # The example Wasm guest targets wasm32-unknown-unknown and is built separately.

@@ -1752,7 +1752,16 @@ attacked. Both sides now filter first and shard within one credential (`worker_s
 because `assign`'s "every task owned exactly once" invariant only holds while every worker divides the
 same list.
 
-**The census is what makes coverage default-closed.** `every_route_is_accounted_for` enumerates all
+**The census is what makes coverage default-closed**, and it lives in `heldar-testkit` rather than in
+a test file, because an integration test cannot be imported. Proprietary verticals compose over the
+`Verticals` seam in a separate private workspace; that workspace needs the SAME rule over the SAME
+composed router, and a reimplementation of this particular rule drifts back to "we test the routes we
+thought of" — the failure it exists to prevent. Point it at both workspaces' source roots: enumerating
+only one half leaves the union, which is what actually serves traffic, checked by nobody. The seam
+itself now documents the split — `merge_routes` inherits the auth floor structurally, `spawn_loops`
+holds no principal at all — so a vertical author reads the contract where they implement it.
+
+`every_route_is_accounted_for` enumerates all
 151 registered routes and requires each to fall into one of three classes: camera-keyed (swept by the
 matrix), *proven* to refuse a camera-scoped credential (probed right there), or declared scope-neutral
 in `SCOPE_NEUTRAL` with a written reason. A route in none of them FAILS. Adding an unguarded route is

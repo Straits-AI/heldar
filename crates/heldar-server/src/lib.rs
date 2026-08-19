@@ -52,8 +52,33 @@ pub trait Verticals: Send + Sync {
         Ok(())
     }
     /// Spawn vertical background loops (use [`spawn_supervised`] for resilience).
+    ///
+    /// A loop holds NO principal, so nothing it does is scope-checked. That is the sharpest edge in
+    /// this trait: if a camera-scoped credential can write state your loop later acts on, the loop
+    /// executes that write with no scope at all. In this workspace an authorised `PATCH` of one
+    /// camera's `retention_hours` made the retention sweeper delete a DIFFERENT camera's recordings —
+    /// every guard answered correctly; the damage happened afterwards. Retention now evicts on a
+    /// per-camera fair share for exactly this reason. If your loop consumes operator-writable state,
+    /// bound each camera's effect on the others.
     fn spawn_loops(&self, _pool: &sqlx::SqlitePool) {}
     /// Merge vertical routers onto the app (inside the /api/v1 auth floor).
+    ///
+    /// # What you get, and what you must do yourself
+    ///
+    /// AUTHENTICATION is structural: this runs before `require_api_auth` is layered on, so a merged
+    /// route cannot be unauthenticated by accident.
+    ///
+    /// CAMERA SCOPE is not. An authenticated `Principal` may carry `Scope::Cameras`, and nothing
+    /// forces a handler to consult it — in THIS workspace 47 routes across three app crates shipped
+    /// with no scope call at all, with the primitives public in a crate they already depended on.
+    /// Use them: `heldar_kernel::routes::cameras::require_fleet_scope` to refuse a scoped credential
+    /// outright, `heldar_kernel::state::{camera_scope_filter, confine_camera_ids, camera_selection}`
+    /// to confine reads, writes and deferred work. Scope is orthogonal to role — `Cap::Admin` does
+    /// NOT exempt a credential — and a route keyed by a resource id rather than a camera id still
+    /// has to resolve its owning camera.
+    ///
+    /// Assert it with `heldar_testkit::Census`, pointed at your own source roots AND this
+    /// workspace's, so the composed surface is checked rather than each half separately.
     fn merge_routes(&self, router: Router<AppState>) -> Router<AppState> {
         router
     }

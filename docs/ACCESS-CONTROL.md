@@ -354,9 +354,11 @@ row dropped early would 403 a scoped credential on its own live evidence.
 
 ### How this is kept honest
 
-Coverage is **default-closed**: a census test enumerates every registered route and fails unless each
-is camera-keyed, provably refuses a scoped credential, or is declared scope-neutral with a reason. A
-new route that consults no scope breaks CI without anyone having to remember it.
+Coverage is **default-closed**: a census enumerates every registered route and fails unless each is
+camera-keyed, provably refuses a scoped credential, or is declared scope-neutral with a reason. A new
+route that consults no scope breaks CI without anyone having to remember it. The census ships as the
+`heldar-testkit` crate so a deployment composing proprietary verticals runs the same rule over its own
+composed router rather than a copy that drifts.
 
 `crates/heldar-server/tests/route_scope_matrix.rs` builds the **composed** router
 (kernel + metrics + entry + movement + search — the same shape `build_app` serves),
