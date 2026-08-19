@@ -243,6 +243,132 @@ which returns **403** (`role 'guard' is not permitted to …`) when denied.
 
 ---
 
+## 4b. Camera scope (per-credential camera restriction)
+
+A capability says *what* a credential may do. A **camera scope** says *which cameras*
+it may do it to. An API key created with a camera list is confined to those cameras;
+a key created without one is **fleet-wide**, which is the default and the only thing
+an interactive user session can be.
+
+Scope is enforced independently of role: it is **not** waived by `admin`. A scoped
+admin key is still scoped. Auth disabled (§5.1) yields the synthetic system principal,
+which is fleet-wide — scope changes nothing about the open LAN appliance.
+
+### What the scope covers
+
+Confining a credential to a camera means more than 403-ing that camera's routes, so
+enforcement has four shapes. The first is the obvious one; the other three exist
+because per-route checks cannot see the escapes:
+
+| Shape | Applies to | Behaviour for a scoped credential |
+|---|---|---|
+| **Per-route check** | anything keyed by a camera id (`…/cameras/{id}/…`, `{camera_id}`) | **403** on a camera outside the scope |
+| **Read confinement** | fleet-wide lists (camera list, health/status, events, search) | results **filtered** to the scope — never a complete inventory disclosure |
+| **Write confinement** | payloads carrying camera ids (backup policies, archive exports) | submitted ids are **intersected** with the scope before use, and re-applied when the policy later runs |
+| **Fleet-only refusal** | credential management, egress config, fleet cursors, `/metrics` | **403** outright — see below |
+
+### Capabilities that cannot be scoped
+
+`events:read` and `identity:read` read tables with **no camera column** — there is no
+predicate to filter them by — so pairing them with a camera scope would be a
+boundary that silently does not hold. The API **refuses to mint** that combination,
+and a stored key carrying it is **denied at authentication** (it predates the refusal
+or was inserted out of band; re-mint it). `admin` implies every capability, so an
+`admin` grant cannot carry a camera scope either.
+
+The practical consequence: a camera-scoped credential cannot reach `/api/v1/events`,
+the entry identity registry, or anything else gated on those capabilities. That is by
+design, not a gap — the route matrix reports such routes as UNREACHABLE rather than
+counting them as covered.
+
+### Surfaces that refuse a scoped credential outright
+
+Some surfaces have no coherent scoped answer, so they are refused rather than
+filtered:
+
+- **Credential management** (create/update/delete users and API keys). A scoped key
+  that can mint keys can mint an unscoped one — scope would be self-removable.
+- **Egress configuration** (backup destinations, webhooks). These send footage and
+  events *out*; repointing a destination exfiltrates other cameras' data without ever
+  reading them through a scoped route.
+- **The outbox cursor** (`GET /api/v1/outbox`). `seq` is a monotonic fleet cursor;
+  filtering it hands back a sequence with holes that the client reads as delivered.
+- **The entry identity registry** (vehicles, watchlist, visitor passes). These tables
+  have no camera column, and the ANPR pipeline matches them **by plate alone** before
+  it can auto-open a barrier — so a row written there acts on every camera on the box.
+  The direct gate actuators are scoped; this is the indirect path into the same relay.
+- **Box-level settings and the module registry** (`/api/v1/system/*` writes, database
+  status, module detail/unregister, plugin-registry refresh, backup destinations).
+  Nothing about them is per-camera, and several are applied **later** by loops that
+  hold no principal.
+- **`GET /metrics`.** The exposition carries `heldar_camera_up{camera=…}` and friends
+  for the whole fleet. A filtered scrape reads to Prometheus as cameras that ceased to
+  exist, writing staleness gaps indistinguishable from real outages into the fleet's
+  history. Scrape with a fleet-wide key.
+
+### The audit log (`GET /api/v1/audit`)
+
+Read confinement, but it could not be expressed the usual way. The owning camera is
+routinely recorded in the free-form `detail` JSON under a *non-camera* `target_type` —
+zones, AI tasks, record and snapshot schedules and recording gaps all do this — so a
+predicate over `target_id` masked gate rows and let every one of those through. One
+`?limit=5000` returned the fleet roster plus which cameras carry zones, AI tasks and
+schedules. `detail` is `Json<Value>` with no schema and new call sites add keys freely:
+it cannot be a scope boundary.
+
+So camera identity was promoted into an indexed `audit_log.subject_camera_id` column
+(kernel migration 0014), derived in `auth::audit` — the single writer — and backfilled
+for rows already on the box. A scoped credential sees a row iff its subject is non-NULL
+and in scope.
+
+This is **fail-closed**: NULL means fleet-level or about no camera at all, and those
+rows are hidden rather than shown. Multi-camera acts (an archive export, an API-key
+mint, the `'*'` bulk device-config write) resolve to NULL deliberately — attributing
+one to a single lane would both mislabel it and hand that lane's holder the other
+camera ids sitting in the same `detail`. Audit is a manager+ surface where a hidden row
+costs an accountability question and an extra row costs the roster, so hiding is the
+conservative direction. Unscoped credentials — every human role, and every key minted
+without a camera list — read the whole log unchanged.
+
+### The recorded-media plane (`/media/*`)
+
+`/media/*` serves the same footage the API gates, so it carries the same scope
+(`services/media_scope.rs`). Two subtrees name their camera in the path
+(`recordings/<camera_id>/…`, scheduled `snapshots/<camera_id>/…`) and are scoped by
+string alone. The rest — exported clips, playback sessions, evidence frames, archives
+— are **flat**: their filenames carry no camera, so producers register each artifact
+in the `media_artifacts` sidecar (migration 0013) and the guard resolves ownership
+from it. Migration 0013 also carried existing zone and embedding evidence across;
+**entry** migration 0004 does the same for gate evidence, which lives in the app crate
+and was missed the first time — without it an upgraded box 403s a scoped credential on
+its own pre-upgrade gate frame while the byte-identical zone frame beside it serves.
+
+This fails closed in both directions: an artifact whose producer never registered it
+is `Unattributed`, which is a 403 for a scoped credential (and unchanged for everyone
+else), and a `/media/*` prefix the module does not recognise is refused for **every**
+credential rather than served ungated.
+
+Attribution rows are swept by the retention loop once their file leaves the disk — by
+**existence**, not by age, because the kinds do not share a retention horizon and a
+row dropped early would 403 a scoped credential on its own live evidence.
+
+### How this is kept honest
+
+Coverage is **default-closed**: a census enumerates every registered route and fails unless each is
+camera-keyed, provably refuses a scoped credential, or is declared scope-neutral with a reason. A new
+route that consults no scope breaks CI without anyone having to remember it. The census ships as the
+`heldar-testkit` crate so a deployment composing proprietary verticals runs the same rule over its own
+composed router rather than a copy that drifts.
+
+`crates/heldar-server/tests/route_scope_matrix.rs` builds the **composed** router
+(kernel + metrics + entry + movement + search — the same shape `build_app` serves),
+discovers every camera-keyed route by walking it, and asserts each one 403s a
+credential scoped elsewhere. Coverage is printed on each run, so a new route that
+escapes the sweep is visible in CI output rather than silently unguarded. Sibling
+tests cover the credential surface, the egress surfaces and the fleet-wide reads.
+
+---
+
 ## 5. Authentication setup
 
 ### 5.1 Default: open LAN appliance (`HELDAR_AUTH_ENABLED=false`)
@@ -412,6 +538,9 @@ The immutable operator+system action log. Filters: `from`, `to`, `actor`, `actio
 `limit` (default 200, ≤5000), newest-first. Every registry mutation, pass operation,
 user/key change, login, and entry confirm/reject appends a row
 (`actor`, `actor_name`, `role`, `action`, `target_type`, `target_id`, `detail`).
+
+A **camera-scoped** credential sees only the rows whose subject camera it holds, and
+this is fail-closed — see §4b, "The audit log".
 
 ---
 

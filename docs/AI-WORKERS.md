@@ -268,7 +268,30 @@ real worker was about to use used to make its genuine detection a silent no-op.
 | --- | --- | --- |
 | `off` | accepted | no notice |
 | `warn` | accepted | **default.** Logs once per credential per hour and raises one `ingest_unleased` event, so you get the list of clients that would break |
-| `enforce` | `401 frame_ticket_required` | promoted automatically by `HELDAR_DEPLOYMENT_MODE=production*` |
+| `enforce` | `401 frame_ticket_required` | **explicit opt-in only** — see below |
+
+> **`enforce` is never turned on for you.** No deployment mode promotes this tier.
+> `HELDAR_DEPLOYMENT_MODE=production*` promotes `HELDAR_MACHINE_AUTH` (a
+> server-side capability narrowing that changes no client protocol) and
+> deliberately leaves `HELDAR_INGEST_PROVENANCE` alone, because requiring a frame
+> ticket is a **client protocol** change: it rejects every worker — yours,
+> third-party, or simply not-yet-upgraded — that does not mint one. Inferring that
+> from a deployment label would mean an operator who followed the hardening advice
+> loses *all* AI ingest, with recording, health and the dashboard still looking
+> perfectly fine. Setting `HELDAR_INGEST_PROVENANCE=enforce` explicitly is the
+> only way to require tickets.
+>
+> **Rollout.** Stay on the `warn` default and read the once-per-hour log (target
+> `heldar::security`, plus one `ingest_unleased` event per credential per hour) —
+> that list *is* the set of clients `enforce` would break. Upgrade them until a
+> full hour passes with the list empty, then set `enforce` and redeploy.
+>
+> **Reading the effective tier.** Never infer it from which variables you
+> remember setting: the boot banner prints it as `ENFORCED` / `NOT ENFORCED`, and
+> `GET /api/v1/system` reports it under `enforcement`
+> (`ingest_provenance`, `frame_tickets_required`, and
+> `machine_auth_promoted_by_mode` — which is `true` for a production deployment
+> mode and applies to `machine_auth` only).
 
 The attribute rewrite, the reserved-event denylist and the severity clamp are
 **unconditional in every tier**, including auth-off — no legitimate client ever

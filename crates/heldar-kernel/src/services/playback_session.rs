@@ -170,6 +170,20 @@ pub async fn create_session(
         return Err(AppError::Other(e.into()));
     }
 
+    // Attribute the whole session DIRECTORY to its camera. `playback/<id>` is the key, so one row
+    // covers index.m3u8, init.mp4 and every seg_*.m4s — a 900-request HLS scrub shares one lookup.
+    // Written last, once the session is complete and its sidecar is durable, so no attribution ever
+    // outlives a half-built session. Without this row the session is Unattributed: a camera-scoped
+    // credential cannot read it AND (see routes/playback_sessions.rs) cannot delete it either, which
+    // is the fail-closed direction on both.
+    crate::services::media_scope::attribute(
+        &state.pool,
+        &format!("playback/{session_id}"),
+        &[camera_id.to_string()],
+        crate::services::media_scope::KIND_PLAYBACK_SESSION,
+    )
+    .await;
+
     tracing::info!(
         session = %session_id,
         camera = %camera_id,
@@ -321,6 +335,10 @@ pub async fn delete_session(state: &AppState, session_id: &str) -> AppResult<()>
     tokio::fs::remove_dir_all(&session_dir)
         .await
         .map_err(|e| AppError::Other(e.into()))?;
+    // Drop the attribution with the artifact. Ordered AFTER the directory is gone so a failed removal
+    // never leaves a served session without its scope row (which would be readable by nobody scoped
+    // and, worse, indistinguishable from a producer that forgot to attribute).
+    crate::services::media_scope::forget(&state.pool, &format!("playback/{session_id}")).await;
     tracing::info!(session = %session_id, "playback: deleted session");
     Ok(())
 }
@@ -372,6 +390,13 @@ async fn sweep(state: &AppState) -> anyhow::Result<()> {
         }
         match tokio::fs::remove_dir_all(&path).await {
             Ok(()) => {
+                // Forget the attribution row with the directory, so `media_artifacts` does not grow
+                // one orphan per expired session. This runs in a background sweeper that holds no
+                // Principal: `forget` is a plain DELETE and adds no auth failure mode here.
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    crate::services::media_scope::forget(&state.pool, &format!("playback/{name}"))
+                        .await;
+                }
                 tracing::debug!(dir = %path.display(), "playback_session_cleanup: removed expired session")
             }
             Err(e) => {
@@ -407,13 +432,22 @@ mod tests {
     }
 
     async fn test_state() -> AppState {
+        test_state_in(std::env::temp_dir().join(format!("heldar_pbs_{}", Uuid::new_v4().simple())))
+            .await
+    }
+
+    /// A state whose `playback_dir` is an isolated temp directory, so the delete/sweep tests write
+    /// (and remove) real directories without touching the repo or a developer's data dir.
+    async fn test_state_in(playback_dir: std::path::PathBuf) -> AppState {
         let pool = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
             .await
             .unwrap();
         crate::db::run_migrations(&pool).await.unwrap();
-        let cfg = std::sync::Arc::new(crate::config::Config::from_env());
+        let mut raw = crate::config::Config::from_env();
+        raw.playback_dir = playback_dir;
+        let cfg = std::sync::Arc::new(raw);
         AppState {
             recorder: crate::services::recorder::RecorderManager::new(pool.clone(), cfg.clone()),
             sampler: crate::services::sampler::SamplerManager::new(pool.clone(), cfg.clone()),
@@ -466,6 +500,106 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    /// Build a session directory + sidecar by hand (no ffmpeg) and register its attribution exactly
+    /// as `create_session` does, so the delete/sweep paths can be exercised without a media build.
+    async fn plant_session(state: &AppState, id: &str, camera_id: &str) -> std::path::PathBuf {
+        let dir = state.cfg.playback_dir.join(id);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let meta = SessionMeta {
+            id: id.to_string(),
+            camera_id: camera_id.to_string(),
+            from: Utc::now() - chrono::Duration::minutes(5),
+            to: Utc::now(),
+            duration_s: 300.0,
+            segment_count: 0,
+            segment_ids: Vec::new(),
+            created_at: Utc::now() - chrono::Duration::days(1),
+        };
+        tokio::fs::write(dir.join(META_FILE), serde_json::to_vec(&meta).unwrap())
+            .await
+            .unwrap();
+        crate::services::media_scope::attribute(
+            &state.pool,
+            &format!("playback/{id}"),
+            &[camera_id.to_string()],
+            crate::services::media_scope::KIND_PLAYBACK_SESSION,
+        )
+        .await;
+        dir
+    }
+
+    /// The key a session is attributed under must be exactly the key the media guard derives from a
+    /// request for that session's playlist. If these ever drift, every scoped credential silently
+    /// 403s on a session it legitimately owns — and the guard's Unattributed branch makes that look
+    /// like a producer that forgot to register, not like a key mismatch.
+    #[test]
+    fn the_attribution_key_matches_what_the_guard_looks_up() {
+        let id = "pbs_deadbeef";
+        // What `create_session` writes.
+        let written = format!("playback/{id}");
+        // What the guard derives for every file the player fetches beneath that session.
+        for f in ["index.m3u8", "init.mp4", "seg_00042.m4s"] {
+            assert_eq!(
+                crate::services::media_scope::artifact_key(&format!("/media/playback/{id}/{f}"))
+                    .as_deref(),
+                Some(written.as_str()),
+                "guard key for {f} must equal the producer key"
+            );
+        }
+        // And the playlist URL handed to the client resolves to the same row.
+        let playlist_url = format!("/media/playback/{id}/index.m3u8");
+        assert_eq!(
+            crate::services::media_scope::artifact_key(&playlist_url).as_deref(),
+            Some(written.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_session_forgets_its_attribution() {
+        let dir = std::env::temp_dir().join(format!("heldar_pbs_{}", Uuid::new_v4().simple()));
+        let state = test_state_in(dir.clone()).await;
+        let id = "pbs_0123456789abcdef";
+        plant_session(&state, id, "cam_a").await;
+        let key = format!("playback/{id}");
+        assert_eq!(
+            crate::services::media_scope::owners(&state.pool, &key).await,
+            crate::services::media_scope::Owners::Cameras(vec!["cam_a".to_string()])
+        );
+
+        delete_session(&state, id).await.unwrap();
+
+        // The row must go with the artifact: a stale row would keep naming a camera for a directory
+        // that no longer exists, and a recycled id would inherit someone else's scope.
+        assert_eq!(
+            crate::services::media_scope::owners(&state.pool, &key).await,
+            crate::services::media_scope::Owners::Unattributed
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn the_expiry_sweeper_forgets_what_it_removes() {
+        // The sweeper runs in a background task that holds no Principal. It must still clean up the
+        // attribution row, or `media_artifacts` grows one orphan per expired session forever.
+        let dir = std::env::temp_dir().join(format!("heldar_pbs_{}", Uuid::new_v4().simple()));
+        let state = test_state_in(dir.clone()).await;
+        let id = "pbs_fedcba9876543210";
+        plant_session(&state, id, "cam_a").await; // created_at is a day ago -> already expired
+        let key = format!("playback/{id}");
+
+        sweep(&state).await.unwrap();
+
+        assert!(
+            !tokio::fs::try_exists(dir.join(id)).await.unwrap_or(true),
+            "the expired session dir should be gone"
+        );
+        assert_eq!(
+            crate::services::media_scope::owners(&state.pool, &key).await,
+            crate::services::media_scope::Owners::Unattributed
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     /// The dashboard's `to` comes from a minute-granular `datetime-local` control, so it must query

@@ -14,8 +14,8 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 
 use heldar_kernel::auth::{self, Cap, Principal};
-use heldar_kernel::error::AppResult;
-use heldar_kernel::state::AppState;
+use heldar_kernel::error::{AppError, AppResult};
+use heldar_kernel::state::{camera_scope_filter, confine_camera_ids, AppState, CameraOwned};
 
 use crate::config::SearchConfig;
 use crate::query::{self, QueryPlan};
@@ -27,14 +27,82 @@ pub fn router(cfg: Arc<SearchConfig>) -> Router<AppState> {
         .route("/api/v1/search/plan", post(plan_only))
         // Similarity retrieval over stored crop embeddings (issue #38). The body can carry a query
         // image as base64, so this route gets its own pre-deserialization cap.
+        //
+        // It is registered through `search_semantic_scoped`, NOT through `semantic::search_semantic`
+        // directly, so that this route joins the same camera-confinement path as its three siblings
+        // instead of taking `body.cameras` verbatim. See that wrapper for why the confinement lives
+        // here rather than inside the handler.
         .route(
             "/api/v1/search/semantic",
-            post(crate::semantic::search_semantic).layer(DefaultBodyLimit::max(
+            post(search_semantic_scoped).layer(DefaultBodyLimit::max(
                 crate::semantic::SEMANTIC_BODY_LIMIT_BYTES,
             )),
         )
         .route("/api/v1/modules/search/ui/index.js", get(serve_ui))
         .layer(Extension(cfg))
+}
+
+// ---- Camera scope ---------------------------------------------------------
+//
+// Search reads across every fact table on the box, so its `cameras` field is the ONLY thing standing
+// between a camera-scoped credential and the whole fleet's history. Today that field is pure caller
+// convenience — it reads like a scope and is not one. The two helpers below make it one.
+//
+// Note the trap both of them exist to close: every executor downstream treats an EMPTY camera list as
+// "no filter", i.e. all cameras (`query.rs` `camset.is_empty()`, `semantic.rs`
+// `(!cameras.is_empty()).then(...)`). So for a scoped caller an empty list must never survive to the
+// executor — including the degenerate empty-allowlist credential, which must find nothing rather than
+// everything. Both helpers are the identity for `Scope::All`, so every human role, every key minted
+// without a camera list, and the auth-disabled LAN default are unaffected by construction.
+
+/// Confine a CALLER-SUPPLIED camera list (the structured plan's `cameras`, the semantic body's).
+///
+/// Delegates to the kernel's `confine_camera_ids` — verbatim for an unscoped caller, expanded from
+/// empty to the credential's own scope for a scoped one, and refused whole rather than silently
+/// narrowed when the caller names a camera it does not hold.
+fn confine_requested_cameras(
+    principal: &Principal,
+    requested: &[String],
+) -> AppResult<Vec<String>> {
+    let confined = confine_camera_ids(principal, requested)?;
+    if principal.camera_scope().is_some() && confined.is_empty() {
+        // Only reachable for a credential scoped to the empty set. Refuse rather than hand the
+        // executor an empty list, which it would read as "every camera".
+        return Err(AppError::Forbidden(
+            "credential is not scoped to any camera (cannot search)".to_string(),
+        ));
+    }
+    Ok(confined)
+}
+
+/// Confine a PLANNER-PRODUCED camera list (the rule parser's or the LLM's).
+///
+/// Unlike a caller-supplied list this is not a request, so an out-of-scope entry is the planner's
+/// guess rather than the caller's demand and is dropped rather than refused — an LLM naming a camera
+/// that does not exist must not turn a question into a 403. When nothing survives (or the planner
+/// named no camera at all) a scoped caller falls back to its OWN scope, never to "all".
+fn confine_planned_cameras(principal: &Principal, planned: &[String]) -> AppResult<Vec<String>> {
+    let Some(scope) = principal.camera_scope() else {
+        return Ok(planned.to_vec());
+    };
+    if scope.is_empty() {
+        // The degenerate credential again: there is no non-empty list to fall back to, and an empty
+        // one would read as "every camera" downstream. Same refusal as the caller-supplied path.
+        return Err(AppError::Forbidden(
+            "credential is not scoped to any camera (cannot search)".to_string(),
+        ));
+    }
+    let kept: Vec<String> = planned
+        .iter()
+        .filter(|c| scope.contains(*c))
+        .cloned()
+        .collect();
+    if !kept.is_empty() {
+        return Ok(kept);
+    }
+    let mut all: Vec<String> = scope.iter().cloned().collect();
+    all.sort();
+    Ok(all)
 }
 
 /// The built search module UI bundle, embedded at compile time (regenerate with `make module-bundles`
@@ -62,11 +130,24 @@ async fn serve_ui(principal: Principal) -> AppResult<axum::response::Response> {
         .into_response())
 }
 
-async fn cameras(pool: &sqlx::SqlitePool) -> Vec<(String, String)> {
-    sqlx::query_as("SELECT id, name FROM cameras")
-        .fetch_all(pool)
-        .await
-        .unwrap_or_default()
+/// The roster handed to the planner so it can turn "the loading dock camera" into a camera id.
+///
+/// It is a full inventory of names AND ids, so for a scoped credential it is filtered — otherwise the
+/// planner's echoed plan is a roster leak wearing a helper's clothes, and it supplies exactly the ids
+/// every camera-keyed route elsewhere takes as input. `camera_scope_filter` returns `None` for an
+/// unscoped caller, so the query below is byte-identical to today's for every human role.
+async fn cameras(pool: &sqlx::SqlitePool, principal: &Principal) -> Vec<(String, String)> {
+    let scope = camera_scope_filter(principal, "id");
+    let mut sql = "SELECT id, name FROM cameras WHERE 1=1".to_string();
+    if let Some((pred, _)) = &scope {
+        sql.push_str(pred);
+    }
+    let mut q = sqlx::query_as::<_, (String, String)>(&sql);
+    // Bind from the RETURNED vector: the empty-allowlist arm is `" AND 0"` with ZERO binds.
+    for id in scope.iter().flat_map(|(_, ids)| ids) {
+        q = q.bind(id);
+    }
+    q.fetch_all(pool).await.unwrap_or_default()
 }
 
 /// The plate an identity-bearing query targets, if any — covers both the `plate` field AND a `text`
@@ -131,7 +212,11 @@ async fn search_events(
     principal.require_cap(Cap::EventsRead, "search events")?;
     // Sanitize the caller-supplied plan (clamp out-of-range hours, etc.) before executing — the same
     // guard applied to LLM-produced plans — so a hand-crafted QueryPlan can't smuggle invalid filters.
-    let plan = crate::planner::sanitize(plan);
+    let mut plan = crate::planner::sanitize(plan);
+    // ...and confine its `cameras` field, which until now was pure caller convenience: the executor
+    // reads an empty list as "every camera", so an unconfined plan is the whole fleet's history.
+    // The plan is echoed back in the response, so this also keeps the echo honest.
+    plan.cameras = confine_requested_cameras(&principal, &plan.cameras)?;
     let outcome = query::execute(&st.pool, &plan, cfg.max_results).await?;
     log_search(
         &st,
@@ -164,12 +249,16 @@ async fn search_nl(
             "`query` is required".into(),
         ));
     }
-    let cams = cameras(&st.pool).await;
+    let cams = cameras(&st.pool, &principal).await;
     // LLM planner if configured, else the transparent rule parser. The LLM only PLANS.
-    let (plan, planner) = match crate::planner::plan_llm(&st.http, &cfg, q, &cams).await {
+    let (mut plan, planner) = match crate::planner::plan_llm(&st.http, &cfg, q, &cams).await {
         Some(p) => (crate::planner::sanitize(p), "llm"),
         None => (crate::planner::parse_rules(q, &cams), "rules"),
     };
+    // The roster above already confined what the planner could name, but the LLM is free to invent an
+    // id, so the plan is confined again before it executes — and, because it is echoed, before it is
+    // shown. Planner output is narrowed rather than refused; see `confine_planned_cameras`.
+    plan.cameras = confine_planned_cameras(&principal, &plan.cameras)?;
     let outcome = query::execute(&st.pool, &plan, cfg.max_results).await?;
     log_search(
         &st,
@@ -198,17 +287,59 @@ async fn plan_only(
             "`query` is required".into(),
         ));
     }
-    let cams = cameras(&st.pool).await;
-    let (plan, planner) = match crate::planner::plan_llm(&st.http, &cfg, q, &cams).await {
+    let cams = cameras(&st.pool, &principal).await;
+    let (mut plan, planner) = match crate::planner::plan_llm(&st.http, &cfg, q, &cams).await {
         Some(p) => (crate::planner::sanitize(p), "llm"),
         None => (
             crate::planner::parse_rules(body.query.trim(), &cams),
             "rules",
         ),
     };
+    // Confined identically to `search_nl`, so the dry-run shows the plan that WOULD run rather than
+    // one the executor will then narrow — a plan you cannot trust is worse than no dry-run.
+    plan.cameras = confine_planned_cameras(&principal, &plan.cameras)?;
     Ok(Json(
         json!({ "query": body.query, "planner": planner, "plan": plan }),
     ))
+}
+
+/// `POST /api/v1/search/semantic`, brought onto the same camera-confinement path as its three
+/// siblings.
+///
+/// The confinement lives in this wrapper rather than inside `semantic::search_semantic` because the
+/// route table is the thing an auditor reads: a handler registered here without a visible
+/// confinement step is exactly how this route came to be the one search surface that took its
+/// `cameras` field verbatim. Two things are closed:
+///
+/// 1. `body.cameras` is confined like any other caller-supplied list. It matters more here than on
+///    the structured routes: `SimilarFilters.cameras` is `None` when the list is empty, i.e. the
+///    whole box's stored crop embeddings.
+/// 2. `body.zone` is resolved through the kernel's `resource_camera` loader FIRST. Downstream,
+///    `embeddings::resolve_zone_scope` is a bare `SELECT … FROM zones WHERE id = ?` that then pivots
+///    the search onto the zone's owning camera — a zone id is therefore a zone→camera oracle, and a
+///    way to search a camera you do not hold without ever naming it. `resource_camera` refuses an
+///    out-of-scope zone and a nonexistent zone with the SAME error value, so the zone id space cannot
+///    be enumerated either. It runs only for a scoped principal, so an unscoped caller keeps today's
+///    exact behaviour, 404 wording included.
+async fn search_semantic_scoped(
+    State(st): State<AppState>,
+    principal: Principal,
+    Extension(cfg): Extension<Arc<SearchConfig>>,
+    Json(mut body): Json<crate::semantic::SemanticBody>,
+) -> AppResult<Json<Value>> {
+    if principal.camera_scope().is_some() {
+        if let Some(zid) = body
+            .zone
+            .as_deref()
+            .map(str::trim)
+            .filter(|z| !z.is_empty())
+        {
+            st.resource_camera(&principal, CameraOwned::Zone, zid, "run a semantic search")
+                .await?;
+        }
+    }
+    body.cameras = confine_requested_cameras(&principal, &body.cameras)?;
+    crate::semantic::search_semantic(State(st), principal, Extension(cfg), Json(body)).await
 }
 
 fn response(
@@ -229,4 +360,113 @@ fn response(
         "hits": outcome.hits,
         "proof": proof,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use heldar_kernel::auth::Scope;
+    use std::collections::HashSet;
+
+    /// A camera-scoped credential holding every capability. Only `scope` differs from the
+    /// auth-disabled system admin, so any behaviour difference below is attributable to camera scope.
+    fn scoped(cameras: &[&str]) -> Principal {
+        let set: HashSet<String> = cameras.iter().map(|c| c.to_string()).collect();
+        Principal {
+            scope: Scope::Cameras(Arc::new(set)),
+            ..Principal::system_admin()
+        }
+    }
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn confinement_is_the_identity_for_an_unscoped_credential() {
+        // CONSTRAINT 1 + 2: the auth-disabled default and every human role search exactly as today,
+        // INCLUDING the empty list, which for them still means "every camera".
+        let admin = Principal::system_admin();
+        assert_eq!(
+            confine_requested_cameras(&admin, &[]).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            confine_requested_cameras(&admin, &v(&["cam_SENTINEL_B"])).unwrap(),
+            v(&["cam_SENTINEL_B"])
+        );
+        assert_eq!(
+            confine_planned_cameras(&admin, &[]).unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            confine_planned_cameras(&admin, &v(&["cam_SENTINEL_B"])).unwrap(),
+            v(&["cam_SENTINEL_B"])
+        );
+    }
+
+    #[test]
+    fn an_empty_request_never_means_every_camera_for_a_scoped_credential() {
+        // This is the whole trap: every executor downstream reads an empty list as "no filter".
+        let p = scoped(&["cam_a", "cam_c"]);
+        assert_eq!(
+            confine_requested_cameras(&p, &[]).unwrap(),
+            v(&["cam_a", "cam_c"])
+        );
+        assert_eq!(
+            confine_planned_cameras(&p, &[]).unwrap(),
+            v(&["cam_a", "cam_c"])
+        );
+    }
+
+    #[test]
+    fn a_requested_camera_outside_the_scope_is_refused_and_named_in_no_message() {
+        let p = scoped(&["cam_a"]);
+        assert_eq!(
+            confine_requested_cameras(&p, &v(&["cam_a"])).unwrap(),
+            v(&["cam_a"])
+        );
+        for asked in [
+            v(&["cam_SENTINEL_B"]),
+            v(&["cam_a", "cam_SENTINEL_B"]),
+            // A camera that does not exist at all is refused identically to one that does but is
+            // held by someone else — the request cannot be used to probe the roster.
+            v(&["cam_zzz"]),
+        ] {
+            let err = confine_requested_cameras(&p, &asked).unwrap_err();
+            assert!(
+                matches!(err, AppError::Forbidden(_)),
+                "{asked:?} -> {err:?}"
+            );
+            assert!(!err.to_string().contains("cam_SENTINEL_B"));
+            assert!(!err.to_string().contains("cam_zzz"));
+        }
+    }
+
+    #[test]
+    fn a_planned_camera_outside_the_scope_is_dropped_rather_than_refused() {
+        // Planner output is the model's guess, not the caller's demand: an invented id must not turn
+        // a question into a 403. What it must never do is widen the search.
+        let p = scoped(&["cam_a", "cam_c"]);
+        assert_eq!(
+            confine_planned_cameras(&p, &v(&["cam_a", "cam_SENTINEL_B"])).unwrap(),
+            v(&["cam_a"])
+        );
+        // Nothing survived: fall back to the credential's OWN scope, never to "all".
+        assert_eq!(
+            confine_planned_cameras(&p, &v(&["cam_SENTINEL_B", "cam_zzz"])).unwrap(),
+            v(&["cam_a", "cam_c"])
+        );
+    }
+
+    #[test]
+    fn the_degenerate_empty_scope_finds_nothing_rather_than_everything() {
+        // A credential scoped to the empty set has no non-empty list to fall back to, and an empty
+        // one would be read downstream as "every camera" — so both paths refuse, identically.
+        let none = scoped(&[]);
+        let a = confine_requested_cameras(&none, &[]).unwrap_err();
+        let b = confine_planned_cameras(&none, &[]).unwrap_err();
+        assert!(matches!(a, AppError::Forbidden(_)), "got {a:?}");
+        assert_eq!(a.to_string(), b.to_string());
+    }
 }

@@ -34,6 +34,9 @@ async fn export_clip(
 ) -> AppResult<Json<ClipResult>> {
     // Operational action (viewer+); the extractor enforces auth when it is enabled.
     principal.require_cap(Cap::VideoExport, "export clips")?;
+    // Camera scope before any footage is read: an export is an arbitrary time range of this camera's
+    // recordings, so capability alone let a scoped credential export a camera it does not hold.
+    st.camera_scope_check(&principal, &id)?;
     let from = util::parse_rfc3339(&req.from)
         .ok_or_else(|| AppError::BadRequest("invalid `from` timestamp".into()))?;
     let to = util::parse_rfc3339(&req.to)
@@ -65,6 +68,9 @@ async fn snapshot_handler(
 ) -> AppResult<Response> {
     // Operational action (viewer+): a snapshot can contain faces/plates.
     principal.require_cap(Cap::VideoPlayback, "capture snapshots")?;
+    // Camera scope: these bytes are returned INLINE, so no media-plane guard can ever cover this
+    // route — the check has to be here, before a live or recorded frame is grabbed.
+    st.camera_scope_check(&principal, &id)?;
     let bytes = match q.at {
         Some(ref at) => {
             let ts = util::parse_rfc3339(at)

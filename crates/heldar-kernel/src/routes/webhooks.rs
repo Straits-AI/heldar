@@ -117,6 +117,10 @@ async fn create(
         principal.can_manage_registry(),
         "create webhook subscriptions",
     )?;
+    // A webhook is an off-box EVENT egress channel with no camera field: the delivery engine ships
+    // every row of `events`, camera_id included, to an arbitrary URL. Same containment as a backup
+    // destination — a camera-scoped credential cannot create or alter one.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage webhook subscriptions")?;
     let name = body.name.trim();
     if name.is_empty() {
         return Err(AppError::BadRequest("`name` is required".into()));
@@ -195,6 +199,10 @@ async fn update(
         principal.can_manage_registry(),
         "update webhook subscriptions",
     )?;
+    // A webhook is an off-box EVENT egress channel with no camera field: the delivery engine ships
+    // every row of `events`, camera_id included, to an arbitrary URL. Same containment as a backup
+    // destination — a camera-scoped credential cannot create or alter one.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage webhook subscriptions")?;
     let cur = load_subscription(&st.pool, &id).await?;
 
     let name = match body.name {
@@ -287,6 +295,10 @@ async fn delete(
         principal.can_manage_registry(),
         "delete webhook subscriptions",
     )?;
+    // A webhook is an off-box EVENT egress channel with no camera field: the delivery engine ships
+    // every row of `events`, camera_id included, to an arbitrary URL. Same containment as a backup
+    // destination — a camera-scoped credential cannot create or alter one.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage webhook subscriptions")?;
     let res = sqlx::query("DELETE FROM webhook_subscriptions WHERE id = ?")
         .bind(&id)
         .execute(&st.pool)
@@ -325,6 +337,10 @@ async fn test(
         principal.can_manage_registry(),
         "test webhook subscriptions",
     )?;
+    // A webhook is an off-box EVENT egress channel with no camera field: the delivery engine ships
+    // every row of `events`, camera_id included, to an arbitrary URL. Same containment as a backup
+    // destination — a camera-scoped credential cannot create or alter one.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage webhook subscriptions")?;
     let sub = load_subscription(&st.pool, &id).await?;
 
     let delivery_id = format!("whd_{}", Uuid::new_v4().simple());

@@ -130,13 +130,38 @@ pub async fn acquire(
         .unwrap_or(MAX_LEASE_TASKS)
         .clamp(1, MAX_LEASE_TASKS);
 
-    let candidates = sqlx::query_as::<_, AiTask>(
-        "SELECT t.* FROM ai_tasks t JOIN cameras c ON c.id = t.camera_id
-         WHERE t.enabled = 1 AND c.enabled = 1
-         ORDER BY t.id ASC",
-    )
-    .fetch_all(pool)
-    .await?;
+    // The camera predicate belongs HERE, not in the loop below, because the shard is computed from
+    // this list's LENGTH. Filtering after the shard means the index space the shard divides is the
+    // fleet's while the list the worker can actually service is smaller — so a scoped worker leases
+    // the arbitrary intersection of the two, and (worse) tasks in its shard that belong to cameras it
+    // cannot hold are leased by NOBODY. Executed before this fix: a six-task fleet where one scoped
+    // worker joined left one camera's task discovered by nobody and leased by nobody — analysis
+    // silently stopped on a camera the scoped credential had nothing to do with.
+    let mut sql = "SELECT t.* FROM ai_tasks t JOIN cameras c ON c.id = t.camera_id
+         WHERE t.enabled = 1 AND c.enabled = 1"
+        .to_string();
+    let scope_ids: Vec<String> = match camera_scope {
+        Some(allowed) => {
+            let mut ids: Vec<String> = allowed.iter().cloned().collect();
+            ids.sort();
+            if ids.is_empty() {
+                // A scope permitting nothing leases nothing — and must not fall through to the
+                // unfiltered query.
+                sql.push_str(" AND 0");
+            } else {
+                let ph = vec!["?"; ids.len()].join(",");
+                sql.push_str(&format!(" AND t.camera_id IN ({ph})"));
+            }
+            ids
+        }
+        None => Vec::new(),
+    };
+    sql.push_str(" ORDER BY t.id ASC");
+    let mut q = sqlx::query_as::<_, AiTask>(&sql);
+    for id in &scope_ids {
+        q = q.bind(id.clone());
+    }
+    let candidates = q.fetch_all(pool).await?;
 
     // Lease only THIS worker's shard, using the same modulo assignment `GET /ai/tasks` hands out.
     //
@@ -146,7 +171,17 @@ pub async fn acquire(
     // active node. Sharding here also means discovery and leasing agree: a worker can lease exactly
     // the tasks it was told to analyze, and no more. Enforcing it server-side rather than trusting a
     // client-supplied `max_tasks` means a greedy or buggy worker cannot take the whole fleet either.
-    let shard = crate::services::worker_shard::for_worker(pool, candidates.len(), worker_id).await;
+    // ...and the denominator must be the workers that divide the SAME list. `worker_shard`'s
+    // invariant is "every task owned exactly once", which holds only when every worker is dividing
+    // one list; workers on different credentials see different lists, so counting them together
+    // opens exactly the gaps described above. Workers on one api key share a scope, hence a view.
+    let shard = crate::services::worker_shard::for_credential(
+        pool,
+        candidates.len(),
+        api_key_id,
+        worker_id,
+    )
+    .await;
 
     let mut taken = Vec::new();
     for (idx, task) in candidates.into_iter().enumerate() {
@@ -161,8 +196,14 @@ pub async fn acquire(
                 continue;
             }
         }
-        // A camera-scoped credential can only lease tasks on cameras it may address at all.
+        // Redundant now that the SELECT carries the predicate — kept as a belt-and-braces check so
+        // that if the query above is ever edited to drop the filter, this still fails closed rather
+        // than leasing another camera's task.
         if let Some(allowed) = camera_scope {
+            debug_assert!(
+                allowed.contains(&task.camera_id),
+                "candidate query returned an out-of-scope task"
+            );
             if !allowed.contains(&task.camera_id) {
                 continue;
             }
@@ -333,6 +374,58 @@ mod tests {
             .unwrap();
         }
         pool
+    }
+
+    /// A camera-scoped worker joining the fleet must not orphan OTHER cameras' tasks.
+    ///
+    /// The shard used to be computed over the fleet-wide candidate list while the camera filter ran
+    /// afterwards, and the live-worker denominator counted every worker on the box. So a scoped
+    /// worker's slots were carved out of a list it could not service, and the tasks landing in those
+    /// slots were leased by nobody — executed against a six-task fleet, one camera's task went
+    /// discovered-by-nobody and leased-by-nobody. Nothing failed; analysis just stopped.
+    ///
+    /// The invariant: an unscoped fleet's coverage is unchanged by a scoped credential existing.
+    #[tokio::test]
+    async fn a_scoped_worker_cannot_orphan_another_credentials_tasks() {
+        let pool = seeded_pool().await;
+        let scope: std::collections::HashSet<String> = ["cam1".to_string()].into_iter().collect();
+
+        // The scoped credential leases first, taking its own camera's task.
+        let scoped = acquire(&pool, "key_scoped", "ws", None, None, 60, Some(&scope))
+            .await
+            .unwrap();
+        let scoped_tasks: Vec<String> = scoped.tasks.iter().map(|t| t.id.clone()).collect();
+        assert_eq!(
+            scoped_tasks,
+            vec!["ai_1".to_string()],
+            "a cam1-scoped worker must lease exactly cam1's task"
+        );
+
+        // An unscoped worker on a DIFFERENT credential must still reach cam2's task. Before the fix
+        // the scoped worker shifted the fleet-wide shard and this came back empty.
+        let fleet = acquire(&pool, "key_fleet", "wf", None, None, 60, None)
+            .await
+            .unwrap();
+        let fleet_tasks: Vec<String> = fleet.tasks.iter().map(|t| t.id.clone()).collect();
+        assert!(
+            fleet_tasks.contains(&"ai_2".to_string()),
+            "cam2's task was orphaned by the existence of a cam1-scoped worker: {fleet_tasks:?}"
+        );
+    }
+
+    /// A scope permitting nothing must lease nothing — never fall through to the unfiltered query.
+    #[tokio::test]
+    async fn an_empty_scope_leases_nothing() {
+        let pool = seeded_pool().await;
+        let empty: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let got = acquire(&pool, "key_empty", "we", None, None, 60, Some(&empty))
+            .await
+            .unwrap();
+        assert!(
+            got.tasks.is_empty(),
+            "an empty camera scope leased tasks: {:?}",
+            got.tasks.iter().map(|t| t.id.clone()).collect::<Vec<_>>()
+        );
     }
 
     /// Exclusivity + renew + the reclaim-after-expiry that a reaper would otherwise be needed for.

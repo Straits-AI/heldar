@@ -36,6 +36,10 @@ pub fn router() -> Router<AppState> {
 
 async fn discover(State(st): State<AppState>, principal: Principal) -> AppResult<Json<Value>> {
     principal.require(principal.can_manage_registry(), "run ONVIF discovery")?;
+    // Box-level: a WS-Discovery sweep answers "what devices are on this segment", which for a
+    // camera-scoped credential is a list of cameras it does not hold. There is no camera id to scope
+    // it by, so containment can only be a refusal. See `cameras::require_fleet_scope`.
+    crate::routes::cameras::require_fleet_scope(&principal, "run ONVIF discovery")?;
     let devices = onvif::discover(&st.cfg).await?;
     auth::audit(
         &st.pool,
@@ -204,4 +208,59 @@ async fn goto_preset(
     )
     .await;
     Ok(Json(json!({ "ok": true })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::Scope;
+    use crate::error::AppError;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    async fn test_state() -> AppState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let cfg = Arc::new(crate::config::Config::from_env());
+        AppState {
+            recorder: crate::services::recorder::RecorderManager::new(pool.clone(), cfg.clone()),
+            sampler: crate::services::sampler::SamplerManager::new(pool.clone(), cfg.clone()),
+            live: crate::services::live_publisher::LivePublisherManager::new(
+                pool.clone(),
+                cfg.clone(),
+                reqwest::Client::new(),
+            ),
+            mirror: None,
+            consumers: Arc::new(Vec::new()),
+            modules: Arc::new(Vec::new()),
+            catalog: Arc::new(crate::services::registry::CatalogService::new(&cfg)),
+            http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
+            started_at: chrono::Utc::now(),
+            pool,
+            cfg,
+        }
+    }
+
+    fn scoped(cameras: &[&str]) -> Principal {
+        let set: HashSet<String> = cameras.iter().map(|c| c.to_string()).collect();
+        Principal {
+            scope: Scope::Cameras(Arc::new(set)),
+            ..Principal::system_admin()
+        }
+    }
+
+    /// WS-Discovery sweeps the whole segment and answers with the devices on it — for a
+    /// camera-scoped credential, a list of cameras it does not hold. It takes no camera id, so there
+    /// is nothing to scope it by and the refusal happens before the probe leaves the box.
+    #[tokio::test]
+    async fn onvif_discovery_is_refused_to_a_camera_scoped_credential() {
+        let st = test_state().await;
+        let err = discover(State(st), scoped(&["cam_a"])).await.unwrap_err();
+        assert!(matches!(err, AppError::Forbidden(_)), "{err:?}");
+    }
 }

@@ -13,7 +13,7 @@ use uuid::Uuid;
 use crate::auth::{self, Cap, Principal};
 use crate::error::{AppError, AppResult};
 use crate::models::{Zone, ZoneCreate, ZoneEvent, ZoneUpdate};
-use crate::state::AppState;
+use crate::state::{AppState, CameraOwned};
 
 pub fn router() -> Router<AppState> {
     Router::new()
@@ -228,6 +228,10 @@ async fn update_zone(
     Json(body): Json<ZoneUpdate>,
 ) -> AppResult<Json<Zone>> {
     principal.require(principal.can_manage_registry(), "update zones")?;
+    // The zone is addressed by its own id, so resolve its owning camera before the row is disclosed.
+    let _ = st
+        .resource_camera(&principal, CameraOwned::Zone, &zone_id, "update zones")
+        .await?;
     let cur = sqlx::query_as::<_, Zone>("SELECT * FROM zones WHERE id = ?")
         .bind(&zone_id)
         .fetch_optional(&st.pool)
@@ -308,6 +312,11 @@ async fn delete_zone(
     principal: Principal,
 ) -> AppResult<StatusCode> {
     principal.require(principal.can_manage_registry(), "delete zones")?;
+    // Before the DELETE: the bare `rows_affected() == 0` 404 below otherwise distinguishes "another
+    // camera's zone" (204) from "never existed" (404), which enumerates the box's zone id space.
+    let _ = st
+        .resource_camera(&principal, CameraOwned::Zone, &zone_id, "delete zones")
+        .await?;
     let res = sqlx::query("DELETE FROM zones WHERE id = ?")
         .bind(&zone_id)
         .execute(&st.pool)
@@ -493,4 +502,175 @@ async fn zone_occupancy(
         })
         .collect();
     Ok(Json(json!({ "zones": out })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::auth::Scope;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    async fn test_state() -> AppState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let cfg = Arc::new(crate::config::Config::from_env());
+        AppState {
+            recorder: crate::services::recorder::RecorderManager::new(pool.clone(), cfg.clone()),
+            sampler: crate::services::sampler::SamplerManager::new(pool.clone(), cfg.clone()),
+            live: crate::services::live_publisher::LivePublisherManager::new(
+                pool.clone(),
+                cfg.clone(),
+                reqwest::Client::new(),
+            ),
+            mirror: None,
+            consumers: Arc::new(Vec::new()),
+            modules: Arc::new(Vec::new()),
+            catalog: Arc::new(crate::services::registry::CatalogService::new(&cfg)),
+            http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
+            started_at: Utc::now(),
+            pool,
+            cfg,
+        }
+    }
+
+    fn scoped(cameras: &[&str]) -> Principal {
+        let set: HashSet<String> = cameras.iter().map(|c| c.to_string()).collect();
+        Principal {
+            scope: Scope::Cameras(Arc::new(set)),
+            ..Principal::system_admin()
+        }
+    }
+
+    async fn seed(pool: &sqlx::SqlitePool, camera_id: &str, zone_id: &str) {
+        let now = Utc::now();
+        sqlx::query("INSERT INTO cameras (id, name, created_at, updated_at) VALUES (?,?,?,?)")
+            .bind(camera_id)
+            .bind(camera_id)
+            .bind(now)
+            .bind(now)
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO zones (id, camera_id, name, polygon, created_at, updated_at)
+             VALUES (?,?,?,'[[0,0],[0,1],[1,1]]',?,?)",
+        )
+        .bind(zone_id)
+        .bind(camera_id)
+        .bind(zone_id)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn empty_update() -> ZoneUpdate {
+        serde_json::from_value(json!({})).unwrap()
+    }
+
+    /// THE ORACLE TEST. `DELETE /api/v1/zones/{id}` used to answer 204 for another camera's zone and
+    /// 404 for a fabricated one, which enumerates the box's zone id space one probe at a time. Both
+    /// must now be the SAME refusal, byte for byte, naming neither the owner nor the probed id.
+    #[tokio::test]
+    async fn a_scoped_key_cannot_distinguish_another_cameras_zone_from_a_missing_one() {
+        let st = test_state().await;
+        seed(&st.pool, "cam_a", "zone_a").await;
+        seed(&st.pool, "cam_sentinel_b", "zone_b").await;
+        let p = scoped(&["cam_a"]);
+
+        for (out_of_scope, nonexistent) in [
+            (
+                delete_zone(State(st.clone()), Path("zone_b".into()), p.clone())
+                    .await
+                    .unwrap_err(),
+                delete_zone(State(st.clone()), Path("zone_zzz".into()), p.clone())
+                    .await
+                    .unwrap_err(),
+            ),
+            (
+                update_zone(
+                    State(st.clone()),
+                    Path("zone_b".into()),
+                    p.clone(),
+                    Json(empty_update()),
+                )
+                .await
+                .unwrap_err(),
+                update_zone(
+                    State(st.clone()),
+                    Path("zone_zzz".into()),
+                    p.clone(),
+                    Json(empty_update()),
+                )
+                .await
+                .unwrap_err(),
+            ),
+        ] {
+            assert!(matches!(out_of_scope, AppError::Forbidden(_)));
+            assert!(matches!(nonexistent, AppError::Forbidden(_)));
+            assert_eq!(out_of_scope.to_string(), nonexistent.to_string());
+            let msg = out_of_scope.to_string();
+            assert!(!msg.contains("cam_sentinel_b"), "{msg}");
+            assert!(!msg.contains("zone_b"), "{msg}");
+        }
+
+        // And the refusal is real: the row survived.
+        let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM zones WHERE id = 'zone_b'")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap();
+        assert_eq!(n, 1, "another camera's zone must not be deletable");
+    }
+
+    /// Constraint 2: an unscoped credential sees NO change — including the 404 body for a missing zone.
+    #[tokio::test]
+    async fn an_unscoped_principal_is_unaffected() {
+        let st = test_state().await;
+        seed(&st.pool, "cam_sentinel_b", "zone_b").await;
+        let admin = Principal::system_admin();
+
+        match delete_zone(State(st.clone()), Path("zone_zzz".into()), admin.clone())
+            .await
+            .unwrap_err()
+        {
+            AppError::NotFound(m) => assert_eq!(m, "zone zone_zzz not found"),
+            other => panic!("expected the pre-existing 404, got {other:?}"),
+        }
+        // ...and it can still delete any camera's zone, exactly as before.
+        assert_eq!(
+            delete_zone(State(st.clone()), Path("zone_b".into()), admin)
+                .await
+                .unwrap(),
+            StatusCode::NO_CONTENT
+        );
+    }
+
+    /// Constraint: no over-blocking. A scoped key still owns its own camera's zones.
+    #[tokio::test]
+    async fn a_scoped_principal_still_edits_its_own_zone() {
+        let st = test_state().await;
+        seed(&st.pool, "cam_a", "zone_a").await;
+        let p = scoped(&["cam_a"]);
+        assert!(update_zone(
+            State(st.clone()),
+            Path("zone_a".into()),
+            p.clone(),
+            Json(empty_update()),
+        )
+        .await
+        .is_ok());
+        assert_eq!(
+            delete_zone(State(st.clone()), Path("zone_a".into()), p)
+                .await
+                .unwrap(),
+            StatusCode::NO_CONTENT
+        );
+    }
 }

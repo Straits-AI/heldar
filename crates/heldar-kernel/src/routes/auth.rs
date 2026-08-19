@@ -48,10 +48,11 @@ const MIN_PASSWORD_LEN: usize = 8;
 /// away and left no distinguishable trace.
 const PRIVILEGED_CAPS: [Cap; 3] = [Cap::Admin, Cap::RegistryManage, Cap::GateOperate];
 
-/// Capabilities that read CROSS-CAMERA tables. There is zero tenancy in the schema (no `site_id`
-/// predicate anywhere), so a camera scope cannot filter them and would be security theatre — refuse the
-/// combination at mint time rather than ship a boundary that silently does not hold.
-const UNSCOPABLE_CAPS: [Cap; 2] = [Cap::EventsRead, Cap::IdentityRead];
+/// Capabilities that read CROSS-CAMERA tables — defined in `auth.rs` beside `Cap` so the mint-time
+/// refusal here and the read-path enforcement in `Principal::from_api_key` share ONE list. They were
+/// briefly enforced by two different tests of the same idea, and that is precisely how the mint-time
+/// refusal came to be defeated by construction.
+use crate::auth::UNSCOPABLE_CAPS;
 
 async fn login(
     State(st): State<AppState>,
@@ -205,6 +206,11 @@ async fn list_users(
     principal: Principal,
 ) -> AppResult<Json<Vec<UserView>>> {
     principal.require(principal.can_admin(), "manage users")?;
+    // Same rule as the key listing and as this file's create/update/delete: a camera-scoped
+    // credential must not touch the credential surface AT ALL, read included. The operator roster is
+    // not camera-scopable — there is no camera to filter it by — so refusal is the only coherent
+    // answer.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage users")?;
     let users = sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY username ASC")
         .fetch_all(&st.pool)
         .await?;
@@ -217,6 +223,13 @@ async fn create_user(
     Json(body): Json<UserCreate>,
 ) -> AppResult<(StatusCode, Json<UserView>)> {
     principal.require(principal.can_admin(), "create users")?;
+    // A camera-scoped credential must not touch the credential surface AT ALL. Minting a key, or
+    // widening its own, escapes camera scope in ONE request without going near a camera-keyed route —
+    // and a new key is returned with its plaintext token. Users are worse: they carry Scope::All by
+    // construction. Refusing the whole surface is the containment; a subset check would still let a
+    // scoped key mint a peer with a DIFFERENT camera, and there is no camera to scope this route by.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage users")?;
+
     let username = body.username.trim();
     if username.is_empty() {
         return Err(AppError::BadRequest("`username` is required".into()));
@@ -272,6 +285,9 @@ async fn update_user(
     Json(body): Json<UserUpdate>,
 ) -> AppResult<Json<UserView>> {
     principal.require(principal.can_admin(), "modify users")?;
+    // See create_user: users carry Scope::All by construction, so a camera-scoped credential editing
+    // one is a scope escape with extra steps.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage users")?;
     let cur = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
         .bind(&id)
         .fetch_optional(&st.pool)
@@ -372,6 +388,10 @@ async fn unlock_user(
     Path(id): Path<String>,
 ) -> AppResult<Json<UserView>> {
     principal.require(principal.can_admin(), "unlock users")?;
+    // The ninth credential-surface handler; the other eight already refuse. Undoing a brute-force
+    // lockout on an arbitrary account is a credential-surface write, and the 200-vs-404 is an id
+    // oracle that returns the full UserView on a hit.
+    crate::routes::cameras::require_fleet_scope(&principal, "unlock users")?;
     let res =
         sqlx::query("UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE id = ?")
             .bind(&id)
@@ -394,6 +414,13 @@ async fn delete_user(
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
     principal.require(principal.can_admin(), "delete users")?;
+    // A camera-scoped credential must not touch the credential surface AT ALL. Minting a key, or
+    // widening its own, escapes camera scope in ONE request without going near a camera-keyed route —
+    // and a new key is returned with its plaintext token. Users are worse: they carry Scope::All by
+    // construction. Refusing the whole surface is the containment; a subset check would still let a
+    // scoped key mint a peer with a DIFFERENT camera, and there is no camera to scope this route by.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage users")?;
+
     if principal.id == id {
         return Err(AppError::BadRequest(
             "cannot delete your own account".into(),
@@ -526,9 +553,15 @@ fn validate_grant(
         }
     };
     if scope_kind == "cameras" {
+        // `expanded()`, not `contains()`: `Cap::Admin` implies every capability at REQUEST time, so a
+        // grant of `admin` is a grant of the unscopable caps whether or not their bits were listed.
+        // Testing the raw bits here let `{"capabilities":["admin"],"scope_kind":"cameras"}` mint
+        // cleanly and then satisfy the very checks this refusal exists to prevent — the refusal was
+        // defeated by construction. Both sides now read the same expansion.
+        let effective = set.expanded();
         let unscopable: Vec<&str> = UNSCOPABLE_CAPS
             .iter()
-            .filter(|c| set.contains(**c))
+            .filter(|c| effective.contains(**c))
             .map(|c| c.slug())
             .collect();
         if !unscopable.is_empty() {
@@ -544,6 +577,13 @@ fn validate_grant(
                     .into(),
             ));
         }
+        // An empty id is not a camera. It would sit in the allowlist matching nothing while making
+        // the scope look populated, and it is the value the audit derivation treats as "no subject".
+        if scope_cameras.iter().any(|c| c.trim().is_empty()) {
+            return Err(AppError::BadRequest(
+                "`scope_cameras` must not contain an empty camera id".into(),
+            ));
+        }
     }
     Ok((
         set.slugs().into_iter().map(str::to_string).collect(),
@@ -557,6 +597,11 @@ async fn list_api_keys(
     principal: Principal,
 ) -> AppResult<Json<Vec<ApiKeyView>>> {
     principal.require(principal.can_admin(), "manage API keys")?;
+    // The READ is as much of the credential surface as the writes its siblings guard: `api_key_view`
+    // serialises `scope_cameras`, so this listing hands a camera-scoped caller every other
+    // integrator's camera allowlist — the fleet roster, and the exact ids every camera-keyed route
+    // takes as input. It was the one member of the create/update/delete batch left unguarded.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage API keys")?;
     let keys = sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys ORDER BY created_at DESC")
         .fetch_all(&st.pool)
         .await?;
@@ -573,6 +618,13 @@ async fn create_api_key(
     Json(body): Json<ApiKeyCreate>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
     principal.require(principal.can_admin(), "create API keys")?;
+    // A camera-scoped credential must not touch the credential surface AT ALL. Minting a key, or
+    // widening its own, escapes camera scope in ONE request without going near a camera-keyed route —
+    // and a new key is returned with its plaintext token. Users are worse: they carry Scope::All by
+    // construction. Refusing the whole surface is the containment; a subset check would still let a
+    // scoped key mint a peer with a DIFFERENT camera, and there is no camera to scope this route by.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage API keys")?;
+
     if body.name.trim().is_empty() {
         return Err(AppError::BadRequest("`name` is required".into()));
     }
@@ -680,6 +732,13 @@ async fn update_api_key(
     Json(body): Json<ApiKeyUpdate>,
 ) -> AppResult<Json<ApiKeyView>> {
     principal.require(principal.can_admin(), "modify API keys")?;
+    // A camera-scoped credential must not touch the credential surface AT ALL. Minting a key, or
+    // widening its own, escapes camera scope in ONE request without going near a camera-keyed route —
+    // and a new key is returned with its plaintext token. Users are worse: they carry Scope::All by
+    // construction. Refusing the whole surface is the containment; a subset check would still let a
+    // scoped key mint a peer with a DIFFERENT camera, and there is no camera to scope this route by.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage API keys")?;
+
     let cur = sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = ?")
         .bind(&id)
         .fetch_optional(&st.pool)
@@ -776,6 +835,13 @@ async fn delete_api_key(
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
     principal.require(principal.can_admin(), "delete API keys")?;
+    // A camera-scoped credential must not touch the credential surface AT ALL. Minting a key, or
+    // widening its own, escapes camera scope in ONE request without going near a camera-keyed route —
+    // and a new key is returned with its plaintext token. Users are worse: they carry Scope::All by
+    // construction. Refusing the whole surface is the containment; a subset check would still let a
+    // scoped key mint a peer with a DIFFERENT camera, and there is no camera to scope this route by.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage API keys")?;
+
     let res = sqlx::query("DELETE FROM api_keys WHERE id = ?")
         .bind(&id)
         .execute(&st.pool)
@@ -798,6 +864,30 @@ async fn delete_api_key(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `UNSCOPABLE_CAPS` refusal was defeated by construction: it tested the RAW bits, so a grant
+    /// of `admin` — which implies every capability at request time — sailed past a check aimed at
+    /// exactly that combination, then satisfied `require_cap` for the caps it had just been refused.
+    #[test]
+    fn an_admin_grant_cannot_carry_a_camera_scope() {
+        let err =
+            validate_grant(&["admin".into()], "cameras", &["cam_a".into()], true).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("events:read") || msg.contains("identity:read"),
+            "an admin grant must be refused a camera scope, naming the unscopable caps; got {msg}"
+        );
+        // Spelling the cap out was already refused; the point is that `admin` now is too.
+        assert!(
+            validate_grant(&["events:read".into()], "cameras", &["cam_a".into()], false).is_err()
+        );
+        // And the combinations that were always legitimate still are.
+        assert!(validate_grant(&["admin".into()], "all", &[], true).is_ok());
+        assert!(
+            validate_grant(&["camera:read".into()], "cameras", &["cam_a".into()], false).is_ok()
+        );
+    }
+
     use crate::config::Config;
     use crate::services::recorder::RecorderManager;
     use crate::services::sampler::SamplerManager;

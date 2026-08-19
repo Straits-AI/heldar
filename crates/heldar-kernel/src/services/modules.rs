@@ -162,8 +162,15 @@ pub async fn register(
 
     let mut tx = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO api_keys (id, name, key_hash, key_prefix, role, active, created_at, capabilities)
-         VALUES (?,?,?,?,?,1,?,?)",
+        // scope_kind is bound EXPLICITLY. Omitting it took the column default `'all'` from migration
+        // 0012, so registering a module minted an UNSCOPED key and handed back its plaintext token —
+        // a scope escape by column default, reachable without touching a camera-keyed route. A sidecar
+        // is registered by an unscoped admin (routes::modules::register refuses a scoped caller), so
+        // 'all' is correct here; it is written down rather than defaulted, so the next column added
+        // cannot silently re-open this.
+        "INSERT INTO api_keys (id, name, key_hash, key_prefix, role, active, created_at, capabilities,
+                               scope_kind)
+         VALUES (?,?,?,?,?,1,?,?,'all')",
     )
     .bind(&api_key_id)
     .bind(format!("module:{}", req.id))

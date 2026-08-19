@@ -424,15 +424,34 @@ async fn bulk_config(
         "run a bulk camera configuration",
     )?;
 
-    // Resolve the target set: an explicit list, or every enabled camera.
+    // Resolve the target set, CONFINED to the caller's camera scope. This is the one handler in this
+    // file that does not reach a camera through `provider_for`, so it is the one that has to confine
+    // its own input.
+    //
+    // Both arms matter. An explicit list must be a subset of the scope (`confine_camera_ids` refuses
+    // a superset rather than silently narrowing it). The `None` arm — "every enabled camera" — is the
+    // sharper of the two: it used to expand to the whole fleet, and even though every per-camera step
+    // would then be refused by `provider_for`, the response still carries one `BulkCameraResult` per
+    // camera, i.e. the complete roster, which is precisely the input every other camera-keyed route
+    // needs. Filtering the query keeps "every enabled camera" honest for an unscoped caller and makes
+    // it "every enabled camera I hold" for a scoped one.
     let ids: Vec<String> = match &body.camera_ids {
-        Some(list) => list.clone(),
+        Some(list) => crate::state::confine_camera_ids(&principal, list)?,
         None => {
-            sqlx::query_scalar::<_, String>(
-                "SELECT id FROM cameras WHERE enabled = 1 ORDER BY id ASC",
-            )
-            .fetch_all(&st.pool)
-            .await?
+            let mut sql = "SELECT id FROM cameras WHERE enabled = 1".to_string();
+            let scope = crate::state::camera_scope_filter(&principal, "id");
+            if let Some((pred, _)) = &scope {
+                sql.push_str(pred);
+            }
+            sql.push_str(" ORDER BY id ASC");
+            let mut q = sqlx::query_scalar::<_, String>(&sql);
+            // Bind from the RETURNED vector, never from `camera_scope()`: the empty-allowlist arm
+            // yields `" AND 0"` with ZERO binds, and iterating the scope instead would desync the
+            // parameter count.
+            for cam in scope.iter().flat_map(|(_, ids)| ids) {
+                q = q.bind(cam);
+            }
+            q.fetch_all(&st.pool).await?
         }
     };
 
@@ -596,12 +615,165 @@ fn action_name(action: &BulkAction) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::auth::Scope;
     use axum::body::Body;
-    use axum::extract::Path;
+    use axum::extract::{Path, State};
     use axum::http::{Request, StatusCode};
     use axum::routing::{get, post};
     use axum::Router;
+    use std::collections::HashSet;
+    use std::sync::Arc;
     use tower::Service;
+
+    async fn test_state() -> AppState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let cfg = Arc::new(crate::config::Config::from_env());
+        AppState {
+            recorder: crate::services::recorder::RecorderManager::new(pool.clone(), cfg.clone()),
+            sampler: crate::services::sampler::SamplerManager::new(pool.clone(), cfg.clone()),
+            live: crate::services::live_publisher::LivePublisherManager::new(
+                pool.clone(),
+                cfg.clone(),
+                reqwest::Client::new(),
+            ),
+            mirror: None,
+            consumers: Arc::new(Vec::new()),
+            modules: Arc::new(Vec::new()),
+            catalog: Arc::new(crate::services::registry::CatalogService::new(&cfg)),
+            http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
+            started_at: Utc::now(),
+            pool,
+            cfg,
+        }
+    }
+
+    fn scoped(cameras: &[&str]) -> Principal {
+        let set: HashSet<String> = cameras.iter().map(|c| c.to_string()).collect();
+        Principal {
+            scope: Scope::Cameras(Arc::new(set)),
+            ..Principal::system_admin()
+        }
+    }
+
+    /// An ENABLED camera with no address — the bulk action itself will fail per-camera (not
+    /// configurable), which is irrelevant here: what is under test is which cameras are TARGETED.
+    async fn seed_camera(pool: &sqlx::SqlitePool, id: &str) {
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO cameras (id, name, enabled, created_at, updated_at) VALUES (?,?,1,?,?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    fn set_ntp_request(camera_ids: Option<Vec<&str>>) -> BulkConfigRequest {
+        BulkConfigRequest {
+            camera_ids: camera_ids.map(|v| v.into_iter().map(str::to_string).collect()),
+            action: BulkAction::SetNtp {
+                ntp_server: "pool.ntp.org".to_string(),
+            },
+        }
+    }
+
+    /// `camera_ids: null` means "every enabled camera". For a camera-scoped credential that used to
+    /// mean the whole fleet — and even though each per-camera step is refused by `provider_for`, the
+    /// response still carries one result row PER CAMERA, which is the complete roster and exactly the
+    /// input every camera-keyed route needs. The target set must be confined, not just the actions.
+    #[tokio::test]
+    async fn a_bulk_run_over_every_camera_is_confined_to_the_credentials_cameras() {
+        let st = test_state().await;
+        seed_camera(&st.pool, "cam_a").await;
+        seed_camera(&st.pool, "cam_sentinel_b").await;
+
+        let resp = bulk_config(
+            State(st.clone()),
+            scoped(&["cam_a"]),
+            Json(set_ntp_request(None)),
+        )
+        .await
+        .unwrap()
+        .0;
+        let targeted: Vec<&str> = resp.results.iter().map(|r| r.camera_id.as_str()).collect();
+        assert_eq!(targeted, vec!["cam_a"]);
+        // Total containment, over the SERIALIZED body: the sentinel must not appear anywhere, in a
+        // camera_id or inside a per-camera error string.
+        let body = serde_json::to_string(&resp).unwrap();
+        assert!(!body.contains("cam_sentinel_b"), "{body}");
+    }
+
+    /// CONSTRAINT 2. An unscoped credential — every human role, and every key minted without a
+    /// camera list — still targets the whole fleet. The confinement must be invisible to it.
+    #[tokio::test]
+    async fn an_unscoped_credential_still_targets_every_enabled_camera() {
+        let st = test_state().await;
+        seed_camera(&st.pool, "cam_a").await;
+        seed_camera(&st.pool, "cam_sentinel_b").await;
+
+        let resp = bulk_config(
+            State(st.clone()),
+            Principal::system_admin(),
+            Json(set_ntp_request(None)),
+        )
+        .await
+        .unwrap()
+        .0;
+        let targeted: Vec<&str> = resp.results.iter().map(|r| r.camera_id.as_str()).collect();
+        assert_eq!(targeted, vec!["cam_a", "cam_sentinel_b"]);
+    }
+
+    /// An EXPLICIT list naming a camera outside the scope is refused whole, not silently narrowed —
+    /// a caller that asked for a camera it does not hold has made an error worth reporting. The
+    /// refusal names no camera, so it cannot be used to test ids one at a time.
+    #[tokio::test]
+    async fn an_explicit_out_of_scope_target_list_is_refused_and_names_no_camera() {
+        let st = test_state().await;
+        seed_camera(&st.pool, "cam_a").await;
+        seed_camera(&st.pool, "cam_sentinel_b").await;
+        let p = scoped(&["cam_a"]);
+
+        for list in [
+            vec!["cam_sentinel_b"],
+            vec!["cam_a", "cam_sentinel_b"],
+            // A camera that does not exist at all is refused identically — no existence oracle.
+            vec!["cam_zzz"],
+        ] {
+            let err = bulk_config(
+                State(st.clone()),
+                p.clone(),
+                Json(set_ntp_request(Some(list.clone()))),
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(err, AppError::Forbidden(_)), "{list:?} -> {err:?}");
+            let msg = err.to_string();
+            assert!(!msg.contains("cam_sentinel_b"), "{msg}");
+            assert!(!msg.contains("cam_zzz"), "{msg}");
+        }
+
+        // No over-blocking: its OWN camera still runs.
+        let resp = bulk_config(
+            State(st.clone()),
+            p,
+            Json(set_ntp_request(Some(vec!["cam_a"]))),
+        )
+        .await
+        .unwrap()
+        .0;
+        assert_eq!(resp.results.len(), 1);
+        assert_eq!(resp.results[0].camera_id, "cam_a");
+    }
 
     async fn send(app: &mut Router, method: &str, uri: &str) -> (StatusCode, String) {
         let req = Request::builder()

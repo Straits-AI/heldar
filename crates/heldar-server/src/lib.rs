@@ -15,10 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use axum::extract::{FromRequestParts, Request, State};
-use axum::http::{HeaderValue, StatusCode};
-use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::http::HeaderValue;
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
@@ -55,8 +52,33 @@ pub trait Verticals: Send + Sync {
         Ok(())
     }
     /// Spawn vertical background loops (use [`spawn_supervised`] for resilience).
+    ///
+    /// A loop holds NO principal, so nothing it does is scope-checked. That is the sharpest edge in
+    /// this trait: if a camera-scoped credential can write state your loop later acts on, the loop
+    /// executes that write with no scope at all. In this workspace an authorised `PATCH` of one
+    /// camera's `retention_hours` made the retention sweeper delete a DIFFERENT camera's recordings —
+    /// every guard answered correctly; the damage happened afterwards. Retention now evicts on a
+    /// per-camera fair share for exactly this reason. If your loop consumes operator-writable state,
+    /// bound each camera's effect on the others.
     fn spawn_loops(&self, _pool: &sqlx::SqlitePool) {}
     /// Merge vertical routers onto the app (inside the /api/v1 auth floor).
+    ///
+    /// # What you get, and what you must do yourself
+    ///
+    /// AUTHENTICATION is structural: this runs before `require_api_auth` is layered on, so a merged
+    /// route cannot be unauthenticated by accident.
+    ///
+    /// CAMERA SCOPE is not. An authenticated `Principal` may carry `Scope::Cameras`, and nothing
+    /// forces a handler to consult it — in THIS workspace 47 routes across three app crates shipped
+    /// with no scope call at all, with the primitives public in a crate they already depended on.
+    /// Use them: `heldar_kernel::routes::cameras::require_fleet_scope` to refuse a scoped credential
+    /// outright, `heldar_kernel::state::{camera_scope_filter, confine_camera_ids, camera_selection}`
+    /// to confine reads, writes and deferred work. Scope is orthogonal to role — `Cap::Admin` does
+    /// NOT exempt a credential — and a route keyed by a resource id rather than a camera id still
+    /// has to resolve its owning camera.
+    ///
+    /// Assert it with `heldar_testkit::Census`, pointed at your own source roots AND this
+    /// workspace's, so the composed surface is checked rather than each half separately.
     fn merge_routes(&self, router: Router<AppState>) -> Router<AppState> {
         router
     }
@@ -131,6 +153,9 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
             .await
             .unwrap_or_default();
     cfg.log_machine_auth_banner(&legacy_keys);
+    // Name the size of the clip-attribution cliff (see the fn doc) instead of letting it surface as
+    // "my scoped key gets 403 on an old clip".
+    log_unattributed_clips(&pool, &cfg.clips_dir).await;
     // Release any transient segment read-locks left by a crash mid clip/snapshot export.
     db::clear_segment_read_locks(&pool)
         .await
@@ -468,8 +493,16 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
         .merge(heldar_search::routes::router(search_cfg.clone()));
     // Proprietary verticals merge their routers via the seam (a no-op in the open build).
     // Recorded media (/media/*) is the same sensitive footage the API gates — so guard it with the
-    // SAME auth when enabled. The browser sends the session cookie with <img>/<video> requests, so the
-    // dashboard keeps working; an unauthenticated client gets 401. No-op when auth is disabled.
+    // SAME auth AND the same camera scope when enabled. The browser sends the session cookie with
+    // <img>/<video> requests, so the dashboard keeps working; an unauthenticated client gets 401.
+    // No-op when auth is disabled.
+    //
+    // The guard itself lives in the kernel (`services::media_scope`) rather than here, because the
+    // flat subtrees (clips, playback sessions, evidence snapshots, archives) name no camera in their
+    // path and are resolved through the `media_artifacts` sidecar the kernel's producers write. Every
+    // `nest_service` prefix below must be recognised by `media_scope::requirement`, which refuses an
+    // unrecognised prefix outright — adding a sixth subtree here without extending it fails CLOSED
+    // (403 for every credential) instead of serving it ungated.
     let media = Router::new()
         .nest_service("/media/recordings", ServeDir::new(&cfg.recordings_dir))
         .nest_service("/media/clips", ServeDir::new(&cfg.clips_dir))
@@ -478,7 +511,7 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
         .nest_service("/media/archives", ServeDir::new(&cfg.archive_dir))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            media_guard,
+            services::media_scope::guard,
         ));
     // Authentication floor for the ENTIRE /api/v1 surface — kernel, open apps, and verticals
     // alike (issue #52): a handler that forgets to name `Principal` can no longer answer
@@ -638,68 +671,50 @@ async fn run_subcommand(cmd: &str, cfg: &Config) -> anyhow::Result<()> {
     }
 }
 
-/// The capability a `/media/*` subtree requires, and whether its path names a camera.
+/// Count clip files on disk that predate the `media_artifacts` sidecar, and say so once at boot.
 ///
-/// `/media/*` serves the SAME footage the API gates, so it must be gated the same way. Resolving a
-/// principal and discarding it — which is what this used to do — meant any authenticated credential,
-/// including a compromised AI worker's, could read every recording, clip, snapshot and backup archive
-/// straight off the media plane while the API surface above it was carefully scoped.
-///
-/// `Some(true)` means the first path segment is a camera id, so camera scope is enforceable here.
-fn media_requirement(path: &str) -> Option<(auth::Cap, bool)> {
-    // Recordings are stored camera-partitioned (`recordings/<camera_id>/<segment>`), so a
-    // camera-scoped credential can be held to its cameras. Clips/snapshots are flat, generated
-    // filenames with no camera in the path; they are gated by capability only (scoping them would
-    // need a DB lookup per byte-range request — tracked as a follow-up, not silently ignored).
-    match path.trim_start_matches('/') {
-        p if p.starts_with("media/recordings") => Some((auth::Cap::VideoPlayback, true)),
-        p if p.starts_with("media/playback") => Some((auth::Cap::VideoPlayback, false)),
-        p if p.starts_with("media/clips") => Some((auth::Cap::VideoExport, false)),
-        p if p.starts_with("media/snapshots") => Some((auth::Cap::VideoPlayback, false)),
-        // Backup archives are a whole-system export — admin only, never a viewer surface.
-        p if p.starts_with("media/archives") => Some((auth::Cap::Admin, false)),
-        _ => None,
-    }
-}
-
-/// The camera id in `/media/recordings/<camera_id>/...`, if present.
-fn media_camera_id(path: &str) -> Option<&str> {
-    path.trim_start_matches('/')
-        .strip_prefix("media/recordings/")?
-        .split('/')
-        .next()
-        .filter(|s| !s.is_empty())
-}
-
-/// Auth guard for the recorded-media plane. When auth is enabled, requires a valid principal (resolved
-/// exactly like the API via the `Principal` extractor — cookie / Bearer / API key), the capability that
-/// subtree demands, and — for recordings, whose paths name their camera — that the credential is scoped
-/// to that camera. 401 unauthenticated, 403 without the capability or outside scope. A no-op
-/// pass-through when auth is disabled (the LAN-appliance default).
-async fn media_guard(State(st): State<AppState>, req: Request, next: Next) -> Response {
-    if !st.cfg.auth_enabled {
-        return next.run(req).await;
-    }
-    let path = req.uri().path().to_string();
-    let (mut parts, body) = req.into_parts();
-    let principal = match auth::Principal::from_request_parts(&mut parts, &st).await {
-        Ok(p) => p,
-        Err(_) => return StatusCode::UNAUTHORIZED.into_response(),
+/// There is no `clips` table and no camera id inside `clip_<uuid>.mp4`, so migration 0013 cannot
+/// backfill attribution for clips exported before it ran. Those files stay readable for every
+/// unscoped credential (which is every human role) and become 403 for a camera-SCOPED credential.
+/// That is the fail-closed answer, but it is a cliff — so report its exact size at boot rather than
+/// letting an operator discover it as a support ticket. Best-effort: never fails the boot.
+async fn log_unattributed_clips(pool: &sqlx::SqlitePool, clips_dir: &std::path::Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(clips_dir).await else {
+        return;
     };
-    if let Some((cap, scoped)) = media_requirement(&path) {
-        if !principal.has(cap) {
-            return StatusCode::FORBIDDEN.into_response();
+    // ONE query, not one per file: a box with thousands of retained clips must not pay thousands of
+    // round-trips on the boot path. A query failure yields an empty set, which would over-report, so
+    // bail instead of guessing.
+    let Ok(attributed) =
+        sqlx::query_scalar::<_, String>("SELECT path FROM media_artifacts WHERE kind = 'clip'")
+            .fetch_all(pool)
+            .await
+            .map(|v| v.into_iter().collect::<std::collections::HashSet<_>>())
+    else {
+        return;
+    };
+    let mut on_disk = 0usize;
+    let mut unattributed = 0usize;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".mp4") {
+            continue;
         }
-        if scoped {
-            // A path we cannot attribute to a camera is refused rather than served: an unattributable
-            // recording path under a camera-scoped credential is exactly the case scope exists for.
-            match media_camera_id(&path) {
-                Some(cam) if principal.camera_allowed(cam) => {}
-                _ => return StatusCode::FORBIDDEN.into_response(),
-            }
+        on_disk += 1;
+        if !attributed.contains(&format!("clips/{name}")) {
+            unattributed += 1;
         }
     }
-    next.run(Request::from_parts(parts, body)).await
+    if unattributed > 0 {
+        tracing::warn!(
+            target: "heldar::security",
+            clips_on_disk = on_disk,
+            unattributed = unattributed,
+            "{unattributed} of {on_disk} exported clip(s) predate media attribution and carry no \
+             owning camera. They remain readable for every unscoped credential (all human roles) and \
+             are refused for camera-SCOPED credentials. Clips exported from now on are attributed."
+        );
+    }
 }
 
 fn init_tracing() {
@@ -801,48 +816,31 @@ mod tests {
         );
     }
 
+    /// The media plane's own rules moved into `heldar_kernel::services::media_scope` (which owns the
+    /// `media_artifacts` attribution the flat subtrees need) and are tested there. What stays this
+    /// crate's responsibility is that the two sides agree: every prefix mounted below is one the
+    /// guard recognises. `requirement` refuses anything it does not recognise, for EVERY credential,
+    /// so a prefix mounted here and missed there is a hard 403, not an ungated subtree — this test
+    /// turns that into a build-time-visible failure instead of a production one.
     #[test]
-    fn media_subtrees_demand_the_right_capability() {
-        use heldar_kernel::auth::Cap;
-        // The hole this closes: every one of these used to be served to ANY authenticated
-        // credential, including a compromised AI worker's, because the guard resolved a principal
-        // and threw it away.
-        assert_eq!(
-            media_requirement("/media/recordings/cam_a/x.mp4"),
-            Some((Cap::VideoPlayback, true))
-        );
-        assert_eq!(
-            media_requirement("/media/playback/pbs_1/index.m3u8"),
-            Some((Cap::VideoPlayback, false))
-        );
-        assert_eq!(
-            media_requirement("/media/clips/abc.mp4"),
-            Some((Cap::VideoExport, false))
-        );
-        assert_eq!(
-            media_requirement("/media/snapshots/s.jpg"),
-            Some((Cap::VideoPlayback, false))
-        );
-        // A whole-system export is admin-only, not a viewer surface.
-        assert_eq!(
-            media_requirement("/media/archives/backup.tar"),
-            Some((Cap::Admin, false))
-        );
-        // Anything outside the media plane is not this guard's business.
-        assert_eq!(media_requirement("/api/v1/cameras"), None);
-    }
-
-    #[test]
-    fn recording_paths_attribute_to_their_camera() {
-        assert_eq!(
-            media_camera_id("/media/recordings/cam_a/2026/x.mp4"),
-            Some("cam_a")
-        );
-        assert_eq!(media_camera_id("/media/recordings/cam_a"), Some("cam_a"));
-        // Unattributable paths must NOT fall through to "allowed" — the guard refuses them, which is
-        // only correct if this returns None rather than guessing.
-        assert_eq!(media_camera_id("/media/recordings/"), None);
-        assert_eq!(media_camera_id("/media/clips/abc.mp4"), None);
+    fn every_mounted_media_prefix_is_one_the_guard_recognises() {
+        use heldar_kernel::services::media_scope::requirement;
+        // Keep in lockstep with the `nest_service` calls in `run`.
+        for path in [
+            "/media/recordings/cam_a/x.mp4",
+            "/media/clips/clip_x.mp4",
+            "/media/snapshots/s.jpg",
+            "/media/playback/pbs_1/index.m3u8",
+            "/media/archives/backup.zip",
+        ] {
+            assert!(
+                requirement(path).is_some(),
+                "{path} is mounted but media_scope::requirement does not recognise it"
+            );
+        }
+        // And the converse: an unmounted subtree is refused rather than served.
+        assert_eq!(requirement("/media/newthing/x"), None);
+        assert_eq!(requirement("/api/v1/cameras"), None);
     }
 
     #[test]

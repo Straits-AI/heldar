@@ -708,14 +708,22 @@ dependencies = [
  "heldar-kernel",
  "heldar-movement",
  "heldar-search",
+ "heldar-testkit",
  "heldar-wasm",
  "reqwest",
+ "serde_json",
  "sqlx",
  "tokio",
+ "tower",
  "tower-http",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
+
+[[package]]
+name = "heldar-testkit"
+version = "0.5.0"
 
 [[package]]
 name = "heldar-wasm"
