@@ -1790,6 +1790,15 @@ revoked key keeps streaming for up to `HELDAR_LIVEVIEW_TOKEN_TTL_SECS` (default 
 established WebRTC session is not bounded by it at all). That limit is measured and documented on
 `services/live_token.rs` rather than quietly assumed away.
 
+**Live sessions are withdrawable.** The auth callback bounds a transport to how often it re-presents
+its token, which is per-segment for HLS and never for WebRTC or RTSP readers. `services/live_reaper.rs`
+closes that: the callback records who opened each read, and withdrawal kicks the session through
+MediaMTX's API — immediately on an API-driven credential change, with a periodic sweep as the backstop
+for what no request announces (expiry, out-of-band edits, a failed kick). It calls
+`media_auth::subject_still_stands` rather than reimplementing withdrawal, for the same reason the
+capability checks share one expansion. Publishes are never recorded, so the cameras cannot be kicked
+by construction rather than by a filter someone could forget.
+
 **The census is what makes coverage default-closed**, and it lives in `heldar-testkit` rather than in
 a test file, because an integration test cannot be imported. Proprietary verticals compose over the
 `Verticals` seam in a separate private workspace; that workspace needs the SAME rule over the SAME

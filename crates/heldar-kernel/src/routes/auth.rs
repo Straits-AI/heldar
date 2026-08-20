@@ -377,6 +377,9 @@ async fn update_user(
         .bind(&id)
         .fetch_one(&st.pool)
         .await?;
+    // Deactivation is the operator act that withdraws a user (the live check reads `users.active`,
+    // never sessions). Apply it to their streams at once rather than at the next tick.
+    crate::services::live_reaper::withdraw_now(&st, "user", id.clone());
     Ok(Json(UserView::from(user)))
 }
 
@@ -455,6 +458,8 @@ async fn delete_user(
         ));
     }
     auth::audit(&st.pool, &principal, "delete_user", "user", &id, json!({})).await;
+    // A deleted user cannot stand; withdraw their streams immediately.
+    crate::services::live_reaper::withdraw_now(&st, "user", id.clone());
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -826,6 +831,11 @@ async fn update_api_key(
         .bind(&id)
         .fetch_one(&st.pool)
         .await?;
+    // Revoked, deactivated or re-scoped — whichever it was, any live stream this key opened may no
+    // longer stand. The reaper would catch it within its interval; doing it here makes an operator's
+    // revocation take effect at the moment they press the button. Spawned, so MediaMTX being slow
+    // cannot hold up this response.
+    crate::services::live_reaper::withdraw_now(&st, "api_key", id.clone());
     Ok(Json(api_key_view(k, st.cfg.machine_auth)))
 }
 
@@ -858,6 +868,8 @@ async fn delete_api_key(
         json!({}),
     )
     .await;
+    // A deleted key is the strongest withdrawal there is; do not make its streams wait for a tick.
+    crate::services::live_reaper::withdraw_now(&st, "api_key", id.clone());
     Ok(StatusCode::NO_CONTENT)
 }
 
