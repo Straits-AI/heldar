@@ -110,6 +110,7 @@ pub struct Census {
     scope_neutral: Vec<(String, String)>,
     unproven: Vec<(String, String)>,
     probe_bodies: Vec<(String, String)>,
+    probe_queries: Vec<(String, String)>,
     fixtures: Vec<(String, Fixture)>,
     camera_keys: Vec<String>,
     min_routes: usize,
@@ -123,6 +124,7 @@ impl Census {
             scope_neutral: Vec::new(),
             unproven: Vec::new(),
             probe_bodies: Vec::new(),
+            probe_queries: Vec::new(),
             fixtures: Vec::new(),
             // The kernel keys on `/api/v1/cameras/{id}`; app crates use an explicit `{camera_id}`
             // under their own prefix. Missing the latter is why the app crates went unscoped.
@@ -166,6 +168,21 @@ impl Census {
                 missing: missing.to_string(),
             },
         ));
+        self
+    }
+
+    /// A query string that satisfies a handler's required parameters, so the probe reaches its GUARD.
+    ///
+    /// The sibling of [`Census::probe_body`], for handlers gated on the QUERY rather than the body. A
+    /// route rejected at `Query<T>` extraction never reached its scope check, so without this it can
+    /// only be recorded as unproven — which reads like a gap in the product when it is a gap in the
+    /// harness.
+    ///
+    /// Where the query names a CAMERA, name one the probing credential does not hold: that turns the
+    /// probe from a capability test into a scope test.
+    pub fn probe_query(mut self, path: &str, query: &str) -> Self {
+        self.probe_queries
+            .push((path.to_string(), query.to_string()));
         self
     }
 
@@ -357,6 +374,7 @@ impl Census {
                     continue;
                 }
                 let body = self.probe_body_for(&route.path);
+                let path = format!("{path}{}", self.probe_query_for(&route.path));
                 let (status, resp) = probe(method.clone(), path, body).await;
                 // 403 is the refusal; 401 means the auth floor caught it first, which is also a
                 // denial.
@@ -424,6 +442,14 @@ impl Census {
             .find(|(p, _)| *p == path)
             .map(|(_, b)| b.clone())
             .unwrap_or_else(|| "{}".to_string())
+    }
+
+    fn probe_query_for(&self, path: &str) -> String {
+        self.probe_queries
+            .iter()
+            .find(|(p, _)| p == path)
+            .map(|(_, q)| format!("?{}", q.trim_start_matches('?')))
+            .unwrap_or_default()
     }
 
     /// Drive one route against its seeded fixture.

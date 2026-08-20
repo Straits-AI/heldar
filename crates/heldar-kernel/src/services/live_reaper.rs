@@ -166,6 +166,63 @@ async fn prune_stale(state: &AppState) {
         .await;
 }
 
+/// Withdraw NOW, for one subject, without waiting for the next tick.
+///
+/// The periodic loop is a backstop for changes this process never sees — a key expiring, a row edited
+/// out of band, a kick that failed and needs retrying. But a revocation made THROUGH the API is an
+/// event we are holding in our hands, and making the operator wait a poll interval for it is a choice,
+/// not a constraint.
+///
+/// Spawned, never awaited by the request: the operator's `PATCH` must not block on MediaMTX being
+/// reachable, and the loop will catch anything this misses.
+pub fn withdraw_now(state: &AppState, subject_kind: &'static str, subject_id: String) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        let sessions: Vec<(String, String, String)> = sqlx::query_as(
+            "SELECT id, protocol, path FROM live_sessions WHERE subject_kind = ? AND subject_id = ?",
+        )
+        .bind(subject_kind)
+        .bind(&subject_id)
+        .fetch_all(&state.pool)
+        .await
+        .unwrap_or_default();
+        if sessions.is_empty() {
+            return;
+        }
+        let api = state.cfg.mediamtx_api_url.trim_end_matches('/');
+        for (id, protocol, path) in sessions {
+            let subject = match subject_kind {
+                "api_key" => crate::services::live_token::Subject::ApiKey(subject_id.clone()),
+                "user" => crate::services::live_token::Subject::User(subject_id.clone()),
+                _ => return,
+            };
+            // Re-ask rather than assume: an update that NARROWED a scope leaves other cameras'
+            // sessions perfectly valid, and this must not cut them.
+            if crate::routes::media_auth::subject_still_stands(&state, &subject, &path).await {
+                continue;
+            }
+            // `protocol` decides the endpoint; anything not in READER_KINDS has no session to kick
+            // (HLS re-presents its token and is stopped by the callback instead).
+            let kind = match protocol.as_str() {
+                "webrtc" => "webrtcsessions",
+                "rtsp" => "rtspsessions",
+                _ => continue,
+            };
+            if kick(&state, api, kind, &id).await {
+                tracing::warn!(
+                    target: "heldar::security",
+                    session = %id, kind, path = %path,
+                    "live_reaper: withdrew a live stream immediately on credential change"
+                );
+                let _ = sqlx::query("DELETE FROM live_sessions WHERE id = ?")
+                    .bind(&id)
+                    .execute(&state.pool)
+                    .await;
+            }
+        }
+    });
+}
+
 /// Run [`sweep`] forever. Interval trades revocation latency against MediaMTX API chatter.
 pub async fn run(state: AppState) {
     let every = Duration::from_secs(state.cfg.live_reaper_interval_s.max(2));
@@ -378,6 +435,59 @@ mod tests {
         seed_key(&st, "key_gone", &["cam_a"], true).await;
         record(&st, "sess_revoked", "cam_cam_a", "key_gone").await;
         assert_eq!(sweep(&st).await, 0);
+    }
+
+    /// The immediate path: a revocation made through the API should not wait for the next tick.
+    ///
+    /// `withdraw_now` is spawned so the operator's request never blocks on MediaMTX, so the assertion
+    /// polls rather than reading straight after — testing a spawned effect by looking once is how you
+    /// write a test that passes on a fast machine and flakes on a loaded one.
+    #[tokio::test]
+    async fn withdraw_now_cuts_a_revoked_credentials_session_without_waiting() {
+        let mtx = fake_mediamtx(vec!["sess_immediate".into()]).await;
+        let st = state_with(&mtx.base).await;
+        seed_key(&st, "key_burned", &["cam_a"], true).await;
+        record(&st, "sess_immediate", "cam_cam_a", "key_burned").await;
+
+        super::withdraw_now(&st, "api_key", "key_burned".to_string());
+
+        for _ in 0..50 {
+            if !mtx.kicked.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert_eq!(
+            *mtx.kicked.lock().unwrap(),
+            vec!["sess_immediate".to_string()],
+            "the revoked credential's stream was not withdrawn immediately"
+        );
+    }
+
+    /// ...and it re-asks per session rather than cutting everything the credential opened. Narrowing
+    /// a scope leaves the cameras it still holds perfectly valid.
+    #[tokio::test]
+    async fn withdraw_now_spares_the_cameras_the_credential_still_holds() {
+        let mtx = fake_mediamtx(vec!["sess_kept".into(), "sess_lost".into()]).await;
+        let st = state_with(&mtx.base).await;
+        seed_key(&st, "key_narrowed", &["cam_a"], false).await;
+        record(&st, "sess_kept", "cam_cam_a", "key_narrowed").await;
+        record(&st, "sess_lost", "cam_cam_b", "key_narrowed").await;
+
+        super::withdraw_now(&st, "api_key", "key_narrowed".to_string());
+
+        for _ in 0..50 {
+            if !mtx.kicked.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+        assert_eq!(
+            *mtx.kicked.lock().unwrap(),
+            vec!["sess_lost".to_string()],
+            "withdrawal must be per camera: the session on the camera it STILL holds was cut"
+        );
     }
 
     /// `Subject::Site` is never recorded, so the rendezvous path can never be kicked by this loop.

@@ -1518,6 +1518,27 @@ const SCOPE_NEUTRAL: &[(&str, &str)] = &[
         "/m/{id}/",
         "module proxy; scope is forwarded to the sidecar, not resolved here",
     ),
+    // Same route family and the same answer as the two above. The wildcard tail is what the census
+    // cannot FILL, but that is a harness limit, not a different classification.
+    (
+        "/m/{id}/{*rest}",
+        "module proxy (wildcard tail); scope is forwarded to the sidecar, not resolved here",
+    ),
+    // Verified against migration 0010: `embed_queries` has NO camera column — id, kind, payload,
+    // vec, model, status. It is a queue of SEARCH TEXT awaiting an embedding, not camera data, so
+    // there is nothing to scope it by.
+    (
+        "/api/v1/ai/embed-queries",
+        "a queue of search text; the table carries no camera",
+    ),
+    // Same table, same answer. Its access control is real but is a DIFFERENT boundary from this
+    // census: `embed_query_result` passes `credential_id(&principal)` into the service, so a result
+    // can only be submitted by the credential that claimed the query. Camera scope has nothing to
+    // say here because there is no camera on the row.
+    (
+        "/api/v1/ai/embed-queries/{id}/result",
+        "same table, no camera; submission is bound to the CLAIMING credential instead",
+    ),
     // --- about the caller itself, not about any camera ---
     ("/api/v1/auth/me", "describes the caller"),
     ("/api/v1/auth/logout", "ends the caller's own session"),
@@ -1533,24 +1554,10 @@ const SCOPE_NEUTRAL: &[(&str, &str)] = &[
 /// extractor rejected — so each was parked with a plausible reason and never probed again. Named
 /// debt decays into that if nobody keeps testing whether it is still true.
 const CENSUS_UNPROVEN: &[(&str, &str)] = &[
-    (
-        "/m/{id}/{*rest}",
-        "the module proxy: a wildcard tail is not one id, so no fixture fills it",
-    ),
-    // The census fills a PATH and posts a BODY. These three are held up by neither.
-    (
-        "/api/v1/ai/embed-queries",
-        "gated on a `worker_id` QUERY parameter, which the census does not supply",
-    ),
-    (
-        "/api/v1/ai/embed-queries/{id}/result",
-        "an embed query is a SEARCH query, not a camera resource; submission is checked against the \
-         CLAIMING credential, so proving it needs a claimed row and a second credential",
-    ),
-    (
-        "/api/v1/movement/search/person",
-        "gated on a `camera` QUERY parameter, which the census does not supply",
-    ),
+    // EMPTY, and worth keeping that way. Every route is now camera-keyed, provably refuses, proven
+    // indistinguishable from a missing resource, or declared with a verified reason. An entry here is
+    // a route whose guard this harness cannot reach — legitimate debt, but debt: it is NOT counted as
+    // coverage, and the count is printed separately so it cannot quietly grow back.
 ];
 
 // ---- Seeded fixtures for the resource-addressed routes ----
@@ -1882,6 +1889,14 @@ async fn every_route_is_accounted_for() {
         r#"{"username":"probe","password":"pw","role":"viewer"}"#,
     )
     .probe_body("/api/v1/system/transcode", r#"{"engine":"cpu"}"#)
+    // Gated on the QUERY, not the body: without these the extractor rejects the probe before the
+    // guard runs, and the route can only be recorded as unproven.
+    .probe_query("/api/v1/ai/embed-queries", "worker_id=probe_worker")
+    // Names camera_b deliberately — the camera the probing credential does not hold.
+    .probe_query(
+        "/api/v1/movement/search/person",
+        "camera=camera_b&track=trk_probe&at=2026-01-01T00:00:00Z",
+    )
     // Routes addressed by a RESOURCE id. Each names a row seeded on camera_b (which the probing
     // credential does not hold) and an id of the same shape naming nothing; the census requires the
     // two answers to be indistinguishable, so a 404 cannot be used to walk the id space.
@@ -2106,5 +2121,84 @@ async fn narrowing_a_scope_off_the_camera_stops_its_stream() {
         mediamtx_auth(&st, "cam_camera_a", &still_held, "read").await,
         StatusCode::OK,
         "re-scoping killed a stream on a camera the credential still holds"
+    );
+}
+
+/// Revoking through the API must withdraw the stream AT THAT MOMENT, not at the reaper's next tick.
+///
+/// This pins the HOOK, not the mechanism: `live_reaper`'s own tests prove withdrawal works, but the
+/// call site in `update_api_key` could be deleted and everything still compiled and passed. That is
+/// exactly the shape of a fix that ships inert.
+#[tokio::test]
+async fn revoking_through_the_api_withdraws_the_stream_immediately() {
+    use std::sync::{Arc, Mutex};
+
+    // A stand-in MediaMTX that reports one live session and records what gets kicked.
+    let kicked: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    let k = kicked.clone();
+    let mtx = axum::Router::new()
+        .route(
+            "/v3/{kind}/list",
+            axum::routing::get(|| async {
+                axum::Json(serde_json::json!({ "items": [{ "id": "sess_live" }] }))
+            }),
+        )
+        .route(
+            "/v3/{kind}/kick/{id}",
+            axum::routing::post(
+                move |axum::extract::Path((_k, id)): axum::extract::Path<(String, String)>| {
+                    let k = k.clone();
+                    async move {
+                        k.lock().unwrap().push(id);
+                        StatusCode::OK
+                    }
+                },
+            ),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let api = format!("http://{}", listener.local_addr().unwrap());
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, mtx).await;
+    });
+
+    let st = test_state_with(move |cfg| {
+        cfg.auth_enabled = true;
+        cfg.mediamtx_api_url = api.clone();
+    })
+    .await;
+    seed_camera(&st, "camera_a").await;
+    let (_key, key_id) = mint_key_with_id(
+        &st,
+        &["camera:read", "video:live", "system:read"],
+        Some(&["camera_a"]),
+    )
+    .await;
+
+    // A live WebRTC session for that credential — the shape that never re-presents its token.
+    sqlx::query(
+        "INSERT INTO live_sessions (id, protocol, path, subject_kind, subject_id, created_at, last_seen_at)
+         VALUES ('sess_live','webrtc','cam_camera_a','api_key',?,?,?)",
+    )
+    .bind(&key_id)
+    .bind(chrono::Utc::now())
+    .bind(chrono::Utc::now())
+    .execute(&st.pool)
+    .await
+    .unwrap();
+
+    revoke_key(&st, &key_id).await;
+
+    // `withdraw_now` is spawned, so poll rather than reading once.
+    for _ in 0..60 {
+        if !kicked.lock().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+    assert_eq!(
+        *kicked.lock().unwrap(),
+        vec!["sess_live".to_string()],
+        "revoking through the API did not withdraw the live stream; the reaper would eventually, but \
+         the operator pressed the button now"
     );
 }
