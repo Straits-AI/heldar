@@ -284,6 +284,16 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
             services::health::run(p.clone(), c.clone())
         });
         let (p, c) = (pool.clone(), cfg.clone());
+        // Withdraw live streams whose credential no longer stands. Only matters for transports that
+        // never re-present their token (WebRTC, RTSP readers) — the auth callback already handles
+        // HLS. Opt-out by setting the interval to 0.
+        if state.cfg.live_reaper_interval_s > 0 {
+            let st = state.clone();
+            spawn_supervised("live-reaper", move || {
+                let st = st.clone();
+                async move { heldar_kernel::services::live_reaper::run(st).await }
+            });
+        }
         spawn_supervised("retention", move || {
             services::retention::run(p.clone(), c.clone())
         });
