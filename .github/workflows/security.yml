@@ -118,6 +118,14 @@ jobs:
           output: trivy-results.sarif
           severity: HIGH,CRITICAL
           ignore-unfixed: true
+          # `website/` is the Docusaurus docs site. Its 24 HIGH findings are Docusaurus's own
+          # transitives — webpack-dev-server, sockjs, uuid — i.e. BUILD tooling. `docusaurus build`
+          # emits static HTML/JS, so none of it reaches the deployed Worker, and none is fixable
+          # without a Docusaurus major bump. Blocking every product PR on a dev server that never
+          # ships is how a gate gets switched off for real. Not silently ignored: the dashboard still
+          # shows them via the SARIF upload below. Drop this the day the docs site gains a runtime
+          # dependency, or Docusaurus ships the bump.
+          skip-dirs: website
           # Blocking. Without this the job produced SARIF and reported SUCCESS, so a HIGH/CRITICAL
           # finding lived on the code-scanning dashboard while the PR showed green. The upload below
           # is `if: always()`, so the finding is still published when this fails.
