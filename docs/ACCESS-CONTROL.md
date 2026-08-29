@@ -368,7 +368,7 @@ decision survives:
 | Archive export (`/api/v1/archive/export`) | on the request | the request — it runs inline and its `.zip` is re-guarded on every fetch |
 | AI **leases** | on each acquire/renew (they are one call) | the lost camera stops being offered on the next renew; the stale row lapses on its TTL (≤ 300 s) and authorizes nothing on its own |
 | AI **frame tickets** | at frame pull, bound to key id + camera | ≤ ticket TTL, and ingest re-checks `require_camera` against the live principal anyway |
-| **Live view** token (MediaMTX) | at `/liveview`, **re-checked on every read** | HLS: seconds (the token is re-presented per segment). An **established WebRTC** session: until it renegotiates — see below |
+| **Live view** token (MediaMTX) | at `/liveview`, **re-checked on every read** | HLS: seconds. WebRTC / RTSP readers: **immediately** when the change is made through the API, else within `HELDAR_LIVE_REAPER_INTERVAL_S` (default 15 s) |
 
 **The detached backup transfer.** `services/backup::spawn_job` answers 202 and keeps copying for up
 to `HELDAR_BACKUP_JOB_TIMEOUT_S` (default an hour), and for `sftp`/`ftp`/`s3` destinations the bytes
@@ -388,11 +388,22 @@ streaming to the TTL — measured at the time as `200 OK` on a replayed token. A
 its **subject** inside the signed payload (api key, user, or site) and the callback re-resolves it on
 every read: revoked, deactivated, deleted, expired, or re-scoped off that camera all stop the stream.
 
-What that does and does not bound: a transport is re-authorized as often as it **re-presents** the
-token. HLS does so per playlist and per segment, so withdrawal bites in seconds. An **established
-WebRTC** session is negotiated once and then flows over the peer connection without asking again —
-tearing that down lives in MediaMTX, not here — so revocation bites it only at the next negotiation.
-Better than the TTL it replaces; not the same as "the stream stops instantly".
+A transport is re-authorized as often as it **re-presents** the token, and HLS does so per segment.
+WebRTC never re-presents — it negotiates once and then flows over the peer connection — and RTSP
+readers are the same, so for those the bound token alone changed nothing.
+
+Those are now ended from the other side. MediaMTX reports a session id on every auth callback and
+exposes `POST /v3/{webrtcsessions,rtspsessions}/kick/{id}`, so the callback records who opened each
+read (`live_sessions`, migration 0016) and withdrawal actually cuts the session: **immediately** when
+the revocation, deactivation, deletion or re-scope is made through the API, and otherwise within
+`HELDAR_LIVE_REAPER_INTERVAL_S` (default 15 s, `0` disables). The periodic sweep is the backstop for
+what no API call announces — a key reaching `expires_at`, a row edited out of band, a kick that failed
+and needs retrying.
+
+Withdrawal is re-asked **per session**, so narrowing a scope cuts the cameras it lost and leaves the
+ones it kept. Never cut: camera **publishes** (only the read arm is recorded, so the recorder is out of
+reach by construction), sessions this box cannot attribute (they predate the table or survived a
+database loss — kicking on ignorance would make a restart look like an outage), and `Site` subjects.
 
 Two subjects are deliberately never withdrawn: **site** (the WebRTC rendezvous drives `ensure_live`
 holding a site token, not a principal — and a remote viewer must not lose video because an unrelated
