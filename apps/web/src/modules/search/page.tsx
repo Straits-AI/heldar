@@ -28,6 +28,7 @@ import {
   StatusPill,
   cx,
   formatClock,
+  friendlyError,
   localInputToIso,
 } from "@heldar/shell";
 import type {
@@ -824,7 +825,7 @@ function SemanticConsole({ nameFor, cameras }: { nameFor: NameFor; cameras: Came
           "Embedding worker offline — semantic search needs a running AI worker with the CLIP extra installed.",
         );
       } else {
-        setError(err instanceof ApiError ? err.message : String(err));
+        setError(friendlyError(err));
       }
       setResult(null);
       setSearched(true);
