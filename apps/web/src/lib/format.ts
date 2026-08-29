@@ -91,6 +91,8 @@ export function friendlyError(e: unknown): string {
       case 502:
       case 504:
         return "The box is unreachable right now — it may be offline. Try again shortly.";
+      case 503:
+        return "That service is temporarily unavailable — retry shortly.";
       case 429:
         return "Too many attempts — wait a minute and try again.";
       case 403:

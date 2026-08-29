@@ -126,8 +126,11 @@ enabling detection tasks, drawing zones, and configuring alerting.
 > authoritative). Workers additionally **lease** their tasks and post a server-issued **frame ticket**,
 > which lets the kernel derive `camera_id`/`task_type`/`frame_id` instead of trusting the body.
 > Requiring the ticket is staged: `HELDAR_INGEST_PROVENANCE` defaults to `warn` (ticketless ingest
-> still works, with a once-per-hour notice per credential) and is promoted to `enforce` automatically
-> when `HELDAR_DEPLOYMENT_MODE=production*`. See [ADR 0005](docs/adr/0005-task-lease-bound-ai-ingest.md)
+> still works, with a once-per-hour notice per credential) and is **never promoted automatically** —
+> not even by `HELDAR_DEPLOYMENT_MODE=production*`, because unlike `HELDAR_MACHINE_AUTH` it is a
+> CLIENT protocol change: `enforce` 401s every worker that does not yet mint a ticket. Set it
+> explicitly after the hourly `ingest_unleased` log goes quiet.
+> See [ADR 0005](docs/adr/0005-task-lease-bound-ai-ingest.md)
 > and [`docs/AI-WORKERS.md`](docs/AI-WORKERS.md) §5.0.
 
 ### Default ports

@@ -140,7 +140,7 @@ function H(e) {
 	return typeof e == "boolean" ? {
 		text: e ? "yes" : "no",
 		ok: e
-	} : typeof e == "number" && Number.isFinite(e) ? e > 0 && e <= 1 ? {
+	} : typeof e == "number" && Number.isFinite(e) ? e >= -1 && e <= 1 ? {
 		text: `${Math.round(e * 100)}%`,
 		ok: e >= .5
 	} : {

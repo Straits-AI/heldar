@@ -218,7 +218,10 @@ function fmtSignal(v: unknown): { text: string; ok: boolean | null } {
   if (typeof v === "boolean") return { text: v ? "yes" : "no", ok: v };
   if (typeof v === "number" && Number.isFinite(v)) {
     // Sub-scores arrive in 0..1; transit-like values arrive as raw magnitudes.
-    if (v > 0 && v <= 1) return { text: `${Math.round(v * 100)}%`, ok: v >= 0.5 };
+    // `>= -1` catches negative cosine similarity, which is a legitimate "very dissimilar" result and
+    // belongs in the percentage branch — it used to fall through and render as a raw `-0.12` beside
+    // siblings shown as `87%`.
+    if (v >= -1 && v <= 1) return { text: `${Math.round(v * 100)}%`, ok: v >= 0.5 };
     return { text: Number.isInteger(v) ? String(v) : v.toFixed(2), ok: null };
   }
   if (typeof v === "string") return { text: v, ok: null };
