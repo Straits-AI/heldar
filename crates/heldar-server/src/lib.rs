@@ -498,6 +498,7 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
     let app = Router::new()
         .merge(routes::api_router())
         .merge(routes::metrics::router())
+        .merge(heldar_kernel::openapi::router())
         .merge(heldar_entry::routes::router())
         .merge(heldar_movement::routes::router(movement_cfg.clone()))
         .merge(heldar_search::routes::router(search_cfg.clone()));
