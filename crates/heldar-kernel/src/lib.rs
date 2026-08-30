@@ -17,6 +17,7 @@ pub mod config;
 pub mod db;
 pub mod env;
 pub mod error;
+pub mod idempotency;
 pub mod models;
 pub mod modules;
 pub mod net_guard;

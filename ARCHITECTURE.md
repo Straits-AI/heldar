@@ -636,6 +636,20 @@ bounded to 64 characters because it reaches log lines. It survives the WebRTC re
 directions, which is the case it exists for — the relay forwards it on the way in and back out
 rather than minting a fresh one for the loopback hop.
 
+**`Idempotency-Key`** (`idempotency.rs`, migration 0017) makes a retried mutation safe. A client that
+times out cannot tell "never arrived" from "done, reply lost", and retrying is the only sane move;
+without this it creates two clips or two backup jobs. Opt-in by the caller — send the header and get
+replay protection, omit it and nothing changes — which is what lets it be one middleware instead of an
+edit to forty handlers.
+
+Keys are scoped to the PRINCIPAL as well as the key string. A key is client-chosen, so a shared
+namespace would let one caller replay another's result by guessing one: deduplication becomes an
+information leak. It is layered INSIDE the auth floor for exactly that reason — the floor is what
+resolves the principal to scope by. Same key and body replays the original response; same key with a
+different body is `409 idempotency_key_conflict`; a duplicate arriving while the first is still
+running is `409 idempotency_in_progress` rather than a half-finished answer. Failures release the key,
+so a transient does not pin itself in place. Keys expire after 24h via the retention loop.
+
 The log filter reads `HELDAR_LOG`, falling back to the conventional `RUST_LOG`. Only the former used
 to be read, so an operator setting `RUST_LOG=warn` — what every Rust binary honours — got no effect
 and kept the `info` default; the live box did exactly that and grew a 300 MB `core.log`. The
