@@ -96,6 +96,29 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
     init_tracing();
 
     let cfg = Arc::new(Config::from_env());
+
+    // A SECRET SOURCE THAT WAS NAMED BUT COULD NOT BE READ STOPS THE BOOT (#126).
+    //
+    // An operator who set `HELDAR_SECRET_KEY_FILE` asked for encryption at rest. Starting anyway
+    // would store every camera credential in plaintext while the deployment believed they were
+    // sealed — and the failure would stay invisible until someone read the database.
+    //
+    // Checked HERE rather than in `Config::from_env()`, which is the repo's test-config idiom: a
+    // panic there meant one stale variable in a developer's shell detonated 144 unrelated tests.
+    // Refusing at boot is the same fail-closed guarantee, where the message is actionable.
+    // Subcommands are covered too — `rekey-secrets` reading a half-configured key is worse, not
+    // better, than the server doing so.
+    let secret_errors = Config::secret_source_errors();
+    if !secret_errors.is_empty() {
+        anyhow::bail!(
+            "refusing to start: {} secret source(s) were configured but could not be read. \
+             Continuing would store credentials in plaintext while this deployment believes they \
+             are encrypted.\n  {}",
+            secret_errors.len(),
+            secret_errors.join("\n  ")
+        );
+    }
+
     // One-shot admin subcommands run a maintenance task and exit, bypassing the server boot (and its
     // process-wide key install + guardrails, which they manage themselves).
     if let Some(cmd) = std::env::args().nth(1) {
@@ -643,7 +666,11 @@ async fn run_subcommand(cmd: &str, cfg: &Config) -> anyhow::Result<()> {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .context("HELDAR_SECRET_KEY (the new key) must be set")?;
-            let old_raw = std::env::var("HELDAR_SECRET_KEY_OLD").unwrap_or_default();
+            let old_raw = heldar_kernel::services::secret_source::resolve("HELDAR_SECRET_KEY_OLD")
+                .ok()
+                .flatten()
+                .map(|r| r.expose().to_string())
+                .unwrap_or_default();
             let old_b64 = old_raw.trim();
             if old_b64.is_empty() {
                 anyhow::bail!(

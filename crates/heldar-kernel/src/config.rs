@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::env::{parse_bool, parse_or, var, var_or};
 
 /// Runtime configuration, loaded from environment (see `.env.example`).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     pub database_url: String,
     pub data_dir: PathBuf,
@@ -424,6 +424,12 @@ pub struct CpTlsCfg {
 fn cp_tls_from_env() -> Option<CpTlsCfg> {
     match (
         var("HELDAR_CP_TLS_CLIENT_CERT"),
+        // NOT `secret()`. This holds a PATH, not a secret — `_FILE` resolution would substitute the
+        // key's CONTENTS where a filename is expected, and `fleet_register` interpolates that
+        // filename into an error it logs at ERROR level. Wiring it to the chain would have made
+        // the branch whose purpose is keeping secrets out of logs print a PEM private key.
+        // A systemd credential already IS a path ($CREDENTIALS_DIRECTORY/NAME), which `var()`
+        // handles unchanged.
         var("HELDAR_CP_TLS_CLIENT_KEY"),
         var("HELDAR_CP_TLS_CA"),
     ) {
@@ -442,7 +448,96 @@ fn cp_tls_from_env() -> Option<CpTlsCfg> {
     }
 }
 
+/// A deployment SECRET, resolved through the secret-source chain (#126) rather than read straight
+/// from the environment.
+///
+/// `NAME` still wins, so nothing moves on upgrade; `NAME_FILE` and a systemd credential are the
+/// hardened alternatives. A named-but-unusable source is fatal at boot rather than a silent
+/// fall-through to "no secret" — an operator who pointed at a file asked for it to be used.
+fn secret(name: &str) -> Option<String> {
+    match crate::services::secret_source::resolve_and_report(name) {
+        Ok(r) => r.map(|r| r.expose().to_string()),
+        Err(e) => {
+            // NOT a panic. `Config::from_env()` is the repo's test-config idiom, called from ~60
+            // helpers, so panicking here meant one stale `_FILE` variable in a developer's shell
+            // detonated 144 tests. The refusal belongs at boot, where it is actionable: the error is
+            // recorded and `heldar_server::run` refuses to start. Fail-closed either way, without
+            // the blast radius.
+            SECRET_ERRORS
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(format!("{e:#}"));
+            None
+        }
+    }
+}
+
+/// Secret sources that were NAMED but could not be read, collected during `from_env`.
+///
+/// Read by [`Config::secret_source_errors`] so the server can refuse to boot. An operator who set
+/// `HELDAR_SECRET_KEY_FILE` asked for encryption at rest; starting anyway would store every camera
+/// credential in plaintext while the deployment believed they were sealed.
+static SECRET_ERRORS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Hand-written so a secret cannot reach a log through `{:?}`.
+///
+/// `#[derive(Debug)]` printed `secret_key_b64: Some("yQw+C67...")` in full, and `?cfg` is the
+/// idiomatic `tracing` shape used throughout this codebase — so the careful redaction in
+/// `secret_source::Resolved` protected a value for the three statements before it was copied into a
+/// struct that prints it. The long-lived copy is the one that matters: it lives in an `Arc<Config>`
+/// for the process lifetime and is handed to every service.
+///
+/// Secrets report whether they are SET, which is the operationally useful half and discloses
+/// nothing — not even a length, since a length is a meaningful hint about a key.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("data_dir", &self.data_dir)
+            .field("deployment_mode", &self.deployment_mode)
+            .field("auth_enabled", &self.auth_enabled)
+            .field("strict_prod", &self.strict_prod)
+            .field("secret_key_b64", &redacted(&self.secret_key_b64))
+            .field(
+                "bootstrap_admin_password",
+                &redacted(&self.bootstrap_admin_password),
+            )
+            .field("smtp_password", &redacted(&self.smtp_password))
+            .finish_non_exhaustive()
+    }
+}
+
+/// `"<set>"` or `"<unset>"` — never the value, never its length.
+fn redacted(v: &Option<String>) -> &'static str {
+    if v.is_some() {
+        "<set>"
+    } else {
+        "<unset>"
+    }
+}
+
 impl Config {
+    /// Secret sources that were NAMED but could not be read (#126).
+    ///
+    /// Non-empty means an operator asked for a secret to come from somewhere and it did not. The
+    /// server refuses to boot on this: continuing would store camera credentials in plaintext while
+    /// the deployment believed they were sealed, and the failure would stay invisible until someone
+    /// read the database.
+    pub fn secret_source_errors() -> Vec<String> {
+        SECRET_ERRORS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Forget any recorded secret-source errors. For tests that deliberately misconfigure one.
+    #[doc(hidden)]
+    pub fn clear_secret_source_errors() {
+        SECRET_ERRORS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+    }
+
     /// Whether per-account brute-force lockout is active (both knobs must be > 0).
     pub fn login_lockout_enabled(&self) -> bool {
         self.login_max_failures > 0 && self.login_lockout_min > 0
@@ -747,12 +842,12 @@ impl Config {
                 .clamp(10, 900),
             login_max_failures: parse_or("HELDAR_LOGIN_MAX_FAILURES", 5),
             login_lockout_min: parse_or("HELDAR_LOGIN_LOCKOUT_MIN", 15),
-            secret_key_b64: var("HELDAR_SECRET_KEY"),
+            secret_key_b64: secret("HELDAR_SECRET_KEY"),
             strict_prod: parse_bool("HELDAR_STRICT_PROD", false),
             exposed_declared: parse_bool("HELDAR_INTERNET_EXPOSED", false),
             deployment_mode,
             bootstrap_admin_user: var("HELDAR_BOOTSTRAP_ADMIN_USER"),
-            bootstrap_admin_password: var("HELDAR_BOOTSTRAP_ADMIN_PASSWORD"),
+            bootstrap_admin_password: secret("HELDAR_BOOTSTRAP_ADMIN_PASSWORD"),
             audit_retention_days: parse_or("HELDAR_AUDIT_RETENTION_DAYS", 365),
             overlay_enabled: parse_bool("HELDAR_OVERLAY_ENABLED", false),
             overlay_kind: var_or("HELDAR_OVERLAY_KIND", "none"),
@@ -820,7 +915,7 @@ impl Config {
             smtp_host: var("HELDAR_SMTP_HOST"),
             smtp_port: parse_or("HELDAR_SMTP_PORT", 587u16),
             smtp_username: var("HELDAR_SMTP_USERNAME"),
-            smtp_password: var("HELDAR_SMTP_PASSWORD"),
+            smtp_password: secret("HELDAR_SMTP_PASSWORD"),
             smtp_from: var("HELDAR_SMTP_FROM"),
             smtp_tls: var_or("HELDAR_SMTP_TLS", "starttls"),
             smtp_recipients: var_or("HELDAR_SMTP_RECIPIENTS", "")

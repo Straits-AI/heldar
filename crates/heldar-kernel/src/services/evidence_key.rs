@@ -21,9 +21,13 @@
 //!
 //! The key file is written 0600. On a box where an attacker can read the data directory, they can
 //! sign bundles — this raises the bar from "anyone with a hex editor" to "root on the recorder",
-//! which is the honest description of what an appliance-held key buys. #126 (pluggable secret
-//! sources) is where this key becomes loadable from an HSM or an external provider; the loader is
-//! deliberately one function so that swap is one function.
+//! which is the honest description of what an appliance-held key buys.
+//!
+//! #126 added the secret-source chain (env / `NAME_FILE` / systemd credential) for the DEPLOYMENT
+//! secrets. This key is not one of them: it is generated on the box and never supplied by an
+//! operator, so there is nothing to resolve. Loading it from an HSM or external provider remains
+//! the open half of #126, and the loader is still deliberately one function so that swap is one
+//! function.
 
 use std::path::{Path, PathBuf};
 
