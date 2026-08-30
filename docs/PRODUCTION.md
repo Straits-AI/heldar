@@ -14,6 +14,25 @@ mode, short sessions) on top of the private full image — `docker compose -f de
 deploy/compose.prod.yml up -d` after `docker login ghcr.io`. Put `HELDAR_SECRET_KEY` +
 `HELDAR_CORS_ORIGINS` in `.env`. A flashed DVR/appliance uses native systemd instead (not Docker).
 
+**Pin the release (#112).** Every tagged release ships `heldar-release-manifest.json`, which records
+the source commit, the migration ceiling those binaries actually carry, the image digests and the
+sha256 of every deployment file. Download it from the release — not from `main` — and verify before
+and after an upgrade:
+
+```bash
+gh release download "$V" -p heldar-release-manifest.json
+gh attestation verify heldar-release-manifest.json --repo Straits-AI/heldar   # it is signed too
+HELDAR_DB=/var/lib/heldar/heldar.db ./scripts/verify_release_manifest.sh heldar-release-manifest.json
+```
+
+The verifier fails closed on a modified deployment file and — the one that matters on an upgrade — on
+a database written by a NEWER release than the binaries you are about to run. Migrations only go
+forward, so an older binary opening a newer schema is not a clean refusal, it is a binary reading a
+database it does not understand. Check this **before** stopping services, not after.
+
+The floating quickstart (`latest`, files from `main`) stays exactly as it is; it is the right thing
+for evaluation and the wrong thing for a recorder.
+
 **Container hardening:** add `deploy/compose.hardened.yml` as a third overlay —
 `-f compose.yml -f compose.prod.yml -f compose.hardened.yml`. `compose.prod.yml` hardens the
 *application* posture (auth, cookies, sessions); this hardens the *container*: read-only root

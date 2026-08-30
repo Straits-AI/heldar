@@ -133,6 +133,22 @@ jobs:
           subject-path: ${{ steps.build.outputs.asset }}
           sbom-path: ${{ steps.build.outputs.asset }}.spdx.json
 
+      # The manifest is generated once, on the x86_64 leg, and pinned+attested like any other asset.
+      - name: Release manifest
+        if: matrix.arch == 'x86_64'
+        run: ./scripts/gen_release_manifest.sh "${{ github.ref_name }}" > heldar-release-manifest.json
+      - name: Attest the manifest
+        if: matrix.arch == 'x86_64'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: heldar-release-manifest.json
+      - name: Upload the manifest
+        if: matrix.arch == 'x86_64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" heldar-release-manifest.json --clobber
+
       - name: Upload to the Release
         env:
           GH_TOKEN: ${{ github.token }}
