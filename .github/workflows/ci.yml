@@ -38,6 +38,16 @@ jobs:
         run: cargo build --workspace --locked
       - name: test
         run: cargo test --workspace --locked
+      - name: heldarctl builds and its help is honest about exit codes
+        run: |
+          set -euo pipefail
+          cargo build --locked --bin heldarctl
+          # The documented exit codes are a contract a script branches on; a help text that has
+          # drifted from them is worse than none.
+          ./target/debug/heldarctl help | grep -q "5 blocking findings"
+          ./target/debug/heldarctl version --json | grep -q '"contract"'
+          # An unknown command is a usage error, not a crash.
+          set +e; ./target/debug/heldarctl nonsense >/dev/null 2>&1; test $? -eq 1
       - name: read-seam lint (cross-app reads go through *_read views)
         run: ./scripts/check-read-seam.sh
       # A generated client that COMPILES is a stronger statement about the contract than any prose:
