@@ -25,6 +25,7 @@ pub mod recording_control;
 pub mod recordings;
 pub mod registry;
 pub mod schedules;
+pub mod sites;
 pub mod snapshot_schedules;
 pub mod system;
 pub mod webhooks;
@@ -46,6 +47,7 @@ pub fn api_router() -> Router<AppState> {
         .merge(recording_control::router())
         .merge(playback::router())
         .merge(evidence::router())
+        .merge(sites::router())
         .merge(playback_sessions::router())
         .merge(liveview::router())
         .merge(media_auth::router())

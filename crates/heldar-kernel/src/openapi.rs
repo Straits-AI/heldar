@@ -63,12 +63,19 @@ pub struct ErrorBody {
         crate::routes::evidence::signing_key,
         crate::routes::system::get_timezone,
         crate::routes::system::put_timezone,
+        crate::routes::sites::list,
+        crate::routes::sites::get_one,
+        crate::routes::sites::create,
+        crate::routes::sites::update,
+        crate::routes::sites::delete_site,
     ),
     components(schemas(ErrorBody, crate::models::CameraView)),
     tags(
         (name = "cameras", description = "Camera registry. Every route here is camera-scoped."),
         (name = "system", description = "Box-wide operational settings. Fleet-wide by nature: a \
          camera-scoped credential cannot change them."),
+        (name = "sites", description = "Sites and their timezones. A site's zone is what its \
+         cameras' schedules and searches are read in, so changing it moves recording windows."),
         (name = "evidence", description = "Signed, offline-verifiable evidence bundles (#118). \
          Every route is camera-scoped, and gated on `video:export` except the public signing key."),
     )

@@ -207,7 +207,15 @@ fn default_vendor() -> String {
 #[derive(Debug, Deserialize, Default)]
 pub struct CameraUpdate {
     pub name: Option<String>,
-    pub site_id: Option<String>,
+    /// Absent = leave the camera where it is. `null` = detach it from its site.
+    ///
+    /// The double option is load-bearing (#125): a camera's site carries the timezone its recording
+    /// schedule is read in, so `site_id` is not a label. Collapsing absent and null — which serde
+    /// does by default — meant `{"site_id": null}` returned 200 while silently keeping the old
+    /// site, and there was NO way to return a camera to the box-wide default through the API at
+    /// all, which made `DELETE /api/v1/sites/{id}`'s "reassign them first" impossible to follow.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub site_id: Option<Option<String>>,
     pub vendor: Option<String>,
     pub model: Option<String>,
     pub address: Option<String>,
