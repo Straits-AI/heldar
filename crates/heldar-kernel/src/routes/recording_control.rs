@@ -32,7 +32,22 @@ pub struct TriggerResult {
     pub post_roll_seconds: i64,
 }
 
-async fn record_trigger(
+/// Manually trigger an event recording window on a camera.
+///
+/// Only meaningful for a camera in `event` or `scheduled_event` mode; anything else is a 400 rather
+/// than a silent no-op, because "I pressed record and nothing happened" is the worst outcome here.
+#[utoipa::path(
+    post, path = "/api/v1/cameras/{id}/record-trigger", tag = "recordings",
+    operation_id = "triggerRecording",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The trigger window that is now open"),
+        (status = 400, description = "Camera is not in an event recording mode, or recording is disabled", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera, or one this credential does not hold", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn record_trigger(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,

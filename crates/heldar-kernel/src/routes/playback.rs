@@ -20,13 +20,32 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/cameras/{id}/snapshot", get(snapshot_handler))
 }
 
-#[derive(Debug, Deserialize)]
-struct ClipRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct ClipRequest {
     from: String,
     to: String,
 }
 
-async fn export_clip(
+/// Export a clip: the segments overlapping the window, concatenated and trimmed.
+///
+/// `-c copy`, so these are the recorded frames rather than a re-encode. The response reports
+/// `covered_seconds` and every `gap` in the window — the clip concatenates across gaps because that
+/// footage does not exist, and presenting it as continuous would be worse than refusing.
+///
+/// For a clip that stays verifiable after it leaves the box, use `/api/v1/evidence/exports`.
+#[utoipa::path(
+    post, path = "/api/v1/cameras/{id}/clip", tag = "recordings",
+    operation_id = "exportClip",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The exported clip, with its coverage and gaps"),
+        (status = 400, description = "Bad range, or longer than the one-hour ceiling", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `video:export`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera, or no footage in the range", body = crate::openapi::ErrorBody),
+        (status = 503, description = "Media job concurrency limit reached", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn export_clip(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -55,12 +74,26 @@ async fn export_clip(
 }
 
 #[derive(Debug, Deserialize)]
-struct SnapshotQuery {
+pub struct SnapshotQuery {
     /// Recorded-frame timestamp (RFC3339). If omitted, a live frame is grabbed.
     at: Option<String>,
 }
 
-async fn snapshot_handler(
+/// A single frame from a camera, live or from recorded footage.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/snapshot", tag = "recordings",
+    operation_id = "getSnapshot",
+    params(
+        ("id" = String, Path, description = "Camera id"),
+        ("at" = Option<String>, Query, description = "RFC3339 instant; omit for live"),
+    ),
+    responses(
+        (status = 200, description = "JPEG frame", content_type = "image/jpeg"),
+        (status = 403, description = "Missing `video:playback`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera, or no footage at that instant", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn snapshot_handler(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,

@@ -58,6 +58,18 @@ pub struct CameraView {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClipRequest {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreateSessionRequest {
+    pub from: String,
+    pub to: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ErrorBody {
     pub code: String,
     pub error: String,
@@ -123,10 +135,18 @@ pub const REQUIREMENTS: &[(&str, &str, Option<&str>, &str)] = &[
     ("GET", "/api/v1/cameras", Some("camera:read"), "scope-filtered"),
     ("DELETE", "/api/v1/cameras/{id}", Some("admin"), "camera-keyed"),
     ("GET", "/api/v1/cameras/{id}", Some("camera:read"), "camera-keyed"),
+    ("POST", "/api/v1/cameras/{id}/clip", Some("video:export"), "camera-keyed"),
+    ("GET", "/api/v1/cameras/{id}/gaps", Some("video:playback"), "camera-keyed"),
+    ("POST", "/api/v1/cameras/{id}/playback/sessions", Some("video:playback"), "camera-keyed"),
+    ("POST", "/api/v1/cameras/{id}/record-trigger", Some("registry:manage"), "camera-keyed"),
+    ("GET", "/api/v1/cameras/{id}/segments", Some("video:playback"), "camera-keyed"),
+    ("GET", "/api/v1/cameras/{id}/snapshot", Some("video:playback"), "camera-keyed"),
+    ("GET", "/api/v1/cameras/{id}/timeline", Some("video:playback"), "camera-keyed"),
     ("GET", "/api/v1/evidence/exports", Some("video:export"), "scope-filtered"),
     ("POST", "/api/v1/evidence/exports", Some("video:export"), "camera-keyed"),
     ("GET", "/api/v1/evidence/exports/{id}", Some("video:export"), "camera-keyed"),
     ("GET", "/api/v1/evidence/signing-key", Some("camera:read"), "scope-neutral"),
+    ("DELETE", "/api/v1/playback/sessions/{session_id}", Some("video:playback"), "camera-keyed"),
     ("GET", "/api/v1/sites", Some("camera:read"), "scope-filtered"),
     ("POST", "/api/v1/sites", None, "fleet-only"),
     ("DELETE", "/api/v1/sites/{id}", None, "fleet-only"),

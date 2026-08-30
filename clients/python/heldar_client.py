@@ -68,6 +68,18 @@ class CameraView:
 
 
 @dataclass
+class ClipRequest:
+    from_: str  # wire name: "from"
+    to: str
+
+
+@dataclass
+class CreateSessionRequest:
+    from_: str  # wire name: "from"
+    to: str
+
+
+@dataclass
 class ErrorBody:
     code: str
     error: str
@@ -157,6 +169,34 @@ class HeldarClient:
         """Requires capability `camera:read`, camera-keyed."""
         return self._call('GET', f'/api/v1/cameras/{id}')
 
+    def export_clip(self, id: str, body: Any) -> Any:
+        """Requires capability `video:export`, camera-keyed."""
+        return self._call('POST', f'/api/v1/cameras/{id}/clip', body)
+
+    def list_gaps(self, id: str) -> Any:
+        """Requires capability `video:playback`, camera-keyed."""
+        return self._call('GET', f'/api/v1/cameras/{id}/gaps')
+
+    def create_playback_session(self, id: str, body: Any) -> Any:
+        """Requires capability `video:playback`, camera-keyed."""
+        return self._call('POST', f'/api/v1/cameras/{id}/playback/sessions', body)
+
+    def trigger_recording(self, id: str) -> Any:
+        """Requires capability `registry:manage`, camera-keyed."""
+        return self._call('POST', f'/api/v1/cameras/{id}/record-trigger')
+
+    def list_segments(self, id: str) -> Any:
+        """Requires capability `video:playback`, camera-keyed."""
+        return self._call('GET', f'/api/v1/cameras/{id}/segments')
+
+    def get_snapshot(self, id: str) -> Any:
+        """Requires capability `video:playback`, camera-keyed."""
+        return self._call('GET', f'/api/v1/cameras/{id}/snapshot')
+
+    def get_timeline(self, id: str) -> Any:
+        """Requires capability `video:playback`, camera-keyed."""
+        return self._call('GET', f'/api/v1/cameras/{id}/timeline')
+
     def list_evidence_exports(self) -> Any:
         """Requires capability `video:export`, scope-filtered."""
         return self._call('GET', f'/api/v1/evidence/exports')
@@ -172,6 +212,10 @@ class HeldarClient:
     def get_evidence_signing_key(self) -> Any:
         """Requires capability `camera:read`, scope-neutral."""
         return self._call('GET', f'/api/v1/evidence/signing-key')
+
+    def delete_playback_session(self, session_id: str) -> Any:
+        """Requires capability `video:playback`, camera-keyed."""
+        return self._call('DELETE', f'/api/v1/playback/sessions/{session_id}')
 
     def list_sites(self) -> Any:
         """Requires capability `camera:read`, scope-filtered."""

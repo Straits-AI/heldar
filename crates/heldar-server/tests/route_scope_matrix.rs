@@ -2400,6 +2400,12 @@ async fn every_declared_capability_is_one_the_kernel_enforces() {
             ("/api/v1/system/timezone", "put") => r#"{"timezone":"UTC"}"#,
             ("/api/v1/sites", "post") => r#"{"id":"decl","name":"Decl"}"#,
             ("/api/v1/sites/{id}", "patch") => r#"{"name":"x"}"#,
+            ("/api/v1/cameras/{id}/clip", "post") => {
+                r#"{"from":"2026-01-01T00:00:00Z","to":"2026-01-01T00:01:00Z"}"#
+            }
+            ("/api/v1/cameras/{id}/playback/sessions", "post") => {
+                r#"{"from":"2026-01-01T00:00:00Z","to":"2026-01-01T00:01:00Z"}"#
+            }
             _ => "{}",
         }
     };

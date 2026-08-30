@@ -31,13 +31,29 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateSessionRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateSessionRequest {
     from: String,
     to: String,
 }
 
-async fn create_session(
+/// Start an HLS playback session over a recorded window.
+///
+/// Returns the manifest URL. The session's media is re-guarded on EVERY fetch, so a URL is not a
+/// bearer capability: re-scoping the credential stops the scrub mid-playback.
+#[utoipa::path(
+    post, path = "/api/v1/cameras/{id}/playback/sessions", tag = "recordings",
+    operation_id = "createPlaybackSession",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The session and its manifest URL"),
+        (status = 400, description = "Bad range", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `video:playback`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera, or no footage in the range", body = crate::openapi::ErrorBody),
+        (status = 503, description = "Media job concurrency limit reached", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn create_session(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -66,7 +82,18 @@ async fn create_session(
     Ok(Json(session))
 }
 
-async fn delete_session(
+/// End a playback session and remove its media.
+#[utoipa::path(
+    delete, path = "/api/v1/playback/sessions/{session_id}", tag = "recordings",
+    operation_id = "deletePlaybackSession",
+    params(("session_id" = String, Path, description = "Playback session id")),
+    responses(
+        (status = 204, description = "Ended"),
+        (status = 403, description = "Missing `video:playback`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown session, or one for a camera this credential does not hold", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_session(
     State(st): State<AppState>,
     Path(session_id): Path<String>,
     principal: Principal,
