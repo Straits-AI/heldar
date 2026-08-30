@@ -259,3 +259,128 @@ fn the_spec_is_well_formed() {
         "ErrorBody must be a component so clients share one error type"
     );
 }
+
+/// The contract's error-code enumeration must be exactly what the server can emit.
+///
+/// It was not. The published description listed `busy`, which `code_for_status` has never returned,
+/// and omitted `payload_too_large` and `rate_limited`, which it returns routinely. A client
+/// branching on `busy` would wait forever for a code that does not exist; one hitting a 429 would
+/// meet an identifier the contract never mentioned.
+///
+/// That is the precise drift the contract module exists to prevent, occurring inside the contract
+/// module — which is why the fix is a test rather than a correction. Both directions are checked:
+/// a code the server can emit must be documented, AND a documented code must be reachable, because
+/// a contract that promises an identifier nothing produces is its own kind of lie.
+#[test]
+fn codes_documented_match_codes_returned() {
+    use axum::http::StatusCode;
+    use heldar_kernel::error::AppError;
+    use std::collections::BTreeSet;
+
+    let documented: BTreeSet<&str> = AppError::ALL_CODES.iter().copied().collect();
+    assert_eq!(
+        documented.len(),
+        AppError::ALL_CODES.len(),
+        "ALL_CODES contains a duplicate"
+    );
+
+    // Every status the classifier can produce, swept exhaustively rather than by a hand-picked
+    // sample — a sample is how `payload_too_large` went unnoticed in the first place.
+    let mut emitted: BTreeSet<&str> = BTreeSet::new();
+    for raw in 100u16..600 {
+        if let Ok(status) = StatusCode::from_u16(raw) {
+            emitted.insert(AppError::code_for_status(status));
+        }
+    }
+
+    let undocumented: Vec<_> = emitted.difference(&documented).collect();
+    assert!(
+        undocumented.is_empty(),
+        "the server can return {undocumented:?}, which the published contract does not mention — a \
+         client cannot branch on a code it was never told about"
+    );
+
+    let unreachable: Vec<_> = documented.difference(&emitted).collect();
+    assert!(
+        unreachable.is_empty(),
+        "the contract documents {unreachable:?}, which no status maps to — a client waiting for one \
+         of these waits forever"
+    );
+
+    // And the served spec's own description must name them, so the JSON an integrator reads is the
+    // same list. This is the artifact that actually reaches a client.
+    let spec = serde_json::to_value(ApiDoc::openapi()).expect("spec");
+    let desc = spec["components"]["schemas"]["ErrorBody"]["properties"]["code"]["description"]
+        .as_str()
+        .unwrap_or_default();
+    for code in AppError::ALL_CODES {
+        assert!(
+            desc.contains(code),
+            "the served contract's `code` description never mentions {code:?}:\n{desc}"
+        );
+    }
+    assert!(
+        !desc.contains("busy"),
+        "the description still names `busy`, which nothing returns:\n{desc}"
+    );
+}
+
+/// A write-only field must be structurally unable to reach a response type (#120).
+///
+/// `Camera` carries a plaintext `password`; `CameraView` carries `has_password: bool` instead, and
+/// its doc comment says the password "is never serialized to clients". This turns that comment into
+/// a check — against the SERVED SPEC, not the source — because the failure mode is a response schema
+/// that quietly grows the field back and a generated client that then types it as returnable.
+///
+/// The sweep is over every schema in the document rather than a named list: a hand-picked list is
+/// how the next response type carrying a secret gets missed.
+#[test]
+fn no_response_schema_exposes_a_write_only_secret() {
+    let spec = serde_json::to_value(ApiDoc::openapi()).expect("spec");
+    let schemas = spec["components"]["schemas"]
+        .as_object()
+        .expect("components.schemas");
+
+    // Names that must never appear as a property of a schema a client READS. `has_password` is the
+    // deliberate, safe alternative and is allowed by name.
+    const FORBIDDEN: &[&str] = &["password", "secret", "token", "private_key", "api_key"];
+
+    // Request bodies legitimately carry credentials — that is how a camera is enrolled. Only
+    // schemas a response can reference are swept.
+    let request_only: std::collections::BTreeSet<&str> = [
+        "CameraCreate",
+        "CameraUpdate",
+        "SiteCreate",
+        "SiteUpdate",
+        "TimezoneUpdate",
+    ]
+    .into_iter()
+    .collect();
+
+    let mut offences: Vec<String> = Vec::new();
+    for (name, schema) in schemas {
+        if request_only.contains(name.as_str()) {
+            continue;
+        }
+        let Some(props) = schema["properties"].as_object() else {
+            continue;
+        };
+        for prop in props.keys() {
+            let p = prop.to_ascii_lowercase();
+            if p == "has_password" {
+                continue;
+            }
+            if FORBIDDEN
+                .iter()
+                .any(|f| p == *f || p.ends_with(&format!("_{f}")))
+            {
+                offences.push(format!("{name}.{prop}"));
+            }
+        }
+    }
+    assert!(
+        offences.is_empty(),
+        "response schema(s) expose a write-only secret: {offences:?}. A generated client would type \
+         these as readable, and an integrator would reasonably expect the server to return them."
+    );
+}

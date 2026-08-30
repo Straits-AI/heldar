@@ -420,6 +420,8 @@ export interface OverlayStatus {
 export interface SystemInfo {
   name: string;
   version: string;
+  /** The API CONTRACT version (#120) — not the build version. Pin generated clients to this. */
+  api_version: string;
   started_at: string;
   uptime_seconds: number;
   recorder_enabled: boolean;
