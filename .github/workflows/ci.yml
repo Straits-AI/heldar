@@ -40,6 +40,21 @@ jobs:
         run: cargo test --workspace --locked
       - name: read-seam lint (cross-app reads go through *_read views)
         run: ./scripts/check-read-seam.sh
+      # The API contract, compared against the one the last release published. Breaking changes are
+      # ALLOWED on this pre-1.0 appliance — what is not allowed is shipping one by accident, because
+      # it breaks a generated client at runtime in someone else's deployment. `continue-on-error`
+      # while the baseline does not exist yet: a release has to publish one before this can enforce.
+      - name: api contract diff (against the last release)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          if gh release download --pattern openapi.json --dir /tmp/baseline 2>/dev/null; then
+            python3 scripts/openapi_diff.py /tmp/baseline/openapi.json target/openapi.json
+          else
+            echo "no published openapi.json to compare against yet — the next release creates one"
+          fi
       - name: open build (no proprietary verticals) compiles
         run: cargo build -p heldar-server --no-default-features --locked
       - name: open build stays lean (no wasm runtime linked by default)

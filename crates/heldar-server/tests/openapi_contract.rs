@@ -384,3 +384,26 @@ fn no_response_schema_exposes_a_write_only_secret() {
          these as readable, and an integrator would reasonably expect the server to return them."
     );
 }
+
+/// Write the served document to `target/openapi.json` so CI can diff it against the last release
+/// without booting a server (#120).
+///
+/// A test rather than a binary because the document is already reachable from the test harness, and
+/// a second entry point is a second thing that can disagree with the first — the failure this whole
+/// module exists to prevent.
+#[test]
+fn write_the_served_document_for_diffing() {
+    let spec = heldar_kernel::openapi::document();
+    let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root")
+        .join("target/openapi.json");
+    std::fs::write(&out, serde_json::to_vec_pretty(&spec).expect("serialize"))
+        .unwrap_or_else(|e| panic!("writing {}: {e}", out.display()));
+    assert!(
+        spec["paths"].as_object().is_some_and(|p| !p.is_empty()),
+        "the document has no paths — writing an empty spec would make every diff against it read \
+         as a wholesale removal"
+    );
+}

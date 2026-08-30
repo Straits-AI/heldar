@@ -171,6 +171,20 @@ jobs:
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: heldar-release-manifest.json
+      # The contract this release publishes, so the next release's diff has a baseline and an
+      # integrator can generate a client without booting a box.
+      - name: API contract
+        if: matrix.arch == 'x86_64'
+        run: |
+          cargo test -p heldar-server --test openapi_contract write_the_served_document -- --exact
+          cp target/openapi.json openapi.json
+      - name: Upload the API contract
+        if: matrix.arch == 'x86_64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" openapi.json --clobber
+
       - name: Upload the manifest
         if: matrix.arch == 'x86_64'
         env:
