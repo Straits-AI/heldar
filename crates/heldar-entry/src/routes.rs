@@ -1100,28 +1100,134 @@ struct ReportQuery {
     from: Option<String>,
     to: Option<String>,
     limit: Option<i64>,
+    /// The IANA zone `date=` is a calendar day IN. Omit and it resolves from the site/box (#125).
+    tz: Option<String>,
 }
 
-/// Resolve a [from, to) window from either an explicit from/to or a `date=YYYY-MM-DD` (UTC day).
-fn report_window(q: &ReportQuery) -> AppResult<(DateTime<Utc>, DateTime<Utc>)> {
+/// The window, and the clock it was computed on.
+struct Window {
+    from: DateTime<Utc>,
+    to: DateTime<Utc>,
+    tz: chrono_tz::Tz,
+    tz_source: &'static str,
+    /// True when `date=` (or the implicit today) was used — i.e. when the zone actually mattered.
+    calendar_day: bool,
+}
+
+impl Window {
+    /// What clock this report was computed on, echoed in every response.
+    ///
+    /// A shifted total looks exactly like a correct one, so the answer has to state its own basis.
+    /// This matters most on the first run after a zone is configured: a `date=` report that used to
+    /// cover 08:00→08:00 local at a UTC+8 site now covers 00:00→00:00, and the numbers change with
+    /// no error. They SHOULD change — that is the fix — but an operator re-running last month's
+    /// compliance export deserves to see why.
+    fn interpretation(&self) -> Value {
+        json!({
+            "timezone": self.tz.to_string(),
+            "timezone_source": self.tz_source,
+            "calendar_day_in": if self.calendar_day { Some(self.tz.to_string()) } else { None },
+            "note": "`date` is a calendar day in this zone; `from`/`to` and every timestamp below \
+                     are UTC.",
+        })
+    }
+}
+
+/// Resolve a [from, to) window from either an explicit from/to or a `date=YYYY-MM-DD`.
+///
+/// A calendar day is a wall-clock notion, so `date=` needs a zone. It used to be resolved as the UTC
+/// day, which after #125 made "yesterday" in search and "yesterday" in this report two different 24
+/// hours on the same box.
+///
+/// Absolute `from`/`to` are unambiguous instants and are untouched — the zone is irrelevant to them,
+/// so they are not refused on a cross-zone box either.
+async fn report_window(st: &AppState, principal: &Principal, q: &ReportQuery) -> AppResult<Window> {
+    let explicit = q.tz.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let (tz, tz_source) = match explicit {
+        Some(raw) => (
+            heldar_kernel::services::tz::parse(raw).ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "`tz` must be an IANA timezone identifier such as `Asia/Kuala_Lumpur` \
+                     (got {raw:?})"
+                ))
+            })?,
+            "explicit",
+        ),
+        None => {
+            let cams: Vec<String> = match &principal.scope {
+                heldar_kernel::auth::Scope::Cameras(set) => set.iter().cloned().collect(),
+                heldar_kernel::auth::Scope::All => Vec::new(),
+            };
+            let (zones, from_site) = heldar_kernel::services::tz::zones_for(&st.pool, &cams).await;
+            if zones.len() > 1 {
+                // Only when the zone actually decides the window. Absolute from/to mean the same
+                // instants everywhere, so refusing those would be obstruction.
+                if q.from.is_none() && q.to.is_none() {
+                    return Err(AppError::BadRequest(format!(
+                        "a calendar day means something different at each of this report's sites \
+                         ({}). Pass an explicit `tz`, or use absolute `from`/`to` — resolving it \
+                         silently would shift the totals by hours.",
+                        zones.into_iter().collect::<Vec<_>>().join(", ")
+                    )));
+                }
+                (chrono_tz::Tz::UTC, "not_a_calendar_day")
+            } else {
+                let one = zones
+                    .into_iter()
+                    .next()
+                    .and_then(|z| heldar_kernel::services::tz::parse(&z));
+                // The source is what was actually consulted, not something inferred from the
+                // value: "the box default happens to be UTC" and "nothing is configured" produce
+                // the same zone and mean different things to an operator reading the report.
+                let (boxwide, _) = heldar_kernel::services::tz::site_tz(&st.pool, None).await;
+                match one {
+                    Some(tz) if from_site => (tz, "site"),
+                    Some(tz) if boxwide.is_some() => (tz, "default"),
+                    Some(tz) => (tz, "utc_fallback"),
+                    None => (chrono_tz::Tz::UTC, "utc_fallback"),
+                }
+            }
+        }
+    };
+
     if q.from.is_some() || q.to.is_some() {
         let from = parse_opt_ts(&q.from, "from")?.unwrap_or_else(|| Utc::now() - Duration::days(1));
         let to = parse_opt_ts(&q.to, "to")?.unwrap_or_else(Utc::now);
         if to < from {
             return Err(AppError::BadRequest("`to` must not precede `from`".into()));
         }
-        return Ok((from, to));
+        return Ok(Window {
+            from,
+            to,
+            tz,
+            tz_source,
+            calendar_day: false,
+        });
     }
+
     let day = match &q.date {
         Some(d) => chrono::NaiveDate::parse_from_str(d.trim(), "%Y-%m-%d")
             .map_err(|_| AppError::BadRequest("`date` must be YYYY-MM-DD".into()))?,
-        None => Utc::now().date_naive(),
+        None => Utc::now().with_timezone(&tz).date_naive(),
     };
-    let start = day
+    let naive = day
         .and_hms_opt(0, 0, 0)
-        .ok_or_else(|| AppError::BadRequest("invalid date".into()))?
-        .and_utc();
-    Ok((start, start + Duration::days(1)))
+        .ok_or_else(|| AppError::BadRequest("invalid date".into()))?;
+    // `from_wall_clock` resolves the two days a year where a local midnight is skipped or repeated.
+    let from = heldar_kernel::services::tz::from_wall_clock(tz, naive);
+    let to = heldar_kernel::services::tz::from_wall_clock(
+        tz,
+        (day + Duration::days(1))
+            .and_hms_opt(0, 0, 0)
+            .ok_or_else(|| AppError::BadRequest("invalid date".into()))?,
+    );
+    Ok(Window {
+        from,
+        to,
+        tz,
+        tz_source,
+        calendar_day: true,
+    })
 }
 
 async fn report_entry_log(
@@ -1130,7 +1236,8 @@ async fn report_entry_log(
     Query(q): Query<ReportQuery>,
 ) -> AppResult<Json<Value>> {
     principal.require_cap(Cap::EventsRead, "view reports")?;
-    let (from, to) = report_window(&q)?;
+    let w = report_window(&st, &principal, &q).await?;
+    let (from, to) = (w.from, w.to);
     let limit = q.limit.unwrap_or(1000).clamp(1, 10000);
     // The daily log is the same rows as the feed, so it gets the same predicate — otherwise the
     // report is a trivial bypass of `list_entry_events`.
@@ -1148,6 +1255,7 @@ async fn report_entry_log(
     let counts = auth_status_counts(&st.pool, &principal, from, to).await?;
     Ok(Json(json!({
         "from": from, "to": to,
+        "interpretation": w.interpretation(),
         "total": events.len(),
         "by_auth_status": counts,
         "events": events,
@@ -1160,7 +1268,8 @@ async fn report_exceptions(
     Query(q): Query<ReportQuery>,
 ) -> AppResult<Json<Value>> {
     principal.require_cap(Cap::EventsRead, "view reports")?;
-    let (from, to) = report_window(&q)?;
+    let w = report_window(&st, &principal, &q).await?;
+    let (from, to) = (w.from, w.to);
     let limit = q.limit.unwrap_or(1000).clamp(1, 10000);
     // Exceptions = anything that is not an automatic clean match: blocked / exception / unmatched,
     // plus any event a guard explicitly rejected.
@@ -1180,6 +1289,7 @@ async fn report_exceptions(
     let events = query.bind(limit).fetch_all(&st.pool).await?;
     Ok(Json(json!({
         "from": from, "to": to,
+        "interpretation": w.interpretation(),
         "total": events.len(),
         "events": events,
     })))
@@ -1670,6 +1780,8 @@ mod tests {
             from: Some((Utc::now() - Duration::days(1)).to_rfc3339()),
             to: Some((Utc::now() + Duration::days(1)).to_rfc3339()),
             limit: None,
+            // Absolute from/to, so the zone does not decide this window (#125).
+            tz: None,
         };
 
         let feed = list_entry_events(State(st.clone()), p.clone(), Query(eq()))

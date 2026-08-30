@@ -227,38 +227,6 @@ fn zone_dependent(plan: &QueryPlan) -> bool {
 ///
 /// An empty camera list means the whole fleet, which is a strict superset of any list — so it is
 /// expanded rather than treated as "no cameras", which is how the refusal was bypassable.
-/// Returns the distinct effective zones, and whether any camera got its zone from a SITE (as
-/// opposed to inheriting the box default or the UTC fallback) — the caller needs that to report an
-/// honest provenance rather than guessing from the value.
-async fn effective_zones(
-    st: &AppState,
-    cameras: &[String],
-) -> (std::collections::BTreeSet<String>, bool) {
-    let (fallback, _) = heldar_kernel::services::tz::site_tz(&st.pool, None).await;
-    let fallback = fallback.unwrap_or(chrono_tz::Tz::UTC).to_string();
-
-    let ids: Vec<String> = if cameras.is_empty() {
-        sqlx::query_scalar::<_, String>("SELECT id FROM cameras")
-            .fetch_all(&st.pool)
-            .await
-            .unwrap_or_default()
-    } else {
-        cameras.to_vec()
-    };
-
-    let mut zones = std::collections::BTreeSet::new();
-    let mut from_site = false;
-    for cam in &ids {
-        let (tz, src) = heldar_kernel::services::tz::site_tz(&st.pool, Some(cam)).await;
-        from_site |= src == heldar_kernel::services::tz::TzSource::Site;
-        zones.insert(
-            tz.map(|t| t.to_string())
-                .unwrap_or_else(|| fallback.clone()),
-        );
-    }
-    (zones, from_site)
-}
-
 /// The zone a plan's hour filter and relative dates are read in, and where it came from (#125).
 ///
 /// `explicit` is the zone the CALLER supplied — not whatever happens to be sitting in `plan.tz`.
@@ -283,7 +251,9 @@ async fn resolve_tz(
         return Ok((tz, "explicit"));
     }
 
-    let (zones, from_site) = effective_zones(st, &plan.cameras).await;
+    // One implementation, in the kernel, so search and the entry reports cannot drift into
+    // disagreeing about what "yesterday" means on the same box.
+    let (zones, from_site) = heldar_kernel::services::tz::zones_for(&st.pool, &plan.cameras).await;
     if zones.len() > 1 {
         // ONLY when the answer actually depends on the clock. Refusing an absolute-window plate
         // lookup because the credential's cameras sit in two sites is obstruction: nothing about
