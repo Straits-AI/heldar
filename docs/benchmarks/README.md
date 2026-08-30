@@ -37,6 +37,12 @@ someone's production recorder is an outage, not a benchmark. Metrics that need f
 access (segment playability, core CPU/RSS) come back `unmeasured`, which is a fact about the mode,
 not a pass.
 
+A field run **cannot qualify a row in the sizing table**, and the gate refuses one that tries. That
+is deliberate rather than a limitation: a real site's cameras are whatever the site has — mixed
+codecs, mixed bitrates, changing between runs — so a field result describes *that site on that day*
+and is not a controlled workload another buyer can plan against. Field mode answers "is this box
+keeping up", which is a different and equally useful question.
+
 ### Re-checking a published result
 
 ```bash
@@ -90,7 +96,9 @@ Measured from outside the box, by doing the work an operator does:
 | `liveview_*`, `snapshot_*`, `clip_*` | real requests, timed |
 | `api_5xx_rate`, `api_seconds_p95` | every control-plane call the harness made |
 | `core_cpu_percent_mean`, `core_rss_bytes_max` | `ps` on the core process |
+| `disk_used_percent_max` | the peak of the exposition's disk gauge over the run |
 | `retention_bytes_reclaimed` | decreases in `heldar_recordings_bytes` |
+| `ai_detections_per_second` | AI profiles only — a **floor** on throughput, not effective FPS (see below) |
 
 **Not measured, and reported as `unmeasured` rather than assumed:**
 
