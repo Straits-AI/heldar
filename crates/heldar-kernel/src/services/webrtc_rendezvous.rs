@@ -491,6 +491,10 @@ fn forward_request_header(name: &str) -> bool {
             | "accept"
             | "content-type"
             | "range"
+            // Correlation must survive the relay: a remote caller's id is dropped here otherwise, and
+            // cross-relay tracing is the case the feature exists for.
+            | "x-request-id"
+            | "x-heldar-correlation-id"
             | "if-none-match"
             | "if-modified-since"
     )
@@ -506,6 +510,8 @@ fn forward_response_header(name: &str) -> bool {
             | "accept-ranges"
             | "cache-control"
             | "etag"
+            // ...and back out, or the remote caller never learns the id its call was given.
+            | "x-request-id"
             | "last-modified"
     )
 }

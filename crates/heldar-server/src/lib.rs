@@ -555,6 +555,9 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
         }
     };
 
+    // Outermost of the app layers so EVERY response carries the id, including auth rejections and
+    // errors raised before a handler runs — those are exactly the ones a caller needs to quote.
+    let app = app.layer(axum::middleware::from_fn(heldar_kernel::request_id::layer));
     let app = app.layer(TraceLayer::new_for_http());
     // Same-origin-only attaches NO layer at all, rather than a permissive one.
     let app = match cors {
@@ -729,8 +732,22 @@ async fn log_unattributed_clips(pool: &sqlx::SqlitePool, clips_dir: &std::path::
 }
 
 fn init_tracing() {
+    // `HELDAR_LOG` first, then the conventional `RUST_LOG`. Only HELDAR_LOG used to be read, so an
+    // operator who set RUST_LOG=warn — the thing every Rust program honours — got no effect at all
+    // and kept the `info` default. That is not hypothetical: the live box sets RUST_LOG=warn and had
+    // a 300 MB core.log because of it.
     let filter = EnvFilter::try_from_env("HELDAR_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("info,heldar_core=debug"));
+        .or_else(|_| EnvFilter::try_from_default_env())
+        .unwrap_or_else(|_| EnvFilter::new("info,heldar_core=debug"))
+        // Floor the correlation span whatever the global level says. It is `info_span!`, so a
+        // perfectly reasonable `warn` filter would drop the span and every warn/error line inside a
+        // request would lose its `request_id` — the id disappearing exactly when an operator is
+        // grepping for it. Costs one span per request.
+        .add_directive(
+            "heldar_kernel::request_id=info"
+                .parse()
+                .expect("static directive"),
+        );
     tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer())
