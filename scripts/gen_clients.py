@@ -123,7 +123,18 @@ def type_of(schema, lang, schemas):
         item = type_of(schema.get("items") or {}, lang, schemas)
         return {"ts": f"{item}[]", "py": f"list[{item}]", "rs": f"Vec<{item}>"}[lang]
     if t == "object" or t is None:
-        # A free-form object is a real thing in this API (detail blobs, config); it is not ambiguity.
+        # A MAP is not a free-form object. `additionalProperties` with a schema says every value has
+        # a known type, and flattening that to `unknown` throws away the one thing a client needs to
+        # index it — the dashboard had to cast around this before the schema said so.
+        ap = schema.get("additionalProperties")
+        if isinstance(ap, dict) and ap:
+            v = type_of(ap, lang, schemas)
+            return {
+                "ts": f"Record<string, {v}>",
+                "py": f"dict[str, {v}]",
+                "rs": f"std::collections::HashMap<String, {v}>",
+            }[lang]
+        # A genuinely free-form object is a real thing in this API (detail blobs); not ambiguity.
         return {"ts": "unknown", "py": "object", "rs": "serde_json::Value"}[lang]
     if t in SCALARS:
         return SCALARS[t][lang]

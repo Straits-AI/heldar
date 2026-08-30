@@ -108,12 +108,12 @@ class BackupDestinationUpdate:
 
 @dataclass
 class BackupDestinationView:
-    config: object
+    config: dict[str, str]
     created_at: str
     enabled: bool
     has_credentials: bool
     id: str
-    kind: str
+    kind: BackupKind
     name: str
     updated_at: str
 
@@ -127,8 +127,8 @@ class BackupJob:
     files_total: int
     id: str
     incident_lock_only: bool
-    kind: str
-    status: str
+    kind: BackupKind
+    status: BackupJobStatus
     created_by: str | None = None
     created_by_kind: str | None = None
     destination_id: str | None = None
@@ -141,6 +141,10 @@ class BackupJob:
     started_at: str | None = None
     to_time: str | None = None
 
+
+BackupJobStatus = str  # one of: pending, running, completed, error
+
+BackupKind = str  # one of: local, sftp, ftp, s3
 
 @dataclass
 class BackupPolicy:
@@ -239,7 +243,7 @@ class CameraView:
     priority: int
     record_audio: bool
     record_enabled: bool
-    record_mode: str
+    record_mode: RecordMode
     record_stream: str
     retention_hours: int
     rtsp_port: int
@@ -549,6 +553,8 @@ class OsdConfig:
     time_style: str | None = None
 
 
+PassStatus = str  # one of: active, checked_in, checked_out, expired, revoked
+
 @dataclass
 class ProbeRequest:
     device_url: str | None = None
@@ -592,6 +598,8 @@ class QueryResult:
 class RebootRequest:
     confirm: bool
 
+
+RecordMode = str  # one of: continuous, scheduled, event, scheduled_event
 
 @dataclass
 class RecordScheduleCreate:
@@ -854,7 +862,7 @@ class VisitorPass:
     code: str
     created_at: str
     id: str
-    status: str
+    status: PassStatus
     updated_at: str
     valid_from: str
     valid_until: str

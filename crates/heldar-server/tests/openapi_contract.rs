@@ -526,3 +526,71 @@ fn the_dashboards_generated_contract_types_are_current() {
          python3 scripts/gen_clients.py target/openapi.json clients"
     );
 }
+
+/// The fields the server constrains must say so in the schema (#156).
+///
+/// A Rust `String` that only ever holds four values arrives as a bare `string` unless it is told
+/// otherwise. The dashboard can refine that locally; a GENERATED CLIENT CANNOT — an integrator gets
+/// no exhaustiveness checking and no error when they send `"schedule"` for `"scheduled"`, and finds
+/// out when the server rejects it at runtime, which is the class of mistake a published contract
+/// exists to prevent.
+///
+/// Each entry here is enforced on write by the server, which is what makes naming it honest.
+#[test]
+fn constrained_fields_publish_their_allowed_values() {
+    let spec = heldar_server::api_document();
+    let schemas = &spec["components"]["schemas"];
+
+    for (schema, field, expected) in [
+        (
+            "CameraView",
+            "record_mode",
+            vec!["continuous", "scheduled", "event", "scheduled_event"],
+        ),
+        (
+            "BackupJob",
+            "status",
+            vec!["pending", "running", "completed", "error"],
+        ),
+        ("BackupJob", "kind", vec!["local", "sftp", "ftp", "s3"]),
+        (
+            "BackupDestinationView",
+            "kind",
+            vec!["local", "sftp", "ftp", "s3"],
+        ),
+        (
+            "VisitorPass",
+            "status",
+            vec!["active", "checked_in", "checked_out", "expired", "revoked"],
+        ),
+    ] {
+        let prop = &schemas[schema]["properties"][field];
+        // The field references a named enum schema; follow it.
+        let target = prop["$ref"]
+            .as_str()
+            .and_then(|r| r.strip_prefix("#/components/schemas/"))
+            .unwrap_or_else(|| {
+                panic!("{schema}.{field} is not a $ref to an enum — it publishes as {prop}")
+            });
+        let values: Vec<&str> = schemas[target]["enum"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{target} carries no `enum`"))
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            values, expected,
+            "{schema}.{field} publishes {values:?}, but the server accepts {expected:?}. A client \
+             generated from this cannot tell a valid value from a typo."
+        );
+    }
+
+    // A map is not a free-form object: `config` says what its values are, so a client can index it.
+    let config = &schemas["BackupDestinationView"]["properties"]["config"];
+    assert_eq!(
+        config["additionalProperties"]["type"].as_str(),
+        Some("string"),
+        "BackupDestinationView.config must publish its value type, or a client cannot index it: \
+         {config}"
+    );
+}

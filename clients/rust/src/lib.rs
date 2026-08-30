@@ -91,12 +91,12 @@ pub struct BackupDestinationUpdate {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupDestinationView {
-    pub config: serde_json::Value,
+    pub config: std::collections::HashMap<String, String>,
     pub created_at: String,
     pub enabled: bool,
     pub has_credentials: bool,
     pub id: String,
-    pub kind: String,
+    pub kind: BackupKind,
     pub name: String,
     pub updated_at: String,
 }
@@ -116,13 +116,37 @@ pub struct BackupJob {
     pub from_time: Option<String>,
     pub id: String,
     pub incident_lock_only: bool,
-    pub kind: String,
+    pub kind: BackupKind,
     pub output_path: Option<String>,
     pub output_url: Option<String>,
     pub policy_id: Option<String>,
     pub started_at: Option<String>,
-    pub status: String,
+    pub status: BackupJobStatus,
     pub to_time: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BackupJobStatus {
+    #[serde(rename = "pending")]
+    Pending,
+    #[serde(rename = "running")]
+    Running,
+    #[serde(rename = "completed")]
+    Completed,
+    #[serde(rename = "error")]
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BackupKind {
+    #[serde(rename = "local")]
+    Local,
+    #[serde(rename = "sftp")]
+    Sftp,
+    #[serde(rename = "ftp")]
+    Ftp,
+    #[serde(rename = "s3")]
+    S3,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -231,7 +255,7 @@ pub struct CameraView {
     #[serde(rename = "record_enabled")]
     pub record_enabled: bool,
     #[serde(rename = "record_mode")]
-    pub record_mode: String,
+    pub record_mode: RecordMode,
     #[serde(rename = "record_stream")]
     pub record_stream: String,
     #[serde(rename = "record_url_masked")]
@@ -553,6 +577,20 @@ pub struct OsdConfig {
     pub time_style: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PassStatus {
+    #[serde(rename = "active")]
+    Active,
+    #[serde(rename = "checked_in")]
+    CheckedIn,
+    #[serde(rename = "checked_out")]
+    CheckedOut,
+    #[serde(rename = "expired")]
+    Expired,
+    #[serde(rename = "revoked")]
+    Revoked,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProbeRequest {
     pub device_url: Option<String>,
@@ -595,6 +633,18 @@ pub struct QueryResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RebootRequest {
     pub confirm: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RecordMode {
+    #[serde(rename = "continuous")]
+    Continuous,
+    #[serde(rename = "scheduled")]
+    Scheduled,
+    #[serde(rename = "event")]
+    Event,
+    #[serde(rename = "scheduled_event")]
+    ScheduledEvent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -879,7 +929,7 @@ pub struct VisitorPass {
     pub plate_norm: Option<String>,
     pub purpose: Option<String>,
     pub site_id: Option<String>,
-    pub status: String,
+    pub status: PassStatus,
     pub updated_at: String,
     pub valid_from: String,
     pub valid_until: String,

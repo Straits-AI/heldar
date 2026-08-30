@@ -88,13 +88,13 @@ export interface BackupDestinationUpdate {
 
 export interface BackupDestinationView {
   /** The config blob with any secret values masked to `***`. */
-  config: unknown;
+  config: Record<string, string>;
   created_at: string;
   enabled: boolean;
   /** Whether at least one secret credential is configured (so the UI can show "set" without the value). */
   has_credentials: boolean;
   id: string;
-  kind: string;
+  kind: BackupKind;
   name: string;
   updated_at: string;
 }
@@ -117,7 +117,7 @@ export interface BackupJob {
   id: string;
   incident_lock_only: boolean;
   /** `policy` | `on_demand_archive`. */
-  kind: string;
+  kind: BackupKind;
   /** Filesystem path of the produced artifact (archive .zip), if any. */
   output_path?: string | null;
   /** Browser-fetchable URL of the produced artifact (under /media/archives/...), if any. */
@@ -125,9 +125,13 @@ export interface BackupJob {
   policy_id?: string | null;
   started_at?: string | null;
   /** `pending` | `running` | `completed` | `error`. */
-  status: string;
+  status: BackupJobStatus;
   to_time?: string | null;
 }
+
+export type BackupJobStatus = "pending" | "running" | "completed" | "error";
+
+export type BackupKind = "local" | "sftp" | "ftp" | "s3";
 
 export interface BackupPolicy {
   /** JSON array of camera ids; empty array means all cameras. */
@@ -222,7 +226,7 @@ export interface CameraView {
   priority: number;
   record_audio: boolean;
   record_enabled: boolean;
-  record_mode: string;
+  record_mode: RecordMode;
   record_stream: string;
   /** Effective RTSP URL for the recorded stream, with credentials masked. */
   record_url_masked?: string | null;
@@ -538,6 +542,8 @@ export interface OsdConfig {
   time_style?: string | null;
 }
 
+export type PassStatus = "active" | "checked_in" | "checked_out" | "expired" | "revoked";
+
 export interface ProbeRequest {
   /** Optional explicit ONVIF device service URL (e.g. `http://host/onvif/device_service`). When omitted, the URL is taken from a prior probe or derived from the camera's address. */
   device_url?: string | null;
@@ -584,6 +590,8 @@ export interface QueryResult {
 export interface RebootRequest {
   confirm: boolean;
 }
+
+export type RecordMode = "continuous" | "scheduled" | "event" | "scheduled_event";
 
 export interface RecordScheduleCreate {
   /** JSON array of weekday ints (0=Mon..6=Sun). */
@@ -858,7 +866,7 @@ export interface VisitorPass {
   plate_norm?: string | null;
   purpose?: string | null;
   site_id?: string | null;
-  status: string;
+  status: PassStatus;
   updated_at: string;
   valid_from: string;
   valid_until: string;
