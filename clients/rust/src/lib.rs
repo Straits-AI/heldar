@@ -1255,6 +1255,7 @@ pub const REQUIREMENTS: &[(&str, &str, Option<&str>, &str)] = &[
     ("GET", "/api/v1/system/db", Some("system:read"), "fleet-only"),
     ("PUT", "/api/v1/system/db", None, "fleet-only"),
     ("POST", "/api/v1/system/db/convert", None, "fleet-only"),
+    ("GET", "/api/v1/system/posture", None, "fleet-only"),
     ("GET", "/api/v1/system/retention", Some("system:read"), "scope-neutral"),
     ("PUT", "/api/v1/system/retention", None, "fleet-only"),
     ("GET", "/api/v1/system/timezone", Some("system:read"), "scope-neutral"),

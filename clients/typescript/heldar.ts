@@ -1786,6 +1786,11 @@ export class HeldarClient {
     return this.call<DbConvertResult>("POST", `/api/v1/system/db/convert`);
   }
 
+  /** Requires admin, fleet-only. */
+  getSecurityPosture(): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/system/posture`);
+  }
+
   /** Requires capability `system:read`, scope-neutral. */
   getRetentionLimits(): Promise<RetentionLimits> {
     return this.call<RetentionLimits>("GET", `/api/v1/system/retention`);
