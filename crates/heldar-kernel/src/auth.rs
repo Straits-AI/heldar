@@ -1319,6 +1319,10 @@ fn subject_camera(
 }
 
 /// Append an immutable audit-log entry (best-effort; never fails the caller).
+///
+/// Returns the row's id, or `None` if the write failed. Evidence bundles (#118) put it in the signed
+/// manifest so a bundle points back at the appliance's own trail — which means the id has to be
+/// known BEFORE the export runs, not derived afterwards by searching for a matching row.
 pub async fn audit(
     pool: &SqlitePool,
     actor: &Principal,
@@ -1326,15 +1330,16 @@ pub async fn audit(
     target_type: &str,
     target_id: &str,
     detail: serde_json::Value,
-) {
+) -> Option<String> {
     // Derived before `detail` is moved into the bind: the subject has to live in its own column
     // because `detail` is free-form `Json<Value>` that no SQL predicate can be trusted to read.
     let subject = subject_camera(target_type, target_id, &detail);
+    let audit_id = format!("aud_{}", uuid::Uuid::new_v4().simple());
     let res = sqlx::query(
         "INSERT INTO audit_log (id, actor, actor_name, role, action, target_type, target_id, detail, subject_camera_id, created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(format!("aud_{}", uuid::Uuid::new_v4().simple()))
+    .bind(&audit_id)
     .bind(&actor.id)
     .bind(&actor.name)
     .bind(actor.role.as_str())
@@ -1348,7 +1353,9 @@ pub async fn audit(
     .await;
     if let Err(e) = res {
         tracing::error!(error = %e, action, "audit: failed to write audit log entry");
+        return None;
     }
+    Some(audit_id)
 }
 
 #[cfg(test)]

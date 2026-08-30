@@ -335,8 +335,8 @@ without a camera list — read the whole log unchanged.
 `/media/*` serves the same footage the API gates, so it carries the same scope
 (`services/media_scope.rs`). Two subtrees name their camera in the path
 (`recordings/<camera_id>/…`, scheduled `snapshots/<camera_id>/…`) and are scoped by
-string alone. The rest — exported clips, playback sessions, evidence frames, archives
-— are **flat**: their filenames carry no camera, so producers register each artifact
+string alone. The rest — exported clips, playback sessions, evidence frames, archives,
+signed evidence bundles — are **flat**: their filenames carry no camera, so producers register each artifact
 in the `media_artifacts` sidecar (migration 0013) and the guard resolves ownership
 from it. Migration 0013 also carried existing zone and embedding evidence across;
 **entry** migration 0004 does the same for gate evidence, which lives in the app crate
@@ -366,6 +366,7 @@ decision survives:
 | Backup / archive **job rows** | at trigger, confined into the job row | the job ships the confined list, never the policy's |
 | Backup **transfer** (detached, off-box) | at trigger, **re-checked while running** | ≤ ~5 s after the credential is withdrawn (kernel migration 0015) |
 | Archive export (`/api/v1/archive/export`) | on the request | the request — it runs inline and its `.zip` is re-guarded on every fetch |
+| Evidence bundle (`/api/v1/evidence/exports`) | on the request, against the camera the export actually reads — derived from `incident_id` where one is given, not the id supplied | the request; the bundle is re-guarded on every fetch like any other artifact. Once downloaded it is a file in someone's possession and no later scope change reaches it — which is the point of signing it |
 | AI **leases** | on each acquire/renew (they are one call) | the lost camera stops being offered on the next renew; the stale row lapses on its TTL (≤ 300 s) and authorizes nothing on its own |
 | AI **frame tickets** | at frame pull, bound to key id + camera | ≤ ticket TTL, and ingest re-checks `require_camera` against the live principal anyway |
 | **Live view** token (MediaMTX) | at `/liveview`, **re-checked on every read** | HLS: seconds. WebRTC / RTSP readers: **immediately** when the change is made through the API, else within `HELDAR_LIVE_REAPER_INTERVAL_S` (default 15 s) |

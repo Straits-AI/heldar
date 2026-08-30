@@ -13,6 +13,10 @@ pub struct Config {
     pub frames_dir: PathBuf,
     /// Directory where segment-spanning HLS playback sessions are generated (one subdir per session).
     pub playback_dir: PathBuf,
+    /// Signed evidence bundles (#118). Separate from `clips_dir` because a bundle is a different
+    /// artifact with a different retention and a different meaning: a clip is convenience, a bundle
+    /// is a chain-of-custody claim.
+    pub evidence_dir: PathBuf,
     pub ffmpeg_bin: String,
     pub ffprobe_bin: String,
     pub mediamtx_api_url: String,
@@ -635,6 +639,9 @@ impl Config {
         let archive_dir = var("HELDAR_ARCHIVE_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("archives"));
+        let evidence_dir = var("HELDAR_EVIDENCE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("evidence"));
 
         let cors_origins = var_or("HELDAR_CORS_ORIGINS", "http://localhost:5173")
             .split(',')
@@ -670,6 +677,7 @@ impl Config {
             data_dir,
             recordings_dir,
             clips_dir,
+            evidence_dir,
             snapshots_dir,
             frames_dir,
             playback_dir,

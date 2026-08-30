@@ -212,6 +212,13 @@ looks too short. Generate each secret with `openssl rand -base64 32`.
   copy encrypted and **separately from `HELDAR_SECRET_KEY`** — the key is what keeps the sealed credentials
   in it useless to a thief.
 
+- **Back up the evidence-signing key** (`$HELDAR_DATA_DIR/evidence-signing-key.pkcs8`, #118) with the
+  appliance. Bundles already exported stay verifiable by anyone who recorded the key id, but a box
+  that loses this key can no longer sign under the identity recipients have already pinned — and it
+  will generate a NEW one on next boot, so the next bundle verifies against a key nobody expects.
+  Unlike `HELDAR_SECRET_KEY` it is not interchangeable: it *is* the appliance's identity, not a
+  configured secret. See [`docs/EVIDENCE.md`](EVIDENCE.md).
+
 - **Rotating `HELDAR_SECRET_KEY`.** Losing or changing the key bricks recording (camera passwords fail to
   decrypt — fail-closed, by design), and restoring a DB onto a box with a different key does the same. To
   rotate, set the current key as `HELDAR_SECRET_KEY_OLD` and the new key as `HELDAR_SECRET_KEY`, then:

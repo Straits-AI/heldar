@@ -24,6 +24,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # The evidence-bundle tests (#118) build a REAL bundle: a synthetic segment via ffmpeg, a
+      # remux, a zip and an openssl signature check. They deliberately fail rather than skip when a
+      # tool is missing — a test that quietly skips in CI is indistinguishable from one that passes,
+      # and this suite is the only thing standing between a tampered bundle and a "VALID" verdict.
+      - name: install ffmpeg (evidence bundle tests remux real media)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg zip
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy (deny warnings)

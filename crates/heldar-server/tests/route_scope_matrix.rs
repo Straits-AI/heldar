@@ -1465,6 +1465,17 @@ const SCOPE_NEUTRAL: &[(&str, &str)] = &[
     ("/api/v1/backup/jobs", "owns_selection_sql subset rule"),
     ("/api/v1/archive/exports", "owns_selection_sql subset rule"),
     (
+        "/api/v1/evidence/exports",
+        "GET is confined to the caller's cameras; POST resolves the camera (from camera_id OR an \
+         incident) and camera_scope_checks it before any footage is read",
+    ),
+    (
+        "/api/v1/evidence/signing-key",
+        "an Ed25519 PUBLIC key. Deliberately readable by any authenticated credential, scoped \
+         included: a scoped operator who exported a bundle needs it to verify one, and a public \
+         key discloses nothing about which cameras exist",
+    ),
+    (
         "/api/v1/archive/export",
         "confine_camera_ids on the submitted list",
     ),
@@ -1609,6 +1620,7 @@ const FX_POLICY_DEL: (&str, &str) = ("bkp_del_of_camera_b", "bkp_del_does_not_ex
 const FX_JOB: (&str, &str) = ("bkj_of_camera_b", "bkj_does_not_exist");
 const FX_JOB_DEL: (&str, &str) = ("bkj_del_of_camera_b", "bkj_del_does_not_exist");
 const FX_LINK: (&str, &str) = ("lnk_of_camera_b", "lnk_does_not_exist");
+const FX_EVIDENCE: (&str, &str) = ("ev_of_camera_b", "ev_does_not_exist");
 
 /// Seed one row per resource-addressed route, all owned by camera_b.
 ///
@@ -1658,6 +1670,21 @@ async fn seed_census_fixtures(st: &AppState, root: &Path) {
     )
     .bind(FX_JOB.0)
     .bind(FX_POLICY.0)
+    .bind(now)
+    .execute(&st.pool)
+    .await
+    .unwrap();
+    // An evidence bundle (#118) exported from camera_b. Reading it by id must answer exactly as an
+    // id naming nothing does — otherwise a bundle id tells a scoped caller which windows of another
+    // camera's footage have been exported, and how large they were.
+    sqlx::query(
+        "INSERT INTO evidence_bundles (id, camera_id, filename, from_time, to_time, size_bytes,
+             sha256, manifest_sha256, key_id, exported_by, created_at)
+         VALUES (?, 'camera_b', 'x.heldar-evidence', ?, ?, 0, 'h', 'm', 'sha256:k', 'someone', ?)",
+    )
+    .bind(FX_EVIDENCE.0)
+    .bind(now)
+    .bind(now)
     .bind(now)
     .execute(&st.pool)
     .await
@@ -1863,6 +1890,12 @@ async fn every_route_is_accounted_for() {
         r#"{"camera_id":"camera_b","task_type":"detection","detections":[]}"#,
     )
     .probe_body("/api/v1/ai/leases", r#"{"worker_id":"w1"}"#)
+    // Names camera_b and dry_run:false, so the probe reaches the scope check rather than stopping at
+    // deserialization — a 422 would have counted as "answered" while proving nothing.
+    .probe_body(
+        "/api/v1/evidence/exports",
+        r#"{"camera_id":"camera_b","from":"2026-01-01T00:00:00Z","to":"2026-01-01T00:01:00Z","dry_run":false}"#,
+    )
     .probe_body("/api/v1/api-keys", r#"{"name":"probe","role":"viewer"}"#)
     .probe_body(
         "/api/v1/backup/destinations",
@@ -1919,6 +1952,11 @@ async fn every_route_is_accounted_for() {
         FX_POLICY.1,
     )
     .fixture("/api/v1/backup/jobs/{id}", FX_JOB.0, FX_JOB.1)
+    .fixture(
+        "/api/v1/evidence/exports/{id}",
+        FX_EVIDENCE.0,
+        FX_EVIDENCE.1,
+    )
     .fixture("/api/v1/zones/{zone_id}", FX_ZONE.0, FX_ZONE.1)
     .fixture(
         "/api/v1/schedules/{schedule_id}",

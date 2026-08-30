@@ -39,6 +39,7 @@ pub const KIND_ZONE_EVIDENCE: &str = "zone_evidence";
 pub const KIND_EMBED_THUMB: &str = "embed_thumb";
 pub const KIND_ENTRY_EVIDENCE: &str = "entry_evidence";
 pub const KIND_ARCHIVE: &str = "archive";
+pub const KIND_EVIDENCE_BUNDLE: &str = "evidence_bundle";
 
 /// How a `/media/*` path is scoped.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -179,6 +180,14 @@ pub fn requirement(path: &str) -> Option<(Cap, MediaKind)> {
             1 => Some((Cap::VideoExport, MediaKind::Artifact)),
             _ => Some((Cap::VideoExport, MediaKind::Denied)),
         },
+        // Signed evidence bundles (#118). An export of footage, so `VideoExport` like clips and
+        // archives — and attributed, so a camera-scoped credential reads only its own. The staging
+        // directory (`.stage-<id>/`) is scratch and never a viewer surface; it is removed on every
+        // outcome, but Denied here means a request that races the build cannot read half a bundle.
+        "evidence" => match rest {
+            [f] if f.ends_with(".heldar-evidence") => Some((Cap::VideoExport, MediaKind::Artifact)),
+            _ => Some((Cap::VideoExport, MediaKind::Denied)),
+        },
         _ => None,
     }
 }
@@ -193,6 +202,7 @@ pub fn artifact_key(path: &str) -> Option<String> {
         ["clips", f] => Some(format!("clips/{f}")),
         ["snapshots", f] => Some(format!("snapshots/{f}")),
         ["archives", f] => Some(format!("archives/{f}")),
+        ["evidence", f] => Some(format!("evidence/{f}")),
         ["playback", id, ..] => Some(format!("playback/{id}")),
         _ => None,
     }
