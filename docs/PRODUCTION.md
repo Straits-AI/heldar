@@ -120,6 +120,35 @@ Those cameras need their passwords re-entered from your own records or the devic
 everything else on the box is intact. Back the key up separately from the database — a backup
 containing both is a backup of neither.
 
+**Check the posture you actually have.**
+
+```bash
+curl -sH "Authorization: Bearer $ADMIN_KEY" \
+  http://localhost:8000/api/v1/system/posture | jq '.findings[] | select(.status != "ok")'
+```
+
+Admin + fleet-scope only: the findings describe the *host*, which is precisely the reconnaissance an
+attacker with a narrow foothold would want. They never carry a secret or a camera URL, so the output
+is safe to paste into a support ticket.
+
+| Finding | What it answers |
+|---|---|
+| `secret_key_source` | is the master key in the environment, a file, or a systemd credential |
+| `process_visibility` | can another local user read ffmpeg's argv — i.e. the camera credentials |
+| `service_user` | is the recorder running as root |
+| `recording_volume_encryption` | is the footage on an encrypted volume, where that is detectable |
+| `rtsp_transport` | how many enabled cameras stream over plain `rtsp://` |
+| `plaintext_credentials` | how many camera passwords predate the master key |
+
+**`unknown` is not a pass.** It means the control could not be assessed from inside the container —
+provider-side volume encryption is invisible from in here, and so is `/proc` on a non-Linux host.
+Treat it as unverified, not as satisfied. Reporting "ok" for something we could not check is the
+kind of unearned assurance this endpoint exists to replace.
+
+**`plaintext_credentials` is the one that surprises people.** Encryption applies on *write*. Setting
+`HELDAR_SECRET_KEY` does not seal rows that already exist — re-save each camera, or the finding will
+keep counting them.
+
 **Container hardening:** add `deploy/compose.hardened.yml` as a third overlay —
 `-f compose.yml -f compose.prod.yml -f compose.hardened.yml`. `compose.prod.yml` hardens the
 *application* posture (auth, cookies, sessions); this hardens the *container*: read-only root

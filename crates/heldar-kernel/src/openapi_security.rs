@@ -1485,6 +1485,13 @@ pub const REQUIREMENTS: &[Requirement] = &[
         admin_only: false,
         scoping: Scoping::Neutral,
     },
+    Requirement {
+        path: "/api/v1/system/posture",
+        method: "get",
+        capability: None,
+        admin_only: true,
+        scoping: Scoping::FleetOnly,
+    },
 ];
 
 /// Inject the security scheme and the per-operation requirements into a generated document.
