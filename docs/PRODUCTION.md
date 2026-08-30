@@ -33,6 +33,61 @@ database it does not understand. Check this **before** stopping services, not af
 The floating quickstart (`latest`, files from `main`) stays exactly as it is; it is the right thing
 for evaluation and the wrong thing for a recorder.
 
+**Keep secrets out of the environment (#126).** Every deployment secret resolves from the first
+source that supplies it:
+
+| Order | Source | Notes |
+|---|---|---|
+| 1 | `NAME` | the environment variable, unchanged — nothing moves on upgrade |
+| 2 | `NAME_FILE` | a path whose contents are the secret; what Docker/Compose/Kubernetes secrets already produce |
+| 3 | `$CREDENTIALS_DIRECTORY/NAME` | a systemd credential, via `LoadCredential=` — 0400 in tmpfs, readable only by the service |
+
+Applies to `HELDAR_SECRET_KEY`, `HELDAR_SECRET_KEY_OLD`, `HELDAR_BOOTSTRAP_ADMIN_PASSWORD` and
+`HELDAR_SMTP_PASSWORD` — the variables that hold a secret VALUE.
+
+`HELDAR_CP_TLS_CLIENT_KEY` is deliberately **not** in that list: it holds a *path*, and `_FILE`
+resolution would substitute the key's contents where a filename belongs. A systemd credential is
+already a path (`$CREDENTIALS_DIRECTORY/NAME`), which that variable accepts as-is.
+
+```yaml
+# compose: the master key as a file rather than an env var
+services:
+  core:
+    environment:
+      HELDAR_SECRET_KEY_FILE: /run/secrets/heldar_master_key
+    secrets: [heldar_master_key]
+secrets:
+  heldar_master_key:
+    file: ./secrets/master.key      # (umask 077; openssl rand -base64 32 > secrets/master.key)
+```
+
+```ini
+# systemd: no secret in the unit file, and none in the environment
+[Service]
+LoadCredential=HELDAR_SECRET_KEY:/etc/heldar/master.key
+```
+
+**Why bother, precisely.** An environment variable is readable from `/proc/<pid>/environ` by anyone
+who can read it, and appears in `docker inspect` output, shell history and crash dumps. A file
+narrows that to whoever can read a file the service user owns — so create it with `umask 077`, or
+the default umask leaves it world-readable and you have moved the exposure rather than closed it.
+
+**What this does not fix.** It does not hide anything from root, and nothing at this layer can. It
+also does **not** stop a child process reading the secret: `HELDAR_SECRET_KEY_FILE` is itself
+inherited, and a same-uid child can simply open the path. The credentials-in-ffmpeg-argv exposure is
+a separate problem and is still open — see #126.
+
+**A named source that cannot be read is fatal at boot**, deliberately. An operator who set
+`HELDAR_SECRET_KEY_FILE` asked for encryption at rest; falling through to "no key" would store every
+camera credential in plaintext while the deployment believed they were sealed, and the failure would
+stay invisible until someone read the database. The trailing newline your editor adds is trimmed;
+an empty file is an error, not a choice to use no key.
+
+**No HTTP secret provider, on purpose.** A recorder must not become synchronously dependent on a
+remote service after boot — a network blip during a reconnect would stop recording. A sidecar that
+writes the secret to a path is already supported by source (2), and that is the integration shape
+for Vault, cloud secret stores or a customer KMS.
+
 **Container hardening:** add `deploy/compose.hardened.yml` as a third overlay —
 `-f compose.yml -f compose.prod.yml -f compose.hardened.yml`. `compose.prod.yml` hardens the
 *application* posture (auth, cookies, sessions); this hardens the *container*: read-only root
