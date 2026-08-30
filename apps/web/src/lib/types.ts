@@ -80,7 +80,12 @@ export interface CameraView {
 export interface CameraCreate {
   id?: string;
   name: string;
-  site_id?: string;
+  /** The camera's site, which carries the timezone its recording schedule is read in (#125).
+   *
+   *  On CREATE: omit or `null` for no site. On UPDATE (`CameraUpdate` is a `Partial` of this),
+   *  absent LEAVES the camera where it is and explicit `null` DETACHES it — the two are different
+   *  requests, and the server distinguishes them. */
+  site_id?: string | null;
   vendor?: string;
   model?: string;
   address?: string;
@@ -1258,6 +1263,8 @@ export interface PlateSearchResult {
 // ---- Stage 7: Semantic search ----
 
 export interface QueryPlan {
+  /** The IANA zone the hour filter and relative dates were read in (#125). */
+  tz?: string | null;
   from?: string | null;
   to?: string | null;
   hour_min?: number | null;
@@ -1290,10 +1297,21 @@ export interface SearchHit {
   claim_level: string;
 }
 
+/** Which clock a search was answered on (#125). Hour filters and relative dates are read in this
+ *  zone; every timestamp in the response is UTC. */
+export interface SearchInterpretation {
+  timezone: string;
+  timezone_source: string;
+  hour_filter_read_in: string;
+  note: string;
+}
+
 export interface SearchResponse {
   query?: string | null;
   planner: string;
   plan: QueryPlan;
+  /** Absent on responses from a server older than #125 — treat as UTC, unlabelled. */
+  interpretation?: SearchInterpretation;
   count: number;
   hits: SearchHit[];
   proof: {

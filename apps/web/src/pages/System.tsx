@@ -609,28 +609,136 @@ function TimezonePanel({ canAdmin }: { canAdmin: boolean }) {
             </p>
           ) : null}
 
-          {overridingSites.length > 0 ? (
-            <div>
-              <SectionLabel>Sites with their own clock</SectionLabel>
+          {/* Sites, and the clock each one overrides the box-wide setting with. Rendered even when
+              the list is EMPTY, and the error is surfaced rather than swallowed: a 403 and "this
+              box has no sites" are otherwise pixel-identical, so a failed fetch reads as a fact. */}
+          <div>
+            <SectionLabel>Sites</SectionLabel>
+            {sites.error ? (
+              <p className="mt-1.5 font-mono text-[11px] text-danger">
+                Could not load sites: {sites.error}
+              </p>
+            ) : siteRows.length === 0 ? (
+              <p className="mt-1.5 font-mono text-[11px] leading-relaxed text-fg-muted">
+                No sites. Every camera follows the box-wide clock above. Add one if parts of this
+                installation keep different hours.
+              </p>
+            ) : (
               <ul className="mt-1.5 space-y-1">
-                {overridingSites.map((s) => (
+                {siteRows.map((s) => (
                   <li
                     key={s.id}
                     className="flex items-baseline justify-between gap-3 font-mono text-[11px]"
                   >
                     <span className="truncate text-fg-secondary">{s.name}</span>
-                    <span className="shrink-0 text-fg">{s.timezone}</span>
+                    <span className={cx("shrink-0", s.timezone ? "text-fg" : "text-fg-muted")}>
+                      {s.timezone ?? "box-wide"}
+                    </span>
                   </li>
                 ))}
               </ul>
+            )}
+            {overridingSites.length > 0 ? (
               <p className="mt-1.5 font-mono text-[11px] leading-relaxed text-fg-muted">
-                A camera on one of these follows its site&apos;s clock, not the box-wide one.
+                A camera on a site with its own clock follows that, not the box-wide one.
               </p>
-            </div>
-          ) : null}
+            ) : null}
+            {canAdmin ? (
+              <SiteAdder
+                onAdded={() => {
+                  void sites.refresh();
+                }}
+              />
+            ) : null}
+          </div>
         </div>
       )}
     </Panel>
+  );
+}
+
+
+/* A minimal site creator. The picker this PR added to AddCamera is useless without one — the
+ * dashboard had no site-creation surface at all, so on every box the dropdown would offer exactly
+ * one option ("No site") forever, and swapping a free-text field that could reference a curl-created
+ * site for a dropdown that cannot is a loss of capability, not a gain. */
+function SiteAdder({ onAdded }: { onAdded: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [id, setId] = useState("");
+  const [name, setName] = useState("");
+  const [tz, setTz] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function add() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.createSite({
+        id: id.trim(),
+        name: name.trim() || id.trim(),
+        timezone: tz.trim() || null,
+      });
+      setId("");
+      setName("");
+      setTz("");
+      setOpen(false);
+      onAdded();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="mt-2 font-mono text-[11px] text-accent-soft underline-offset-2 hover:underline"
+      >
+        + add a site
+      </button>
+    );
+  }
+  return (
+    <div className="mt-2 space-y-2 rounded-md border border-line bg-canvas/50 p-2.5">
+      <div className="grid grid-cols-2 gap-2">
+        <input
+          value={id}
+          onChange={(e) => setId(e.target.value)}
+          placeholder="id (kl-hq)"
+          className="rounded-md border border-line bg-canvas px-2 py-1.5 font-mono text-[11px] text-fg outline-none focus:border-accent"
+          autoFocus
+        />
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="name"
+          className="rounded-md border border-line bg-canvas px-2 py-1.5 font-mono text-[11px] text-fg outline-none focus:border-accent"
+        />
+      </div>
+      <input
+        value={tz}
+        onChange={(e) => setTz(e.target.value)}
+        placeholder="timezone (optional, e.g. Asia/Kuala_Lumpur)"
+        className="w-full rounded-md border border-line bg-canvas px-2 py-1.5 font-mono text-[11px] text-fg outline-none focus:border-accent"
+      />
+      <p className="font-mono text-[10px] leading-relaxed text-fg-muted">
+        Leave the timezone blank and this site follows the box-wide clock. It is not the same as
+        setting UTC.
+      </p>
+      {error ? <p className="font-mono text-[11px] text-danger">{error}</p> : null}
+      <div className="flex gap-2">
+        <Button size="sm" variant="primary" disabled={busy || !id.trim()} onClick={() => void add()}>
+          {busy ? <Spinner size={13} /> : "Add"}
+        </Button>
+        <Button size="sm" disabled={busy} onClick={() => setOpen(false)}>
+          Cancel
+        </Button>
+      </div>
+    </div>
   );
 }
 

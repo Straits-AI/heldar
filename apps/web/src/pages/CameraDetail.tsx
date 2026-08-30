@@ -758,7 +758,7 @@ export function CameraDetail() {
           )}
 
           {isScheduledMode && (
-            <RecordingSchedulePanel cameraId={id} canManage={canManage} />
+            <RecordingSchedulePanel cameraId={id} siteId={cam?.site_id} canManage={canManage} />
           )}
 
           <PtzPanel cameraId={id} canManage={canManage} />
