@@ -76,7 +76,21 @@ async fn provider_for(
 
 // ========================= Capability map =========================
 
-async fn get_capabilities(
+/// The device-control surfaces this camera was last probed to support.
+///
+/// A DB read of the persisted map, never a device call — it answers instantly and answers `{}` for
+/// a camera nobody has probed yet. `POST .../control/probe` is what refreshes it.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/control/capabilities", tag = "cameras",
+    operation_id = "getCameraControlCapabilities",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The persisted capability map (`{}` when never probed)"),
+        (status = 403, description = "Missing `camera:read`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_capabilities(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -86,7 +100,21 @@ async fn get_capabilities(
     Ok(Json(camera_control::stored_capabilities(&st, &id).await?))
 }
 
-async fn probe(
+/// Re-probe the camera's device-control surfaces and persist the fresh capability map.
+///
+/// Best-effort by design: a surface that does not answer is recorded `false`, so an unreachable or
+/// non-configurable camera still returns 200 with a map of falses rather than an error.
+#[utoipa::path(
+    post, path = "/api/v1/cameras/{id}/control/probe", tag = "cameras",
+    operation_id = "probeCameraControl",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The freshly probed capability map"),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn probe(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -116,7 +144,20 @@ async fn probe(
 
 // ========================= Day/night (IR-cut) =========================
 
-async fn get_day_night(
+/// The camera's day/night (IR-cut filter) configuration, read live from the device.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/control/day_night", tag = "cameras",
+    operation_id = "getCameraDayNight",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The device's current day/night configuration", body = DayNightConfig),
+        (status = 400, description = "Camera is not configurable (unsupported vendor, or no address/credentials), or the device does not expose this surface", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `camera:read`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "Device unreachable or returned an unusable response", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_day_night(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -126,7 +167,24 @@ async fn get_day_night(
     Ok(Json(provider.get_day_night().await?))
 }
 
-async fn put_day_night(
+/// Write the day/night (IR-cut filter) configuration to the device.
+///
+/// Read-modify-write: absent fields are left as the device has them. Returns the configuration
+/// read back from the device afterwards, not the patch that was sent.
+#[utoipa::path(
+    put, path = "/api/v1/cameras/{id}/control/day_night", tag = "cameras",
+    operation_id = "setCameraDayNight",
+    params(("id" = String, Path, description = "Camera id")),
+    request_body = DayNightPatch,
+    responses(
+        (status = 200, description = "The configuration read back from the device", body = DayNightConfig),
+        (status = 400, description = "`mode` is not one of auto|day|night|schedule, or the camera is not configurable", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "Device unreachable or returned an unusable response", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_day_night(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -160,7 +218,23 @@ async fn put_day_night(
 
 // ========================= Image / lighting =========================
 
-async fn get_image(
+/// The camera's image and supplement-lighting configuration, read live from the device.
+///
+/// Fields the device does not expose come back `null`; which lighting modes it accepts is in the
+/// capability map (`supplement_light_modes`), not here.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/control/image", tag = "cameras",
+    operation_id = "getCameraImage",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The device's current image/lighting configuration", body = ImageConfig),
+        (status = 400, description = "Camera is not configurable (unsupported vendor, or no address/credentials), or the device does not expose this surface", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `camera:read`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "Device unreachable or returned an unusable response", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_image(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -170,7 +244,24 @@ async fn get_image(
     Ok(Json(provider.get_image_config().await?))
 }
 
-async fn put_image(
+/// Write image and supplement-lighting settings to the device.
+///
+/// Read-modify-write: only the fields present are written, and the response is what the device
+/// reports afterwards — a value it clamped or ignored comes back as the device kept it.
+#[utoipa::path(
+    put, path = "/api/v1/cameras/{id}/control/image", tag = "cameras",
+    operation_id = "setCameraImage",
+    params(("id" = String, Path, description = "Camera id")),
+    request_body = ImageConfigPatch,
+    responses(
+        (status = 200, description = "The configuration read back from the device", body = ImageConfig),
+        (status = 400, description = "Camera is not configurable, or the device rejected a value", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "Device unreachable or returned an unusable response", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_image(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -204,14 +295,32 @@ async fn put_image(
 
 // ========================= Built-in detections =========================
 
-#[derive(Debug, Deserialize)]
-struct DetectionUpdate {
-    enabled: bool,
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct DetectionUpdate {
+    pub enabled: bool,
 }
 
 /// Arm/disarm one of the camera's built-in detections (motion / line_crossing / intrusion) on the
 /// device, then refresh the capability map in the background so the panel's state stays truthful.
-async fn put_detection(
+///
+/// `kind` must be one the device actually exposes; anything else is a 400, not a silent no-op.
+#[utoipa::path(
+    put, path = "/api/v1/cameras/{id}/control/detections/{kind}", tag = "cameras",
+    operation_id = "setCameraBuiltinDetection",
+    params(
+        ("id" = String, Path, description = "Camera id"),
+        ("kind" = String, Path, description = "Detection token, e.g. `motion`, `line_crossing`, `intrusion`"),
+    ),
+    request_body = DetectionUpdate,
+    responses(
+        (status = 200, description = "The detection's new arm state"),
+        (status = 400, description = "This detection cannot be armed on this device, or the camera is not configurable", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "Device unreachable or returned an unusable response", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_detection(
     State(st): State<AppState>,
     Path((id, kind)): Path<(String, String)>,
     principal: Principal,
@@ -240,7 +349,23 @@ async fn put_detection(
 
 // ========================= Detection geometry (line / intrusion / motion) =========================
 
-async fn get_line_crossing(
+/// The camera's line-crossing rules, read live from the device.
+///
+/// The device exposes a FIXED set of rule slots; an unused one comes back `enabled: false` with a
+/// degenerate line rather than being absent. Coordinates are normalized 0..1.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/control/line_crossing", tag = "cameras",
+    operation_id = "getCameraLineCrossing",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The device's line-crossing rule slots", body = LineCrossingConfig),
+        (status = 400, description = "Camera is not configurable (unsupported vendor, or no address/credentials), or the device does not expose this surface", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `camera:read`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "Device unreachable or returned an unusable response", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_line_crossing(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -251,7 +376,24 @@ async fn get_line_crossing(
 }
 
 /// Write line-crossing rules (geometry drawn in the Device panel over the camera frame).
-async fn put_line_crossing(
+///
+/// Submitted lines are merged over the device's existing slots BY `id`, so a slot you do not send
+/// is left alone. Each line needs exactly two points in 0..1 and a `direction` of
+/// `any|left-right|right-left`.
+#[utoipa::path(
+    put, path = "/api/v1/cameras/{id}/control/line_crossing", tag = "cameras",
+    operation_id = "setCameraLineCrossing",
+    params(("id" = String, Path, description = "Camera id")),
+    request_body = LineCrossingConfig,
+    responses(
+        (status = 200, description = "The rules read back from the device", body = LineCrossingConfig),
+        (status = 400, description = "Bad geometry or direction, or the camera is not configurable", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "Device unreachable or returned an unusable response", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_line_crossing(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -280,7 +422,23 @@ async fn put_line_crossing(
     Ok(Json(updated))
 }
 
-async fn get_intrusion(
+/// The camera's intrusion (field-detection) regions, read live from the device.
+///
+/// An unconfigured region slot carries NO points — an empty `points` array means "slot unused",
+/// not "region covering nothing".
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/control/intrusion", tag = "cameras",
+    operation_id = "getCameraIntrusion",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The device's intrusion region slots", body = IntrusionConfig),
+        (status = 400, description = "Camera is not configurable (unsupported vendor, or no address/credentials), or the device does not expose this surface", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `camera:read`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "Device unreachable or returned an unusable response", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_intrusion(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -291,7 +449,23 @@ async fn get_intrusion(
 }
 
 /// Write intrusion regions (geometry drawn in the Device panel over the camera frame).
-async fn put_intrusion(
+///
+/// Regions are merged over the device's existing slots BY `id`. A region must be a 3–10 vertex
+/// polygon in 0..1, or empty to clear the slot.
+#[utoipa::path(
+    put, path = "/api/v1/cameras/{id}/control/intrusion", tag = "cameras",
+    operation_id = "setCameraIntrusion",
+    params(("id" = String, Path, description = "Camera id")),
+    request_body = IntrusionConfig,
+    responses(
+        (status = 200, description = "The regions read back from the device", body = IntrusionConfig),
+        (status = 400, description = "Bad polygon (not 3–10 points, or outside 0..1), or the camera is not configurable", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "Device unreachable or returned an unusable response", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_intrusion(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -320,7 +494,23 @@ async fn put_intrusion(
     Ok(Json(updated))
 }
 
-async fn get_motion(
+/// The camera's on-board motion-detection arm switch and sensitivity.
+///
+/// The detection GRID stays on the device and is not exposed here — this is the on/off and how
+/// twitchy, not where.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/control/motion", tag = "cameras",
+    operation_id = "getCameraMotion",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The device's motion-detection settings", body = MotionConfig),
+        (status = 400, description = "Camera is not configurable (unsupported vendor, or no address/credentials), or the device does not expose this surface", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `camera:read`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "Device unreachable or returned an unusable response", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_motion(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -331,7 +521,20 @@ async fn get_motion(
 }
 
 /// Write motion arm switch + sensitivity (the grid layout stays on-device).
-async fn put_motion(
+#[utoipa::path(
+    put, path = "/api/v1/cameras/{id}/control/motion", tag = "cameras",
+    operation_id = "setCameraMotion",
+    params(("id" = String, Path, description = "Camera id")),
+    request_body = MotionConfig,
+    responses(
+        (status = 200, description = "The settings read back from the device", body = MotionConfig),
+        (status = 400, description = "Camera is not configurable, or the device rejected the value", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "Device unreachable or returned an unusable response", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_motion(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -359,7 +562,20 @@ async fn put_motion(
 
 // ========================= IO outputs =========================
 
-async fn list_outputs(
+/// The camera's alarm/relay output ports.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/control/io/outputs", tag = "cameras",
+    operation_id = "listCameraIoOutputs",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The device's output ports", body = Vec<IoOutput>),
+        (status = 400, description = "Camera is not configurable (unsupported vendor, or no address/credentials), or the device has no IO surface", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `camera:read`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "Device unreachable or returned an unusable response", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_outputs(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -369,16 +585,35 @@ async fn list_outputs(
     Ok(Json(provider.list_io_outputs().await?))
 }
 
-#[derive(Debug, Default, Deserialize)]
-struct PulseRequest {
-    /// Pulse width in milliseconds (0/absent = the service default; bounded by MAX_PULSE_MS).
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+pub struct PulseRequest {
+    /// Pulse width in milliseconds (0/absent = the service default of 1000; clamped to 30000).
     #[serde(default)]
-    pulse_ms: u64,
+    pub pulse_ms: u64,
 }
 
 /// Pulse a relay output (PHYSICAL-WORLD side effect — e.g. a barrier test fire). Manager+: the
 /// guard-facing gate-open flows through the access-control app's policy, not this raw primitive.
-async fn pulse_output(
+///
+/// The request body is optional. `pulse_ms` is clamped to 30000 rather than refused, and the
+/// EFFECTIVE width is what comes back. A device refusal (no relay port on this model) is reported
+/// as a 400 carrying the device's own reason, not as a 500.
+#[utoipa::path(
+    post, path = "/api/v1/cameras/{id}/control/io/outputs/{port}/pulse", tag = "cameras",
+    operation_id = "pulseCameraIoOutput",
+    params(
+        ("id" = String, Path, description = "Camera id"),
+        ("port" = i64, Path, description = "Output port number (1-based)"),
+    ),
+    request_body(content = PulseRequest, description = "Optional pulse width"),
+    responses(
+        (status = 200, description = "Pulsed; reports the effective width in milliseconds"),
+        (status = 400, description = "Camera is not configurable, or the device refused the pulse (e.g. no relay port)", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn pulse_output(
     State(st): State<AppState>,
     Path((id, port)): Path<(String, i64)>,
     principal: Principal,

@@ -7,7 +7,7 @@ use serde_json::Value;
 use sqlx::types::Json;
 use sqlx::FromRow;
 
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, FromRow, utoipa::ToSchema)]
 pub struct Vehicle {
     pub id: String,
     pub plate: String,
@@ -28,7 +28,7 @@ pub struct Vehicle {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct VehicleCreate {
     pub plate: String,
     pub owner_name: Option<String>,
@@ -45,7 +45,7 @@ pub struct VehicleCreate {
     pub valid_until: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct VehicleUpdate {
     pub plate: Option<String>,
     pub owner_name: Option<String>,
@@ -62,7 +62,7 @@ pub struct VehicleUpdate {
     pub valid_until: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, FromRow, utoipa::ToSchema)]
 pub struct VisitorPass {
     pub id: String,
     pub code: String,
@@ -85,7 +85,7 @@ pub struct VisitorPass {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct VisitorPassCreate {
     pub visitor_name: String,
     pub phone: Option<String>,
@@ -99,7 +99,7 @@ pub struct VisitorPassCreate {
     pub valid_until: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct VisitorPassUpdate {
     pub visitor_name: Option<String>,
     pub phone: Option<String>,
@@ -113,7 +113,7 @@ pub struct VisitorPassUpdate {
     pub status: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, FromRow, utoipa::ToSchema)]
 pub struct Watchlist {
     pub id: String,
     pub plate: String,
@@ -127,7 +127,7 @@ pub struct Watchlist {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct WatchlistCreate {
     pub plate: String,
     pub kind: Option<String>,
@@ -136,7 +136,7 @@ pub struct WatchlistCreate {
     pub active: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct WatchlistUpdate {
     pub kind: Option<String>,
     pub reason: Option<String>,

@@ -31,7 +31,7 @@ pub struct AiTask {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AiTaskCreate {
     pub task_type: String,
     pub stream_profile: Option<String>,
@@ -41,7 +41,7 @@ pub struct AiTaskCreate {
     pub enabled: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct AiTaskUpdate {
     pub task_type: Option<String>,
     pub stream_profile: Option<String>,
@@ -70,7 +70,7 @@ pub struct Detection {
 
 /// One detection inside an ingest request.
 // `Serialize` so the Wasm plugin host (heldar-wasm) can marshal a batch to JSON for a sandboxed guest.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct DetectionIngest {
     pub label: Option<String>,
     pub confidence: Option<f64>,
@@ -193,7 +193,7 @@ impl Provenance {
 }
 
 /// Optional event an AI worker can raise alongside its detections.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct IngestEvent {
     pub event_type: String,
     pub severity: Option<String>,
@@ -201,7 +201,7 @@ pub struct IngestEvent {
 }
 
 /// Payload an AI worker POSTs to ingest detections (and optionally an event) for a camera.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AiIngest {
     pub camera_id: String,
     pub task_type: String,
@@ -240,7 +240,7 @@ pub struct Zone {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ZoneCreate {
     pub name: String,
     pub kind: Option<String>,
@@ -252,7 +252,7 @@ pub struct ZoneCreate {
     pub enabled: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct ZoneUpdate {
     pub name: Option<String>,
     pub kind: Option<String>,

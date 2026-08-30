@@ -637,6 +637,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tracing",
+ "utoipa",
  "uuid",
 ]
 
@@ -689,6 +690,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tracing",
+ "utoipa",
  "uuid",
 ]
 
@@ -708,6 +710,7 @@ dependencies = [
  "sqlx",
  "tokio",
  "tracing",
+ "utoipa",
  "uuid",
 ]
 

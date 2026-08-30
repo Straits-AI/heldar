@@ -1269,6 +1269,9 @@ export interface PlateSearchResult {
 // ---- Stage 7: Semantic search ----
 
 export interface QueryPlan {
+  /** Semantic-route-only zone filter (#77). The structured executor has no zone filter and
+   *  clears this, so a caller sending it on /search/events has NOT filtered by zone. */
+  zone?: string | null;
   /** The IANA zone the hour filter and relative dates were read in (#125). */
   tz?: string | null;
   from?: string | null;
@@ -1456,6 +1459,10 @@ export type BackupPolicyUpdate = Partial<BackupPolicyCreate>;
 
 /** A single backup run (scheduled, manually triggered, or an on-demand archive export). */
 export interface BackupJob {
+  /** Who ordered this job, and with what kind of credential. The server has always
+   *  returned these; the dashboard had never modelled them. */
+  created_by?: string | null;
+  created_by_kind?: string | null;
   id: string;
   policy_id?: string | null;
   destination_id?: string | null;

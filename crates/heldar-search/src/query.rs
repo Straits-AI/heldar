@@ -10,7 +10,7 @@ use sqlx::{FromRow, SqlitePool};
 
 /// A structured, executable query plan. Produced by the planner (rules or LLM), shown back to the
 /// caller, and executed deterministically. All fields optional ⇒ "everything in the default window".
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct QueryPlan {
     pub from: Option<String>,
     pub to: Option<String>,

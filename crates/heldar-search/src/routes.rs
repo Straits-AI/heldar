@@ -113,7 +113,15 @@ const SEARCH_UI_BUNDLE: &str = include_str!("../ui/search.js");
 /// Serve the runtime-loaded search module UI (the dashboard imports it via `ModuleHost`). Any
 /// authenticated viewer may load it — it is inert frontend code; the data it fetches is separately
 /// gated by the kernel's RBAC.
-async fn serve_ui(principal: Principal) -> AppResult<axum::response::Response> {
+#[utoipa::path(
+    get, path = "/api/v1/modules/search/ui/index.js", tag = "search",
+    operation_id = "getSearchModuleUi",
+    responses(
+        (status = 200, description = "The module UI bundle, as `text/javascript`"),
+        (status = 403, description = "Missing `events:read`", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn serve_ui(principal: Principal) -> AppResult<axum::response::Response> {
     principal.require_cap(Cap::EventsRead, "load the search module UI")?;
     Ok((
         [
@@ -292,7 +300,25 @@ async fn resolve_tz(
     Ok((chrono_tz::Tz::UTC, "utc_fallback"))
 }
 
-async fn search_events(
+/// Execute a structured query plan against the box's stored event facts.
+///
+/// An empty `cameras` means every camera — but for a camera-scoped credential it is expanded to
+/// that credential's own cameras, and naming a camera it does not hold is refused outright (403)
+/// rather than silently narrowed. The plan is echoed back with `tz` set to the zone the answer was
+/// actually computed in; a time-of-day filter (`hour_min`/`hour_max`) spanning cameras in different
+/// timezones is a 400 unless the caller supplies `tz`, because a wall-clock hour means something
+/// different at each.
+#[utoipa::path(
+    post, path = "/api/v1/search/events", tag = "search",
+    operation_id = "searchEvents",
+    request_body = crate::query::QueryPlan,
+    responses(
+        (status = 200, description = "The executed plan, its resolved timezone, the matching hits and a proof block"),
+        (status = 400, description = "Invalid `tz`, or a time-of-day filter across cameras in different timezones", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `events:read`, or a camera requested that this credential does not hold", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn search_events(
     State(st): State<AppState>,
     principal: Principal,
     Extension(cfg): Extension<Arc<SearchConfig>>,
@@ -333,12 +359,32 @@ async fn search_events(
     )))
 }
 
-#[derive(Debug, Deserialize)]
-struct NlBody {
-    query: String,
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct NlBody {
+    /// The question, in plain language. Must be non-empty.
+    pub query: String,
 }
 
-async fn search_nl(
+/// Answer a natural-language question: plan it into a structured query, execute that plan, return
+/// the rows.
+///
+/// The planner (an LLM when configured, otherwise a transparent rule parser) only ever produces the
+/// plan — the answer is the executed query's rows, never model output, and the plan is echoed so it
+/// can be checked or re-run. A camera the planner names but the credential does not hold is dropped
+/// rather than refused (an invented id must not turn a question into a 403); when nothing survives,
+/// a scoped credential falls back to its own cameras, never to "all". Use `/api/v1/search/plan` to
+/// see the interpretation without executing it.
+#[utoipa::path(
+    post, path = "/api/v1/search/nl", tag = "search",
+    operation_id = "searchNaturalLanguage",
+    request_body = NlBody,
+    responses(
+        (status = 200, description = "The plan the question became, its resolved timezone, the matching hits and a proof block"),
+        (status = 400, description = "Empty `query`, or a time-of-day question across cameras in different timezones", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `events:read`, or a credential scoped to no camera", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn search_nl(
     State(st): State<AppState>,
     principal: Principal,
     Extension(cfg): Extension<Arc<SearchConfig>>,
@@ -404,7 +450,22 @@ async fn search_nl(
     )))
 }
 
-async fn plan_only(
+/// Show how a natural-language question would be interpreted, without executing it.
+///
+/// A dry run: no rows are read and no data is returned, only the plan and the timezone it would be
+/// read in. It is planned, confined and zone-resolved exactly as `/api/v1/search/nl` does, so what
+/// it shows is the plan that would actually run.
+#[utoipa::path(
+    post, path = "/api/v1/search/plan", tag = "search",
+    operation_id = "planSearch",
+    request_body = NlBody,
+    responses(
+        (status = 200, description = "The plan, the planner that produced it, and the timezone it would be read in"),
+        (status = 400, description = "Empty `query`, or a time-of-day question across cameras in different timezones", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `events:read`, or a credential scoped to no camera", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn plan_only(
     State(st): State<AppState>,
     principal: Principal,
     Extension(cfg): Extension<Arc<SearchConfig>>,
@@ -471,7 +532,31 @@ async fn plan_only(
 ///    out-of-scope zone and a nonexistent zone with the SAME error value, so the zone id space cannot
 ///    be enumerated either. It runs only for a scoped principal, so an unscoped caller keeps today's
 ///    exact behaviour, 404 wording included.
-async fn search_semantic_scoped(
+// The rustdoc above is the wrapper's rationale, for maintainers. utoipa would otherwise lift its
+// first line into the document as the operation summary, so the caller-facing text is stated here.
+#[utoipa::path(
+    post, path = "/api/v1/search/semantic", tag = "search",
+    operation_id = "searchSemantic",
+    summary = "Similarity search over stored crop embeddings",
+    description = "Similarity search over the box's stored crop embeddings, from a text description \
+or a query image.\n\nResults are similarity-ranked estimates from a learned embedding space, not \
+facts — the proof block marks the whole ranking as a fallible inference, so a high score is not a \
+match. Send exactly one of `text` or `image_b64`; `image_b64` may carry a `data:` prefix, is capped \
+at 10,000,000 characters, and must decode to a JPEG, PNG, WebP, GIF or BMP. `zone` pins its owning \
+camera implicitly, and a zone this credential does not hold is reported identically to one that \
+does not exist, so the zone id space cannot be enumerated. An empty `cameras` means every camera, \
+except for a camera-scoped credential, where it is confined to that credential's own cameras.",
+    request_body = crate::semantic::SemanticBody,
+    responses(
+        (status = 200, description = "Ranked hits, the model that embedded them, and a proof block"),
+        (status = 400, description = "Neither or both of `text`/`image_b64`, an undecodable or unsupported image, an invalid or inverted `from`/`to`, or a `zone` whose camera is not in `cameras`", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `events:read`; a camera requested that this credential does not hold; or, for a camera-scoped credential, a `zone` it does not hold — reported identically to a zone that does not exist, so the zone id space cannot be enumerated", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "No such zone. Reachable only for an unscoped credential: for a camera-scoped one a missing zone is the 403 above", body = heldar_kernel::openapi::ErrorBody),
+        (status = 413, description = "Request body over 12 MB. Rejected before deserialization, so this response is not the standard error envelope"),
+        (status = 503, description = "No embedding worker answered in time — the query was never embedded", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn search_semantic_scoped(
     State(st): State<AppState>,
     principal: Principal,
     Extension(cfg): Extension<Arc<SearchConfig>>,

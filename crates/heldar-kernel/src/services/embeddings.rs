@@ -45,7 +45,7 @@ const MAX_QUEUE_DEPTH: i64 = 16;
 const SCAN_CAP: usize = 100_000;
 
 /// One embedding item in an ingest batch.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct EmbeddingItem {
     pub track_id: Option<String>,
     pub detection_id: Option<String>,
@@ -60,7 +60,7 @@ pub struct EmbeddingItem {
 }
 
 /// Batch body of `POST /api/v1/ai/embeddings`.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct EmbeddingIngest {
     pub camera_id: String,
     pub model: String,
@@ -334,7 +334,7 @@ pub async fn claim_queries(
 }
 
 /// Worker's answer to a claimed query: a vector, or an error string.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct QueryResult {
     pub vec: Option<Vec<f32>>,
     pub model: Option<String>,

@@ -91,7 +91,19 @@ async fn load_subscription(pool: &sqlx::SqlitePool, id: &str) -> AppResult<Webho
         .ok_or_else(|| AppError::NotFound(format!("webhook subscription {id} not found")))
 }
 
-async fn list(
+/// Every webhook subscription, oldest first.
+///
+/// Readable by any principal holding `events:read`, not just a manager: the signing `secret` is
+/// replaced by a `has_secret` flag and never returned, so a listing discloses no key material.
+#[utoipa::path(
+    get, path = "/api/v1/webhooks", tag = "webhooks",
+    operation_id = "listWebhookSubscriptions",
+    responses(
+        (status = 200, description = "Subscriptions, oldest first; secrets masked", body = Vec<WebhookSubscriptionView>),
+        (status = 403, description = "Missing `events:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<WebhookSubscriptionView>>> {
@@ -108,7 +120,23 @@ async fn list(
     ))
 }
 
-async fn create(
+/// Create a webhook subscription.
+///
+/// `url` must be an http(s) target the egress guard accepts — cloud-metadata, link-local and
+/// unspecified addresses are refused with 400 so `/test` cannot be turned into an SSRF oracle; LAN
+/// targets stay allowed. Delivery starts at creation time: the backlog of existing events is never
+/// replayed. The `secret` is stored sealed and is never echoed back, only `has_secret`.
+#[utoipa::path(
+    post, path = "/api/v1/webhooks", tag = "webhooks",
+    operation_id = "createWebhookSubscription",
+    request_body = WebhookSubscriptionCreate,
+    responses(
+        (status = 201, description = "The created subscription, secret masked", body = WebhookSubscriptionView),
+        (status = 400, description = "Missing `name`, an unusable `url`, a bad `min_severity`, or an empty `event_types` entry", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn create(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<WebhookSubscriptionCreate>,
@@ -189,7 +217,23 @@ async fn create(
     ))
 }
 
-async fn update(
+/// Update a webhook subscription. An absent field is left unchanged.
+///
+/// `secret` is three-state: omit it to keep the current signing key, send `null` (or `""`) to clear
+/// it, send a value to replace it.
+#[utoipa::path(
+    patch, path = "/api/v1/webhooks/{id}", tag = "webhooks",
+    operation_id = "updateWebhookSubscription",
+    params(("id" = String, Path, description = "Subscription id")),
+    request_body = WebhookSubscriptionUpdate,
+    responses(
+        (status = 200, description = "The updated subscription, secret masked", body = WebhookSubscriptionView),
+        (status = 400, description = "Blank `name`, an unusable `url`, a bad `min_severity`, or an empty `event_types` entry", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown subscription", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn update(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -286,7 +330,18 @@ async fn update(
     Ok(Json(WebhookSubscriptionView::from(sub)))
 }
 
-async fn delete(
+/// Delete a webhook subscription. Its delivery log goes with it.
+#[utoipa::path(
+    delete, path = "/api/v1/webhooks/{id}", tag = "webhooks",
+    operation_id = "deleteWebhookSubscription",
+    params(("id" = String, Path, description = "Subscription id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 403, description = "Missing `registry:manage`, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown subscription", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -321,14 +376,32 @@ async fn delete(
 }
 
 /// Result of POST /api/v1/webhooks/{id}/test — one synthetic signed delivery to the subscription's url.
-#[derive(Debug, Serialize)]
-struct WebhookTestResult {
-    ok: bool,
-    status: Option<u16>,
-    error: Option<String>,
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct WebhookTestResult {
+    /// Whether the target accepted the delivery.
+    pub ok: bool,
+    /// The target's HTTP status, absent when the request never got a response.
+    pub status: Option<u16>,
+    /// Why the delivery failed, absent on success.
+    pub error: Option<String>,
 }
 
-async fn test(
+/// Send one synthetic signed `test` event to the subscription's url.
+///
+/// A rejected or unreachable target is still a 200 with `ok: false` — the 200 means the box made the
+/// attempt, not that the target accepted it. The attempt is written to the delivery log with a null
+/// `event_id`, so it never counts against real-event retry bounds.
+#[utoipa::path(
+    post, path = "/api/v1/webhooks/{id}/test", tag = "webhooks",
+    operation_id = "testWebhookSubscription",
+    params(("id" = String, Path, description = "Subscription id")),
+    responses(
+        (status = 200, description = "The attempt's outcome; check `ok`, not the status code", body = WebhookTestResult),
+        (status = 403, description = "Missing `registry:manage`, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown subscription", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn test(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -387,11 +460,28 @@ async fn test(
 }
 
 #[derive(Debug, Deserialize)]
-struct DeliveriesQuery {
-    limit: Option<i64>,
+pub struct DeliveriesQuery {
+    pub limit: Option<i64>,
 }
 
-async fn list_deliveries(
+/// One subscription's delivery attempts, newest first.
+///
+/// `limit` is clamped to 1..=1000 (default 100) rather than rejected, so an out-of-range value
+/// still answers.
+#[utoipa::path(
+    get, path = "/api/v1/webhooks/{id}/deliveries", tag = "webhooks",
+    operation_id = "listWebhookDeliveries",
+    params(
+        ("id" = String, Path, description = "Subscription id"),
+        ("limit" = Option<i64>, Query, description = "Max rows, clamped to 1..=1000 (default 100)"),
+    ),
+    responses(
+        (status = 200, description = "Delivery attempts, newest first", body = Vec<WebhookDelivery>),
+        (status = 403, description = "Missing `events:read`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown subscription", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_deliveries(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -420,7 +510,15 @@ struct EventTypeInfo {
 /// The built-in event-type taxonomy emitted via `repo::log_event` across the kernel + bundled apps.
 /// Apps and AI workers may additionally emit their own custom `event_type` strings (the AI ingest path
 /// passes a worker-supplied type straight through), so this list is descriptive, not exhaustive.
-async fn event_types(
+#[utoipa::path(
+    get, path = "/api/v1/events/types", tag = "webhooks",
+    operation_id = "listEventTypes",
+    responses(
+        (status = 200, description = "Objects of `{event_type, description}`: the built-in taxonomy, plus types observed in the events table"),
+        (status = 403, description = "Missing `events:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn event_types(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<serde_json::Value>>> {

@@ -23,7 +23,7 @@ pub struct BackupDestination {
 }
 
 /// Client-facing destination: secret config values are replaced with `***`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct BackupDestinationView {
     pub id: String,
     pub name: String,
@@ -69,7 +69,7 @@ impl From<BackupDestination> for BackupDestinationView {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct BackupDestinationCreate {
     pub name: String,
     /// `local` | `sftp` | `ftp` | `s3`.
@@ -78,7 +78,7 @@ pub struct BackupDestinationCreate {
     pub enabled: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct BackupDestinationUpdate {
     pub name: Option<String>,
     pub kind: Option<String>,
@@ -87,7 +87,7 @@ pub struct BackupDestinationUpdate {
 }
 
 /// Result of POST /api/v1/backup/destinations/{id}/test (a connectivity / writability probe).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct BackupTestResult {
     pub ok: bool,
     pub error: Option<String>,
@@ -95,12 +95,13 @@ pub struct BackupTestResult {
 }
 
 /// A scheduled backup policy: ship a camera selection's recent footage to a destination on an interval.
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, FromRow, utoipa::ToSchema)]
 pub struct BackupPolicy {
     pub id: String,
     pub name: String,
     pub destination_id: String,
     /// JSON array of camera ids; empty array means all cameras.
+    #[schema(value_type = Vec<String>)]
     pub camera_ids: Json<Value>,
     pub incident_lock_only: bool,
     pub schedule_interval_s: i64,
@@ -112,7 +113,7 @@ pub struct BackupPolicy {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct BackupPolicyCreate {
     pub name: String,
     pub destination_id: String,
@@ -123,7 +124,7 @@ pub struct BackupPolicyCreate {
     pub enabled: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct BackupPolicyUpdate {
     pub name: Option<String>,
     pub destination_id: Option<String>,
@@ -135,13 +136,15 @@ pub struct BackupPolicyUpdate {
 }
 
 /// A single backup run (policy-scheduled, manually triggered, or an on-demand archive export).
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, FromRow, utoipa::ToSchema)]
 pub struct BackupJob {
     pub id: String,
     pub policy_id: Option<String>,
     pub destination_id: Option<String>,
     /// `policy` | `on_demand_archive`.
     pub kind: String,
+    /// JSON array of camera ids the run covers; empty array means every camera on the box.
+    #[schema(value_type = Vec<String>)]
     pub camera_ids: Json<Value>,
     pub from_time: Option<DateTime<Utc>>,
     pub to_time: Option<DateTime<Utc>>,
@@ -170,7 +173,7 @@ pub struct BackupJob {
 }
 
 /// Request body for POST /api/v1/archive/export — zip a selection of recorded footage on demand.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ArchiveExportRequest {
     /// Camera ids to include; empty/omitted means all cameras.
     #[serde(default)]

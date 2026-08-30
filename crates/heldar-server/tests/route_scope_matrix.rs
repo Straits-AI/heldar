@@ -2406,19 +2406,98 @@ async fn every_declared_capability_is_one_the_kernel_enforces() {
             ("/api/v1/cameras/{id}/playback/sessions", "post") => {
                 r#"{"from":"2026-01-01T00:00:00Z","to":"2026-01-01T00:01:00Z"}"#
             }
+            // The rest exist ONLY to get past deserialization and reach the capability gate. They
+            // do not have to be semantically valid — a 400 from the handler is fine, a 422 from
+            // serde is not, because it means the probe never reached the thing being tested.
+            ("/api/v1/cameras/config/bulk", "post") => {
+                r#"{"camera_ids":[],"action":{"type":"sync_time"}}"#
+            }
+            ("/api/v1/cameras/{id}/config/time", "put") => {
+                r#"{"time_mode":"manual","local_time":"2026-01-01T00:00:00","time_zone":"CST-8:00:00"}"#
+            }
+            ("/api/v1/cameras/{id}/config/time/ntp", "put") => {
+                r#"{"addressing_format":"ipaddress","host_name":"1.2.3.4","port":123,"interval":60}"#
+            }
+            ("/api/v1/cameras/{id}/config/onvif", "put") => {
+                r#"{"onvif_enabled":false,"isapi_enabled":false}"#
+            }
+            ("/api/v1/cameras/{id}/config/onvif/ensure_user", "post") => {
+                r#"{"password":"probe-only-never-used"}"#
+            }
+            ("/api/v1/cameras/{id}/config/osd", "put") => {
+                r#"{"datetime_enabled":false,"channel_name_enabled":false}"#
+            }
+            ("/api/v1/cameras/{id}/config/reboot", "post") => r#"{"confirm":false}"#,
+            ("/api/v1/cameras/{id}/config/video/{channel}", "put") => r#"{}"#,
+            ("/api/v1/backup/destinations", "post") => r#"{"name":"p","kind":"local","config":{}}"#,
+            ("/api/v1/backup/policies", "post") => r#"{"name":"p","destination_id":"d"}"#,
+            ("/api/v1/movement/links", "post") => r#"{"from_camera":"a","to_camera":"b"}"#,
+            ("/api/v1/cameras/{id}/control/detections/{kind}", "put") => r#"{"enabled":false}"#,
+            ("/api/v1/cameras/{id}/control/line_crossing", "put") => {
+                r#"{"enabled":false,"lines":[]}"#
+            }
+            ("/api/v1/cameras/{id}/control/intrusion", "put") => {
+                r#"{"enabled":false,"regions":[]}"#
+            }
+            ("/api/v1/cameras/{id}/control/motion", "put") => r#"{"enabled":false}"#,
+            ("/api/v1/cameras/{id}/ai-tasks", "post") => r#"{"task_type":"detection"}"#,
+            ("/api/v1/ai/leases", "post") => r#"{"worker_id":"w-probe"}"#,
+            ("/api/v1/ai/events", "post") => {
+                r#"{"camera_id":"camera_a","task_type":"detection","detections":[]}"#
+            }
+            ("/api/v1/ai/embeddings", "post") => {
+                r#"{"camera_id":"camera_a","model":"clip","dim":2,"items":[]}"#
+            }
+            ("/api/v1/cameras/{id}/ptz/goto_preset", "post") => r#"{"token":"1"}"#,
+            ("/api/v1/vehicles", "post") => r#"{"plate":"ABC123"}"#,
+            ("/api/v1/passes", "post") => r#"{"visitor_name":"P","plate":"ABC123"}"#,
+            ("/api/v1/watchlist", "post") => r#"{"plate":"ABC123"}"#,
+            ("/api/v1/entry/gate/settings", "put") => r#"{"kill_switch":false}"#,
+            ("/api/v1/cameras/{id}/zones", "post") => {
+                r#"{"name":"z","polygon":[[0,0],[1,0],[1,1]]}"#
+            }
+            ("/api/v1/webhooks", "post") => r#"{"name":"w","url":"http://127.0.0.1/x"}"#,
+            ("/api/v1/search/nl", "post") => r#"{"query":"red car"}"#,
+            ("/api/v1/search/plan", "post") => r#"{"query":"red car"}"#,
             _ => "{}",
         }
     };
 
     let mut checked = 0usize;
+    let mut problems: Vec<String> = Vec::new();
     for req in REQUIREMENTS {
         let Some(cap) = req.capability else {
             // Admin-gated routes are covered by the fleet-scope assertion list above; a capability
             // claim is what this test is about.
             continue;
         };
-        let path = req.path.replace("{id}", "camera_a");
+        // Substitute EVERY path parameter, not just `{id}`. An unsubstituted `{channel}` reaches
+        // the handler as a literal and fails to parse as a u32 — a 400 before the gate, which
+        // proves nothing about the declaration either way.
+        let path = req
+            .path
+            .replace("{id}", "camera_a")
+            .replace("{camera_id}", "camera_a")
+            .replace("{channel}", "1")
+            .replace("{port}", "1")
+            .replace("{kind}", "motion")
+            .replace("{session_id}", "pbs_probe")
+            .replace("{task_id}", "task_probe")
+            .replace("{zone_id}", "zone_probe")
+            .replace("{schedule_id}", "sched_probe")
+            .replace("{lease_id}", "lease_probe")
+            .replace("{incident_id}", "inc_probe")
+            .replace("{plate}", "ABC123")
+            .replace("{name}", "probe");
         let body = body_for(req.path, req.method);
+        // A GET with a REQUIRED query parameter 400s on the missing param before the gate, the
+        // same way a POST 422s on a missing body field.
+        let path = match req.path {
+            "/api/v1/movement/search/person" => {
+                format!("{path}?camera=camera_a&track=t1&at=2026-01-01T00:00:00Z")
+            }
+            _ => path,
+        };
         let method = req.method.to_uppercase();
 
         // Everything EXCEPT the declared capability. Admin is excluded from the "lacking" set
@@ -2430,15 +2509,30 @@ async fn every_declared_capability_is_one_the_kernel_enforces() {
             .collect();
         let lacking = mint_key(&st, &without, None).await;
         let (status, resp) = call_body(&st, &lacking, &method, &path, body).await;
-        assert_eq!(
-            status,
-            StatusCode::FORBIDDEN,
-            "the contract declares {} {} needs `{}`, but a credential holding every OTHER \
-             capability was not refused ({status}): {resp}",
-            req.method,
-            req.path,
-            cap.slug()
-        );
+        if status != StatusCode::FORBIDDEN {
+            // COLLECTED, NOT ASSERTED. Failing on the first mismatch means finding them one CI run
+            // at a time, and with 149 declarations that is a day of round trips for what is one
+            // reading of the same list.
+            //
+            // A 422 here is a BODY problem, not a declaration problem: deserialization runs before
+            // the gate, so the probe never reached it and the declaration is neither proven nor
+            // disproven. It is reported distinctly for that reason.
+            problems.push(format!(
+                "{} {} declares `{}` but a credential holding every OTHER capability got {}{}: {}",
+                req.method,
+                req.path,
+                cap.slug(),
+                status,
+                if status == StatusCode::UNPROCESSABLE_ENTITY {
+                    " (body rejected before the gate — the probe needs a valid body, this is not \
+                      necessarily a wrong declaration)"
+                } else {
+                    ""
+                },
+                resp.chars().take(160).collect::<String>()
+            ));
+            continue;
+        }
 
         // The control. Without it, a route that refuses everything would look correctly declared.
         //
@@ -2452,18 +2546,26 @@ async fn every_declared_capability_is_one_the_kernel_enforces() {
             .collect();
         let full = mint_key(&st, &holding, None).await;
         let (status, resp) = call_body(&st, &full, &method, &path, body).await;
-        assert_ne!(
-            status,
-            StatusCode::FORBIDDEN,
-            "a credential holding every capability was still refused on {} {} — so the refusal \
-             above proves nothing about `{}`: {resp}",
-            req.method,
-            req.path,
-            cap.slug()
-        );
+        if status == StatusCode::FORBIDDEN {
+            problems.push(format!(
+                "{} {} refused a credential holding EVERY capability — so its refusal proves \
+                 nothing about `{}`: {}",
+                req.method,
+                req.path,
+                cap.slug(),
+                resp.chars().take(160).collect::<String>()
+            ));
+            continue;
+        }
         checked += 1;
     }
 
+    assert!(
+        problems.is_empty(),
+        "{} declaration(s) do not match what the kernel enforces:\n  {}",
+        problems.len(),
+        problems.join("\n  ")
+    );
     assert!(
         checked >= 8,
         "only {checked} capability declarations were exercised — if the table shrank, the contract \
@@ -2482,7 +2584,7 @@ fn the_contract_and_the_requirements_table_cover_the_same_routes() {
     use heldar_kernel::openapi_security::REQUIREMENTS;
     use std::collections::BTreeSet;
 
-    let spec = heldar_kernel::openapi::document();
+    let spec = heldar_server::api_document();
     let mut documented: BTreeSet<(String, String)> = BTreeSet::new();
     for (path, item) in spec["paths"].as_object().expect("paths") {
         for method in item.as_object().expect("path item").keys() {
