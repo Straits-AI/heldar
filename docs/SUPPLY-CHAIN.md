@@ -86,6 +86,11 @@ Every published musl binary and every pushed `ghcr.io/straits-ai/*` image carrie
   tag that produced it,
 - an **SBOM attestation** binding that SBOM to the same artifact.
 
+The **API contract** (`openapi.json`, #120) is published with every release. It is what a generated
+client is built from, and it is what the next release's contract diff compares against — a breaking
+change is allowed on this pre-1.0 appliance, but shipping one by accident is not, because it breaks
+a client at runtime in someone else's deployment.
+
 The **release manifest** (`heldar-release-manifest.json`, #112) carries a build-provenance
 attestation too. It is the one artifact that is not a thing you run — it is the document naming
 which binaries, images and deployment files belong to one release, so an unattested one could be
