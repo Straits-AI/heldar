@@ -51,6 +51,8 @@
 //! row should degrade, not take the recorder down. Every WRITE path validates and refuses instead,
 //! so the fall-through is a safety net and not the normal way a bad zone is handled.
 
+use std::collections::BTreeSet;
+
 use chrono::{DateTime, TimeZone, Utc};
 use serde::Serialize;
 use sqlx::SqlitePool;
@@ -100,6 +102,52 @@ pub async fn site_tz(pool: &SqlitePool, camera_id: Option<&str>) -> (Option<Tz>,
         return (Some(tz), TzSource::Default);
     }
     (None, TzSource::Unset)
+}
+
+/// The distinct EFFECTIVE zones of a set of cameras, and whether any came from a site.
+///
+/// Every camera contributes exactly one entry, using the same fallback chain a single-camera lookup
+/// would get: its site, then the box default, then UTC. That matters in both directions — a camera
+/// with no site must not silently inherit a sibling's zone, and must not manufacture a disagreement
+/// with one either.
+///
+/// An EMPTY list means the whole fleet and is expanded, not treated as "no cameras": a query over
+/// everything covers a strict superset of any list, so treating it as contributing nothing is how a
+/// cross-zone guard gets bypassed by asking for more.
+///
+/// Shared by search and by the entry reports so the two cannot drift into disagreeing about what
+/// "yesterday" means on the same box.
+pub async fn zones_for(pool: &SqlitePool, cameras: &[String]) -> (BTreeSet<String>, bool) {
+    let (fallback, _) = site_tz(pool, None).await;
+    let fallback = fallback.unwrap_or(Tz::UTC).to_string();
+
+    let ids: Vec<String> = if cameras.is_empty() {
+        sqlx::query_scalar::<_, String>("SELECT id FROM cameras")
+            .fetch_all(pool)
+            .await
+            .unwrap_or_default()
+    } else {
+        cameras.to_vec()
+    };
+
+    let mut zones = BTreeSet::new();
+    let mut from_site = false;
+    for cam in &ids {
+        let (tz, src) = site_tz(pool, Some(cam)).await;
+        from_site |= src == TzSource::Site;
+        zones.insert(
+            tz.map(|t| t.to_string())
+                .unwrap_or_else(|| fallback.clone()),
+        );
+    }
+    if zones.is_empty() {
+        // No cameras to ask — a fresh box, or a query over a fleet that has none yet. The effective
+        // zone is still the box default; returning an empty set here dropped that on the floor and
+        // answered in UTC, which is the silent shift this module exists to prevent, arrived at from
+        // the other direction.
+        zones.insert(fallback);
+    }
+    (zones, from_site)
 }
 
 /// Parse an IANA identifier, or `None`. The single place a stored string becomes a zone.

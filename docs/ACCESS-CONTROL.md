@@ -366,6 +366,7 @@ decision survives:
 | Backup / archive **job rows** | at trigger, confined into the job row | the job ships the confined list, never the policy's |
 | Backup **transfer** (detached, off-box) | at trigger, **re-checked while running** | ≤ ~5 s after the credential is withdrawn (kernel migration 0015) |
 | Archive export (`/api/v1/archive/export`) | on the request | the request — it runs inline and its `.zip` is re-guarded on every fetch |
+| Entry reports (`/api/v1/reports/*`) | on the request | the request. `date=` is a calendar day in the resolved site zone, and the response echoes which — a shifted total looks exactly like a correct one |
 | Site writes (`POST`/`PATCH`/`DELETE /api/v1/sites`) | on the request; fleet-only | the request. A site's timezone is what its cameras' schedules are read in, so changing it moves recording windows — the response reports how many cameras it moved, and a site with cameras cannot be deleted at all |
 | Evidence bundle (`/api/v1/evidence/exports`) | on the request, against the camera the export actually reads — derived from `incident_id` where one is given, not the id supplied | the request; the bundle is re-guarded on every fetch like any other artifact. Once downloaded it is a file in someone's possession and no later scope change reaches it — which is the point of signing it |
 | AI **leases** | on each acquire/renew (they are one call) | the lost camera stops being offered on the next renew; the stale row lapses on its TTL (≤ 300 s) and authorizes nothing on its own |
