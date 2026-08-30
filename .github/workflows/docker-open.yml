@@ -93,6 +93,10 @@ jobs:
           format: spdx-json
           output-file: sbom-${{ matrix.name }}.spdx.json
           upload-artifact: false
+          # Symmetric with release.yml. Harmless today (the upload loop only walks THIS run's
+          # artifacts, and there are none), but flipping upload-artifact on later would start racing
+          # release.yml for the same tag's release with only `contents: read` to do it with.
+          upload-release-assets: false
 
       # Attested against the DIGEST, not a tag. A tag is mutable — attesting one would certify
       # whatever it points at today, which is exactly the substitution this is meant to detect.

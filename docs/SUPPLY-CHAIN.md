@@ -93,8 +93,9 @@ forges everything a signature is supposed to prevent.
 ### Verifying before you run something
 
 ```bash
-# A published binary
-gh attestation verify heldar-core-x86_64 --repo Straits-AI/heldar
+# A published binary. The asset name carries the version and arch — see the download snippet in
+# docs/PRODUCTION.md, which builds the same string.
+gh attestation verify "heldar-core-$V-$ARCH-linux-musl" --repo Straits-AI/heldar
 
 # A pushed image, by DIGEST
 gh attestation verify oci://ghcr.io/straits-ai/heldar-core@sha256:<digest> \
