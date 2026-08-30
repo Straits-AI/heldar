@@ -684,8 +684,11 @@ async fn run_subcommand(cmd: &str, cfg: &Config) -> anyhow::Result<()> {
                 anyhow::bail!("HELDAR_SECRET_KEY_OLD == HELDAR_SECRET_KEY — nothing to rotate");
             }
             let pool = db::init_pool(cfg).await.context("open database")?;
-            let n = services::admin::rekey_camera_secrets(&pool, &old_key, &new_key).await?;
-            let m = services::admin::rekey_stored_credentials(&pool, &old_key, &new_key).await?;
+            // ONE TRANSACTION. A failure part-way through used to leave some rows under the new
+            // key and some under the old, and a mixed database is not a partial success: every
+            // camera on the wrong side of the split stops recording, because decrypting with the
+            // wrong key is a hard error by design.
+            let (n, m) = services::admin::rekey_all(&pool, &old_key, &new_key).await?;
             pool.close().await;
             println!(
                 "rekey-secrets: re-sealed {n} camera credential(s) and {m} webhook/backup \
@@ -711,7 +714,7 @@ async fn run_subcommand(cmd: &str, cfg: &Config) -> anyhow::Result<()> {
                  Usage:\n  \
                  heldar-core                    run the server (default)\n  \
                  heldar-core backup-db <dest>   online snapshot of the metadata DB (SQLite VACUUM INTO)\n  \
-                 heldar-core rekey-secrets      re-seal camera + webhook + backup credentials (HELDAR_SECRET_KEY_OLD -> HELDAR_SECRET_KEY)\n  \
+                 heldar-core rekey-secrets      re-seal camera + webhook + backup credentials, atomically (HELDAR_SECRET_KEY_OLD -> HELDAR_SECRET_KEY)\n  \
                  heldar-core convert-autovacuum one-time DB auto_vacuum=INCREMENTAL conversion (run with the server stopped)"
             );
             Ok(())
