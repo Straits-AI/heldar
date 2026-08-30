@@ -530,6 +530,13 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
     // non-/api/v1 paths pass through (media has its own guard below).
     let app = verticals
         .merge_routes(app)
+        // Idempotency sits INSIDE the auth floor, deliberately: it scopes keys to the principal, and
+        // the principal is what the floor resolves. Outside it there would be no identity to scope
+        // by, and one caller could replay another's result by guessing a key.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            heldar_kernel::idempotency::layer,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             heldar_kernel::auth::require_api_auth,

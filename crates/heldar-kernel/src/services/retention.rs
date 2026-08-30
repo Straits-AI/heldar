@@ -351,6 +351,13 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
     //    runs FIRST so the freed space is reflected before the floor decides how much footage to prune.
     //    (a) Exported clips: `clip_<uuid>.mp4`/`.txt` in clips_dir, older than CLIP_RETENTION.
     let clips_pruned = prune_tree_older_than(&cfg.clips_dir, CLIP_RETENTION).await;
+    // Idempotency keys are bounded the same way everything else here is: they are a replay window,
+    // not a second copy of the API's history.
+    let keys_pruned = crate::idempotency::prune(pool).await;
+    if keys_pruned > 0 {
+        tracing::info!(keys_pruned, "retention: pruned expired idempotency keys");
+    }
+
     // Forget the attribution rows whose artifact is gone. Runs AFTER the prunes above and before
     // the snapshot/archive prunes below purely to bound growth; correctness does not depend on the
     // order, because the sweep only drops rows whose file has already left the disk.
