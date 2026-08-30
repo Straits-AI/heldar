@@ -203,6 +203,125 @@ pub(crate) async fn log_search(
     }
 }
 
+/// Does this plan's answer actually depend on which clock it is read on?
+///
+/// Only hour filters and the relative windows the planner produces are wall-clock notions. An
+/// absolute RFC3339 range with no hour filter means the same instants in every zone, so a zone
+/// disagreement among its cameras is irrelevant and refusing it would be obstruction, not safety.
+///
+/// This gate is what keeps the cross-zone refusal from permanently breaking a camera-scoped
+/// credential whose cameras happen to span two sites: a plain plate lookup does not care.
+fn zone_dependent(plan: &QueryPlan) -> bool {
+    plan.hour_min.is_some() || plan.hour_max.is_some()
+}
+
+/// The EFFECTIVE zone of every camera the plan will read, as a set.
+///
+/// Every camera contributes exactly one entry, using the same fallback chain a single-camera query
+/// would get: its site, then the box default, then UTC. That matters in both directions —
+///
+/// - a camera with NO site must not silently inherit a sibling's zone, so it contributes its own
+///   fallback rather than nothing;
+/// - a camera with no site must not manufacture a disagreement either, so it contributes the box
+///   default rather than a distinct "unset" marker.
+///
+/// An empty camera list means the whole fleet, which is a strict superset of any list — so it is
+/// expanded rather than treated as "no cameras", which is how the refusal was bypassable.
+/// Returns the distinct effective zones, and whether any camera got its zone from a SITE (as
+/// opposed to inheriting the box default or the UTC fallback) — the caller needs that to report an
+/// honest provenance rather than guessing from the value.
+async fn effective_zones(
+    st: &AppState,
+    cameras: &[String],
+) -> (std::collections::BTreeSet<String>, bool) {
+    let (fallback, _) = heldar_kernel::services::tz::site_tz(&st.pool, None).await;
+    let fallback = fallback.unwrap_or(chrono_tz::Tz::UTC).to_string();
+
+    let ids: Vec<String> = if cameras.is_empty() {
+        sqlx::query_scalar::<_, String>("SELECT id FROM cameras")
+            .fetch_all(&st.pool)
+            .await
+            .unwrap_or_default()
+    } else {
+        cameras.to_vec()
+    };
+
+    let mut zones = std::collections::BTreeSet::new();
+    let mut from_site = false;
+    for cam in &ids {
+        let (tz, src) = heldar_kernel::services::tz::site_tz(&st.pool, Some(cam)).await;
+        from_site |= src == heldar_kernel::services::tz::TzSource::Site;
+        zones.insert(
+            tz.map(|t| t.to_string())
+                .unwrap_or_else(|| fallback.clone()),
+        );
+    }
+    (zones, from_site)
+}
+
+/// The zone a plan's hour filter and relative dates are read in, and where it came from (#125).
+///
+/// `explicit` is the zone the CALLER supplied — not whatever happens to be sitting in `plan.tz`.
+/// Those are different once a planner has written into the plan, and conflating them was a real
+/// bug: the natural-language route resolved a zone, stamped it onto the plan, then re-resolved and
+/// saw its own value as "explicit". The site was never consulted on that route at all, and both the
+/// response and the `search_log` accountability row asserted a provenance the caller never gave.
+///
+/// Order: the caller's zone, then the single zone shared by every camera the plan reads, then the
+/// box default, then UTC — search's historical behaviour, so an unconfigured box is unchanged.
+async fn resolve_tz(
+    st: &AppState,
+    explicit: Option<&str>,
+    plan: &QueryPlan,
+) -> AppResult<(chrono_tz::Tz, &'static str)> {
+    if let Some(raw) = explicit.map(str::trim).filter(|s| !s.is_empty()) {
+        let tz = heldar_kernel::services::tz::parse(raw).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "`tz` must be an IANA timezone identifier such as `Asia/Kuala_Lumpur` (got {raw:?})"
+            ))
+        })?;
+        return Ok((tz, "explicit"));
+    }
+
+    let (zones, from_site) = effective_zones(st, &plan.cameras).await;
+    if zones.len() > 1 {
+        // ONLY when the answer actually depends on the clock. Refusing an absolute-window plate
+        // lookup because the credential's cameras sit in two sites is obstruction: nothing about
+        // that query is zone-dependent, and the caller has no way to make it agree.
+        if zone_dependent(plan) {
+            return Err(AppError::BadRequest(format!(
+                "this query filters by time of day across cameras in different timezones ({}). \
+                 A wall-clock hour means something different at each, so pass an explicit `tz`, or \
+                 search one site at a time — resolving it silently would return plausible results \
+                 shifted by hours.",
+                zones.into_iter().collect::<Vec<_>>().join(", ")
+            )));
+        }
+        // Not zone-dependent: any zone gives the same answer. Say UTC rather than pick a site's.
+        return Ok((chrono_tz::Tz::UTC, "not_time_of_day"));
+    }
+
+    if let Some(one) = zones.into_iter().next() {
+        if let Some(tz) = heldar_kernel::services::tz::parse(&one) {
+            // The source is what the cameras actually reported, not something inferred by comparing
+            // the value to the box default — a site that deliberately chose the same zone as the
+            // default is still a site's choice, and an unconfigured box falling back to UTC is not
+            // a site at all.
+            let (boxwide, _) = heldar_kernel::services::tz::site_tz(&st.pool, None).await;
+            let src = if from_site {
+                "site"
+            } else if boxwide.is_some() {
+                "default"
+            } else {
+                "utc_fallback"
+            };
+            return Ok((tz, src));
+        }
+    }
+
+    Ok((chrono_tz::Tz::UTC, "utc_fallback"))
+}
+
 async fn search_events(
     State(st): State<AppState>,
     principal: Principal,
@@ -217,7 +336,13 @@ async fn search_events(
     // reads an empty list as "every camera", so an unconfined plan is the whole fleet's history.
     // The plan is echoed back in the response, so this also keeps the echo honest.
     plan.cameras = confine_requested_cameras(&principal, &plan.cameras)?;
-    let outcome = query::execute(&st.pool, &plan, cfg.max_results).await?;
+    // On THIS route `plan.tz` really is the caller's — they sent the plan.
+    let caller_tz = plan.tz.clone();
+    let (tz, tz_source) = resolve_tz(&st, caller_tz.as_deref(), &plan).await?;
+    // Echo the RESOLVED zone in the plan itself, so the logged plan and the response agree about
+    // which clock the answer was computed on. A plan logged without it cannot be re-run.
+    plan.tz = Some(tz.to_string());
+    let outcome = query::execute_in(&st.pool, &plan, cfg.max_results, tz).await?;
     log_search(
         &st,
         &principal,
@@ -228,7 +353,14 @@ async fn search_events(
         outcome.hits.len(),
     )
     .await;
-    Ok(Json(response(None, "structured", &plan, outcome)))
+    Ok(Json(response(
+        None,
+        "structured",
+        &plan,
+        outcome,
+        tz,
+        tz_source,
+    )))
 }
 
 #[derive(Debug, Deserialize)]
@@ -251,15 +383,37 @@ async fn search_nl(
     }
     let cams = cameras(&st.pool, &principal).await;
     // LLM planner if configured, else the transparent rule parser. The LLM only PLANS.
+    // TWO PASSES, because the zone depends on the cameras and the cameras come from parsing.
+    // The first pass exists only to learn which cameras the query names; its date windows are
+    // discarded. Resolving from an EMPTY plan instead — which is what this did first — meant the
+    // site was never consulted on this route at all.
     let (mut plan, planner) = match crate::planner::plan_llm(&st.http, &cfg, q, &cams).await {
         Some(p) => (crate::planner::sanitize(p), "llm"),
-        None => (crate::planner::parse_rules(q, &cams), "rules"),
+        None => (
+            crate::planner::parse_rules_in(q, &cams, chrono_tz::Tz::UTC),
+            "rules",
+        ),
     };
     // The roster above already confined what the planner could name, but the LLM is free to invent an
     // id, so the plan is confined again before it executes — and, because it is echoed, before it is
     // shown. Planner output is narrowed rather than refused; see `confine_planned_cameras`.
     plan.cameras = confine_planned_cameras(&principal, &plan.cameras)?;
-    let outcome = query::execute(&st.pool, &plan, cfg.max_results).await?;
+    // A PLANNER'S ZONE IS NOT A CALLER'S ZONE. The natural-language body carries no `tz` field, so
+    // anything sitting in `plan.tz` here was invented by the rule parser or hallucinated by the
+    // model. Treating it as explicit — which is what happened — meant a model could pick the clock
+    // an operator's question was answered on, and the response would call that choice "explicit".
+    plan.tz = None;
+    let (tz, tz_source) = resolve_tz(&st, None, &plan).await?;
+
+    // Re-parse now that the zone is known, so "yesterday" is the SITE's calendar day. The first
+    // pass only told us which cameras were named.
+    if planner == "rules" {
+        let cameras = plan.cameras.clone();
+        plan = crate::planner::parse_rules_in(q, &cams, tz);
+        plan.cameras = cameras;
+    }
+    plan.tz = Some(tz.to_string());
+    let outcome = query::execute_in(&st.pool, &plan, cfg.max_results, tz).await?;
     log_search(
         &st,
         &principal,
@@ -270,7 +424,14 @@ async fn search_nl(
         outcome.hits.len(),
     )
     .await;
-    Ok(Json(response(Some(q), planner, &plan, outcome)))
+    Ok(Json(response(
+        Some(q),
+        planner,
+        &plan,
+        outcome,
+        tz,
+        tz_source,
+    )))
 }
 
 async fn plan_only(
@@ -288,19 +449,38 @@ async fn plan_only(
         ));
     }
     let cams = cameras(&st.pool, &principal).await;
+    // Resolved and re-parsed exactly as `search_nl` does, for the reason stated below: this route
+    // had kept the UTC-only parser, so on a box with a zone configured the dry-run showed a window
+    // eight hours away from the one the real route would use — and positively asserted "tz": "UTC".
+    // A plan you cannot trust is worse than no dry-run, and one that confidently states the wrong
+    // clock is worse still.
     let (mut plan, planner) = match crate::planner::plan_llm(&st.http, &cfg, q, &cams).await {
         Some(p) => (crate::planner::sanitize(p), "llm"),
         None => (
-            crate::planner::parse_rules(body.query.trim(), &cams),
+            crate::planner::parse_rules_in(q, &cams, chrono_tz::Tz::UTC),
             "rules",
         ),
     };
     // Confined identically to `search_nl`, so the dry-run shows the plan that WOULD run rather than
     // one the executor will then narrow — a plan you cannot trust is worse than no dry-run.
     plan.cameras = confine_planned_cameras(&principal, &plan.cameras)?;
-    Ok(Json(
-        json!({ "query": body.query, "planner": planner, "plan": plan }),
-    ))
+    plan.tz = None;
+    let (tz, tz_source) = resolve_tz(&st, None, &plan).await?;
+    if planner == "rules" {
+        let cameras = plan.cameras.clone();
+        plan = crate::planner::parse_rules_in(q, &cams, tz);
+        plan.cameras = cameras;
+    }
+    plan.tz = Some(tz.to_string());
+    Ok(Json(json!({
+        "query": body.query,
+        "planner": planner,
+        "plan": plan,
+        "interpretation": {
+            "timezone": tz.to_string(),
+            "timezone_source": tz_source,
+        },
+    })))
 }
 
 /// `POST /api/v1/search/semantic`, brought onto the same camera-confinement path as its three
@@ -347,12 +527,24 @@ fn response(
     planner: &str,
     plan: &QueryPlan,
     outcome: query::ExecOutcome,
+    tz: chrono_tz::Tz,
+    tz_source: &str,
 ) -> Value {
     let proof = crate::proof::build(query, planner, plan, &outcome.hits, outcome.truncated);
     json!({
         "query": query,
         "planner": planner,
         "plan": plan,
+        // WHICH CLOCK THIS ANSWER WAS COMPUTED ON (#125). An operator cannot tell a correct result
+        // from one shifted by eight hours by looking at it, so the interpretation is stated rather
+        // than left to be assumed.
+        "interpretation": {
+            "timezone": tz.to_string(),
+            "timezone_source": tz_source,
+            "hour_filter_read_in": tz.to_string(),
+            "note": "hour_min/hour_max and relative dates are read in this zone; stored timestamps \
+                     and every timestamp below are UTC.",
+        },
         "count": outcome.hits.len(),
         // Honest signal: the field-filtered result set may omit older in-window matches because a
         // source hit its fetch cap. Clients (and the proof layer) must not treat the count as complete.
@@ -468,5 +660,223 @@ mod tests {
         let b = confine_planned_cameras(&none, &[]).unwrap_err();
         assert!(matches!(a, AppError::Forbidden(_)), "got {a:?}");
         assert_eq!(a.to_string(), b.to_string());
+    }
+}
+
+/// `resolve_tz` had NO tests, and all three of the route defects an independent review found lived
+/// inside it: the natural-language route never consulting the site, the cross-zone refusal being
+/// bypassable by an empty camera list, and a camera with no site silently inheriting a sibling's
+/// zone. A guard with no tests is a guard nobody has checked.
+#[cfg(test)]
+mod tz_resolution_tests {
+    use super::*;
+
+    async fn state_with(sites: &[(&str, Option<&str>)], cams: &[(&str, Option<&str>)]) -> AppState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        heldar_kernel::db::run_migrations(&pool).await.unwrap();
+        let now = chrono::Utc::now();
+        for (id, tz) in sites {
+            sqlx::query("INSERT INTO sites (id, name, timezone, created_at) VALUES (?,?,?,?)")
+                .bind(id)
+                .bind(id)
+                .bind(tz)
+                .bind(now)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        for (id, site) in cams {
+            sqlx::query(
+                "INSERT INTO cameras (id, site_id, name, created_at, updated_at) VALUES (?,?,?,?,?)",
+            )
+            .bind(id)
+            .bind(site)
+            .bind(id)
+            .bind(now)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+        let cfg = Arc::new(heldar_kernel::config::Config::from_env());
+        AppState {
+            recorder: heldar_kernel::services::recorder::RecorderManager::new(
+                pool.clone(),
+                cfg.clone(),
+            ),
+            sampler: heldar_kernel::services::sampler::SamplerManager::new(
+                pool.clone(),
+                cfg.clone(),
+            ),
+            live: heldar_kernel::services::live_publisher::LivePublisherManager::new(
+                pool.clone(),
+                cfg.clone(),
+                heldar_kernel::reqwest::Client::new(),
+            ),
+            mirror: None,
+            consumers: Arc::new(Vec::new()),
+            modules: Arc::new(Vec::new()),
+            catalog: Arc::new(heldar_kernel::services::registry::CatalogService::new(&cfg)),
+            http: heldar_kernel::reqwest::Client::new(),
+            media_jobs: heldar_kernel::services::media_jobs::MediaJobGovernor::new(2),
+            started_at: chrono::Utc::now(),
+            pool,
+            cfg,
+        }
+    }
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn hour_plan(cameras: &[&str]) -> QueryPlan {
+        QueryPlan {
+            hour_min: Some(18),
+            cameras: v(cameras),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_single_sites_zone_wins_and_names_itself() {
+        let st = state_with(
+            &[("s1", Some("Asia/Kuala_Lumpur"))],
+            &[("cam_a", Some("s1"))],
+        )
+        .await;
+        let (tz, src) = resolve_tz(&st, None, &hour_plan(&["cam_a"])).await.unwrap();
+        assert_eq!(tz, chrono_tz::Tz::Asia__Kuala_Lumpur);
+        assert_eq!(src, "site");
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_box_still_answers_in_utc() {
+        let st = state_with(&[], &[("cam_a", None)]).await;
+        let (tz, src) = resolve_tz(&st, None, &hour_plan(&["cam_a"])).await.unwrap();
+        assert_eq!(
+            tz,
+            chrono_tz::Tz::UTC,
+            "the historical behaviour must not move"
+        );
+        assert_eq!(src, "utc_fallback");
+    }
+
+    #[tokio::test]
+    async fn a_callers_zone_wins_and_a_bad_one_is_refused() {
+        let st = state_with(
+            &[("s1", Some("Asia/Kuala_Lumpur"))],
+            &[("cam_a", Some("s1"))],
+        )
+        .await;
+        let (tz, src) = resolve_tz(&st, Some("America/New_York"), &hour_plan(&["cam_a"]))
+            .await
+            .unwrap();
+        assert_eq!(tz, chrono_tz::Tz::America__New_York);
+        assert_eq!(src, "explicit");
+        assert!(resolve_tz(&st, Some("Asia/KL"), &hour_plan(&["cam_a"]))
+            .await
+            .is_err());
+    }
+
+    /// The refusal was bypassable by asking for EVERYTHING: an empty camera list means the whole
+    /// fleet, a strict superset of the list that gets refused, and it contributed no zones at all.
+    #[tokio::test]
+    async fn an_empty_camera_list_cannot_bypass_the_cross_zone_refusal() {
+        let st = state_with(
+            &[
+                ("s_kl", Some("Asia/Kuala_Lumpur")),
+                ("s_ny", Some("America/New_York")),
+            ],
+            &[("cam_kl", Some("s_kl")), ("cam_ny", Some("s_ny"))],
+        )
+        .await;
+        assert!(
+            resolve_tz(&st, None, &hour_plan(&["cam_kl", "cam_ny"]))
+                .await
+                .is_err(),
+            "naming both cameras must be refused"
+        );
+        assert!(
+            resolve_tz(&st, None, &hour_plan(&[])).await.is_err(),
+            "and so must asking for the whole fleet, which INCLUDES both — otherwise the refusal \
+             is bypassed by requesting strictly more"
+        );
+    }
+
+    /// The refusal must not fire on a query whose answer does not depend on the clock. A
+    /// camera-scoped credential whose cameras span two sites could otherwise never run ANY
+    /// structured search, including a plain plate lookup with an absolute window, and had no way to
+    /// satisfy the guard because its complaint was unrelated to what it asked.
+    #[tokio::test]
+    async fn a_query_with_no_time_of_day_term_is_not_refused_across_zones() {
+        let st = state_with(
+            &[
+                ("s_kl", Some("Asia/Kuala_Lumpur")),
+                ("s_ny", Some("America/New_York")),
+            ],
+            &[("cam_kl", Some("s_kl")), ("cam_ny", Some("s_ny"))],
+        )
+        .await;
+        let plate_lookup = QueryPlan {
+            from: Some("2026-06-01T00:00:00Z".into()),
+            to: Some("2026-06-02T00:00:00Z".into()),
+            plate: Some("ABC123".into()),
+            cameras: v(&["cam_kl", "cam_ny"]),
+            ..Default::default()
+        };
+        let (_, src) = resolve_tz(&st, None, &plate_lookup)
+            .await
+            .expect("an absolute-window plate lookup means the same instants in every zone");
+        assert_eq!(src, "not_time_of_day");
+    }
+
+    /// A camera with no site has no zone configured; its historical behaviour is UTC. Reading it in
+    /// a sibling's zone is a silent shift, and the guard was blind to it because a camera
+    /// contributing no zone contributed nothing to the comparison.
+    #[tokio::test]
+    async fn a_camera_with_no_site_does_not_inherit_a_siblings_zone() {
+        let st = state_with(
+            &[("s_kl", Some("Asia/Kuala_Lumpur"))],
+            &[("cam_kl", Some("s_kl")), ("cam_orphan", None)],
+        )
+        .await;
+        assert!(
+            resolve_tz(&st, None, &hour_plan(&["cam_kl", "cam_orphan"]))
+                .await
+                .is_err(),
+            "the orphan falls back to UTC and KL is +08:00 — that is a real disagreement and must \
+             be refused, not resolved to whichever camera was listed first"
+        );
+        // Alone, it is simply UTC.
+        let (tz, _) = resolve_tz(&st, None, &hour_plan(&["cam_orphan"]))
+            .await
+            .unwrap();
+        assert_eq!(tz, chrono_tz::Tz::UTC);
+    }
+
+    /// ...and the mirror image: a box default is what a site-less camera falls back to, so it must
+    /// not manufacture a disagreement with a site that names the same zone.
+    #[tokio::test]
+    async fn the_box_default_does_not_manufacture_a_disagreement() {
+        let st = state_with(
+            &[("s_kl", Some("Asia/Kuala_Lumpur"))],
+            &[("cam_kl", Some("s_kl")), ("cam_orphan", None)],
+        )
+        .await;
+        heldar_kernel::services::settings::set_str(
+            &st.pool,
+            heldar_kernel::services::tz::DEFAULT_TIMEZONE,
+            "Asia/Kuala_Lumpur",
+        )
+        .await
+        .unwrap();
+        let (tz, _) = resolve_tz(&st, None, &hour_plan(&["cam_kl", "cam_orphan"]))
+            .await
+            .expect("both cameras effectively read Asia/Kuala_Lumpur — there is no disagreement");
+        assert_eq!(tz, chrono_tz::Tz::Asia__Kuala_Lumpur);
     }
 }

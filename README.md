@@ -111,6 +111,7 @@ curl -X POST http://localhost:8000/api/v1/cameras -H 'content-type: application/
 curl http://localhost:8000/api/v1/system                     # uptime, camera/segment counts
 curl http://localhost:8000/api/v1/cameras/gate_a/timeline    # recorded ranges
 curl http://localhost:8000/api/v1/system/retention           # recording size cap + free-disk floor
+curl http://localhost:8000/api/v1/system/timezone            # the site clock schedules and search use
 ```
 
 > Do not brute-force camera credentials. HikVision devices lock out after failed attempts.
@@ -121,6 +122,12 @@ curl http://localhost:8000/api/v1/system/retention           # recording size ca
 > `GET`/`PUT /api/v1/system/retention` (PUT admin-only) and the dashboard's System page — no restart.
 > The metadata DB is also bounded (`HELDAR_MAX_DB_GB`, default 4), and a pre-existing DB self-converts to
 > `auto_vacuum=INCREMENTAL` in the background on first upgrade (`HELDAR_DB_AUTOVACUUM_CONVERT=true`).
+
+> **Which clock is yours.** Timestamps are stored in UTC. *Interpretation* — a schedule's "18:00",
+> a search's "after 6pm", "yesterday" — follows the site's timezone once one is set
+> (`GET`/`PUT /api/v1/system/timezone`, admin-only). With none set, schedules follow the server's
+> local zone and search follows UTC, exactly as before, so nothing moves until you choose. Set one
+> and both move together. See [#125](https://github.com/Straits-AI/heldar/issues/125).
 
 Run the reference AI worker against an AI-enabled camera:
 

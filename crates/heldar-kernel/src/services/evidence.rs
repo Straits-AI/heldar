@@ -519,17 +519,39 @@ async fn build_bundle(
     let key = crate::services::evidence_key::EvidenceKey::load_or_create(&st.cfg.data_dir)
         .map_err(AppError::Other)?;
 
+    let (tz, tz_src) = crate::services::tz::site_tz(&st.pool, Some(camera_id)).await;
+    let tz_name = tz.map(|t| t.to_string());
+    let tz_source = serde_json::to_value(tz_src).unwrap_or(Value::Null);
+    let tz_note = match tz {
+        Some(_) => {
+            "Every timestamp in this bundle is UTC. This zone is the site's, recorded so a \
+                    reader can render local wall-clock times without guessing which clock they are."
+        }
+        None => {
+            "No timezone is configured for this site, so all times in this bundle are UTC and \
+                 no local wall clock can be derived from it."
+        }
+    };
+
     let manifest = json!({
         "format": FORMAT,
         "bundle_id": id,
         "created_at": Utc::now(),
         "hash_algorithm": "sha256",
+        // THE MANIFEST IS SIGNED, SO THIS STATEMENT HAS TO STAY TRUE (#125). It previously attested
+        // "not configured on this appliance", which was accurate then and would have become a
+        // signed falsehood the moment a zone could be resolved — the box would have gone on
+        // asserting it, under its own key, for every bundle.
+        //
+        // The zone is recorded for DISPLAY only. Every timestamp in this bundle is UTC and stays
+        // UTC; naming the zone lets a reader render a local wall clock without guessing, and lets
+        // them see that "02:14" in a report meant 02:14 at the site rather than 02:14 somewhere
+        // else. Null means genuinely unconfigured, which is a fact about the evidence.
         "site": {
             "id": site_id,
-            // #125 makes the site timezone first-class. Until then it is genuinely not configured,
-            // and naming a guess here would put a wrong local time on an evidence document.
-            "timezone": Value::Null,
-            "timezone_note": "not configured on this appliance; all times in this bundle are UTC",
+            "timezone": tz_name,
+            "timezone_source": tz_source,
+            "timezone_note": tz_note,
         },
         "camera": {"id": camera_id, "name": camera_name},
         "incident_id": incident_id,

@@ -1254,3 +1254,85 @@ async fn slack_inside_an_entrys_declared_data_cannot_hide_a_member() {
         );
     }
 }
+
+/// The manifest is SIGNED, so what it says about time has to stay true (#125).
+///
+/// It used to attest "not configured on this appliance; all times in this bundle are UTC" — accurate
+/// when written, and a signed falsehood the moment a zone could be resolved. A box asserting that
+/// under its own key, for every bundle, is worse than one that says nothing.
+#[tokio::test]
+async fn the_signed_manifest_names_the_sites_zone_when_there_is_one() {
+    require("ffmpeg");
+    require("zip");
+    require("openssl");
+    let dir = scratch("tz");
+    let st = state(&dir).await;
+    let (from, to) = seed(&st, "cam_a").await;
+    let p = heldar_kernel::auth::Principal::system_admin();
+
+    let read_site = |bundle: PathBuf| {
+        let o = Command::new("python3")
+            .arg("-c")
+            .arg(
+                "import sys,zipfile,json;z=zipfile.ZipFile(sys.argv[1]);\
+                  m=json.loads(z.read('manifest.json'));print(json.dumps(m['site']))",
+            )
+            .arg(&bundle)
+            .output()
+            .expect("reading the manifest");
+        serde_json::from_slice::<serde_json::Value>(&o.stdout).expect("site block")
+    };
+
+    // Unconfigured: null, and it SAYS no local clock can be derived.
+    let r = evidence::export(&st, &p, "cam_a", from, to, None, None, None)
+        .await
+        .expect("export");
+    let site = read_site(st.cfg.evidence_dir.join(&r.filename));
+    assert!(site["timezone"].is_null(), "nothing configured yet: {site}");
+    assert!(
+        site["timezone_note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no local wall clock"),
+        "an unconfigured bundle must say so rather than imply UTC is the site's clock: {site}"
+    );
+
+    // Configure a site and export again.
+    let now = chrono::Utc::now();
+    sqlx::query("INSERT INTO sites (id, name, timezone, created_at) VALUES (?,?,?,?)")
+        .bind("site_kl")
+        .bind("KL")
+        .bind("Asia/Kuala_Lumpur")
+        .bind(now)
+        .execute(&st.pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE cameras SET site_id = 'site_kl' WHERE id = 'cam_a'")
+        .execute(&st.pool)
+        .await
+        .unwrap();
+
+    let r = evidence::export(&st, &p, "cam_a", from, to, None, None, None)
+        .await
+        .expect("export");
+    let bundle = st.cfg.evidence_dir.join(&r.filename);
+    let site = read_site(bundle.clone());
+    assert_eq!(
+        site["timezone"].as_str(),
+        Some("Asia/Kuala_Lumpur"),
+        "the signed manifest must name the site's zone: {site}"
+    );
+    assert_eq!(site["timezone_source"].as_str(), Some("site"), "{site}");
+    assert!(
+        !site["timezone_note"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("no local wall clock"),
+        "the unconfigured note must not survive into a configured bundle — that is the signed \
+         falsehood this test exists to prevent: {site}"
+    );
+
+    // And it still verifies: the zone is inside the signature, not bolted on beside it.
+    let (code, out) = verify(&bundle, &["--key-id", r.key_id.as_str()]);
+    assert_eq!(code, 0, "the bundle must still verify:\n{out}");
+}

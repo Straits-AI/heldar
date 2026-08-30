@@ -121,8 +121,9 @@ response, and what is stored in `search_log`.
 |---|---|---|
 | `from` | `string?` (RFC3339) | Window start. Default: **now − 7 days**. |
 | `to` | `string?` (RFC3339) | Window end. Default: **now + 1 minute**. |
-| `hour_min` | `int?` (0–23) | Time-of-day floor — keep events whose **UTC hour ≥** this (`"after 6pm"` ⇒ 18). |
-| `hour_max` | `int?` (0–23) | Time-of-day ceiling — keep events whose **UTC hour ≤** this (`"before 9am"` ⇒ 9). |
+| `hour_min` | `int?` (0–23) | Time-of-day floor — keep events whose **local hour ≥** this (`"after 6pm"` ⇒ 18). Read in `tz`. |
+| `hour_max` | `int?` (0–23) | Time-of-day ceiling — keep events whose **local hour ≤** this (`"before 9am"` ⇒ 9). Read in `tz`. |
+| `tz` | `string?` | IANA zone the hour filter and relative dates are read in. Omit and it resolves: the cameras' site → the box default → UTC. A query spanning sites in **different** zones is refused rather than resolved — see below. |
 | `cameras` | `string[]` | Camera **ids**; empty ⇒ all cameras. |
 | `sources` | `string[]` | Which fact tables to search: subset of `entry` \| `zone` \| `breach`; empty ⇒ **all three**. |
 | `plate` | `string?` | Exact normalized plate (UPPERCASE alphanumeric). **Identity-bearing** — triggers audit (§8). |
@@ -141,6 +142,39 @@ Every result is normalized to a **`SearchHit`** regardless of which table it cam
 `claim_level` (always `"event"` — see the proof ladder).
 
 ---
+
+### Which clock a search is answered on
+
+`hour_min`/`hour_max` and relative dates (`today`, `yesterday`) are **wall-clock** notions, so they
+need a zone. Before #125 they were read in UTC: at a site eight hours ahead, `"after 6pm"` selected
+the small hours of the following morning. The search was syntactically valid, the footage looked
+convincing, and nothing in the response said which clock it had used.
+
+Resolution order:
+
+1. an explicit `tz` on the plan
+2. the single site the plan's cameras belong to
+3. the box-wide default (`PUT /api/v1/system/timezone`)
+4. UTC
+
+(4) is the historical behaviour, kept so an unconfigured box answers exactly as it always has.
+
+**A query spanning cameras in different timezones is refused, not resolved.** A relative time means
+something different at each site, and picking one is invisible — the results look plausible and are
+merely shifted. Pass an explicit `tz`, or search one site at a time.
+
+Every response carries an `interpretation` block:
+
+```json
+"interpretation": {
+  "timezone": "Asia/Kuala_Lumpur",
+  "timezone_source": "site",
+  "hour_filter_read_in": "Asia/Kuala_Lumpur",
+  "note": "hour_min/hour_max and relative dates are read in this zone; stored timestamps and every timestamp below are UTC."
+}
+```
+
+Stored timestamps are UTC and stay UTC. The zone is for interpretation only.
 
 ## 4. The deterministic executor (`query.rs`)
 
@@ -167,7 +201,7 @@ indexed and bounded); everything else is applied in Rust.
 
 **3. Rust field filters.** The fetched hits are filtered in-process (`hits.retain`) against
 the remaining plan fields, in this order: `cameras` (membership) → `hour_min`/`hour_max`
-(UTC hour of the timestamp) → `plate` (exact) → `color` / `vehicle_type` (case-insensitive
+(local hour of the timestamp, in the resolved zone) → `plate` (exact) → `color` / `vehicle_type` (case-insensitive
 on `subject`) → `subject_type` → `auth_status` (membership) → `event_type` (case-insensitive
 on `kind`) → `zone_kind` (case-insensitive) → `text` (lowercased substring).
 
@@ -207,7 +241,7 @@ recognizes the patterns below and leaves everything else to the default window.
 | **Event / source** | `red zone` / `restricted` / `breach` / `intrusion` → `sources+=breach`; **else** `enter` / `entry` / `arriv` → `event_type=vehicle_entry`; **else** `exit` / `leav` / `left` → `event_type=vehicle_exit` | (breach intent wins; otherwise entry/exit). |
 | **Camera name** | a camera's `name` or `id` appears in the question (matched **longest-name-first**, so `"gate b annex"` beats `"gate b"`) | appends the camera `id` to `cameras` (deduped). |
 | **Relative date** | `yesterday` (full prior day) · `today` (since midnight) · `last/past/this week` (now − 7 d) · `last/past N days` (now − N d, N clamped 1–365) | `from` / `to`. |
-| **Time of day** | `after <time>` → `hour_min`; `before <time>` → `hour_max`; accepts `6pm`, `6 pm`, `18:00` (am/pm normalized to a 0–23 UTC hour) | `hour_min` / `hour_max`. |
+| **Time of day** | `after <time>` → `hour_min`; `before <time>` → `hour_max`; accepts `6pm`, `6 pm`, `18:00` (am/pm normalized to a 0–23 local hour) | `hour_min` / `hour_max`. |
 | **Plate** | the first plate-like token: 4–10 alphanumerics containing **both** a letter and a digit (normalized UPPERCASE) | `plate`. |
 
 ### Worked examples

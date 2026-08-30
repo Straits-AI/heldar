@@ -42,7 +42,8 @@ pub struct PersistedSnapshot {
 
 /// A recurring per-camera recording window, applied when the camera's `record_mode` is `scheduled`
 /// or `scheduled_event`. `days` is a JSON array of weekday ints (0=Mon..6=Sun); `time_start` /
-/// `time_end` are "HH:MM" 24h in the SERVER's LOCAL timezone (chrono::Local). When `time_start` >
+/// `time_end` are "HH:MM" 24h read in the camera's SITE timezone (#125), falling back to the
+/// server's local zone when nothing is configured. When `time_start` >
 /// `time_end` the window wraps past midnight (its early-morning portion is attributed to the day it
 /// started on).
 #[derive(Debug, Clone, Serialize, FromRow)]

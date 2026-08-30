@@ -29,6 +29,107 @@ pub fn router() -> Router<AppState> {
             "/api/v1/system/transcode",
             get(get_transcode).put(put_transcode),
         )
+        .route(
+            "/api/v1/system/timezone",
+            get(get_timezone).put(put_timezone),
+        )
+}
+
+/// The box-wide timezone, and — the part that matters — where the effective one comes from.
+///
+/// "UTC" and "nobody has configured a zone" look identical in a timestamp and mean very different
+/// things, so the source is reported beside the value. `server_local_offset` is the box's own clock
+/// offset, previously visible only in the boot log; next to the configured zone it is what lets an
+/// operator see "the site says Asia/Kuala_Lumpur but this container is running on +00:00".
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TimezoneSettings {
+    /// The IANA identifier configured box-wide, if any.
+    configured: Option<String>,
+    source: crate::services::tz::TzSource,
+    /// The server's own local offset (`%:z`), for spotting a container whose `TZ` disagrees.
+    server_local_offset: String,
+    /// What an unconfigured box does, stated rather than left to be discovered: schedules follow
+    /// the SERVER's local zone and search follows UTC. Setting a zone makes both follow it.
+    unconfigured_behaviour: &'static str,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct TimezoneUpdate {
+    /// An IANA identifier, e.g. `Asia/Kuala_Lumpur`. Empty clears it.
+    timezone: String,
+}
+
+async fn timezone_settings(st: &AppState) -> TimezoneSettings {
+    let (tz, source) = crate::services::tz::site_tz(&st.pool, None).await;
+    TimezoneSettings {
+        configured: tz.map(|t| t.to_string()),
+        source,
+        server_local_offset: chrono::Local::now().format("%:z").to_string(),
+        unconfigured_behaviour:
+            "with no zone configured, recording schedules follow the SERVER's local timezone and \
+             search hour filters follow UTC — the historical behaviour of each. Setting a zone \
+             makes both follow it.",
+    }
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/system/timezone", tag = "system",
+    responses((status = 200, description = "The effective timezone and where it comes from", body = TimezoneSettings)),
+)]
+pub async fn get_timezone(
+    State(st): State<AppState>,
+    principal: Principal,
+) -> AppResult<Json<TimezoneSettings>> {
+    principal.require_cap(Cap::SystemRead, "read the timezone")?;
+    Ok(Json(timezone_settings(&st).await))
+}
+
+/// Set the box-wide timezone (admin only).
+///
+/// REFUSED FOR A CAMERA-SCOPED CREDENTIAL. A zone reinterprets every schedule and every relative
+/// search on the box, so it is fleet-wide by nature — the same reasoning as the transcode engine.
+///
+/// The value is validated here rather than at read time. A stored zone that does not parse falls
+/// back silently by design (a corrupted row must not take the recorder down), so if writes did not
+/// refuse, `Asia/KL` would be accepted with a 200 and the box would quietly keep answering in the
+/// old zone.
+#[utoipa::path(
+    put, path = "/api/v1/system/timezone", tag = "system",
+    request_body = TimezoneUpdate,
+    responses(
+        (status = 200, description = "The new effective timezone", body = TimezoneSettings),
+        (status = 400, description = "Not an IANA timezone identifier", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_timezone(
+    State(st): State<AppState>,
+    principal: Principal,
+    Json(body): Json<TimezoneUpdate>,
+) -> AppResult<Json<TimezoneSettings>> {
+    principal.require(principal.can_admin(), "change the timezone")?;
+    crate::routes::cameras::require_fleet_scope(&principal, "change the box timezone")?;
+
+    let raw = body.timezone.trim().to_string();
+    if !raw.is_empty() && crate::services::tz::parse(&raw).is_none() {
+        return Err(AppError::BadRequest(format!(
+            "`timezone` must be an IANA identifier such as `Asia/Kuala_Lumpur` (got {raw:?}). \
+             Abbreviations and fixed offsets are not accepted: `GMT+8` and `+08:00` cannot express \
+             daylight saving, and a recorder that is an hour out twice a year returns the wrong \
+             footage for a valid search."
+        )));
+    }
+    settings::set_str(&st.pool, crate::services::tz::DEFAULT_TIMEZONE, &raw).await?;
+    crate::auth::audit(
+        &st.pool,
+        &principal,
+        "update_timezone",
+        "settings",
+        "timezone",
+        json!({ "timezone": raw }),
+    )
+    .await;
+    Ok(Json(timezone_settings(&st).await))
 }
 
 const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;

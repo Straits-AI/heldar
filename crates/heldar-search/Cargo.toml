@@ -26,6 +26,7 @@ sqlx = { version = "0.8", default-features = false, features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+chrono-tz = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"

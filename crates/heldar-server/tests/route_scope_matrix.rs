@@ -763,6 +763,17 @@ async fn a_scoped_credential_cannot_reach_the_egress_surfaces() {
             "{}",
             "convert the database",
         ),
+        // A timezone reinterprets every schedule and every relative search on the box. Declaring
+        // this route SCOPE_NEUTRAL and stopping there was a mistake: the census SKIPS a
+        // scope-neutral path, so `require_fleet_scope` on the PUT was asserted nowhere while the
+        // declaration read as though it had been checked. The neutral declaration is still correct
+        // for the GET (it discloses no camera); this is where the WRITE is actually proven.
+        (
+            "PUT",
+            "/api/v1/system/timezone",
+            r#"{"timezone":"America/New_York"}"#,
+            "change the box-wide timezone",
+        ),
     ] {
         let (status, resp) = call_body(&st, &scoped, method, path, body).await;
         assert_eq!(
@@ -1468,6 +1479,13 @@ const SCOPE_NEUTRAL: &[(&str, &str)] = &[
         "/api/v1/evidence/exports",
         "GET is confined to the caller's cameras; POST resolves the camera (from camera_id OR an \
          incident) and camera_scope_checks it before any footage is read",
+    ),
+    (
+        "/api/v1/system/timezone",
+        "GET only: SystemRead, and it discloses no camera. The PUT is NOT neutral and is proven \
+         to 403 for a camera-scoped credential in the fleet-scope assertion list below — a \
+         scope_neutral declaration makes the census skip the path, so the write needs its own \
+         assertion or nothing checks it",
     ),
     (
         "/api/v1/evidence/signing-key",

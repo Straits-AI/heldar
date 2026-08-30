@@ -2,7 +2,8 @@
 //!
 //! A `camera_schedules` row defines a recurring daily recording window; it takes effect only when
 //! the camera's `record_mode` is `scheduled` or `scheduled_event`. `days` is a JSON array of weekday
-//! ints (0=Mon..6=Sun); `time_start`/`time_end` are "HH:MM" 24h in the SERVER's LOCAL timezone
+//! ints (0=Mon..6=Sun); `time_start`/`time_end` are "HH:MM" 24h read in the CAMERA'S SITE timezone
+//! (#125), falling back to the SERVER's local zone when no zone is configured anywhere
 //! (start > end means an overnight window). Schedules are managed by manager+; any authenticated
 //! principal can list them. The schedule watcher opens/closes windows in the background.
 
