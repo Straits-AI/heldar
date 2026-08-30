@@ -203,6 +203,58 @@ pub(crate) async fn log_search(
     }
 }
 
+/// The zone a plan's hour filter and relative dates are read in, and where it came from (#125).
+///
+/// Order: an explicit `plan.tz`, then the single site the plan's cameras belong to, then the
+/// box-wide default, then UTC — search's historical behaviour, so an unconfigured box is unchanged.
+///
+/// A PLAN SPANNING SITES IN DIFFERENT ZONES IS REFUSED rather than resolved. Picking one site's
+/// zone for another's cameras is the failure this whole issue is about, and it would be invisible:
+/// the results look plausible, just shifted. The caller is told to say which zone it meant.
+async fn resolve_plan_tz(
+    st: &AppState,
+    plan: &QueryPlan,
+) -> AppResult<(chrono_tz::Tz, &'static str)> {
+    if let Some(raw) = plan.tz.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let tz = heldar_kernel::services::tz::parse(raw).ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "`tz` must be an IANA timezone identifier such as `Asia/Kuala_Lumpur` (got {raw:?})"
+            ))
+        })?;
+        return Ok((tz, "explicit"));
+    }
+
+    // Every distinct zone among the plan's cameras. An empty camera list means the whole fleet, in
+    // which case there is no single site to ask and the box default applies.
+    let mut zones: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for cam in &plan.cameras {
+        let (tz, _) = heldar_kernel::services::tz::site_tz(&st.pool, Some(cam)).await;
+        if let Some(tz) = tz {
+            zones.insert(tz.to_string());
+        }
+    }
+    if zones.len() > 1 {
+        return Err(AppError::BadRequest(format!(
+            "this query spans cameras in different timezones ({}). A relative time means something \
+             different at each, so pass an explicit `tz`, or search one site at a time — resolving \
+             it silently would return plausible results shifted by hours.",
+            zones.into_iter().collect::<Vec<_>>().join(", ")
+        )));
+    }
+    if let Some(one) = zones.into_iter().next() {
+        if let Some(tz) = heldar_kernel::services::tz::parse(&one) {
+            return Ok((tz, "site"));
+        }
+    }
+    let (tz, _) = heldar_kernel::services::tz::site_tz(&st.pool, None).await;
+    match tz {
+        Some(tz) => Ok((tz, "default")),
+        // Search has always read hours in UTC. Keeping that as the unconfigured fallback is what
+        // stops this change from silently moving every saved query on every box.
+        None => Ok((chrono_tz::Tz::UTC, "utc_fallback")),
+    }
+}
+
 async fn search_events(
     State(st): State<AppState>,
     principal: Principal,
@@ -217,7 +269,11 @@ async fn search_events(
     // reads an empty list as "every camera", so an unconfined plan is the whole fleet's history.
     // The plan is echoed back in the response, so this also keeps the echo honest.
     plan.cameras = confine_requested_cameras(&principal, &plan.cameras)?;
-    let outcome = query::execute(&st.pool, &plan, cfg.max_results).await?;
+    let (tz, tz_source) = resolve_plan_tz(&st, &plan).await?;
+    // Echo the RESOLVED zone in the plan itself, so the logged plan and the response agree about
+    // which clock the answer was computed on. A plan logged without it cannot be re-run.
+    plan.tz = Some(tz.to_string());
+    let outcome = query::execute_in(&st.pool, &plan, cfg.max_results, tz).await?;
     log_search(
         &st,
         &principal,
@@ -228,7 +284,14 @@ async fn search_events(
         outcome.hits.len(),
     )
     .await;
-    Ok(Json(response(None, "structured", &plan, outcome)))
+    Ok(Json(response(
+        None,
+        "structured",
+        &plan,
+        outcome,
+        tz,
+        tz_source,
+    )))
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,13 +316,32 @@ async fn search_nl(
     // LLM planner if configured, else the transparent rule parser. The LLM only PLANS.
     let (mut plan, planner) = match crate::planner::plan_llm(&st.http, &cfg, q, &cams).await {
         Some(p) => (crate::planner::sanitize(p), "llm"),
-        None => (crate::planner::parse_rules(q, &cams), "rules"),
+        None => {
+            // The rule parser needs the zone BEFORE it can turn "yesterday" into a window, so
+            // resolve from an empty plan first: explicit tz cannot apply here (there is no plan
+            // yet), so this is the site-or-default-or-UTC answer.
+            let (pre_tz, _) = resolve_plan_tz(&st, &QueryPlan::default()).await?;
+            (crate::planner::parse_rules_in(q, &cams, pre_tz), "rules")
+        }
     };
     // The roster above already confined what the planner could name, but the LLM is free to invent an
     // id, so the plan is confined again before it executes — and, because it is echoed, before it is
     // shown. Planner output is narrowed rather than refused; see `confine_planned_cameras`.
     plan.cameras = confine_planned_cameras(&principal, &plan.cameras)?;
-    let outcome = query::execute(&st.pool, &plan, cfg.max_results).await?;
+    // A MODEL'S TYPO MUST NOT FAIL AN OPERATOR'S QUESTION. On the structured route an unparseable
+    // `tz` is a 400, because a caller sent it deliberately. Here the planner may have invented one,
+    // so it is cleared and resolution falls through to the site — the answer is still computed in a
+    // real zone, and the response says which.
+    if plan
+        .tz
+        .as_deref()
+        .is_some_and(|t| heldar_kernel::services::tz::parse(t).is_none())
+    {
+        plan.tz = None;
+    }
+    let (tz, tz_source) = resolve_plan_tz(&st, &plan).await?;
+    plan.tz = Some(tz.to_string());
+    let outcome = query::execute_in(&st.pool, &plan, cfg.max_results, tz).await?;
     log_search(
         &st,
         &principal,
@@ -270,7 +352,14 @@ async fn search_nl(
         outcome.hits.len(),
     )
     .await;
-    Ok(Json(response(Some(q), planner, &plan, outcome)))
+    Ok(Json(response(
+        Some(q),
+        planner,
+        &plan,
+        outcome,
+        tz,
+        tz_source,
+    )))
 }
 
 async fn plan_only(
@@ -347,12 +436,24 @@ fn response(
     planner: &str,
     plan: &QueryPlan,
     outcome: query::ExecOutcome,
+    tz: chrono_tz::Tz,
+    tz_source: &str,
 ) -> Value {
     let proof = crate::proof::build(query, planner, plan, &outcome.hits, outcome.truncated);
     json!({
         "query": query,
         "planner": planner,
         "plan": plan,
+        // WHICH CLOCK THIS ANSWER WAS COMPUTED ON (#125). An operator cannot tell a correct result
+        // from one shifted by eight hours by looking at it, so the interpretation is stated rather
+        // than left to be assumed.
+        "interpretation": {
+            "timezone": tz.to_string(),
+            "timezone_source": tz_source,
+            "hour_filter_read_in": tz.to_string(),
+            "note": "hour_min/hour_max and relative dates are read in this zone; stored timestamps \
+                     and every timestamp below are UTC.",
+        },
         "count": outcome.hits.len(),
         // Honest signal: the field-filtered result set may omit older in-window matches because a
         // source hit its fetch cap. Clients (and the proof layer) must not treat the count as complete.
