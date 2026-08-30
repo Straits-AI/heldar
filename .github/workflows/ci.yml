@@ -40,6 +40,28 @@ jobs:
         run: cargo test --workspace --locked
       - name: read-seam lint (cross-app reads go through *_read views)
         run: ./scripts/check-read-seam.sh
+      # A generated client that COMPILES is a stronger statement about the contract than any prose:
+      # a $ref to a missing schema, an operation with no id, or a duplicate operationId all become
+      # build failures here instead of a surprise for whoever generates a client later. The first
+      # run of this found two real defects — a field named `from` (a keyword in two of the three
+      # languages) and three duplicated operationIds that silently collapsed a method.
+      - name: generate API clients
+        run: python3 scripts/gen_clients.py target/openapi.json clients
+      - name: rust client compiles
+        run: cargo build --quiet --manifest-path clients/rust/Cargo.toml
+      - name: python client imports
+        run: python3 -c "import sys; sys.path.insert(0,'clients/python'); import heldar_client"
+      - name: generated clients are in sync with the contract
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet -- clients; then
+            echo "The committed clients differ from what the contract generates:"
+            git --no-pager diff --stat -- clients
+            echo
+            echo "Regenerate and commit:  python3 scripts/gen_clients.py target/openapi.json clients"
+            exit 1
+          fi
+
       # The API contract, compared against the one the last release published. Breaking changes are
       # ALLOWED on this pre-1.0 appliance — what is not allowed is shipping one by accident, because
       # it breaks a generated client at runtime in someone else's deployment. `continue-on-error`
@@ -99,6 +121,9 @@ jobs:
       # decides what a sandboxed plugin may ask the host to fetch with the operator's session.
       - run: npm run test:unit
         working-directory: apps/web
+      # The generated TypeScript client must typecheck under the same strictness as the dashboard.
+      - name: typescript client compiles
+        run: npx --yes -p typescript@5 tsc --noEmit --strict --target es2022 --lib es2022,dom --moduleResolution bundler --module esnext clients/typescript/heldar.ts
       - run: npm run build
         working-directory: apps/web
 

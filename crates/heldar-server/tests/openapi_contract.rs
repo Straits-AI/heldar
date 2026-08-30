@@ -407,3 +407,111 @@ fn write_the_served_document_for_diffing() {
          as a wholesale removal"
     );
 }
+
+/// `operationId` must be unique across the document — OpenAPI requires it, and every generator uses
+/// it to name a method.
+///
+/// It was not. utoipa derives the id from the handler's function name, and `sites::create`,
+/// `evidence::create`, `sites::list`, `evidence::list`, `sites::get_one` and `evidence::get_one`
+/// collided three ways. The served spec was invalid, and nothing noticed until a generated client
+/// tried to compile: TypeScript refused with "duplicate function implementation" and Python quietly
+/// produced THIRTEEN methods for fourteen operations — the second silently overwriting the first.
+///
+/// That silent overwrite is the reason this is a test and not a lint. A generator that keeps going
+/// gives you a client missing an endpoint, and you find out when a call you never wrote is missing.
+#[test]
+fn every_operation_id_is_unique() {
+    use std::collections::BTreeMap;
+
+    let spec = heldar_kernel::openapi::document();
+    let mut seen: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for (path, item) in spec["paths"].as_object().expect("paths") {
+        for (method, op) in item.as_object().expect("path item") {
+            if !["get", "put", "post", "delete", "patch"].contains(&method.as_str()) {
+                continue;
+            }
+            let id = op["operationId"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{} {} has no operationId", method.to_uppercase(), path));
+            seen.entry(id.to_string()).or_default().push(format!(
+                "{} {}",
+                method.to_uppercase(),
+                path
+            ));
+        }
+    }
+    let dupes: Vec<_> = seen.iter().filter(|(_, v)| v.len() > 1).collect();
+    assert!(
+        dupes.is_empty(),
+        "duplicate operationId(s), which make the document invalid and silently collapse generated \
+         client methods: {dupes:?}"
+    );
+}
+
+/// The dashboard's hand-written types must agree with the generated contract (#120).
+///
+/// Replacing `apps/web/src/lib/types.ts` wholesale is not on: it covers 151 routes and the contract
+/// covers 14, so the generated file is a strict subset. What IS achievable now — and is the part
+/// that actually protects anyone — is that where they overlap they must not disagree. A dashboard
+/// field the server no longer returns, or a required field the dashboard thinks is optional, is a
+/// runtime `undefined` that no typecheck catches today.
+///
+/// This compares property NAMES rather than TypeScript types: the two are written in different
+/// idioms (`string | null` vs `?:`), and asserting on the rendering would fail on formatting rather
+/// than on substance. Names are what a runtime access actually depends on.
+#[test]
+fn the_dashboard_types_agree_with_the_contract_where_they_overlap() {
+    use std::collections::BTreeSet;
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("repo root");
+    let dash = std::fs::read_to_string(root.join("apps/web/src/lib/types.ts"))
+        .expect("the dashboard's types");
+    let spec = heldar_kernel::openapi::document();
+    let schemas = spec["components"]["schemas"].as_object().expect("schemas");
+
+    // Interfaces the dashboard defines under the same name as a contract schema.
+    let mut checked = 0usize;
+    for (name, schema) in schemas {
+        let Some(props) = schema["properties"].as_object() else {
+            continue;
+        };
+        let needle = format!("export interface {name} {{");
+        let Some(start) = dash.find(&needle) else {
+            continue; // the dashboard does not model this one; not a disagreement
+        };
+        let body = &dash[start + needle.len()..];
+        let end = body.find("\n}").unwrap_or(body.len());
+        let body = &body[..end];
+
+        let dashboard_fields: BTreeSet<String> = body
+            .lines()
+            .filter_map(|l| {
+                let l = l.trim();
+                if l.starts_with("//") || l.starts_with("*") || l.starts_with("/*") {
+                    return None;
+                }
+                let name = l.split(['?', ':']).next()?.trim();
+                (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_'))
+                    .then(|| name.to_string())
+            })
+            .collect();
+
+        let contract_fields: BTreeSet<String> = props.keys().cloned().collect();
+        let missing: Vec<_> = contract_fields.difference(&dashboard_fields).collect();
+        assert!(
+            missing.is_empty(),
+            "the contract's {name} has field(s) the dashboard does not model: {missing:?}. A field \
+             the server returns and the dashboard has never heard of is not an error today, but it \
+             means the dashboard is working from a stale picture of the API."
+        );
+        checked += 1;
+    }
+    assert!(
+        checked >= 3,
+        "only {checked} shared type(s) were compared — if the dashboard renamed its interfaces this \
+         test silently stops checking anything"
+    );
+}

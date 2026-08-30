@@ -74,6 +74,7 @@ async fn timezone_settings(st: &AppState) -> TimezoneSettings {
 
 #[utoipa::path(
     get, path = "/api/v1/system/timezone", tag = "system",
+    operation_id = "getTimezone",
     responses((status = 200, description = "The effective timezone and where it comes from", body = TimezoneSettings)),
 )]
 pub async fn get_timezone(
@@ -95,6 +96,7 @@ pub async fn get_timezone(
 /// old zone.
 #[utoipa::path(
     put, path = "/api/v1/system/timezone", tag = "system",
+    operation_id = "setTimezone",
     request_body = TimezoneUpdate,
     responses(
         (status = 200, description = "The new effective timezone", body = TimezoneSettings),

@@ -26,6 +26,10 @@ export interface CameraView {
   id: string;
   site_id?: string | null;
   name: string;
+  /** AI decode priority (higher = more important). The sampler favours high-priority cameras under
+   *  fps-budget pressure and sheds low-priority ones first. The server has always returned this;
+   *  the dashboard had never modelled it. */
+  priority: number;
   vendor: string;
   model?: string | null;
   address?: string | null;
