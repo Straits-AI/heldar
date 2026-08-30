@@ -763,17 +763,36 @@ async fn a_scoped_credential_cannot_reach_the_egress_surfaces() {
             "{}",
             "convert the database",
         ),
-        // A timezone reinterprets every schedule and every relative search on the box. Declaring
-        // this route SCOPE_NEUTRAL and stopping there was a mistake: the census SKIPS a
-        // scope-neutral path, so `require_fleet_scope` on the PUT was asserted nowhere while the
-        // declaration read as though it had been checked. The neutral declaration is still correct
-        // for the GET (it discloses no camera); this is where the WRITE is actually proven.
+        // A timezone reinterprets every schedule and every relative search on the box.
+        //
+        // NOTE WHAT THIS DOES AND DOES NOT PROVE. These entries assert a 403, and they get one —
+        // but from `require(can_admin())`, which fires before the scope guard, because the census
+        // credential is not an admin. Deleting `require_fleet_scope` from every handler below
+        // leaves this whole list green. The scope guards are proven in tests/sites_api.rs, which
+        // calls the handlers directly with an admin-BUT-camera-scoped principal; the API refuses to
+        // mint one (admin implies the unscopable caps), so it cannot be reached over HTTP at all.
         (
             "PUT",
             "/api/v1/system/timezone",
             r#"{"timezone":"America/New_York"}"#,
             "change the box-wide timezone",
         ),
+        // A site's zone is what its cameras' schedules are read in, so these move recording
+        // windows for every camera on the site — fleet-wide by nature, like the settings above.
+        // (Same caveat as the note above: the 403 here is the admin gate.)
+        (
+            "POST",
+            "/api/v1/sites",
+            r#"{"id":"evil","name":"E","timezone":"America/New_York"}"#,
+            "create a site",
+        ),
+        (
+            "PATCH",
+            "/api/v1/sites/site_census",
+            r#"{"timezone":"America/New_York"}"#,
+            "move a site's clock",
+        ),
+        ("DELETE", "/api/v1/sites/site_census", "", "delete a site"),
     ] {
         let (status, resp) = call_body(&st, &scoped, method, path, body).await;
         assert_eq!(
@@ -1481,6 +1500,19 @@ const SCOPE_NEUTRAL: &[(&str, &str)] = &[
          incident) and camera_scope_checks it before any footage is read",
     ),
     (
+        "/api/v1/sites",
+        "scope-FILTERED read: a scoped credential sees only the sites its own cameras belong to. \
+         The writes 403 here via the ADMIN gate, which fires first; the fleet-scope guard itself \
+         is proven in tests/sites_api.rs, which calls the handlers with an admin-BUT-scoped \
+         principal the API refuses to mint",
+    ),
+    (
+        "/api/v1/sites/{id}",
+        "a site the credential holds no camera on answers 404, exactly as an unknown one — see the \
+         resource fixture. The PATCH/DELETE 403 here via the ADMIN gate; their fleet-scope guard \
+         is proven in tests/sites_api.rs",
+    ),
+    (
         "/api/v1/system/timezone",
         "GET only: SystemRead, and it discloses no camera. The PUT is NOT neutral and is proven \
          to 403 for a camera-scoped credential in the fleet-scope assertion list below — a \
@@ -1639,6 +1671,7 @@ const FX_JOB: (&str, &str) = ("bkj_of_camera_b", "bkj_does_not_exist");
 const FX_JOB_DEL: (&str, &str) = ("bkj_del_of_camera_b", "bkj_del_does_not_exist");
 const FX_LINK: (&str, &str) = ("lnk_of_camera_b", "lnk_does_not_exist");
 const FX_EVIDENCE: (&str, &str) = ("ev_of_camera_b", "ev_does_not_exist");
+const FX_SITE: (&str, &str) = ("site_of_camera_b", "site_does_not_exist");
 
 /// Seed one row per resource-addressed route, all owned by camera_b.
 ///
@@ -1707,6 +1740,24 @@ async fn seed_census_fixtures(st: &AppState, root: &Path) {
     .execute(&st.pool)
     .await
     .unwrap();
+    // A site holding only camera_b, plus the one the fleet-scope assertions try to mutate. Reading
+    // a site the credential holds no camera on must answer exactly as an unknown one, or a site id
+    // becomes a way to enumerate the fleet's structure.
+    for id in [FX_SITE.0, "site_census"] {
+        sqlx::query("INSERT INTO sites (id, name, timezone, created_at) VALUES (?,?,?,?)")
+            .bind(id)
+            .bind(id)
+            .bind("Asia/Kuala_Lumpur")
+            .bind(now)
+            .execute(&st.pool)
+            .await
+            .unwrap();
+    }
+    sqlx::query("UPDATE cameras SET site_id = ? WHERE id = 'camera_b'")
+        .bind(FX_SITE.0)
+        .execute(&st.pool)
+        .await
+        .unwrap();
     sqlx::query(
         "INSERT INTO backup_jobs (id, policy_id, destination_id, kind, camera_ids, status,
                                   files_total, files_copied, bytes_copied, incident_lock_only,
@@ -1975,6 +2026,7 @@ async fn every_route_is_accounted_for() {
         FX_EVIDENCE.0,
         FX_EVIDENCE.1,
     )
+    .fixture("/api/v1/sites/{id}", FX_SITE.0, FX_SITE.1)
     .fixture("/api/v1/zones/{zone_id}", FX_ZONE.0, FX_ZONE.1)
     .fixture(
         "/api/v1/schedules/{schedule_id}",
