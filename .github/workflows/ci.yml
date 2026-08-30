@@ -100,6 +100,9 @@ jobs:
       # ($ROOT/infra/mediamtx/mediamtx), auto-detecting the runner's OS/arch.
       - name: provision MediaMTX
         run: ./scripts/setup_mediamtx.sh
+        env:
+          # Raises the GitHub API rate limit from 60/hour per shared runner IP to 1000/hour.
+          GITHUB_TOKEN: ${{ github.token }}
       # scripts/e2e_stack.sh runs the debug binary at target/debug/heldar-core.
       - name: build heldar-core (debug)
         run: cargo build --locked --bin heldar-core
@@ -145,6 +148,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: provision MediaMTX
         run: ./scripts/setup_mediamtx.sh
+        env:
+          # Raises the GitHub API rate limit from 60/hour per shared runner IP to 1000/hour.
+          GITHUB_TOKEN: ${{ github.token }}
       # Caddy terminates the TLS the suite is about. The pinned version tracks deploy/compose.tls.yml.
       - name: provision Caddy
         run: ./scripts/setup_caddy.sh
@@ -182,6 +188,9 @@ jobs:
       # Same provisioning as the e2e stack: MediaMTX binary + the debug core the scripts invoke.
       - name: provision MediaMTX
         run: ./scripts/setup_mediamtx.sh
+        env:
+          # Raises the GitHub API rate limit from 60/hour per shared runner IP to 1000/hour.
+          GITHUB_TOKEN: ${{ github.token }}
       - name: build heldar-core (debug)
         run: cargo build --locked --bin heldar-core
       # Full media validation: boots MediaMTX + a synthetic RTSP camera + the core, records, and
