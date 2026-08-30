@@ -24,6 +24,12 @@ Each link below opens the in-repo guide on GitHub:
 - [Search](https://github.com/Straits-AI/heldar/blob/main/docs/SEARCH.md)
   - deterministic query over stored event facts, with the natural-language plan as
   the single fallible step and a proof layer over every answer.
+- [Evidence bundles](https://github.com/Straits-AI/heldar/blob/main/docs/EVIDENCE.md)
+  - exporting a signed bundle that stays verifiable after it leaves the appliance
+  (clip, events, detections, audit trail, source hashes and recording gaps under one
+  Ed25519 signature), verifying one offline with `python3` and `openssl`, and what the
+  signature does *not* establish — the appliance stamps its own clock, so it attests
+  to origin and integrity, never to time.
 - [Observability](https://github.com/Straits-AI/heldar/blob/main/docs/OBSERVABILITY.md)
   - the health/metrics/events APIs, Prometheus exposition, the alert webhook,
   storage monitoring, and recording-gap reporting.

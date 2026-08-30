@@ -35,7 +35,7 @@ pub struct ClipResult {
 }
 
 /// A span within a requested clip window for which no recorded footage exists.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
 pub struct ClipGap {
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,
@@ -47,7 +47,11 @@ const GAP_TOLERANCE_MS: i64 = 1000;
 
 /// Compute covered seconds + the recording gaps within `[from, to]` from the (start-ordered)
 /// overlapping segments. A gap is a span longer than [`GAP_TOLERANCE_MS`] with no footage.
-fn coverage_and_gaps(
+///
+/// Shared with the evidence bundle (#118) so a bundle's signed coverage claim and a clip's reported
+/// coverage are the same computation — two implementations would eventually disagree, and the one
+/// inside a signed document is the one nobody can correct after the fact.
+pub(crate) fn coverage_and_gaps(
     segments: &[Segment],
     from: DateTime<Utc>,
     to: DateTime<Utc>,

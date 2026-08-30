@@ -12,6 +12,8 @@ pub mod discovery;
 #[cfg(feature = "smtp")]
 pub mod email;
 pub mod embeddings;
+pub mod evidence;
+pub mod evidence_key;
 pub mod fanout;
 pub mod fleet_register;
 pub mod frame_ticket;

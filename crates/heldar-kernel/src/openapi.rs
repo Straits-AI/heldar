@@ -57,9 +57,17 @@ pub struct ErrorBody {
         crate::routes::cameras::list_cameras,
         crate::routes::cameras::get_camera,
         crate::routes::cameras::delete_camera,
+        crate::routes::evidence::create,
+        crate::routes::evidence::list,
+        crate::routes::evidence::get_one,
+        crate::routes::evidence::signing_key,
     ),
     components(schemas(ErrorBody, crate::models::CameraView)),
-    tags((name = "cameras", description = "Camera registry. Every route here is camera-scoped."))
+    tags(
+        (name = "cameras", description = "Camera registry. Every route here is camera-scoped."),
+        (name = "evidence", description = "Signed, offline-verifiable evidence bundles (#118). \
+         Every route is camera-scoped, and gated on `video:export` except the public signing key."),
+    )
 )]
 pub struct ApiDoc;
 

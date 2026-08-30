@@ -94,6 +94,12 @@ in a photo and get similarity-ranked detection crops with jump-to-playback. Rank
 embeddings computed by the AI worker (optional `requirements-embed.txt` extra) — fully local, no
 cloud: [`docs/SEARCH.md`](docs/SEARCH.md).
 
+**Signed evidence bundles** make an export defensible after it leaves the box. A bundle carries the
+clip, the events and detections in the window, the audit trail, the source segment hashes and the
+recording gaps — under one Ed25519 signature, verifiable offline with `python3` and `openssl` alone:
+[`docs/EVIDENCE.md`](docs/EVIDENCE.md). It states what it cannot prove, too: the appliance stamps its
+own clock, so the signature attests to origin and integrity, never to time.
+
 Onboard a camera (you supply the address and credentials; the RTSP URL is built from the vendor
 template):
 

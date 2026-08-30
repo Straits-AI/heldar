@@ -520,6 +520,7 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
         .nest_service("/media/snapshots", ServeDir::new(&cfg.snapshots_dir))
         .nest_service("/media/playback", ServeDir::new(&cfg.playback_dir))
         .nest_service("/media/archives", ServeDir::new(&cfg.archive_dir))
+        .nest_service("/media/evidence", ServeDir::new(&cfg.evidence_dir))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             services::media_scope::guard,
@@ -867,6 +868,7 @@ mod tests {
             "/media/snapshots/s.jpg",
             "/media/playback/pbs_1/index.m3u8",
             "/media/archives/backup.zip",
+            "/media/evidence/ev_x.heldar-evidence",
         ] {
             assert!(
                 requirement(path).is_some(),
