@@ -123,11 +123,11 @@ jobs:
       # produced it. A sha256 sidecar only detects corruption when you already trust where the
       # checksum came from; this authenticates the publisher.
       - name: Attest build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ steps.build.outputs.asset }}
       - name: Attest heldarctl
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: ${{ steps.build.outputs.cli-asset }}
 
@@ -172,7 +172,7 @@ jobs:
         run: ./scripts/gen_release_manifest.sh "${{ github.ref_name }}" > heldar-release-manifest.json
       - name: Attest the manifest
         if: matrix.arch == 'x86_64'
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: heldar-release-manifest.json
       # The contract this release publishes, so the next release's diff has a baseline and an
@@ -210,7 +210,7 @@ jobs:
           sha256sum "heldar-skills-$TAG.tar.gz" > "heldar-skills-$TAG.tar.gz.sha256"
       - name: Attest the skill bundle
         if: matrix.arch == 'x86_64'
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: heldar-skills-${{ github.ref_name }}.tar.gz
       - name: Upload the skill bundle

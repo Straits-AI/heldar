@@ -102,7 +102,7 @@ jobs:
       # whatever it points at today, which is exactly the substitution this is meant to detect.
       - name: Attest build provenance
         if: steps.build.outputs.digest != ''
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-name: ghcr.io/straits-ai/${{ matrix.name }}
           subject-digest: ${{ steps.build.outputs.digest }}
