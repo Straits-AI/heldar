@@ -105,3 +105,41 @@ export function friendlyError(e: unknown): string {
   }
   return e instanceof Error ? e.message : String(e);
 }
+
+/**
+ * How to label a bare "HH:MM" schedule window with the clock it is actually read in (#125).
+ *
+ * A recording window is a wall-clock rule evaluated in the camera's site timezone, or — when no zone
+ * is configured anywhere — the server's own clock. Rendering "18:00" unlabelled is how an operator
+ * in Kuala Lumpur comes to believe they scheduled 6pm local on a box running UTC, and the recorder
+ * is then eight hours out every day with nothing on screen to say so.
+ *
+ * Returns `null` only while the setting is still loading, so the caller renders the panel unchanged
+ * rather than flashing a wrong label.
+ */
+export function scheduleClockLabel(
+  tz: { configured: string | null; server_local_offset: string } | null | undefined,
+  /** The camera's own site zone, when it has one — it OVERRIDES the box-wide setting. */
+  siteZone?: string | null,
+): string | null {
+  if (!tz) return null;
+  // Resolution order must match `services/tz.rs`: the camera's site, then the box-wide setting,
+  // then the server's own clock. The first version of this took only the box-wide value, so a
+  // camera on a site with a different zone was labelled with a clock its recorder does not use —
+  // an 8-hour lie stated with authority, which is WORSE than the unlabelled window it replaced.
+  // An unlabelled "18:00" sends someone to go and check; "18:00 — UTC" invites them to "fix" a
+  // schedule that was already correct.
+  if (siteZone) return siteZone;
+  // Not "UTC": say WHOSE clock it is. "the server's clock" is the honest description, and it is
+  // the thing an operator can go and check.
+  return tz.configured ?? `server clock (${tz.server_local_offset})`;
+}
+
+/** The zone a camera's schedule is actually read in, or `null` when its site names none. */
+export function cameraSiteZone(
+  siteId: string | null | undefined,
+  sites: { id: string; timezone: string | null }[] | undefined,
+): string | null {
+  if (!siteId || !sites) return null;
+  return sites.find((s) => s.id === siteId)?.timezone ?? null;
+}

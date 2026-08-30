@@ -89,6 +89,9 @@ import type {
   RetentionLimits,
   RetentionUpdate,
   TranscodeSettings,
+  TimezoneSettings,
+  TimezoneUpdate,
+  Site,
   TranscodeUpdate,
   DbStatus,
   DbLimitUpdate,
@@ -370,6 +373,23 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(body),
     }),
+  getTimezone: () => request<TimezoneSettings>("/api/v1/system/timezone"),
+  setTimezone: (body: TimezoneUpdate) =>
+    request<TimezoneSettings>("/api/v1/system/timezone", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  listSites: () => request<{ sites: Site[] }>("/api/v1/sites"),
+  createSite: (body: { id: string; name: string; timezone?: string | null }) =>
+    request<Site>("/api/v1/sites", { method: "POST", body: JSON.stringify(body) }),
+  updateSite: (id: string, body: { name?: string; timezone?: string | null }) =>
+    request<{ site: Site; cameras_affected: number; timezone_changed: boolean; note: string }>(
+      `/api/v1/sites/${encodeURIComponent(id)}`,
+      { method: "PATCH", body: JSON.stringify(body) },
+    ),
+  deleteSite: (id: string) =>
+    request<{ deleted: string }>(`/api/v1/sites/${encodeURIComponent(id)}`, { method: "DELETE" }),
+
   getTranscode: () => request<TranscodeSettings>("/api/v1/system/transcode"),
   setTranscode: (body: TranscodeUpdate) =>
     request<TranscodeSettings>("/api/v1/system/transcode", {

@@ -130,7 +130,9 @@ curl http://localhost:8000/api/v1/system/timezone            # the site clock sc
 > attached cannot be deleted, because that would drop them to the box default and reinterpret their
 > windows silently.
 
-> **Which clock is yours.** Timestamps are stored in UTC. *Interpretation* — a schedule's "18:00",
+> **Which clock is yours.** The dashboard's System page shows the effective timezone, where it came
+> from, and any sites overriding it; the recording-schedule panel labels its windows with the clock
+> they are read in. Timestamps are stored in UTC. *Interpretation* — a schedule's "18:00",
 > a search's "after 6pm", "yesterday" — follows the site's timezone once one is set
 > (`GET`/`PUT /api/v1/system/timezone`, admin-only). With none set, schedules follow the server's
 > local zone and search follows UTC, exactly as before, so nothing moves until you choose. Set one
