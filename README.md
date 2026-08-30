@@ -123,7 +123,8 @@ curl http://localhost:8000/api/v1/system/timezone            # the site clock sc
 > The metadata DB is also bounded (`HELDAR_MAX_DB_GB`, default 4), and a pre-existing DB self-converts to
 > `auto_vacuum=INCREMENTAL` in the background on first upgrade (`HELDAR_DB_AUTOVACUUM_CONVERT=true`).
 
-> **Sites.** `GET`/`POST /api/v1/sites`, `PATCH`/`DELETE /api/v1/sites/{id}` (writes admin-only).
+> **Sites.** `GET`/`POST /api/v1/sites`, `GET`/`PATCH`/`DELETE /api/v1/sites/{id}` (writes admin +
+> fleet-scope only; moving a camera between sites is too, via `PATCH /api/v1/cameras/{id}`).
 > A site carries the timezone its cameras' schedules and searches are read in. Changing it moves
 > those recording windows, so the response says how many cameras it moved; a site with cameras
 > attached cannot be deleted, because that would drop them to the box default and reinterpret their

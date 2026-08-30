@@ -334,6 +334,26 @@ impl Census {
         G: Fn(String, String, String) -> Gut,
         Gut: Future<Output = (u16, String)>,
     {
+        // A DECLARATION MUST NOT SILENTLY DISABLE EVIDENCE.
+        //
+        // `scope_neutral` is checked before `fixtures` below, so declaring a route neutral makes the
+        // census SKIP it — fixture and all. That has now happened three times in this repository,
+        // each time with the declaration's own text pointing at the very fixture it had disabled,
+        // and each time it read as though the route had been checked. The author cannot see it: both
+        // halves look present, and the suite is green.
+        //
+        // Neither is wrong on its own, so this refuses the COMBINATION rather than either piece.
+        for (path, _) in &self.fixtures {
+            if let Some((_, why)) = self.scope_neutral.iter().find(|(p, _)| p == path) {
+                panic!(
+                    "{path} has BOTH a fixture and a scope_neutral declaration. The declaration \
+                     wins and the fixture never runs, so this route is not being checked at all. \
+                     Delete one. If the route is genuinely scope-filtered, the fixture is the \
+                     evidence and the declaration is the thing to remove.\n  declared: {why}"
+                );
+            }
+        }
+
         let routes = self.discover();
         let mut report = Report {
             total: routes.len(),

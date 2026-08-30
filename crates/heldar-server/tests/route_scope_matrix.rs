@@ -1502,15 +1502,11 @@ const SCOPE_NEUTRAL: &[(&str, &str)] = &[
     (
         "/api/v1/sites",
         "scope-FILTERED read: a scoped credential sees only the sites its own cameras belong to. \
-         The writes 403 here via the ADMIN gate, which fires first; the fleet-scope guard itself \
-         is proven in tests/sites_api.rs, which calls the handlers with an admin-BUT-scoped \
-         principal the API refuses to mint",
-    ),
-    (
-        "/api/v1/sites/{id}",
-        "a site the credential holds no camera on answers 404, exactly as an unknown one — see the \
-         resource fixture. The PATCH/DELETE 403 here via the ADMIN gate; their fleet-scope guard \
-         is proven in tests/sites_api.rs",
+         A filtered list is something the census cannot check, so the confinement is proven in \
+         `a_scoped_credential_sees_only_its_own_sites` below. The WRITES 403 here via the ADMIN \
+         gate, which fires first; their fleet-scope guard is proven in tests/sites_api.rs. \
+         `/api/v1/sites/{id}` is deliberately NOT declared — it has a fixture, and a declaration \
+         would disable it",
     ),
     (
         "/api/v1/system/timezone",

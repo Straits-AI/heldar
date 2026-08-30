@@ -200,15 +200,27 @@ SQLite. Timestamps are RFC3339 UTC `TEXT`, booleans are `INTEGER` 0/1, JSON is
 `TEXT`. Six tables:
 
 ```
- tenants ─1:N─ sites ─1:N─ cameras ─1:N─ segments        (timeline index)
-                              │  1:1 ─── camera_status    (live state, upserted)
-                              │  1:N ─── events           (lifecycle log; camera_id nullable)
+ sites ─1:N─ cameras ─1:N─ segments        (timeline index)
+                │  1:1 ─── camera_status    (live state, upserted)
+                │  1:N ─── events           (lifecycle log; camera_id nullable)
 ```
 
-### `tenants`, `sites` — multi-tenant scaffolding
-Present for forward-compatibility but unused by Stage 0 logic. `sites` carries a
-`timezone` (default `'UTC'`). `cameras.site_id` → `sites(id) ON DELETE SET NULL`;
-`sites.tenant_id` → `tenants(id) ON DELETE CASCADE`.
+### `sites` — the clock a camera's schedule is read in
+Managed through `/api/v1/sites` (writes admin + fleet-scope only). A site carries an IANA
+`timezone`, and that is what its cameras' recording windows and relative searches are interpreted
+in (#125) — so changing it MOVES the hours those cameras record, and the API reports how many
+cameras it moved.
+
+`timezone` is **nullable**, and null means *nobody has chosen one* rather than *UTC*. It was
+`NOT NULL DEFAULT 'UTC'` until migration 0019, which made a site that never named a zone
+indistinguishable from one that deliberately chose UTC — and the resolver treats those differently,
+because only one of them should override the box-wide default.
+
+`cameras.site_id` → `sites(id) ON DELETE SET NULL`, which is why deleting a site with cameras on it
+is refused: the cascade would silently drop them to the box default and reinterpret their windows.
+
+(There is no `tenants` table. It was dropped in `0001_init.sql`; this document described it for
+some time afterwards.)
 
 ### `cameras` — device registry (Layer 0)
 | Column | Notes |

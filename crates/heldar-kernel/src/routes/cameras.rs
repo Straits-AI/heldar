@@ -157,6 +157,13 @@ async fn create_camera(
     if body.name.trim().is_empty() {
         return Err(AppError::BadRequest("`name` is required".into()));
     }
+    // Placing a camera on a site decides which clock its recording schedule is read in (#125), and
+    // an unknown site_id 400s on the foreign key while a real one succeeds — so allowing it here
+    // would hand a camera-scoped credential the same site-enumeration oracle the update path had.
+    // Enroll the camera, then move it with a fleet-wide credential.
+    if body.site_id.is_some() {
+        require_fleet_scope(&principal, "place a camera on a site")?;
+    }
     // A camera-scoped credential may only mint a camera it ALREADY holds. Without this a
     // `scope_kind: cameras` key carrying RegistryManage could enroll cameras outside its allowlist —
     // spawning a recorder, a live publisher and a capability probe for a camera it does not hold, and
@@ -324,7 +331,7 @@ async fn create_camera(
     Ok((StatusCode::CREATED, Json(cam.into())))
 }
 
-async fn update_camera(
+pub async fn update_camera(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -341,7 +348,24 @@ async fn update_camera(
     }
 
     let name = body.name.unwrap_or(cur.name);
-    let site_id = body.site_id.or(cur.site_id);
+    // Absent leaves it; explicit null detaches. See `CameraUpdate::site_id` — a camera's site
+    // carries the clock its schedule is read in, so this is not a label edit.
+    let previous_site = cur.site_id.clone();
+    let site_id = match body.site_id {
+        None => cur.site_id,
+        Some(v) => v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()),
+    };
+
+    // MOVING A CAMERA BETWEEN SITES MOVES THE HOURS IT RECORDS, so it is fleet-only and reported.
+    //
+    // `PATCH /api/v1/sites/{id}` guards and announces exactly this effect behind admin + fleet
+    // scope. Reaching the same effect through the camera required only `RegistryManage` and a
+    // camera scope, said nothing in the response, and audited `{}` — and, because an unknown
+    // site_id 400s on the foreign key while a real one succeeds, it also let a scoped credential
+    // enumerate every site id on the box. Refusing uniformly closes both.
+    if site_id != previous_site {
+        crate::routes::cameras::require_fleet_scope(&principal, "move a camera between sites")?;
+    }
     let vendor = body.vendor.unwrap_or(cur.vendor);
     let model = body.model.or(cur.model);
     let address = body.address.or(cur.address);
@@ -464,15 +488,37 @@ async fn update_camera(
     // Re-discover device capabilities in the background — an address/credential/vendor change can
     // change what the camera exposes. Cheap (a few LAN calls) and best-effort.
     crate::services::camera_control::spawn_probe(&st, &id);
+    // The audit row carried `{}`, so a site change — which moves the camera's recording windows —
+    // left no record of what it had been.
+    let site_moved = site_id != previous_site;
+    let (new_tz, _) = if site_moved {
+        crate::services::tz::site_tz(&st.pool, Some(&id)).await
+    } else {
+        (None, crate::services::tz::TzSource::Unset)
+    };
     auth::audit(
         &st.pool,
         &principal,
         "update_camera",
         "camera",
         &id,
-        json!({}),
+        json!({
+            "site_changed": site_moved,
+            "previous_site_id": previous_site,
+            "site_id": site_id,
+            "timezone_now": new_tz.map(|t| t.to_string()),
+        }),
     )
     .await;
+    if site_moved {
+        tracing::warn!(
+            target: "heldar::security",
+            camera = %id,
+            from = ?previous_site,
+            to = ?site_id,
+            "cameras: site changed — this camera's recording schedule now follows a different clock"
+        );
+    }
     Ok(Json(st.camera_for(&principal, &id).await?.into()))
 }
 

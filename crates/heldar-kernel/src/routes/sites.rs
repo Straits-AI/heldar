@@ -52,7 +52,11 @@ pub struct SiteRow {
     /// precisely so that "nobody has chosen" is distinguishable from "chose UTC". A site with no
     /// zone falls through to the box-wide default.
     pub timezone: Option<String>,
-    pub created_at: String,
+    /// Typed, not a raw column string: sqlx hands back `+00:00` while every other model in the API
+    /// re-serializes as `Z`, and one box speaking two timestamp dialects is a trap a generated
+    /// client will not catch — OpenAPI types both as plain `string`.
+    #[schema(value_type = String)]
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Deserialize, utoipa::ToSchema)]
@@ -66,18 +70,8 @@ pub struct SiteCreate {
 pub struct SiteUpdate {
     pub name: Option<String>,
     /// An IANA identifier, or explicit `null` to clear it back to the box default.
-    #[serde(default, deserialize_with = "double_option")]
+    #[serde(default, deserialize_with = "crate::util::double_option")]
     pub timezone: Option<Option<String>>,
-}
-
-/// Distinguish "field absent" from "field present and null" — `timezone: null` means *clear it*,
-/// while omitting the field means *leave it alone*. Without this they are the same value and a
-/// caller renaming a site would silently wipe its zone.
-fn double_option<'de, D>(d: D) -> Result<Option<Option<String>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    serde::Deserialize::deserialize(d).map(Some)
 }
 
 fn validate_tz(raw: &Option<String>) -> AppResult<()> {
@@ -214,8 +208,16 @@ pub async fn create(
             .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
     {
         return Err(AppError::BadRequest(
-            "`id` must be a non-empty slug of [A-Za-z0-9_-]".into(),
+            "`id` must be 1-64 characters of [A-Za-z0-9_-]".into(),
         ));
+    }
+    if id.len() > 64 {
+        return Err(AppError::BadRequest(
+            "`id` must be 1-64 characters of [A-Za-z0-9_-]".into(),
+        ));
+    }
+    if body.name.trim().is_empty() {
+        return Err(AppError::BadRequest("`name` is required".into()));
     }
     validate_tz(&body.timezone)?;
     let tz = body
@@ -297,7 +299,14 @@ pub async fn update(
             .filter(|s| !s.is_empty())
             .map(str::to_string),
     };
-    let name = body.name.clone().unwrap_or_else(|| cur.name.clone());
+    // Trimmed, and a blank rename keeps the old name rather than storing whitespace. `create`
+    // trimmed and `update` did not, which is how a site ends up named "   ".
+    let name = body
+        .name
+        .clone()
+        .map(|n| n.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .unwrap_or_else(|| cur.name.clone());
 
     sqlx::query("UPDATE sites SET name = ?, timezone = ? WHERE id = ?")
         .bind(&name)
@@ -380,21 +389,31 @@ pub async fn delete_site(
         return Err(AppError::NotFound(format!("site {id} not found")));
     }
 
-    // `cameras.site_id` is ON DELETE SET NULL, so this would drop every camera on the site back to
-    // the box default and reinterpret its recording windows — with no event and nothing to notice.
-    // Refusing makes the operator move the cameras deliberately, one at a time, where it is visible.
-    let n = camera_count(&st, &id).await;
-    if n > 0 {
+    // `cameras.site_id` is ON DELETE SET NULL, so deleting a populated site would drop every camera
+    // on it back to the box default and reinterpret its recording windows — with no event and
+    // nothing to notice. Refusing makes the operator move the cameras deliberately.
+    //
+    // THE CHECK AND THE DELETE ARE ONE STATEMENT. Counting first and then deleting is a TOCTOU on
+    // separate pool connections (the pool is 16 by default, never 1): a camera assigned in between
+    // is silently detached, which is precisely the outcome the guard exists to prevent. Measured at
+    // 23 of 40 attempts before this was one statement.
+    let deleted = sqlx::query(
+        "DELETE FROM sites
+          WHERE id = ? AND NOT EXISTS (SELECT 1 FROM cameras WHERE site_id = ?)",
+    )
+    .bind(&id)
+    .bind(&id)
+    .execute(&st.pool)
+    .await?
+    .rows_affected();
+    if deleted == 0 {
+        let n = camera_count(&st, &id).await;
         return Err(AppError::Conflict(format!(
             "{n} camera(s) still belong to site {id}. Deleting it would drop them to the box-wide \
-             timezone and silently reinterpret their recording schedules — reassign them first."
+             timezone and silently reinterpret their recording schedules — reassign them first \
+             with `PATCH /api/v1/cameras/{{id}}`."
         )));
     }
-
-    sqlx::query("DELETE FROM sites WHERE id = ?")
-        .bind(&id)
-        .execute(&st.pool)
-        .await?;
     auth::audit(&st.pool, &principal, "delete_site", "site", &id, json!({})).await;
     Ok(Json(json!({ "deleted": id })))
 }

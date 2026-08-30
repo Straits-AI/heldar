@@ -134,17 +134,23 @@ async fn omitting_the_timezone_leaves_it_and_sending_null_clears_it() {
 
     let (s, v) = call(&st, "PATCH", "/api/v1/sites/kl", r#"{"name":"KL HQ"}"#).await;
     assert_eq!(s, StatusCode::OK, "{v}");
-    assert_eq!(
-        v["site"]["timezone"], "Asia/Kuala_Lumpur",
-        "a rename must not silently wipe the zone: {v}"
-    );
     assert_eq!(v["timezone_changed"], false);
+    // READ IT BACK FROM THE DATABASE. The PATCH response is constructed from the handler's own
+    // inputs, so asserting on it proves only that the handler can echo. Breaking the UPDATE's bind
+    // left this whole suite green while the API reported a zone change that never landed.
+    let (_, stored) = call(&st, "GET", "/api/v1/sites/kl", "").await;
+    assert_eq!(
+        stored["timezone"], "Asia/Kuala_Lumpur",
+        "a rename must not silently wipe the zone: {stored}"
+    );
 
     let (s, v) = call(&st, "PATCH", "/api/v1/sites/kl", r#"{"timezone":null}"#).await;
     assert_eq!(s, StatusCode::OK, "{v}");
+    assert_eq!(v["timezone_changed"], true);
+    let (_, stored) = call(&st, "GET", "/api/v1/sites/kl", "").await;
     assert!(
-        v["site"]["timezone"].is_null(),
-        "explicit null clears it: {v}"
+        stored["timezone"].is_null(),
+        "explicit null clears it: {stored}"
     );
     assert_eq!(v["timezone_changed"], true);
 }
@@ -186,6 +192,16 @@ async fn changing_the_zone_reports_how_many_cameras_it_moved() {
             .contains("wall-clock"),
         "the response must say what a zone change actually does: {v}"
     );
+
+    // And the cameras' clocks actually moved. A report is only worth having if it describes reality.
+    let (_, stored) = call(&st, "GET", "/api/v1/sites/kl", "").await;
+    assert_eq!(stored["timezone"], "America/New_York", "{stored}");
+    let (tz, src) = heldar_kernel::services::tz::site_tz(&st.pool, Some("cam_a")).await;
+    assert_eq!(
+        tz.map(|t| t.to_string()).as_deref(),
+        Some("America/New_York")
+    );
+    assert_eq!(src, heldar_kernel::services::tz::TzSource::Site);
 }
 
 /// `cameras.site_id` is ON DELETE SET NULL, so deleting a populated site would drop its cameras to
@@ -385,4 +401,233 @@ async fn the_box_timezone_write_refuses_a_camera_scoped_credential_on_scope_alon
     )
     .await;
     assert!(fleet.is_ok(), "and a fleet-wide admin must be able to");
+}
+
+// -------------------------------------------------------------------------------------------------
+// Moving a camera between sites moves the hours it records. Reaching that effect through the CAMERA
+// required only `RegistryManage` and a camera scope, said nothing, and audited `{}` — while the
+// identical effect through `PATCH /api/v1/sites/{id}` was admin + fleet and announced itself.
+// -------------------------------------------------------------------------------------------------
+
+#[tokio::test]
+async fn moving_a_camera_between_sites_is_fleet_only_and_leaves_a_record() {
+    let st = state().await;
+    call(
+        &st,
+        "POST",
+        "/api/v1/sites",
+        r#"{"id":"kl","name":"KL","timezone":"Asia/Kuala_Lumpur"}"#,
+    )
+    .await;
+    add_camera(&st, "cam_a", None).await;
+
+    // A camera-scoped credential cannot move it — which also closes the site-enumeration oracle,
+    // since a real site id and an invented one now get the same refusal.
+    let scoped = admin_but_scoped();
+    let moved = heldar_kernel::routes::cameras::update_camera(
+        State(st.clone()),
+        Path("cam_a".to_string()),
+        scoped.clone(),
+        Json(serde_json::from_str(r#"{"site_id":"kl"}"#).unwrap()),
+    )
+    .await;
+    assert!(
+        moved.is_err(),
+        "a scoped credential must not move a camera's clock"
+    );
+    let ghost = heldar_kernel::routes::cameras::update_camera(
+        State(st.clone()),
+        Path("cam_a".to_string()),
+        scoped,
+        Json(serde_json::from_str(r#"{"site_id":"no_such_site"}"#).unwrap()),
+    )
+    .await;
+    assert!(
+        ghost.is_err(),
+        "and an invented site id must be refused the SAME way, or the difference enumerates sites"
+    );
+
+    // A fleet-wide admin can, and it is recorded.
+    let fleet = Principal::system_admin();
+    assert!(heldar_kernel::routes::cameras::update_camera(
+        State(st.clone()),
+        Path("cam_a".to_string()),
+        fleet.clone(),
+        Json(serde_json::from_str(r#"{"site_id":"kl"}"#).unwrap()),
+    )
+    .await
+    .is_ok());
+
+    let (tz, _) = heldar_kernel::services::tz::site_tz(&st.pool, Some("cam_a")).await;
+    assert_eq!(
+        tz.map(|t| t.to_string()).as_deref(),
+        Some("Asia/Kuala_Lumpur")
+    );
+
+    let detail: (String,) = sqlx::query_as(
+        "SELECT detail FROM audit_log WHERE action = 'update_camera' ORDER BY created_at DESC LIMIT 1",
+    )
+    .fetch_one(&st.pool)
+    .await
+    .unwrap();
+    let d: serde_json::Value = serde_json::from_str(&detail.0).unwrap();
+    assert_eq!(d["site_changed"], true, "the audit row must record it: {d}");
+    assert_eq!(d["timezone_now"], "Asia/Kuala_Lumpur", "{d}");
+    assert!(d["previous_site_id"].is_null(), "{d}");
+}
+
+/// `DELETE /api/v1/sites/{id}` tells the operator to reassign the cameras first. That has to be
+/// possible: `site_id` absent means "leave it", and only an explicit `null` detaches.
+#[tokio::test]
+async fn a_camera_can_actually_be_detached_from_its_site() {
+    let st = state().await;
+    call(
+        &st,
+        "POST",
+        "/api/v1/sites",
+        r#"{"id":"kl","name":"KL","timezone":"Asia/Kuala_Lumpur"}"#,
+    )
+    .await;
+    add_camera(&st, "cam_a", Some("kl")).await;
+    let fleet = Principal::system_admin();
+
+    // Absent leaves it where it is.
+    let _ = heldar_kernel::routes::cameras::update_camera(
+        State(st.clone()),
+        Path("cam_a".to_string()),
+        fleet.clone(),
+        Json(serde_json::from_str(r#"{"name":"Renamed"}"#).unwrap()),
+    )
+    .await
+    .expect("rename");
+    let (tz, _) = heldar_kernel::services::tz::site_tz(&st.pool, Some("cam_a")).await;
+    assert!(tz.is_some(), "a rename must not detach the camera");
+
+    // Explicit null detaches, and the site then deletes.
+    let _ = heldar_kernel::routes::cameras::update_camera(
+        State(st.clone()),
+        Path("cam_a".to_string()),
+        fleet,
+        Json(serde_json::from_str(r#"{"site_id":null}"#).unwrap()),
+    )
+    .await
+    .expect("detach");
+    let (tz, src) = heldar_kernel::services::tz::site_tz(&st.pool, Some("cam_a")).await;
+    assert_eq!(tz, None, "explicit null must detach");
+    assert_eq!(src, heldar_kernel::services::tz::TzSource::Unset);
+
+    let (s, v) = call(&st, "DELETE", "/api/v1/sites/kl", "").await;
+    assert_eq!(
+        s,
+        StatusCode::OK,
+        "the 409's advice must be followable: {v}"
+    );
+}
+
+/// A filtered list is something the route census cannot check — it can only tell a refusal from an
+/// answer, and this route legitimately answers. So the confinement needs its own test, and without
+/// one the read half of this API was asserted by nothing at all.
+#[tokio::test]
+async fn a_scoped_credential_sees_only_its_own_sites() {
+    let st = state().await;
+    for (id, tz) in [("kl", "Asia/Kuala_Lumpur"), ("ldn", "Europe/London")] {
+        call(
+            &st,
+            "POST",
+            "/api/v1/sites",
+            &format!(r#"{{"id":"{id}","name":"{id}","timezone":"{tz}"}}"#),
+        )
+        .await;
+    }
+    add_camera(&st, "cam_a", Some("kl")).await;
+    add_camera(&st, "cam_secret", Some("ldn")).await;
+
+    let scoped = admin_but_scoped(); // holds cam_a only
+    let listed = sites::list(State(st.clone()), scoped.clone())
+        .await
+        .unwrap();
+    let ids: Vec<&str> = listed.0["sites"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|s| s["id"].as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec!["kl"],
+        "a scoped credential must see only the sites its own cameras are on"
+    );
+
+    // ...and a site it holds no camera on answers exactly as a site that does not exist, so an id
+    // cannot be used to discover the fleet's structure.
+    let hidden = sites::get_one(State(st.clone()), scoped.clone(), Path("ldn".to_string())).await;
+    let missing = sites::get_one(State(st.clone()), scoped, Path("nope".to_string())).await;
+    let shape = |r: &Result<_, heldar_kernel::error::AppError>| match r {
+        Err(e) => format!("{e:?}")
+            .split('(')
+            .next()
+            .unwrap_or("?")
+            .to_string(),
+        Ok(_) => "Ok".to_string(),
+    };
+    assert_eq!(
+        shape(&hidden),
+        shape(&missing),
+        "an out-of-scope site and an unknown one must be indistinguishable"
+    );
+    assert!(hidden.is_err());
+
+    // The control: a fleet-wide credential sees both, so the filtering above is the scope and not
+    // something else hiding everything.
+    let all = sites::list(State(st), Principal::system_admin())
+        .await
+        .unwrap();
+    assert_eq!(all.0["sites"].as_array().map(Vec::len), Some(2));
+}
+
+#[tokio::test]
+async fn ids_and_names_are_validated_rather_than_stored_as_given() {
+    let st = state().await;
+    for (body, why) in [
+        (r#"{"id":"","name":"X"}"#, "empty id"),
+        (r#"{"id":"has space","name":"X"}"#, "space in id"),
+        (r#"{"id":"a/b","name":"X"}"#, "slash in id"),
+        (r#"{"id":"kl","name":"   "}"#, "whitespace-only name"),
+    ] {
+        let (s, v) = call(&st, "POST", "/api/v1/sites", body).await;
+        assert_eq!(s, StatusCode::BAD_REQUEST, "{why} must be refused: {v}");
+    }
+    let long = "a".repeat(65);
+    let (s, _) = call(
+        &st,
+        "POST",
+        "/api/v1/sites",
+        &format!(r#"{{"id":"{long}","name":"X"}}"#),
+    )
+    .await;
+    assert_eq!(s, StatusCode::BAD_REQUEST, "a 65-char id is not a slug");
+
+    // A whitespace-only rename keeps the old name rather than storing "   ".
+    call(&st, "POST", "/api/v1/sites", r#"{"id":"kl","name":"KL"}"#).await;
+    call(&st, "PATCH", "/api/v1/sites/kl", r#"{"name":"   "}"#).await;
+    let (_, v) = call(&st, "GET", "/api/v1/sites/kl", "").await;
+    assert_eq!(
+        v["name"], "KL",
+        "a blank rename must not blank the name: {v}"
+    );
+}
+
+/// Every timestamp the API emits should look the same. sqlx hands back `+00:00` from a raw column
+/// while typed models re-serialize as `Z`, and one box speaking two dialects is a trap a generated
+/// client will not catch — OpenAPI types both as plain `string`.
+#[tokio::test]
+async fn timestamps_match_the_rest_of_the_api() {
+    let st = state().await;
+    call(&st, "POST", "/api/v1/sites", r#"{"id":"kl","name":"KL"}"#).await;
+    let (_, v) = call(&st, "GET", "/api/v1/sites/kl", "").await;
+    let ts = v["created_at"].as_str().unwrap_or_default();
+    assert!(
+        ts.ends_with('Z'),
+        "site timestamps must be Z-form like every other model, got {ts:?}"
+    );
 }
