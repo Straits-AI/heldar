@@ -2209,3 +2209,60 @@ async fn revoking_through_the_api_withdraws_the_stream_immediately() {
          the operator pressed the button now"
     );
 }
+
+// ---- Correlation id, against the REAL layer stack ----
+//
+// The first version of this test built a one-route toy router with only the id middleware attached.
+// It would have stayed green if someone moved `.layer(request_id::layer)` inside the auth floor —
+// the exact regression its own comment claimed to prevent. Ordering is the whole property, so the
+// test has to use the composed stack.
+
+/// The id must survive the responses raised BEFORE a handler: those are what a caller quotes.
+#[tokio::test]
+async fn every_response_carries_a_request_id_through_the_real_stack() {
+    let st = test_state_with(|cfg| cfg.auth_enabled = true).await;
+    seed_camera(&st, "camera_a").await;
+
+    // Same order as `heldar_server::run`: routes, then the auth floor, then the id outermost.
+    let base = composed_router(&st)
+        .layer(axum::middleware::from_fn_with_state(
+            st.clone(),
+            heldar_kernel::auth::require_api_auth,
+        ))
+        .layer(axum::middleware::from_fn(heldar_kernel::request_id::layer));
+
+    // Both are refused BEFORE any handler runs — the auth floor covers the whole `/api/v1` prefix,
+    // so even an unrouted path under it answers 401 rather than 404. Which of the two it is does not
+    // matter here; that it still carries the id does.
+    for path in ["/api/v1/cameras", "/api/v1/no-such-route"] {
+        let b = Request::builder().method("GET").uri(path);
+        let mut app = base.clone();
+        let resp = app.call(b.body(Body::empty()).unwrap()).await.unwrap();
+        assert!(
+            !resp.status().is_success(),
+            "{path} should have been refused without a credential"
+        );
+        assert!(
+            resp.headers().get("x-request-id").is_some(),
+            "{path} was refused with no correlation id — the id is layered inside something it \
+             should wrap"
+        );
+    }
+
+    // ...and a caller-supplied id survives the whole stack rather than being replaced.
+    let mut app = base.clone();
+    let resp = app
+        .call(
+            Request::builder()
+                .uri("/api/v1/cameras")
+                .header("x-request-id", "trace-from-caller")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        resp.headers().get("x-request-id").unwrap(),
+        "trace-from-caller"
+    );
+}

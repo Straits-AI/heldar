@@ -632,7 +632,15 @@ caller supplies `X-Request-ID` or `X-Heldar-Correlation-ID`. It is put on the tr
 `grep req_abc123` in the log returns the whole story of one request, and it is echoed on errors and
 on responses raised before any handler — a 401 or 404 is exactly what a caller needs to quote. A
 caller-supplied value is descriptive only, never an authorization input, and is sanitised and
-bounded to 64 characters because it reaches log lines.
+bounded to 64 characters because it reaches log lines. It survives the WebRTC relay in both
+directions, which is the case it exists for — the relay forwards it on the way in and back out
+rather than minting a fresh one for the loopback hop.
+
+The log filter reads `HELDAR_LOG`, falling back to the conventional `RUST_LOG`. Only the former used
+to be read, so an operator setting `RUST_LOG=warn` — what every Rust binary honours — got no effect
+and kept the `info` default; the live box did exactly that and grew a 300 MB `core.log`. The
+correlation span is floored at `info` regardless of the global directive, so tightening the filter
+does not silently strip `request_id` from the warn/error lines an operator is grepping.
 
 `error` is prose and may be reworded; **`code` is API** — `not_found`, `bad_request`, `conflict`,
 `unauthorized`, `forbidden`, `unavailable`, `busy`, `internal` — and is what an integration should
