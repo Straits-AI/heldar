@@ -16,6 +16,7 @@ members = [
     "crates/heldar-testkit",
     "crates/heldar-wasm",
     "crates/heldarctl",
+    "crates/heldar-mcp",
 ]
 # The example Wasm guest targets wasm32-unknown-unknown and is built separately.
 exclude = [
