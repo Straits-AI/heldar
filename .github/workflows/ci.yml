@@ -48,6 +48,16 @@ jobs:
           ./target/debug/heldarctl version --json | grep -q '"contract"'
           # An unknown command is a usage error, not a crash.
           set +e; ./target/debug/heldarctl nonsense >/dev/null 2>&1; test $? -eq 1
+      - name: skill bundle lints (#124)
+        run: |
+          set -euo pipefail
+          # Every skill's permitted tools are checked against heldar-mcp's ACTUAL tool table, so a
+          # skill cannot name a tool that does not exist — an invented tool becomes an invented
+          # RESULT the moment a model decides to be helpful.
+          # The API-path check needs the served document, so write it first — otherwise that
+          # half of the lint silently skips and the step reports success having checked less.
+          cargo test -p heldar-server --test openapi_contract write_the_served_document --locked
+          python3 scripts/validate_skills.py
       - name: read-seam lint (cross-app reads go through *_read views)
         run: ./scripts/check-read-seam.sh
       # A generated client that COMPILES is a stronger statement about the contract than any prose:

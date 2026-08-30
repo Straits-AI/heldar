@@ -196,6 +196,31 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: gh release upload "$TAG" heldar-release-manifest.json --clobber
 
+      # The skill bundle ships as a release asset (#124), pinned to the contract this tag serves.
+      # A skill is only meaningful against an API it was written for, and its frontmatter says which.
+      - name: Package the skill bundle
+        if: matrix.arch == 'x86_64'
+        env:
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/validate_skills.py
+          tar -czf "heldar-skills-$TAG.tar.gz" skills
+          sha256sum "heldar-skills-$TAG.tar.gz" > "heldar-skills-$TAG.tar.gz.sha256"
+      - name: Attest the skill bundle
+        if: matrix.arch == 'x86_64'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: heldar-skills-${{ github.ref_name }}.tar.gz
+      - name: Upload the skill bundle
+        if: matrix.arch == 'x86_64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: gh release upload "$TAG" "heldar-skills-$TAG.tar.gz" "heldar-skills-$TAG.tar.gz.sha256" --clobber
+
       - name: Upload to the Release
         env:
           GH_TOKEN: ${{ github.token }}
