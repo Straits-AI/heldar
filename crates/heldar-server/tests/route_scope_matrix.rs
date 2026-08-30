@@ -2370,3 +2370,136 @@ async fn every_response_carries_a_request_id_through_the_real_stack() {
         "trace-from-caller"
     );
 }
+
+/// Every capability the published contract DECLARES must be one the kernel actually enforces (#120).
+///
+/// `x-heldar-capability` tells an integrator which credential to present. If it names a capability
+/// the handler does not check, the contract is worse than silence: it sends someone to mint a
+/// credential that will not work, or — worse — implies a route is gated when it is not.
+///
+/// So each declaration is driven against the REAL router with a credential holding EVERY capability
+/// except the declared one. A refusal proves the gate exists and that this specific capability is
+/// what opens it. The control is the same request with the full set, which must NOT be refused for
+/// the same reason — otherwise a route that refuses everything would look perfectly declared.
+#[tokio::test]
+async fn every_declared_capability_is_one_the_kernel_enforces() {
+    use heldar_kernel::auth::Cap;
+    use heldar_kernel::openapi_security::REQUIREMENTS;
+
+    let st = test_state().await;
+    seed_camera(&st, "camera_a").await;
+
+    // A body good enough to reach the capability check on every write route in the table. The gate
+    // runs before deserialization matters, so a 422 would still prove nothing — these bodies are
+    // valid so a refusal can only be the gate.
+    let body_for = |path: &str, method: &str| -> &'static str {
+        match (path, method) {
+            ("/api/v1/evidence/exports", "post") => {
+                r#"{"camera_id":"camera_a","from":"2026-01-01T00:00:00Z","to":"2026-01-01T00:01:00Z"}"#
+            }
+            ("/api/v1/system/timezone", "put") => r#"{"timezone":"UTC"}"#,
+            ("/api/v1/sites", "post") => r#"{"id":"decl","name":"Decl"}"#,
+            ("/api/v1/sites/{id}", "patch") => r#"{"name":"x"}"#,
+            _ => "{}",
+        }
+    };
+
+    let mut checked = 0usize;
+    for req in REQUIREMENTS {
+        let Some(cap) = req.capability else {
+            // Admin-gated routes are covered by the fleet-scope assertion list above; a capability
+            // claim is what this test is about.
+            continue;
+        };
+        let path = req.path.replace("{id}", "camera_a");
+        let body = body_for(req.path, req.method);
+        let method = req.method.to_uppercase();
+
+        // Everything EXCEPT the declared capability. Admin is excluded from the "lacking" set
+        // because it implies all of them, which would make every probe vacuous.
+        let without: Vec<&str> = Cap::ALL
+            .iter()
+            .filter(|c| **c != cap && **c != Cap::Admin)
+            .map(|c| c.slug())
+            .collect();
+        let lacking = mint_key(&st, &without, None).await;
+        let (status, resp) = call_body(&st, &lacking, &method, &path, body).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "the contract declares {} {} needs `{}`, but a credential holding every OTHER \
+             capability was not refused ({status}): {resp}",
+            req.method,
+            req.path,
+            cap.slug()
+        );
+
+        // The control. Without it, a route that refuses everything would look correctly declared.
+        //
+        // The control set must INCLUDE the declared capability, which for an Admin-gated route
+        // means including Admin — otherwise the control cannot pass and the test reports a
+        // contradiction that is its own construction rather than a defect in the contract.
+        let holding: Vec<&str> = Cap::ALL
+            .iter()
+            .filter(|c| **c != Cap::Admin || cap == Cap::Admin)
+            .map(|c| c.slug())
+            .collect();
+        let full = mint_key(&st, &holding, None).await;
+        let (status, resp) = call_body(&st, &full, &method, &path, body).await;
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "a credential holding every capability was still refused on {} {} — so the refusal \
+             above proves nothing about `{}`: {resp}",
+            req.method,
+            req.path,
+            cap.slug()
+        );
+        checked += 1;
+    }
+
+    assert!(
+        checked >= 8,
+        "only {checked} capability declarations were exercised — if the table shrank, the contract \
+         is describing less than it did, and this test would pass by checking almost nothing"
+    );
+}
+
+/// Every documented path must appear in the requirements table, and vice versa.
+///
+/// The two are separate lists, which is precisely the shape that drifts — so neither is allowed to
+/// grow without the other. A documented route with no declared requirement publishes a surface an
+/// integrator cannot authenticate against; a declared requirement for an undocumented route
+/// describes something the contract does not contain.
+#[test]
+fn the_contract_and_the_requirements_table_cover_the_same_routes() {
+    use heldar_kernel::openapi_security::REQUIREMENTS;
+    use std::collections::BTreeSet;
+
+    let spec = heldar_kernel::openapi::document();
+    let mut documented: BTreeSet<(String, String)> = BTreeSet::new();
+    for (path, item) in spec["paths"].as_object().expect("paths") {
+        for method in item.as_object().expect("path item").keys() {
+            if ["get", "put", "post", "delete", "patch", "head", "options"]
+                .contains(&method.as_str())
+            {
+                documented.insert((path.clone(), method.clone()));
+            }
+        }
+    }
+    let declared: BTreeSet<(String, String)> = REQUIREMENTS
+        .iter()
+        .map(|r| (r.path.to_string(), r.method.to_string()))
+        .collect();
+
+    let undeclared: Vec<_> = documented.difference(&declared).collect();
+    assert!(
+        undeclared.is_empty(),
+        "documented but with no declared requirement: {undeclared:?}"
+    );
+    let unpublished: Vec<_> = declared.difference(&documented).collect();
+    assert!(
+        unpublished.is_empty(),
+        "a requirement is declared for a route the contract does not document: {unpublished:?}"
+    );
+}

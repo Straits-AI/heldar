@@ -107,6 +107,19 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/api/v1/openapi.json", get(spec))
 }
 
-async fn spec() -> Json<utoipa::openapi::OpenApi> {
-    Json(ApiDoc::openapi())
+async fn spec() -> Json<serde_json::Value> {
+    Json(document())
+}
+
+/// The served document: generated from the handlers, then decorated with what each route REQUIRES.
+///
+/// The decoration is a post-pass over one table (`openapi_security::REQUIREMENTS`) rather than
+/// attributes scattered across handlers, so a test can iterate it and drive the real router to check
+/// every claim. A statement sitting beside the code agrees with it right up until someone changes
+/// one and not the other — which is exactly how this module's own error-code list drifted.
+pub fn document() -> serde_json::Value {
+    let mut spec =
+        serde_json::to_value(ApiDoc::openapi()).unwrap_or_else(|_| serde_json::json!({}));
+    crate::openapi_security::decorate(&mut spec);
+    spec
 }

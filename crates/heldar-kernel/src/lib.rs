@@ -22,6 +22,7 @@ pub mod models;
 pub mod modules;
 pub mod net_guard;
 pub mod openapi;
+pub mod openapi_security;
 pub mod registry;
 pub mod repo;
 pub mod request_id;
