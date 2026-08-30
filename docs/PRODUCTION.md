@@ -88,6 +88,38 @@ remote service after boot — a network blip during a reconnect would stop recor
 writes the secret to a path is already supported by source (2), and that is the integration shape
 for Vault, cloud secret stores or a customer KMS.
 
+**Rotating the master key.** Stop the server, then:
+
+```bash
+HELDAR_SECRET_KEY_OLD_FILE=/run/secrets/old.key \
+HELDAR_SECRET_KEY_FILE=/run/secrets/new.key \
+  heldar-core rekey-secrets
+```
+
+Both keys go through the same source chain, so rotating does **not** force the old key back into the
+environment — which would undo the point of moving it out.
+
+**It is one transaction, and that is the guarantee.** Either every sealed secret is under the new key
+or the database is untouched. A crash, a full disk or an undecryptable row rolls the whole thing
+back. A *mixed* database is not a partial success: decrypting with the wrong key is a hard error by
+design (the kernel never feeds ciphertext to ffmpeg), so every camera on the wrong side of a split
+stops recording while the operator believes only the rotation failed.
+
+Re-running after success is a no-op, so if you are unsure what state a box is in, run it again.
+
+**If the key is lost, the sealed values are gone.** There is no recovery path and there is not
+supposed to be one — that is what encryption at rest means. What you can do:
+
+```bash
+# Confirm what is actually sealed (no key needed — the marker is a prefix):
+sqlite3 /var/lib/heldar/heldar.db \
+  "SELECT id FROM cameras WHERE password LIKE 'enc:v1:%';"
+```
+
+Those cameras need their passwords re-entered from your own records or the devices themselves;
+everything else on the box is intact. Back the key up separately from the database — a backup
+containing both is a backup of neither.
+
 **Container hardening:** add `deploy/compose.hardened.yml` as a third overlay —
 `-f compose.yml -f compose.prod.yml -f compose.hardened.yml`. `compose.prod.yml` hardens the
 *application* posture (auth, cookies, sessions); this hardens the *container*: read-only root
