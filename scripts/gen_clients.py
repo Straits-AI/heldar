@@ -242,6 +242,50 @@ def emit_typescript(doc, ops, schemas, out):
         )
     lines.append("}")
     write(os.path.join(out, "typescript"), "heldar.ts", "\n".join(lines))
+    emit_dashboard_types(doc, schemas)
+
+
+def emit_dashboard_types(doc, schemas, path="apps/web/src/lib/contract.ts"):
+    """The contract's TYPES, for the dashboard to alias instead of re-declaring.
+
+    The dashboard hand-wrote every request/response shape, and the overlap test caught five real
+    drifts across three changes — a field the server returns that the dashboard had never heard of.
+    Detecting drift is worth having; making it IMPOSSIBLE is better, and costs a generated file.
+
+    Types only, no client: the dashboard has its own `api.ts` with auth, error mapping and polling
+    that the generated client does not replicate, and replacing that would be churn for no gain.
+    What matters is that a shape is declared once."""
+    lines = [
+        "// GENERATED FROM the served OpenAPI document BY scripts/gen_clients.py — DO NOT EDIT.",
+        "//",
+        "// The dashboard aliases these in `types.ts` rather than re-declaring them, so a field the",
+        "// server adds cannot go unnoticed here. Regenerate with:",
+        "//",
+        "//   cargo test -p heldar-server --test openapi_contract write_the_served_document",
+        "//   python3 scripts/gen_clients.py target/openapi.json clients",
+        "//",
+        f"// Contract version: {doc['info']['version']}",
+        "",
+    ]
+    for name, schema in sorted(schemas.items()):
+        if schema.get("type") == "string" and "enum" in schema:
+            variants = " | ".join(json.dumps(v) for v in schema["enum"])
+            lines.append(f"export type {name} = {variants};\n")
+            continue
+        req = set(schema.get("required") or [])
+        lines.append(f"export interface {name} {{")
+        for prop, ps in (schema.get("properties") or {}).items():
+            t = type_of(ps, "ts", schemas)
+            desc = (ps.get("description") or "").strip().splitlines()
+            if desc:
+                lines.append("  /** " + " ".join(d.strip() for d in desc) + " */")
+            lines.append(f"  {prop}{'' if prop in req else '?'}: {t};")
+        lines.append("}\n")
+    d = os.path.dirname(path)
+    if os.path.isdir(d):
+        with open(path, "w") as fh:
+            fh.write("\n".join(lines))
+        print(f"  wrote {path}")
 
 
 def emit_python(doc, ops, schemas, out):

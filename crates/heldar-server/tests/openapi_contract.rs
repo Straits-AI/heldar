@@ -215,7 +215,7 @@ fn no_response_schema_exposes_a_write_only_secret() {
     //
     // A schema is a response schema if a 2xx response references it, directly or through another
     // response schema. Nothing else needs saying, and nothing goes stale.
-    let mut response_roots: std::collections::BTreeSet<String> = Default::default();
+    let mut response_roots: BTreeSet<String> = Default::default();
     for (_, item) in spec["paths"].as_object().expect("paths") {
         for (_, op) in item.as_object().expect("path item") {
             let Some(responses) = op["responses"].as_object() else {
@@ -236,7 +236,7 @@ fn no_response_schema_exposes_a_write_only_secret() {
         let Some(schema) = schemas.get(&name) else {
             continue;
         };
-        let mut refs = Default::default();
+        let mut refs: BTreeSet<String> = Default::default();
         collect_refs(schema, &mut refs);
         for r in refs {
             if reachable.insert(r.clone()) {
@@ -336,76 +336,62 @@ fn every_operation_id_is_unique() {
     );
 }
 
-/// The dashboard's hand-written types must agree with the generated contract (#120).
+/// The dashboard must ALIAS the contract's types, never re-declare them (#120).
 ///
-/// Replacing `apps/web/src/lib/types.ts` wholesale is not on: it covers 151 routes and the contract
-/// covers 14, so the generated file is a strict subset. What IS achievable now — and is the part
-/// that actually protects anyone — is that where they overlap they must not disagree. A dashboard
-/// field the server no longer returns, or a required field the dashboard thinks is optional, is a
-/// runtime `undefined` that no typecheck catches today.
+/// This replaces an earlier test that compared the two field by field. That test found five real
+/// drifts — a field the server returns that the dashboard had never heard of — which is exactly why
+/// it should not be the mechanism: it detected drift AFTER it shipped. `apps/web/src/lib/types.ts`
+/// now aliases the generated `contract.ts`, so the shapes are the same type and cannot diverge at
+/// all; this holds that arrangement in place.
 ///
-/// This compares property NAMES rather than TypeScript types: the two are written in different
-/// idioms (`string | null` vs `?:`), and asserting on the rendering would fail on formatting rather
-/// than on substance. Names are what a runtime access actually depends on.
+/// A few aliases legitimately REFINE the contract (`Omit<Contract.X, "f"> & { f: Narrower }`) where
+/// the published schema is less precise than the server's behaviour — a Rust `String` that only
+/// holds four values. Those still derive from the contract, so they are allowed; re-declaring the
+/// whole shape is not.
 #[test]
-fn the_dashboard_types_agree_with_the_contract_where_they_overlap() {
-    use std::collections::BTreeSet;
+fn the_dashboard_aliases_contract_types_rather_than_redeclaring_them() {
+    let root = repo_root();
+    let contract = std::fs::read_to_string(root.join("apps/web/src/lib/contract.ts"))
+        .expect("apps/web/src/lib/contract.ts");
+    let types = std::fs::read_to_string(root.join("apps/web/src/lib/types.ts"))
+        .expect("apps/web/src/lib/types.ts");
 
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .and_then(|p| p.parent())
-        .expect("repo root");
-    let dash = std::fs::read_to_string(root.join("apps/web/src/lib/types.ts"))
-        .expect("the dashboard's types");
-    let spec = heldar_server::api_document();
-    let schemas = spec["components"]["schemas"].as_object().expect("schemas");
-
-    // Interfaces the dashboard defines under the same name as a contract schema.
-    let mut checked = 0usize;
-    for (name, schema) in schemas {
-        let Some(props) = schema["properties"].as_object() else {
-            continue;
-        };
-        let needle = format!("export interface {name} {{");
-        let Some(start) = dash.find(&needle) else {
-            continue; // the dashboard does not model this one; not a disagreement
-        };
-        let body = &dash[start + needle.len()..];
-        let end = body.find("\n}").unwrap_or(body.len());
-        let body = &body[..end];
-
-        let dashboard_fields: BTreeSet<String> = body
-            .lines()
-            .filter_map(|l| {
-                let l = l.trim();
-                if l.starts_with("//") || l.starts_with("*") || l.starts_with("/*") {
-                    return None;
-                }
-                let name = l.split(['?', ':']).next()?.trim();
-                (!name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || c == '_'))
-                    .then(|| name.to_string())
-            })
-            .collect();
-
-        let contract_fields: BTreeSet<String> = props.keys().cloned().collect();
-        let missing: Vec<_> = contract_fields.difference(&dashboard_fields).collect();
-        assert!(
-            missing.is_empty(),
-            "the contract's {name} has field(s) the dashboard does not model: {missing:?}. A field \
-             the server returns and the dashboard has never heard of is not an error today, but it \
-             means the dashboard is working from a stale picture of the API."
-        );
-        checked += 1;
-    }
+    let contract_names: BTreeSet<String> = contract
+        .lines()
+        .filter_map(|l| {
+            l.strip_prefix("export interface ")
+                .or_else(|| l.strip_prefix("export type "))
+                .and_then(|r| r.split_whitespace().next())
+                .map(str::to_string)
+        })
+        .collect();
     assert!(
-        checked >= 3,
-        "only {checked} shared type(s) were compared — if the dashboard renamed its interfaces this \
-         test silently stops checking anything"
+        contract_names.len() > 50,
+        "only {} types found in contract.ts — the parser is looking at the wrong shape and this \
+         test is asserting nothing",
+        contract_names.len()
+    );
+
+    let redeclared: Vec<&String> = contract_names
+        .iter()
+        .filter(|n| types.contains(&format!("export interface {n} {{")))
+        .collect();
+    assert!(
+        redeclared.is_empty(),
+        "the dashboard re-declares {redeclared:?}, which the contract already defines. A second \
+         declaration is a second source of truth, and it drifts silently — alias it instead:\n  \
+         export type X = Contract.X;\n  export type X = Omit<Contract.X, \"f\"> & {{ f: Narrower }};"
+    );
+
+    let aliased = types.matches("= Contract.").count();
+    assert!(
+        aliased >= 40,
+        "only {aliased} alias(es) to the contract found in types.ts — if the dashboard stopped \
+         aliasing, this test would pass while proving nothing"
     );
 }
-
 /// Every `#/components/schemas/X` referenced anywhere inside a JSON value.
-fn collect_refs(v: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
+fn collect_refs(v: &serde_json::Value, out: &mut BTreeSet<String>) {
     match v {
         serde_json::Value::Object(o) => {
             if let Some(r) = o.get("$ref").and_then(|r| r.as_str()) {
@@ -430,8 +416,7 @@ fn collect_refs(v: &serde_json::Value, out: &mut std::collections::BTreeSet<Stri
 ///
 /// An example that calls a method the generator no longer emits is worse than no example: it is the
 /// first thing an integrator copies, and it fails at their keyboard rather than in our CI. This
-/// regenerates the client from the served document and checks every `client.x(...)` the example
-/// names actually exists on it.
+/// checks every `client.x(...)` the example names still exists on the regenerated client.
 ///
 /// It does NOT run the example against a box — that needs a camera and footage. It checks the
 /// vocabulary, which is the part that goes stale when a route is renamed.
@@ -439,12 +424,11 @@ fn collect_refs(v: &serde_json::Value, out: &mut std::collections::BTreeSet<Stri
 fn the_shipped_example_calls_methods_the_generated_client_still_has() {
     let root = repo_root();
     let example = root.join("examples/api-client/recording_health.py");
-    if !example.is_file() {
-        panic!(
-            "the example named by docs/README is missing: {}",
-            example.display()
-        );
-    }
+    assert!(
+        example.is_file(),
+        "the example named by the README is missing: {}",
+        example.display()
+    );
 
     let out = std::process::Command::new("python3")
         .arg("-c")
@@ -455,8 +439,7 @@ fn the_shipped_example_calls_methods_the_generated_client_still_has() {
              src = open(sys.argv[1]).read()\n\
              have = {m for m in dir(h.HeldarClient) if not m.startswith('_')}\n\
              called = set(re.findall(r'client\\.(\\w+)\\(', src)) - {'HeldarClient'}\n\
-             missing = sorted(called - have)\n\
-             print('MISSING:' + ','.join(missing))\n\
+             print('MISSING:' + ','.join(sorted(called - have)))\n\
              print('CHECKED:' + str(len(called)))",
         )
         .arg(&example)
@@ -489,5 +472,57 @@ fn the_shipped_example_calls_methods_the_generated_client_still_has() {
         checked >= 2,
         "only {checked} client call(s) were found in the example — if it stopped using the \
          generated client, this test is asserting nothing"
+    );
+}
+
+/// The dashboard's generated contract types must be current (#120).
+///
+/// `apps/web/src/lib/contract.ts` is generated from the served document, and `types.ts` aliases it
+/// rather than re-declaring shapes. That makes drift impossible instead of merely detectable — but
+/// only while the generated file is in step. A stale one is a hand-written file wearing a
+/// "GENERATED" header, which is worse than no claim at all.
+#[test]
+fn the_dashboards_generated_contract_types_are_current() {
+    let root = repo_root();
+    let target = root.join("apps/web/src/lib/contract.ts");
+    let before = std::fs::read_to_string(&target).unwrap_or_default();
+    assert!(
+        !before.is_empty(),
+        "apps/web/src/lib/contract.ts is missing — types.ts aliases it, so the dashboard will not \
+         typecheck without it"
+    );
+
+    let doc = root.join("target/openapi.json");
+    std::fs::write(
+        &doc,
+        serde_json::to_vec_pretty(&heldar_server::api_document()).expect("spec"),
+    )
+    .expect("writing the served document");
+    let scratch = root.join("target/contract-freshness");
+    let _ = std::fs::remove_dir_all(&scratch);
+    std::fs::create_dir_all(scratch.join("apps/web/src/lib")).expect("scratch");
+
+    let out = std::process::Command::new("python3")
+        .arg(root.join("scripts/gen_clients.py"))
+        .arg(&doc)
+        .arg(scratch.join("clients"))
+        .current_dir(&scratch)
+        .output()
+        .expect("running the generator");
+    assert!(
+        out.status.success(),
+        "the client generator failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let regenerated = std::fs::read_to_string(scratch.join("apps/web/src/lib/contract.ts"))
+        .expect("the generator did not write the dashboard types — its output path moved");
+    assert_eq!(
+        before.trim(),
+        regenerated.trim(),
+        "apps/web/src/lib/contract.ts is out of date. It is GENERATED and the dashboard aliases it, \
+         so a stale copy is a hand-written file wearing a generated header. Regenerate:\n  \
+         cargo test -p heldar-server --test openapi_contract write_the_served_document\n  \
+         python3 scripts/gen_clients.py target/openapi.json clients"
     );
 }
