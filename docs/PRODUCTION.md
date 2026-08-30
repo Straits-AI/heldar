@@ -149,6 +149,31 @@ kind of unearned assurance this endpoint exists to replace.
 `HELDAR_SECRET_KEY` does not seal rows that already exist — re-save each camera, or the finding will
 keep counting them.
 
+**Camera credentials in ffmpeg's argv.** They are there, and Heldar does not claim otherwise —
+RTSP authenticates from the URL, so the recorder hands ffmpeg `rtsp://user:pass@host/...` as one
+argument, which lands in `/proc/<pid>/cmdline`. Encrypting credentials at rest does not touch this:
+the point of storing them is to hand them to ffmpeg.
+
+What a deployment can do is make that file unreadable, and then be *held to it*:
+
+```bash
+# The host or runtime sets this — Heldar can only observe it.
+mount -o remount,hidepid=2 /proc
+
+# Then the box refuses to start if the claim is not true:
+HELDAR_REQUIRE_CREDENTIAL_ISOLATION=true
+```
+
+Off by default: a sealed single-operator appliance does not need it, and a box that refuses to record
+is worse than one with a documented exposure. Turning it on is the operator saying *hold me to this*
+— and an **unverifiable** posture is refused too, because "we could not check" is not evidence the
+claim holds.
+
+`GET /api/v1/system/posture` reports the same finding without refusing, so you can see where a box
+stands before committing to the flag. The full evaluation — including the loopback-restream option
+and why it is deferred — is in
+[ADR 0006](adr/0006-rtsp-credential-exposure.md).
+
 **Container hardening:** add `deploy/compose.hardened.yml` as a third overlay —
 `-f compose.yml -f compose.prod.yml -f compose.hardened.yml`. `compose.prod.yml` hardens the
 *application* posture (auth, cookies, sessions); this hardens the *container*: read-only root

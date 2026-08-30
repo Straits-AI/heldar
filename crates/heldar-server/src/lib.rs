@@ -128,6 +128,15 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
     // built, and run the internet-exposed production guardrails (warn, or refuse under STRICT_PROD).
     services::secrets::init_key(cfg.secret_key_b64.as_deref()).context("HELDAR_SECRET_KEY")?;
     cfg.enforce_production_guardrails()?;
+    // A DECLARED high-assurance posture is verified, not taken on trust (#126, ADR 0006). Camera
+    // credentials reach ffmpeg in its argv and cannot be removed from there without changing the
+    // media path; what the box can do is refuse when a deployment says no untrusted local user can
+    // read them and the mount options say otherwise.
+    if let Some(why) =
+        services::posture::credential_isolation_failure(cfg.require_credential_isolation)
+    {
+        anyhow::bail!("{why}");
+    }
     // Surface the effective local timezone at boot. Recording schedules are evaluated in server-local
     // time (chrono::Local); in a container/appliance with no tzdata or TZ unset, Local silently
     // resolves to UTC, so an operator who set "09:00 local" would record in UTC. Logging the offset
