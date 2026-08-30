@@ -19,6 +19,30 @@ fn overlay() -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("reading {}: {e}", p.display()))
 }
 
+
+/// The overlay text for ONE service, so a check binds to the service it names.
+///
+/// Global `count()` assertions were the first version and they were bypassable three ways: moving
+/// `read_only` off `core` and onto `ai` kept the count at 2, and weakening `cap_drop: ["ALL"]` to
+/// `["NET_RAW"]` kept its count at 4 while removing the protection entirely.
+fn service(y: &str, name: &str) -> String {
+    let start = y
+        .find(&format!("\n  {name}:\n"))
+        .unwrap_or_else(|| panic!("service `{name}` is missing from the overlay"));
+    let rest = &y[start + 1..];
+    // Up to the next top-level `  <name>:` key, or the end.
+    let end = rest
+        .match_indices("\n  ")
+        .filter(|(i, _)| {
+            let line = rest[*i + 1..].lines().next().unwrap_or("");
+            line.starts_with("  ") && line.trim_end().ends_with(':') && !line.starts_with("    ")
+        })
+        .map(|(i, _)| i + 1)
+        .find(|i| *i > 1)
+        .unwrap_or(rest.len());
+    rest[..end].to_string()
+}
+
 /// Every service gets the three settings that cost nothing and contain the most.
 #[test]
 fn every_service_drops_privileges() {
@@ -30,11 +54,13 @@ fn every_service_drops_privileges() {
         4,
         "every service (mediamtx, core, web, ai) needs no-new-privileges"
     );
-    assert_eq!(
-        y.matches("cap_drop:").count(),
-        4,
-        "every service should start from ALL dropped"
-    );
+    // The VALUE, per service. `cap_drop: ["NET_RAW"]` also matches a bare `cap_drop:` count.
+    for svc in ["mediamtx", "core", "web", "ai"] {
+        assert!(
+            service(&y, svc).contains(r#"cap_drop: ["ALL"]"#),
+            "{svc} must drop ALL capabilities, not a subset"
+        );
+    }
     // Unbounded container logs fill the same disk the recordings need.
     assert!(y.contains("max-size:"), "container logs must be bounded");
 }
@@ -45,12 +71,20 @@ fn every_service_drops_privileges() {
 #[test]
 fn the_two_exceptions_to_read_only_are_explained() {
     let y = overlay();
-    assert_eq!(
-        y.matches("read_only: true").count(),
-        2,
-        "core and web carry read_only; mediamtx and ai are the two documented exceptions, so a \
-         change here means one was added or silently dropped"
-    );
+    // Bound to the SERVICE. A global count of 2 stays 2 if read_only moves from core to ai, which
+    // would quietly hand core a writable rootfs.
+    for svc in ["core", "web"] {
+        assert!(
+            service(&y, svc).contains("read_only: true"),
+            "{svc} must have a read-only root filesystem"
+        );
+    }
+    for svc in ["mediamtx", "ai"] {
+        assert!(
+            !service(&y, svc).contains("read_only: true"),
+            "{svc} is a documented exception — if it can now be read-only, update the note too"
+        );
+    }
     // MediaMTX writes a self-signed keypair at startup; the AI worker downloads model weights.
     assert!(
         y.contains("auto.crt"),
@@ -60,6 +94,24 @@ fn the_two_exceptions_to_read_only_are_explained() {
         y.contains("model weights") || y.contains("crash loop"),
         "the ai exception must say why read_only is absent"
     );
+}
+
+/// The ceilings the docs advertise must exist. Compose v2 does enforce `deploy.resources.limits`
+/// outside Swarm (that "Swarm-only" belief is a stale doc bug, since corrected upstream), so these
+/// are real — and previously nothing referenced them at all: deleting every limits block failed no
+/// assertion while `docs/PRODUCTION.md` still promised CPU/memory/PID ceilings.
+#[test]
+fn every_service_has_resource_ceilings() {
+    let y = overlay();
+    for svc in ["mediamtx", "core", "web", "ai"] {
+        let block = service(&y, svc);
+        for key in ["cpus:", "memory:", "pids:"] {
+            assert!(
+                block.contains(key),
+                "{svc} has no `{key}` ceiling — a runaway there takes the host with it"
+            );
+        }
+    }
 }
 
 /// nginx needs three capabilities back and no more. NET_BIND_SERVICE in particular would be a smell:

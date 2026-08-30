@@ -10,8 +10,9 @@
 # The stack runs `network_mode: host` for camera discovery, multicast and WebRTC. That removes the
 # network namespace as a boundary, which makes these process-level boundaries matter MORE, not less.
 #
-# Every setting here was booted and checked, not copied from a hardening checklist: `read_only` is
-# absent where a service genuinely needs to write, and says why.
+# The mediamtx, core and web settings were booted and checked, not copied from a hardening checklist:
+# `read_only` is absent where a service genuinely needs to write, and each exception quotes the error
+# that proved it. The `ai` service is the exception to that too — see its note.
 name: heldar
 
 services:
@@ -87,10 +88,19 @@ services:
     logging: *bounded_logs
     # NO `read_only` here, deliberately. The worker downloads model weights at first use (torch/YOLO
     # /OCR caches under the home dir), and a read-only rootfs turns that into a crash loop on the
-    # first run of an optional profile most operators enable later. Give it a writable cache volume
-    # and it can be locked down too — until then this is honest rather than aspirational.
+    # first run of an optional profile most operators enable later.
+    #
+    # NOT verified by a full model download, unlike the other three services — the cache volume is
+    # placed from how the image resolves HOME, and the first real run of an optional profile is what
+    # would confirm it. Said plainly because "booted and checked" was claimed for all four and was
+    # only true for three.
     volumes:
-      - heldar-ai-cache:/home/heldar/.cache
+      # /home/worker, not /home/heldar: this image creates `worker` (apps/ai/Dockerfile:26); `heldar`
+      # is the CORE image's user. Mounted at the wrong path the volume is inert — caches land on the
+      # ephemeral rootfs and are re-downloaded every restart, and nothing errors, because this service
+      # is not read-only. A silent failure is exactly what booting the other services caught and what
+      # reasoning about this one missed.
+      - heldar-ai-cache:/home/worker/.cache
     deploy:
       resources:
         limits: { cpus: "4.0", memory: 8g, pids: 512 }
