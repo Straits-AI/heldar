@@ -44,6 +44,13 @@ const MAX_STORED_BODY: usize = 64 * 1024;
 /// command, short enough that the table does not become a second copy of the API's history.
 const RETENTION_HOURS: i64 = 24;
 
+/// How long a CLAIM may sit without an answer before it is treated as dead rather than in flight.
+///
+/// Generously longer than any request this box serves (the backup trigger answers 202 and detaches),
+/// and far shorter than [`RETENTION_HOURS`], because the failure it cleans up — a handler that
+/// panicked between claiming and answering — otherwise blocks that key for a full day.
+const STUCK_CLAIM_MINUTES: i64 = 5;
+
 fn hash_body(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
@@ -71,12 +78,40 @@ pub async fn layer(State(st): State<AppState>, req: Request, next: Next) -> Resp
 
     let method = req.method().to_string();
     let path = req.uri().path().to_string();
+
+    // Decide BEFORE touching the body. `to_bytes` consumes the stream as it reads, so discovering
+    // "too big" that way leaves nothing to forward — the first cut buffered first and returned 413,
+    // which turned a keyed 8 MiB AI ingest (its own route allows 24 MiB) into a bogus rejection that
+    // the same request without the header would not get.
+    //
+    // No Content-Length (chunked) is treated as too big: unknown length cannot be bounded without
+    // reading it. Such requests run UNPROTECTED, which is the honest outcome — replay needs a stored
+    // body, and there is no safe way to have one here.
+    let declared = req
+        .headers()
+        .get(axum::http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<usize>().ok());
+    if declared.map(|n| n > MAX_STORED_BODY).unwrap_or(true) {
+        return next.run(req).await;
+    }
+
     let (parts, body) = req.into_parts();
     let bytes = match to_bytes(body, MAX_STORED_BODY).await {
         Ok(b) => b,
-        // Oversized: not cacheable, so run it unprotected rather than store a truncated reply. The
-        // body is already consumed, so it has to be rebuilt from what we read.
-        Err(_) => return (StatusCode::PAYLOAD_TOO_LARGE, "request body too large").into_response(),
+        // Content-Length said it fit and it did not. The body is gone either way, so answer honestly
+        // rather than forward a truncated request to a handler.
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                axum::Json(serde_json::json!({
+                    "error": "request body did not match its Content-Length",
+                    "code": "bad_request",
+                    "retryable": false,
+                })),
+            )
+                .into_response()
+        }
     };
     let hash = hash_body(&bytes);
 
@@ -150,7 +185,36 @@ pub async fn layer(State(st): State<AppState>, req: Request, next: Next) -> Resp
         .run(Request::from_parts(parts, Body::from(bytes)))
         .await;
     let (rparts, rbody) = resp.into_parts();
-    let rbytes = to_bytes(rbody, MAX_STORED_BODY).await.unwrap_or_default();
+
+    // Same rule for the response, and this one was worse: the first cut ran
+    // `to_bytes(..).unwrap_or_default()` and then sent THAT back, so a response over the cap reached
+    // the caller EMPTY — on the original request, not merely on a replay. A keyed
+    // `POST /cameras/config/bulk` on a large fleet returns one result per camera and would have
+    // silently answered `200` with nothing in it while the mutation really happened.
+    //
+    // So: only buffer what we already know is small enough to store. Anything else is forwarded
+    // untouched and simply not cached, and the key is released so a retry is not told "in progress"
+    // forever.
+    // `size_hint`, not Content-Length: axum handlers do not set that header — hyper adds it when the
+    // response is written to the wire, long after this layer. An in-memory body (which every JSON
+    // handler produces) reports an exact hint, and a streaming one reports none, which is exactly the
+    // distinction that matters here.
+    let storable = rparts.status.is_success()
+        && http_body::Body::size_hint(&rbody)
+            .exact()
+            .map(|n| n as usize <= MAX_STORED_BODY)
+            .unwrap_or(false);
+    if !storable {
+        release_key(&st, &principal.id, &key, &method, &path).await;
+        return Response::from_parts(rparts, rbody);
+    }
+    let rbytes = match to_bytes(rbody, MAX_STORED_BODY).await {
+        Ok(b) => b,
+        Err(_) => {
+            release_key(&st, &principal.id, &key, &method, &path).await;
+            return (StatusCode::INTERNAL_SERVER_ERROR, "response body error").into_response();
+        }
+    };
 
     // Only successes are replayable. Caching a failure would pin a transient error in place: the
     // client retries with the same key, having done nothing wrong, and gets the old failure forever.
@@ -168,30 +232,52 @@ pub async fn layer(State(st): State<AppState>, req: Request, next: Next) -> Resp
         .execute(&st.pool)
         .await;
     } else {
-        // Release the key so the caller can retry the SAME operation.
-        let _ = sqlx::query(
-            "DELETE FROM idempotency_keys
-              WHERE principal_id = ? AND key = ? AND method = ? AND path = ? AND status_code IS NULL",
-        )
-        .bind(&principal.id)
-        .bind(&key)
-        .bind(&method)
-        .bind(&path)
-        .execute(&st.pool)
-        .await;
+        release_key(&st, &principal.id, &key, &method, &path).await;
     }
     Response::from_parts(rparts, Body::from(rbytes))
+}
+
+/// Let the caller retry this exact operation: drop an unfinished claim.
+///
+/// `status_code IS NULL` guards it to claims this request owns — a completed row is somebody's stored
+/// answer and must survive.
+async fn release_key(st: &AppState, principal_id: &str, key: &str, method: &str, path: &str) {
+    let _ = sqlx::query(
+        "DELETE FROM idempotency_keys
+          WHERE principal_id = ? AND key = ? AND method = ? AND path = ? AND status_code IS NULL",
+    )
+    .bind(principal_id)
+    .bind(key)
+    .bind(method)
+    .bind(path)
+    .execute(&st.pool)
+    .await;
 }
 
 /// Drop keys past their retention window. Called from the retention loop.
 pub async fn prune(pool: &sqlx::SqlitePool) -> u64 {
     let cutoff = chrono::Utc::now() - chrono::Duration::hours(RETENTION_HOURS);
-    sqlx::query("DELETE FROM idempotency_keys WHERE created_at < ?")
+    let mut n = sqlx::query("DELETE FROM idempotency_keys WHERE created_at < ?")
         .bind(cutoff)
         .execute(pool)
         .await
         .map(|r| r.rows_affected())
-        .unwrap_or(0)
+        .unwrap_or(0);
+
+    // Unfinished claims get a much shorter window than completed ones.
+    //
+    // The claim is written before the handler runs and the answer after it, so a handler that panics
+    // between the two leaves a row with no answer forever. Every retry then reads "still in flight"
+    // and is told to retry again — for a full day, under the completed-row TTL. That is worse than
+    // having no idempotency at all, where a retry would simply run. A request that has not answered
+    // in STUCK_CLAIM_MINUTES is not in flight; it died.
+    n += sqlx::query("DELETE FROM idempotency_keys WHERE status_code IS NULL AND created_at < ?")
+        .bind(chrono::Utc::now() - chrono::Duration::minutes(STUCK_CLAIM_MINUTES))
+        .execute(pool)
+        .await
+        .map(|r| r.rows_affected())
+        .unwrap_or(0);
+    n
 }
 
 #[cfg(test)]
@@ -268,7 +354,13 @@ mod tests {
     }
 
     async fn post_it(app: &mut Router, key: Option<&str>, body: &str) -> (StatusCode, String) {
-        let mut b = Request::builder().method("POST").uri("/api/v1/thing");
+        let mut b = Request::builder()
+            .method("POST")
+            .uri("/api/v1/thing")
+            // A real client always sends this for a known body, and the middleware requires it: an
+            // unknown length cannot be bounded without reading it, so chunked requests run
+            // unprotected rather than risk truncation.
+            .header(axum::http::header::CONTENT_LENGTH, body.len().to_string());
         if let Some(k) = key {
             b = b.header("idempotency-key", k);
         }
@@ -390,11 +482,127 @@ mod tests {
         );
     }
 
+    /// THE WORST BUG THIS HAD: a response over the cache cap was truncated to EMPTY and that empty
+    /// body was sent to the caller — on the original request, not a replay. A keyed
+    /// `POST /cameras/config/bulk` on a large fleet would have answered `200` with nothing in it
+    /// while the mutation really happened.
+    #[tokio::test]
+    async fn a_large_response_reaches_the_caller_intact_and_is_simply_not_cached() {
+        let st = state().await;
+        let big = "x".repeat(MAX_STORED_BODY * 2);
+        let expected = big.clone();
+        let p = principal("key_1");
+        let mut a = Router::new()
+            .route(
+                "/api/v1/thing",
+                post(move || {
+                    let big = big.clone();
+                    async move { big }
+                }),
+            )
+            .layer(axum::middleware::from_fn_with_state(st.clone(), layer))
+            .layer(axum::middleware::from_fn(
+                move |mut req: Request, next: Next| {
+                    let p = p.clone();
+                    async move {
+                        req.extensions_mut().insert(p);
+                        next.run(req).await
+                    }
+                },
+            ))
+            .with_state(st.clone());
+
+        let (status, body) = post_it(&mut a, Some("big"), "{}").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            body.len(),
+            expected.len(),
+            "the caller got a truncated body — the response was buffered for the cache and the \
+             truncation was forwarded"
+        );
+
+        // Too big to cache, so the key must have been RELEASED rather than left claimed — otherwise
+        // the caller is told "in progress" for every retry until the prune.
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM idempotency_keys")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap();
+        assert_eq!(rows, 0, "an uncacheable response left its key claimed");
+    }
+
+    /// A body too large to buffer must run UNPROTECTED, not be rejected. The AI ingest routes accept
+    /// 8 and 24 MiB; the first cut returned 413 for anything over 64 KiB that carried a key, so the
+    /// same request succeeded without the header and failed with it.
+    #[tokio::test]
+    async fn an_oversized_request_runs_instead_of_being_rejected() {
+        let st = state().await;
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut a = app(&st, "key_1", calls.clone());
+        let big = "y".repeat(MAX_STORED_BODY * 2);
+        let (status, _) = post_it(&mut a, Some("huge"), &big).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a large keyed request was rejected instead of simply running unprotected"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
     /// GETs are not mutations and are never keyed.
     #[tokio::test]
     async fn reads_are_untouched() {
         let st = state().await;
         let n = prune(&st.pool).await;
         assert_eq!(n, 0, "nothing to prune on a fresh box");
+    }
+}
+
+#[cfg(test)]
+mod review_regressions {
+    use super::*;
+
+    async fn pool() -> sqlx::SqlitePool {
+        let p = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&p).await.unwrap();
+        p
+    }
+
+    /// A claim whose handler died must not block that key for a day.
+    ///
+    /// Without the short window the row sits with `status_code IS NULL` forever, every retry is told
+    /// "still in flight, retryable: true", and the caller loops for 24h — worse than having no
+    /// idempotency, where the retry would just run.
+    #[tokio::test]
+    async fn a_dead_claim_is_reclaimed_long_before_the_completed_ttl() {
+        let p = pool().await;
+        // A claim from 10 minutes ago that never got an answer.
+        sqlx::query(
+            "INSERT INTO idempotency_keys (key, principal_id, method, path, request_hash, created_at)
+             VALUES ('stuck','key_1','POST','/api/v1/thing','h',?)",
+        )
+        .bind(chrono::Utc::now() - chrono::Duration::minutes(10))
+        .execute(&p)
+        .await
+        .unwrap();
+        // ...and a COMPLETED row of the same age, which must survive: it is somebody's stored answer.
+        sqlx::query(
+            "INSERT INTO idempotency_keys (key, principal_id, method, path, request_hash, status_code, body, created_at)
+             VALUES ('done','key_1','POST','/api/v1/thing','h',200,'{}',?)",
+        )
+        .bind(chrono::Utc::now() - chrono::Duration::minutes(10))
+        .execute(&p)
+        .await
+        .unwrap();
+
+        assert_eq!(prune(&p).await, 1, "exactly the dead claim should go");
+        let left: Vec<String> = sqlx::query_scalar("SELECT key FROM idempotency_keys")
+            .fetch_all(&p)
+            .await
+            .unwrap();
+        assert_eq!(left, vec!["done".to_string()]);
     }
 }

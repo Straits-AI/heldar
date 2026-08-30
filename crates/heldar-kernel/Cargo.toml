@@ -73,3 +73,4 @@ hmac = "0.12"
 # zero new compiled crates while giving asymmetric verify with a PUBLIC key (no forgeable secret).
 ring = "0.17"
 utoipa = { version = "5.5.0", features = ["axum_extras", "chrono"] }
+http-body = "1.1.0"

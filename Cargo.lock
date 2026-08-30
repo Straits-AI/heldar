@@ -642,6 +642,7 @@ dependencies = [
  "dotenvy",
  "futures-util",
  "hmac",
+ "http-body",
  "lettre",
  "libc",
  "md-5",

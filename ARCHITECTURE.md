@@ -648,7 +648,16 @@ information leak. It is layered INSIDE the auth floor for exactly that reason �
 resolves the principal to scope by. Same key and body replays the original response; same key with a
 different body is `409 idempotency_key_conflict`; a duplicate arriving while the first is still
 running is `409 idempotency_in_progress` rather than a half-finished answer. Failures release the key,
-so a transient does not pin itself in place. Keys expire after 24h via the retention loop.
+so a transient does not pin itself in place. Keys expire after 24h via the retention loop, and an
+UNFINISHED claim after five minutes — a handler that died between claiming and answering would
+otherwise have every retry told "still in flight" for a full day, which is worse than having no
+idempotency at all.
+
+Size is decided from the declared length BEFORE anything is read, in both directions. A request whose
+`Content-Length` is missing or over the cap runs unprotected rather than being rejected (the AI ingest
+routes accept 8 and 24 MiB, and a keyed batch must not fail where an unkeyed one succeeds), and a
+response too large to cache is forwarded untouched with its key released rather than buffered — the
+first cut truncated it and sent the truncation to the caller.
 
 The log filter reads `HELDAR_LOG`, falling back to the conventional `RUST_LOG`. Only the former used
 to be read, so an operator setting `RUST_LOG=warn` — what every Rust binary honours — got no effect
