@@ -31,7 +31,18 @@ pub fn router() -> Router<AppState> {
 }
 
 /// Merged view: compiled modules first, then registered sidecars (kind = imported).
-async fn list(
+///
+/// One live list the dashboard builds its nav and routes from — compiled-in modules and
+/// runtime-registered sidecars are the same shape here, distinguished only by `kind`.
+#[utoipa::path(
+    get, path = "/api/v1/modules", tag = "system",
+    operation_id = "listModules",
+    responses(
+        (status = 200, description = "Compiled modules followed by registered sidecars"),
+        (status = 403, description = "Missing `system:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<ModuleManifest>>> {
@@ -44,7 +55,22 @@ async fn list(
 }
 
 /// Register a sidecar plugin. Mints its scoped key + webhook subscription and returns them ONCE.
-async fn register(
+///
+/// `api_key` and `webhook_secret` are returned by this call and never again — a caller that drops
+/// the response has to unregister and re-register. Registering mints a credential, so it is refused
+/// to a camera-scoped credential as well as to a non-admin.
+#[utoipa::path(
+    post, path = "/api/v1/modules", tag = "system",
+    operation_id = "registerModule",
+    request_body = ModuleRegisterRequest,
+    responses(
+        (status = 201, description = "The registration plus its once-only `api_key` and `webhook_secret`"),
+        (status = 400, description = "Bad `id`, `name`, `base_url` or `role`", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 409, description = "The id is already registered, or reserved by a compiled-in module", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn register(
     State(st): State<AppState>,
     principal: Principal,
     Json(req): Json<ModuleRegisterRequest>,
@@ -77,7 +103,20 @@ async fn register(
 }
 
 /// Admin detail for one registered sidecar (includes its base URL + minted resource ids).
-async fn detail(
+///
+/// Compiled-in modules have no registration row: asking for one by id is a 404, even though it
+/// appears in `GET /api/v1/modules`.
+#[utoipa::path(
+    get, path = "/api/v1/modules/{id}", tag = "system",
+    operation_id = "getModule",
+    params(("id" = String, Path, description = "Module id")),
+    responses(
+        (status = 200, description = "The registration, with `base_url` and the minted resource ids"),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "No sidecar is registered under this id", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn detail(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -93,7 +132,19 @@ async fn detail(
 }
 
 /// Uninstall a sidecar: deletes the row + revokes its key + removes its webhook subscription.
-async fn unregister(
+///
+/// The minted API key is REVOKED, not just detached, so the plugin loses kernel access immediately.
+#[utoipa::path(
+    delete, path = "/api/v1/modules/{id}", tag = "system",
+    operation_id = "unregisterModule",
+    params(("id" = String, Path, description = "Module id")),
+    responses(
+        (status = 204, description = "Unregistered; its key and webhook subscription are gone"),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "No sidecar is registered under this id", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn unregister(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,

@@ -233,6 +233,11 @@ export interface CreateSessionRequest {
   to: string;
 }
 
+export interface Credential {
+  password: string;
+  username: string;
+}
+
 export interface DayNightConfig {
   mode: string;
   sensitivity?: number | null;
@@ -278,6 +283,18 @@ export interface DeviceInfo {
   serial_number?: string | null;
 }
 
+export interface DiscoverOptions {
+  auto_add?: boolean;
+  connect_timeout_ms?: number | null;
+  credentials?: Credential[] | null;
+  password?: string | null;
+  rtsp_port?: number | null;
+  targets: string;
+  try_default_creds?: boolean;
+  username?: string | null;
+  verify?: boolean;
+}
+
 export interface EmbeddingIngest {
   camera_id: string;
   dim: number;
@@ -307,6 +324,10 @@ export interface ErrorBody {
   code: string;
   error: string;
   retryable: boolean;
+}
+
+export interface EvidenceLockBody {
+  incident_id?: string | null;
 }
 
 export interface ExportRequest {
@@ -352,6 +373,18 @@ export interface ImageConfig {
   white_light_brightness?: number | null;
 }
 
+export interface IncidentSummary {
+  incident_id: string;
+  newest_end: string;
+  oldest_start: string;
+  segment_count: number;
+  total_bytes: number;
+}
+
+export interface IncidentTagBody {
+  incident_id?: string | null;
+}
+
 export interface IngestEvent {
   event_type: string;
   payload?: unknown;
@@ -386,9 +419,27 @@ export interface LoginRequest {
   username: string;
 }
 
+export interface ModuleRegisterRequest {
+  base_url: string;
+  description?: string;
+  id: string;
+  name: string;
+  nav?: NavEntry[];
+  publisher?: string;
+  role?: string | null;
+  subscribes?: string[] | null;
+  version?: string;
+}
+
 export interface MotionConfig {
   enabled: boolean;
   sensitivity?: number | null;
+}
+
+export interface NavEntry {
+  icon: string;
+  label: string;
+  path: string;
 }
 
 export interface NlBody {
@@ -455,6 +506,20 @@ export interface RebootRequest {
   confirm: boolean;
 }
 
+export interface RecordScheduleCreate {
+  days: unknown;
+  enabled?: boolean | null;
+  time_end: string;
+  time_start: string;
+}
+
+export interface RecordScheduleUpdate {
+  days?: unknown;
+  enabled?: boolean | null;
+  time_end?: string | null;
+  time_start?: string | null;
+}
+
 export interface ResolveBody {
   note?: string | null;
 }
@@ -516,6 +581,26 @@ export interface SmartRegion {
   points: number[][];
   sensitivity: number;
   time_threshold: number;
+}
+
+export interface SnapshotSchedule {
+  camera_id: string;
+  created_at: string;
+  enabled: boolean;
+  id: string;
+  interval_seconds: number;
+  last_fired_at?: string | null;
+  updated_at: string;
+}
+
+export interface SnapshotScheduleCreate {
+  enabled?: boolean | null;
+  interval_seconds?: number | null;
+}
+
+export interface SnapshotScheduleUpdate {
+  enabled?: boolean | null;
+  interval_seconds?: number | null;
 }
 
 export interface TimeConfig {
@@ -1189,6 +1274,16 @@ export class HeldarClient {
   }
 
   /** Requires capability `camera:read`, camera-keyed. */
+  getCameraHealth(id: string): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/cameras/${encodeURIComponent(id)}/health`);
+  }
+
+  /** Requires capability `video:live`, camera-keyed. */
+  getLiveView(id: string): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/cameras/${encodeURIComponent(id)}/liveview`);
+  }
+
+  /** Requires capability `camera:read`, camera-keyed. */
   getCameraOnvif(id: string): Promise<unknown> {
     return this.call<unknown>("GET", `/api/v1/cameras/${encodeURIComponent(id)}/onvif`);
   }
@@ -1234,6 +1329,26 @@ export class HeldarClient {
   }
 
   /** Requires capability `video:playback`, camera-keyed. */
+  listRecordingGaps(id: string): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/cameras/${encodeURIComponent(id)}/recording-gaps`);
+  }
+
+  /** Requires capability `registry:manage`, camera-keyed. */
+  retryRecordingGap(id: string, gap_id: string): Promise<unknown> {
+    return this.call<unknown>("POST", `/api/v1/cameras/${encodeURIComponent(id)}/recording-gaps/${encodeURIComponent(gap_id)}/retry`);
+  }
+
+  /** Requires capability `camera:read`, camera-keyed. */
+  listRecordingSchedules(id: string): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/cameras/${encodeURIComponent(id)}/schedules`);
+  }
+
+  /** Requires capability `registry:manage`, camera-keyed. */
+  createRecordingSchedule(id: string, body: RecordScheduleCreate): Promise<unknown> {
+    return this.call<unknown>("POST", `/api/v1/cameras/${encodeURIComponent(id)}/schedules`, body);
+  }
+
+  /** Requires capability `video:playback`, camera-keyed. */
   listSegments(id: string): Promise<unknown> {
     return this.call<unknown>("GET", `/api/v1/cameras/${encodeURIComponent(id)}/segments`);
   }
@@ -1241,6 +1356,26 @@ export class HeldarClient {
   /** Requires capability `video:playback`, camera-keyed. */
   getSnapshot(id: string): Promise<unknown> {
     return this.call<unknown>("GET", `/api/v1/cameras/${encodeURIComponent(id)}/snapshot`);
+  }
+
+  /** Requires capability `camera:read`, camera-keyed. */
+  listSnapshotSchedules(id: string): Promise<SnapshotSchedule[]> {
+    return this.call<SnapshotSchedule[]>("GET", `/api/v1/cameras/${encodeURIComponent(id)}/snapshot-schedules`);
+  }
+
+  /** Requires capability `registry:manage`, camera-keyed. */
+  createSnapshotSchedule(id: string, body: SnapshotScheduleCreate): Promise<unknown> {
+    return this.call<unknown>("POST", `/api/v1/cameras/${encodeURIComponent(id)}/snapshot-schedules`, body);
+  }
+
+  /** Requires capability `video:playback`, camera-keyed. */
+  listCameraSnapshots(id: string): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/cameras/${encodeURIComponent(id)}/snapshots`);
+  }
+
+  /** Requires capability `camera:read`, camera-keyed. */
+  testCamera(id: string): Promise<unknown> {
+    return this.call<unknown>("POST", `/api/v1/cameras/${encodeURIComponent(id)}/test`);
   }
 
   /** Requires capability `video:playback`, camera-keyed. */
@@ -1271,6 +1406,11 @@ export class HeldarClient {
   /** Requires capability `events:read`, camera-keyed. */
   getZoneOccupancy(id: string): Promise<unknown> {
     return this.call<unknown>("GET", `/api/v1/cameras/${encodeURIComponent(id)}/zones/occupancy`);
+  }
+
+  /** Requires capability `net:scan`, fleet-only. */
+  discoverCameras(body: DiscoverOptions): Promise<unknown> {
+    return this.call<unknown>("POST", `/api/v1/discover`, body);
   }
 
   /** Requires capability `events:read`, scope-filtered. */
@@ -1318,6 +1458,11 @@ export class HeldarClient {
     return this.call<unknown>("PUT", `/api/v1/entry/gate/settings`, body);
   }
 
+  /** Requires capability `events:read`, fleet-only. */
+  listEvents(): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/events`);
+  }
+
   /** Requires capability `events:read`, scope-neutral. */
   listEventTypes(): Promise<unknown> {
     return this.call<unknown>("GET", `/api/v1/events/types`);
@@ -1343,6 +1488,31 @@ export class HeldarClient {
     return this.call<unknown>("GET", `/api/v1/evidence/signing-key`);
   }
 
+  /** Requires capability `camera:read`, scope-filtered. */
+  listCameraHealth(): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/health/cameras`);
+  }
+
+  /** Requires capability `events:read`, scope-filtered. */
+  listIncidents(): Promise<IncidentSummary[]> {
+    return this.call<IncidentSummary[]>("GET", `/api/v1/incidents`);
+  }
+
+  /** Requires capability `video:playback`, scope-filtered. */
+  listIncidentSegments(incident_id: string): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/incidents/${encodeURIComponent(incident_id)}/segments`);
+  }
+
+  /** Requires capability `system:read`, fleet-only. */
+  listModules(): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/modules`);
+  }
+
+  /** Requires admin, fleet-only. */
+  registerModule(body: ModuleRegisterRequest): Promise<unknown> {
+    return this.call<unknown>("POST", `/api/v1/modules`, body);
+  }
+
   /** Requires capability `events:read`, scope-neutral. */
   getEntryModuleUi(): Promise<unknown> {
     return this.call<unknown>("GET", `/api/v1/modules/entry/ui/index.js`);
@@ -1356,6 +1526,16 @@ export class HeldarClient {
   /** Requires capability `events:read`, scope-neutral. */
   getSearchModuleUi(): Promise<unknown> {
     return this.call<unknown>("GET", `/api/v1/modules/search/ui/index.js`);
+  }
+
+  /** Requires admin, camera-keyed. */
+  unregisterModule(id: string): Promise<unknown> {
+    return this.call<unknown>("DELETE", `/api/v1/modules/${encodeURIComponent(id)}`);
+  }
+
+  /** Requires admin, camera-keyed. */
+  getModule(id: string): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/modules/${encodeURIComponent(id)}`);
   }
 
   /** Requires capability `events:read`, scope-filtered. */
@@ -1423,6 +1603,16 @@ export class HeldarClient {
     return this.call<unknown>("POST", `/api/v1/onvif/discover`);
   }
 
+  /** Requires scope-neutral. */
+  getOpenApiDocument(): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/openapi.json`);
+  }
+
+  /** Requires admin, fleet-only. */
+  listOutbox(): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/outbox`);
+  }
+
   /** Requires capability `identity:read`, scope-neutral. */
   listVisitorPasses(): Promise<VisitorPass[]> {
     return this.call<VisitorPass[]>("GET", `/api/v1/passes`);
@@ -1463,6 +1653,16 @@ export class HeldarClient {
     return this.call<unknown>("DELETE", `/api/v1/playback/sessions/${encodeURIComponent(session_id)}`);
   }
 
+  /** Requires capability `system:read`, fleet-only. */
+  listRegistry(): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/registry`);
+  }
+
+  /** Requires admin, fleet-only. */
+  refreshRegistry(): Promise<unknown> {
+    return this.call<unknown>("POST", `/api/v1/registry/refresh`);
+  }
+
   /** Requires capability `events:read`, scope-filtered. */
   getEntryLogReport(): Promise<unknown> {
     return this.call<unknown>("GET", `/api/v1/reports/entry-log`);
@@ -1471,6 +1671,16 @@ export class HeldarClient {
   /** Requires capability `events:read`, scope-filtered. */
   getEntryExceptionsReport(): Promise<unknown> {
     return this.call<unknown>("GET", `/api/v1/reports/exceptions`);
+  }
+
+  /** Requires capability `registry:manage`, scope-filtered. */
+  deleteRecordingSchedule(schedule_id: string): Promise<unknown> {
+    return this.call<unknown>("DELETE", `/api/v1/schedules/${encodeURIComponent(schedule_id)}`);
+  }
+
+  /** Requires capability `registry:manage`, scope-filtered. */
+  updateRecordingSchedule(schedule_id: string, body: RecordScheduleUpdate): Promise<unknown> {
+    return this.call<unknown>("PATCH", `/api/v1/schedules/${encodeURIComponent(schedule_id)}`, body);
   }
 
   /** Requires capability `events:read`, scope-filtered. */
@@ -1491,6 +1701,26 @@ export class HeldarClient {
   /** Requires capability `events:read`, scope-filtered. */
   searchSemantic(body: SemanticBody): Promise<unknown> {
     return this.call<unknown>("POST", `/api/v1/search/semantic`, body);
+  }
+
+  /** Requires capability `registry:manage`, camera-keyed. */
+  unlockSegmentEvidence(id: string): Promise<unknown> {
+    return this.call<unknown>("DELETE", `/api/v1/segments/${encodeURIComponent(id)}/evidence-lock`);
+  }
+
+  /** Requires capability `registry:manage`, camera-keyed. */
+  lockSegmentEvidence(id: string, body: EvidenceLockBody): Promise<unknown> {
+    return this.call<unknown>("POST", `/api/v1/segments/${encodeURIComponent(id)}/evidence-lock`, body);
+  }
+
+  /** Requires capability `registry:manage`, camera-keyed. */
+  tagSegmentIncident(id: string, body: IncidentTagBody): Promise<unknown> {
+    return this.call<unknown>("PATCH", `/api/v1/segments/${encodeURIComponent(id)}/incident`, body);
+  }
+
+  /** Requires capability `system:read`, scope-filtered. */
+  getSiteInfo(): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/site`);
   }
 
   /** Requires capability `camera:read`, scope-filtered. */
@@ -1516,6 +1746,16 @@ export class HeldarClient {
   /** Requires admin, fleet-only. */
   updateSite(id: string, body: SiteUpdate): Promise<unknown> {
     return this.call<unknown>("PATCH", `/api/v1/sites/${encodeURIComponent(id)}`, body);
+  }
+
+  /** Requires capability `registry:manage`, fleet-only. */
+  deleteSnapshotSchedule(schedule_id: string): Promise<unknown> {
+    return this.call<unknown>("DELETE", `/api/v1/snapshot-schedules/${encodeURIComponent(schedule_id)}`);
+  }
+
+  /** Requires capability `registry:manage`, fleet-only. */
+  updateSnapshotSchedule(schedule_id: string, body: SnapshotScheduleUpdate): Promise<SnapshotSchedule> {
+    return this.call<SnapshotSchedule>("PATCH", `/api/v1/snapshot-schedules/${encodeURIComponent(schedule_id)}`, body);
   }
 
   /** Requires capability `system:read`, scope-filtered. */

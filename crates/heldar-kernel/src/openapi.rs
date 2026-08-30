@@ -97,6 +97,37 @@ pub const API_VERSION: &str = "0.1.0";
         crate::routes::playback_sessions::create_session,
         crate::routes::playback_sessions::delete_session,
         crate::routes::recording_control::record_trigger,
+        crate::openapi::spec,
+        crate::routes::anr::list_gaps,
+        crate::routes::anr::retry_gap,
+        crate::routes::health::list_status,
+        crate::routes::health::camera_status,
+        crate::routes::health::list_events,
+        crate::routes::incidents::lock_evidence,
+        crate::routes::incidents::unlock_evidence,
+        crate::routes::incidents::tag_incident,
+        crate::routes::incidents::list_incidents,
+        crate::routes::incidents::incident_segments,
+        crate::routes::modules::list,
+        crate::routes::modules::register,
+        crate::routes::modules::detail,
+        crate::routes::modules::unregister,
+        crate::routes::outbox::list_outbox,
+        crate::routes::outbox::site_info,
+        crate::routes::registry::list,
+        crate::routes::registry::refresh,
+        crate::routes::snapshot_schedules::list_schedules,
+        crate::routes::snapshot_schedules::create_schedule,
+        crate::routes::snapshot_schedules::update_schedule,
+        crate::routes::snapshot_schedules::delete_schedule,
+        crate::routes::snapshot_schedules::list_snapshots,
+        crate::routes::liveview::liveview,
+        crate::routes::schedules::list_schedules,
+        crate::routes::schedules::create_schedule,
+        crate::routes::schedules::update_schedule,
+        crate::routes::schedules::delete_schedule,
+        crate::routes::discovery::discover_handler,
+        crate::routes::cameras::test_camera,
         crate::routes::ai::acquire_lease,
         crate::routes::ai::claim_embed_queries,
         crate::routes::ai::create_task,
@@ -219,7 +250,18 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/api/v1/openapi.json", get(spec))
 }
 
-async fn spec() -> Json<serde_json::Value> {
+/// This document.
+///
+/// Inside the `/api/v1` auth floor deliberately: the surface map is not something to hand to an
+/// unauthenticated caller. Publishing it for codegen is the release artifact's job, not this
+/// endpoint's — and note this serves the KERNEL's fragment, while the composed document including
+/// the app crates is what `heldar_server::api_document()` builds.
+#[utoipa::path(
+    get, path = "/api/v1/openapi.json", tag = "system",
+    operation_id = "getOpenApiDocument",
+    responses((status = 200, description = "The OpenAPI 3.1 document for this build")),
+)]
+pub async fn spec() -> Json<serde_json::Value> {
     Json(document())
 }
 

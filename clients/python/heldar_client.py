@@ -280,6 +280,12 @@ class CreateSessionRequest:
 
 
 @dataclass
+class Credential:
+    password: str
+    username: str
+
+
+@dataclass
 class DayNightConfig:
     mode: str
     sensitivity: int | None = None
@@ -333,6 +339,19 @@ class DeviceInfo:
 
 
 @dataclass
+class DiscoverOptions:
+    targets: str
+    auto_add: bool = None
+    connect_timeout_ms: int | None = None
+    credentials: list[Credential] | None = None
+    password: str | None = None
+    rtsp_port: int | None = None
+    try_default_creds: bool = None
+    username: str | None = None
+    verify: bool = None
+
+
+@dataclass
 class EmbeddingIngest:
     camera_id: str
     dim: int
@@ -365,6 +384,11 @@ class ErrorBody:
     code: str
     error: str
     retryable: bool
+
+
+@dataclass
+class EvidenceLockBody:
+    incident_id: str | None = None
 
 
 @dataclass
@@ -417,6 +441,20 @@ class ImageConfig:
 
 
 @dataclass
+class IncidentSummary:
+    incident_id: str
+    newest_end: str
+    oldest_start: str
+    segment_count: int
+    total_bytes: int
+
+
+@dataclass
+class IncidentTagBody:
+    incident_id: str | None = None
+
+
+@dataclass
 class IngestEvent:
     event_type: str
     payload: object = None
@@ -457,9 +495,29 @@ class LoginRequest:
 
 
 @dataclass
+class ModuleRegisterRequest:
+    base_url: str
+    id: str
+    name: str
+    description: str = None
+    nav: list[NavEntry] = None
+    publisher: str = None
+    role: str | None = None
+    subscribes: list[str] | None = None
+    version: str = None
+
+
+@dataclass
 class MotionConfig:
     enabled: bool
     sensitivity: int | None = None
+
+
+@dataclass
+class NavEntry:
+    icon: str
+    label: str
+    path: str
 
 
 @dataclass
@@ -536,6 +594,22 @@ class RebootRequest:
 
 
 @dataclass
+class RecordScheduleCreate:
+    days: object
+    time_end: str
+    time_start: str
+    enabled: bool | None = None
+
+
+@dataclass
+class RecordScheduleUpdate:
+    days: object = None
+    enabled: bool | None = None
+    time_end: str | None = None
+    time_start: str | None = None
+
+
+@dataclass
 class ResolveBody:
     note: str | None = None
 
@@ -605,6 +679,29 @@ class SmartRegion:
     points: list[list[float]]
     sensitivity: int
     time_threshold: int
+
+
+@dataclass
+class SnapshotSchedule:
+    camera_id: str
+    created_at: str
+    enabled: bool
+    id: str
+    interval_seconds: int
+    updated_at: str
+    last_fired_at: str | None = None
+
+
+@dataclass
+class SnapshotScheduleCreate:
+    enabled: bool | None = None
+    interval_seconds: int | None = None
+
+
+@dataclass
+class SnapshotScheduleUpdate:
+    enabled: bool | None = None
+    interval_seconds: int | None = None
 
 
 @dataclass
@@ -1231,6 +1328,14 @@ class HeldarClient:
         """Requires capability `video:playback`, camera-keyed."""
         return self._call('GET', f'/api/v1/cameras/{id}/gaps')
 
+    def get_camera_health(self, id: str) -> Any:
+        """Requires capability `camera:read`, camera-keyed."""
+        return self._call('GET', f'/api/v1/cameras/{id}/health')
+
+    def get_live_view(self, id: str) -> Any:
+        """Requires capability `video:live`, camera-keyed."""
+        return self._call('GET', f'/api/v1/cameras/{id}/liveview')
+
     def get_camera_onvif(self, id: str) -> Any:
         """Requires capability `camera:read`, camera-keyed."""
         return self._call('GET', f'/api/v1/cameras/{id}/onvif')
@@ -1267,6 +1372,22 @@ class HeldarClient:
         """Requires capability `registry:manage`, camera-keyed."""
         return self._call('POST', f'/api/v1/cameras/{id}/record-trigger')
 
+    def list_recording_gaps(self, id: str) -> Any:
+        """Requires capability `video:playback`, camera-keyed."""
+        return self._call('GET', f'/api/v1/cameras/{id}/recording-gaps')
+
+    def retry_recording_gap(self, id: str, gap_id: str) -> Any:
+        """Requires capability `registry:manage`, camera-keyed."""
+        return self._call('POST', f'/api/v1/cameras/{id}/recording-gaps/{gap_id}/retry')
+
+    def list_recording_schedules(self, id: str) -> Any:
+        """Requires capability `camera:read`, camera-keyed."""
+        return self._call('GET', f'/api/v1/cameras/{id}/schedules')
+
+    def create_recording_schedule(self, id: str, body: Any) -> Any:
+        """Requires capability `registry:manage`, camera-keyed."""
+        return self._call('POST', f'/api/v1/cameras/{id}/schedules', body)
+
     def list_segments(self, id: str) -> Any:
         """Requires capability `video:playback`, camera-keyed."""
         return self._call('GET', f'/api/v1/cameras/{id}/segments')
@@ -1274,6 +1395,22 @@ class HeldarClient:
     def get_snapshot(self, id: str) -> Any:
         """Requires capability `video:playback`, camera-keyed."""
         return self._call('GET', f'/api/v1/cameras/{id}/snapshot')
+
+    def list_snapshot_schedules(self, id: str) -> Any:
+        """Requires capability `camera:read`, camera-keyed."""
+        return self._call('GET', f'/api/v1/cameras/{id}/snapshot-schedules')
+
+    def create_snapshot_schedule(self, id: str, body: Any) -> Any:
+        """Requires capability `registry:manage`, camera-keyed."""
+        return self._call('POST', f'/api/v1/cameras/{id}/snapshot-schedules', body)
+
+    def list_camera_snapshots(self, id: str) -> Any:
+        """Requires capability `video:playback`, camera-keyed."""
+        return self._call('GET', f'/api/v1/cameras/{id}/snapshots')
+
+    def test_camera(self, id: str) -> Any:
+        """Requires capability `camera:read`, camera-keyed."""
+        return self._call('POST', f'/api/v1/cameras/{id}/test')
 
     def get_timeline(self, id: str) -> Any:
         """Requires capability `video:playback`, camera-keyed."""
@@ -1298,6 +1435,10 @@ class HeldarClient:
     def get_zone_occupancy(self, id: str) -> Any:
         """Requires capability `events:read`, camera-keyed."""
         return self._call('GET', f'/api/v1/cameras/{id}/zones/occupancy')
+
+    def discover_cameras(self, body: Any) -> Any:
+        """Requires capability `net:scan`, fleet-only."""
+        return self._call('POST', f'/api/v1/discover', body)
 
     def list_entry_events(self) -> Any:
         """Requires capability `events:read`, scope-filtered."""
@@ -1335,6 +1476,10 @@ class HeldarClient:
         """Requires capability `registry:manage`, fleet-only."""
         return self._call('PUT', f'/api/v1/entry/gate/settings', body)
 
+    def list_events(self) -> Any:
+        """Requires capability `events:read`, fleet-only."""
+        return self._call('GET', f'/api/v1/events')
+
     def list_event_types(self) -> Any:
         """Requires capability `events:read`, scope-neutral."""
         return self._call('GET', f'/api/v1/events/types')
@@ -1355,6 +1500,26 @@ class HeldarClient:
         """Requires capability `camera:read`, scope-neutral."""
         return self._call('GET', f'/api/v1/evidence/signing-key')
 
+    def list_camera_health(self) -> Any:
+        """Requires capability `camera:read`, scope-filtered."""
+        return self._call('GET', f'/api/v1/health/cameras')
+
+    def list_incidents(self) -> Any:
+        """Requires capability `events:read`, scope-filtered."""
+        return self._call('GET', f'/api/v1/incidents')
+
+    def list_incident_segments(self, incident_id: str) -> Any:
+        """Requires capability `video:playback`, scope-filtered."""
+        return self._call('GET', f'/api/v1/incidents/{incident_id}/segments')
+
+    def list_modules(self) -> Any:
+        """Requires capability `system:read`, fleet-only."""
+        return self._call('GET', f'/api/v1/modules')
+
+    def register_module(self, body: Any) -> Any:
+        """Requires admin, fleet-only."""
+        return self._call('POST', f'/api/v1/modules', body)
+
     def get_entry_module_ui(self) -> Any:
         """Requires capability `events:read`, scope-neutral."""
         return self._call('GET', f'/api/v1/modules/entry/ui/index.js')
@@ -1366,6 +1531,14 @@ class HeldarClient:
     def get_search_module_ui(self) -> Any:
         """Requires capability `events:read`, scope-neutral."""
         return self._call('GET', f'/api/v1/modules/search/ui/index.js')
+
+    def unregister_module(self, id: str) -> Any:
+        """Requires admin, camera-keyed."""
+        return self._call('DELETE', f'/api/v1/modules/{id}')
+
+    def get_module(self, id: str) -> Any:
+        """Requires admin, camera-keyed."""
+        return self._call('GET', f'/api/v1/modules/{id}')
 
     def list_movement_breaches(self) -> Any:
         """Requires capability `events:read`, scope-filtered."""
@@ -1419,6 +1592,14 @@ class HeldarClient:
         """Requires capability `registry:manage`, fleet-only."""
         return self._call('POST', f'/api/v1/onvif/discover')
 
+    def get_open_api_document(self) -> Any:
+        """Requires scope-neutral."""
+        return self._call('GET', f'/api/v1/openapi.json')
+
+    def list_outbox(self) -> Any:
+        """Requires admin, fleet-only."""
+        return self._call('GET', f'/api/v1/outbox')
+
     def list_visitor_passes(self) -> Any:
         """Requires capability `identity:read`, scope-neutral."""
         return self._call('GET', f'/api/v1/passes')
@@ -1451,6 +1632,14 @@ class HeldarClient:
         """Requires capability `video:playback`, camera-keyed."""
         return self._call('DELETE', f'/api/v1/playback/sessions/{session_id}')
 
+    def list_registry(self) -> Any:
+        """Requires capability `system:read`, fleet-only."""
+        return self._call('GET', f'/api/v1/registry')
+
+    def refresh_registry(self) -> Any:
+        """Requires admin, fleet-only."""
+        return self._call('POST', f'/api/v1/registry/refresh')
+
     def get_entry_log_report(self) -> Any:
         """Requires capability `events:read`, scope-filtered."""
         return self._call('GET', f'/api/v1/reports/entry-log')
@@ -1458,6 +1647,14 @@ class HeldarClient:
     def get_entry_exceptions_report(self) -> Any:
         """Requires capability `events:read`, scope-filtered."""
         return self._call('GET', f'/api/v1/reports/exceptions')
+
+    def delete_recording_schedule(self, schedule_id: str) -> Any:
+        """Requires capability `registry:manage`, scope-filtered."""
+        return self._call('DELETE', f'/api/v1/schedules/{schedule_id}')
+
+    def update_recording_schedule(self, schedule_id: str, body: Any) -> Any:
+        """Requires capability `registry:manage`, scope-filtered."""
+        return self._call('PATCH', f'/api/v1/schedules/{schedule_id}', body)
 
     def search_events(self, body: Any) -> Any:
         """Requires capability `events:read`, scope-filtered."""
@@ -1474,6 +1671,22 @@ class HeldarClient:
     def search_semantic(self, body: Any) -> Any:
         """Requires capability `events:read`, scope-filtered."""
         return self._call('POST', f'/api/v1/search/semantic', body)
+
+    def unlock_segment_evidence(self, id: str) -> Any:
+        """Requires capability `registry:manage`, camera-keyed."""
+        return self._call('DELETE', f'/api/v1/segments/{id}/evidence-lock')
+
+    def lock_segment_evidence(self, id: str, body: Any) -> Any:
+        """Requires capability `registry:manage`, camera-keyed."""
+        return self._call('POST', f'/api/v1/segments/{id}/evidence-lock', body)
+
+    def tag_segment_incident(self, id: str, body: Any) -> Any:
+        """Requires capability `registry:manage`, camera-keyed."""
+        return self._call('PATCH', f'/api/v1/segments/{id}/incident', body)
+
+    def get_site_info(self) -> Any:
+        """Requires capability `system:read`, scope-filtered."""
+        return self._call('GET', f'/api/v1/site')
 
     def list_sites(self) -> Any:
         """Requires capability `camera:read`, scope-filtered."""
@@ -1494,6 +1707,14 @@ class HeldarClient:
     def update_site(self, id: str, body: Any) -> Any:
         """Requires admin, fleet-only."""
         return self._call('PATCH', f'/api/v1/sites/{id}', body)
+
+    def delete_snapshot_schedule(self, schedule_id: str) -> Any:
+        """Requires capability `registry:manage`, fleet-only."""
+        return self._call('DELETE', f'/api/v1/snapshot-schedules/{schedule_id}')
+
+    def update_snapshot_schedule(self, schedule_id: str, body: Any) -> Any:
+        """Requires capability `registry:manage`, fleet-only."""
+        return self._call('PATCH', f'/api/v1/snapshot-schedules/{schedule_id}', body)
 
     def get_system_info(self) -> Any:
         """Requires capability `system:read`, scope-filtered."""

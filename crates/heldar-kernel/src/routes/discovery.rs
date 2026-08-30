@@ -13,7 +13,22 @@ pub fn router() -> Router<AppState> {
 }
 
 /// Scan a network range for cameras; optionally verify credentials and auto-register them.
-async fn discover_handler(
+/// Scan the LAN for cameras.
+///
+/// FLEET-ONLY. Every returned device carries `already_registered`, computed against the whole
+/// camera table, so a camera-scoped credential would learn the size of the fleet and the address of
+/// every camera on it — the roster leak in address space rather than id space. `auto_add` is worse:
+/// the ids it mints can never be in the caller's allowlist.
+#[utoipa::path(
+    post, path = "/api/v1/discover", tag = "cameras",
+    operation_id = "discoverCameras",
+    responses(
+        (status = 200, description = "Devices found, each flagged with whether it is already registered"),
+        (status = 400, description = "Malformed scan options", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `net:scan`, missing `registry:manage` for `auto_add`, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn discover_handler(
     State(st): State<AppState>,
     principal: Principal,
     Json(opts): Json<DiscoverOptions>,

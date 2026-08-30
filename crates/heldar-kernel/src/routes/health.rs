@@ -15,7 +15,20 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/events", get(list_events))
 }
 
-async fn list_status(
+/// Live recorder health (state, last segment, reconnects, fps, bitrate, last error) per camera.
+///
+/// Confined to the cameras this credential holds — a scoped caller gets a short list, not a 403.
+/// A disabled camera always reports `disabled`, overriding whatever stale state the recorder
+/// teardown left in its row.
+#[utoipa::path(
+    get, path = "/api/v1/health/cameras", tag = "cameras",
+    operation_id = "listCameraHealth",
+    responses(
+        (status = 200, description = "Health rows for the caller's cameras, by camera id"),
+        (status = 403, description = "Missing `camera:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_status(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<CameraStatus>>> {
@@ -57,7 +70,22 @@ async fn list_status(
     Ok(Json(rows))
 }
 
-async fn camera_status(
+/// Live recorder health for one camera.
+///
+/// Scope is checked before the row is read, so an out-of-scope camera is a 403 and never a 404 —
+/// the 404 here means only "no status row yet" (the recorder has never run for it). A disabled
+/// camera reports `disabled` regardless of stale recorder state.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/health", tag = "cameras",
+    operation_id = "getCameraHealth",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The camera's health row"),
+        (status = 403, description = "Missing `camera:read`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "No status recorded for this camera yet", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn camera_status(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -85,14 +113,34 @@ async fn camera_status(
 }
 
 #[derive(Debug, Deserialize)]
-struct EventQuery {
+pub struct EventQuery {
     camera_id: Option<String>,
     event_type: Option<String>,
     severity: Option<String>,
     limit: Option<i64>,
 }
 
-async fn list_events(
+/// The box event feed (camera offline, recorder errors, recording gaps, zone and ingest events),
+/// newest first.
+///
+/// Confined to the caller's cameras. Box-level events with no camera (disk, RAID, system) are
+/// deliberately withheld from a camera-scoped credential, so such a caller sees a strict subset of
+/// what an unscoped one sees. `limit` defaults to 200 and is clamped to 1..=2000.
+#[utoipa::path(
+    get, path = "/api/v1/events", tag = "cameras",
+    operation_id = "listEvents",
+    params(
+        ("camera_id" = Option<String>, Query, description = "Only events for this camera"),
+        ("event_type" = Option<String>, Query, description = "Only events of this type"),
+        ("severity" = Option<String>, Query, description = "Only events of this severity"),
+        ("limit" = Option<i64>, Query, description = "Max rows (default 200, clamped to 1..=2000)"),
+    ),
+    responses(
+        (status = 200, description = "Matching events, newest first"),
+        (status = 403, description = "Missing `events:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_events(
     State(st): State<AppState>,
     principal: Principal,
     Query(q): Query<EventQuery>,

@@ -123,6 +123,12 @@ curl http://localhost:8000/api/v1/system/timezone            # the site clock sc
 > The metadata DB is also bounded (`HELDAR_MAX_DB_GB`, default 4), and a pre-existing DB self-converts to
 > `auto_vacuum=INCREMENTAL` in the background on first upgrade (`HELDAR_DB_AUTOVACUUM_CONVERT=true`).
 
+> **Generated API clients.** The box publishes an OpenAPI contract (`GET /api/v1/openapi.json`, and
+> `openapi.json` on every release). TypeScript, Python and Rust clients are generated from it and
+> compiled in CI, so a `$ref` to a missing schema or a duplicated operation id is a build failure
+> rather than a surprise later. See [`clients/`](clients/) and a worked integration in
+> [`examples/api-client/`](examples/api-client/).
+
 > **Sites.** `GET`/`POST /api/v1/sites`, `GET`/`PATCH`/`DELETE /api/v1/sites/{id}` (writes admin +
 > fleet-scope only; moving a camera between sites is too, via `PATCH /api/v1/cameras/{id}`).
 > A site carries the timezone its cameras' schedules and searches are read in. Changing it moves
