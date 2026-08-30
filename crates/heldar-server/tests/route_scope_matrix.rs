@@ -145,6 +145,7 @@ fn composed_router(st: &AppState) -> axum::Router {
         // it was invisible to the matrix until it moved, which is how a fleet-wide exposition sat
         // outside the scope sweep.
         .merge(heldar_kernel::routes::metrics::router())
+        .merge(heldar_kernel::openapi::router())
         .merge(heldar_entry::routes::router())
         .merge(heldar_movement::routes::router(movement_cfg))
         .merge(heldar_search::routes::router(search_cfg))
@@ -1540,6 +1541,12 @@ const SCOPE_NEUTRAL: &[(&str, &str)] = &[
         "same table, no camera; submission is bound to the CLAIMING credential instead",
     ),
     // --- about the caller itself, not about any camera ---
+    // The API contract describes the SURFACE, not any camera's data. It sits inside the /api/v1 auth
+    // floor so it is not public, but every authenticated caller gets the same document.
+    (
+        "/api/v1/openapi.json",
+        "the API contract; identical for every caller, no camera data",
+    ),
     ("/api/v1/auth/me", "describes the caller"),
     ("/api/v1/auth/logout", "ends the caller's own session"),
 ];

@@ -78,7 +78,7 @@ impl Camera {
 }
 
 /// Client-facing camera representation: credentials stripped, stream URLs masked.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct CameraView {
     pub id: String,
     pub site_id: Option<String>,

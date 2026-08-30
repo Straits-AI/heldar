@@ -19,9 +19,7 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/cameras", get(list_cameras).post(create_camera))
         .route(
             "/api/v1/cameras/{id}",
-            get(get_camera_handler)
-                .patch(update_camera)
-                .delete(delete_camera),
+            get(get_camera).patch(update_camera).delete(delete_camera),
         )
         .route(
             "/api/v1/cameras/{id}/test",
@@ -91,7 +89,19 @@ pub fn require_fleet_scope(principal: &Principal, action: &str) -> AppResult<()>
     Ok(())
 }
 
-async fn list_cameras(
+/// List cameras.
+///
+/// Camera-scoped: a credential carrying a camera list sees only those cameras. The refusal is a
+/// filtered list, not a 403 — a complete inventory would make the per-camera 403s pointless.
+#[utoipa::path(
+    get, path = "/api/v1/cameras", tag = "cameras",
+    responses(
+        (status = 200, description = "Cameras visible to this credential", body = [CameraView]),
+        (status = 401, description = "No credential", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `camera:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_cameras(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<CameraView>>> {
@@ -112,7 +122,19 @@ async fn list_cameras(
     Ok(Json(cams.into_iter().map(CameraView::from).collect()))
 }
 
-async fn get_camera_handler(
+/// Fetch one camera.
+///
+/// An out-of-scope camera answers exactly as an unknown one (404), so the response cannot be used to
+/// discover which cameras exist.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}", tag = "cameras",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The camera", body = CameraView),
+        (status = 404, description = "Unknown camera, or one this credential does not hold", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_camera(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -454,7 +476,17 @@ async fn update_camera(
     Ok(Json(st.camera_for(&principal, &id).await?.into()))
 }
 
-async fn delete_camera(
+/// Delete a camera and its registry rows.
+#[utoipa::path(
+    delete, path = "/api/v1/cameras/{id}", tag = "cameras",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 403, description = "Not permitted, or outside this credential's camera scope", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_camera(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,

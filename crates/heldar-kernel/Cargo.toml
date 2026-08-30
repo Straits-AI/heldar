@@ -72,3 +72,4 @@ hmac = "0.12"
 # already resolved in Cargo.lock (the rustls TLS backend under reqwest), so declaring it directly adds
 # zero new compiled crates while giving asymmetric verify with a PUBLIC key (no forgeable secret).
 ring = "0.17"
+utoipa = { version = "5.5.0", features = ["axum_extras", "chrono"] }
