@@ -183,6 +183,12 @@ pub struct Config {
     /// Turn the production guardrails (see `enforce_production_guardrails`) into hard boot failures
     /// instead of warnings, for an internet-exposed deployment.
     pub strict_prod: bool,
+    /// Refuse to boot unless no untrusted local user can read this process's command line (#126).
+    ///
+    /// Camera credentials reach ffmpeg in its argv; see ADR 0006. Off by default — a sealed
+    /// appliance does not need it, and a box that refuses to record is worse than one with a
+    /// documented exposure.
+    pub require_credential_isolation: bool,
     /// Operator's explicit declaration that this box is reachable from outside the trusted LAN
     /// (`HELDAR_INTERNET_EXPOSED=true`). The automatic detection ([`Config::internet_exposed`]) only
     /// knows about the opt-in remote paths (rendezvous / overlay / control-plane) — it CANNOT see a
@@ -844,6 +850,7 @@ impl Config {
             login_lockout_min: parse_or("HELDAR_LOGIN_LOCKOUT_MIN", 15),
             secret_key_b64: secret("HELDAR_SECRET_KEY"),
             strict_prod: parse_bool("HELDAR_STRICT_PROD", false),
+            require_credential_isolation: parse_bool("HELDAR_REQUIRE_CREDENTIAL_ISOLATION", false),
             exposed_declared: parse_bool("HELDAR_INTERNET_EXPOSED", false),
             deployment_mode,
             bootstrap_admin_user: var("HELDAR_BOOTSTRAP_ADMIN_USER"),

@@ -467,3 +467,74 @@ mod tests {
         );
     }
 }
+
+/// Refuse to boot when the deployment DECLARES credential isolation and does not have it (#126).
+///
+/// Camera credentials reach ffmpeg in its argv and cannot be removed from there without changing
+/// the media path — see ADR 0006. What a box CAN do is check the claim rather than assert it: a
+/// deployment that sets `HELDAR_REQUIRE_CREDENTIAL_ISOLATION=true` is stating that no untrusted
+/// local user can read `/proc/<pid>/cmdline`, and this verifies that from the actual mount options
+/// rather than from the operator's intention.
+///
+/// Default off, deliberately. A sealed single-operator appliance does not need it, and a box that
+/// refuses to record is worse than one with a documented exposure. Turning it on is the operator
+/// saying "hold me to this".
+///
+/// Returns the reason to refuse, or `None` to proceed.
+pub fn credential_isolation_failure(required: bool) -> Option<String> {
+    if !required {
+        return None;
+    }
+    let f = process_visibility();
+    match f.status {
+        Status::Ok => None,
+        // UNKNOWN IS A REFUSAL HERE, unlike in the report. The operator asked to be held to this
+        // claim, and "we could not check" is not evidence the claim holds — a posture endpoint may
+        // say "unverified", but a prerequisite that passes on unverified is not a prerequisite.
+        Status::Unknown | Status::Weak => Some(format!(
+            "HELDAR_REQUIRE_CREDENTIAL_ISOLATION=true, but process visibility is not restricted: \
+             {}. Camera credentials appear in ffmpeg's argv, so any local user able to read \
+             /proc/<pid>/cmdline can read them. Mount /proc with hidepid=2, or unset the variable \
+             to accept the exposure. See docs/adr/0006-rtsp-credential-exposure.md.",
+            f.detail
+        )),
+    }
+}
+
+#[cfg(test)]
+mod isolation_tests {
+    use super::*;
+
+    #[test]
+    fn the_check_is_off_by_default() {
+        assert!(
+            credential_isolation_failure(false).is_none(),
+            "a box that has not asked to be held to this must boot unchanged — refusing to record \
+             is worse than a documented exposure"
+        );
+    }
+
+    /// The refusal must name what was observed and what to do, because it fires at boot on a box
+    /// that was working a moment ago.
+    #[test]
+    fn a_declared_but_unmet_claim_is_refused_with_a_reason() {
+        let observed = process_visibility();
+        match credential_isolation_failure(true) {
+            None => assert_eq!(
+                observed.status,
+                Status::Ok,
+                "it may only pass when visibility is genuinely restricted"
+            ),
+            Some(msg) => {
+                assert_ne!(observed.status, Status::Ok);
+                assert!(msg.contains("hidepid"), "must say how to fix it: {msg}");
+                assert!(msg.contains("0006"), "must point at the ADR: {msg}");
+                assert!(
+                    msg.contains("unset the variable"),
+                    "must offer the other way out — accepting the exposure is a legitimate choice \
+                     for a sealed appliance: {msg}"
+                );
+            }
+        }
+    }
+}
