@@ -624,10 +624,14 @@ export interface RetentionLimits {
 }
 
 export interface RetentionUpdate {
+  /** Compute the effect and change nothing (#121). */
+  dry_run?: boolean;
   /** New global recordings cap in GB (> 0). Omit to leave unchanged. */
   max_recordings_gb?: number | null;
   /** New free-disk floor in GB (>= 0; 0 disables the floor). Omit to leave unchanged. */
   min_free_disk_gb?: number | null;
+  /** The `plan_hash` from a dry run. Supplying it makes the commit refuse if anything the plan depended on has moved since. Omit to commit without planning. */
+  plan_hash?: string | null;
 }
 
 export interface SemanticBody {

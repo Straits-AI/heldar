@@ -31,6 +31,7 @@ pub mod modules;
 pub mod native_anpr;
 pub mod onvif;
 pub mod perception_ingest;
+pub mod plan;
 pub mod playback_session;
 pub mod posture;
 pub mod recorder;

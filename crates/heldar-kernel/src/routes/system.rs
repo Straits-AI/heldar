@@ -237,6 +237,13 @@ pub struct RetentionUpdate {
     max_recordings_gb: Option<f64>,
     /// New free-disk floor in GB (>= 0; 0 disables the floor). Omit to leave unchanged.
     min_free_disk_gb: Option<f64>,
+    /// Compute the effect and change nothing (#121).
+    #[serde(default)]
+    dry_run: bool,
+    /// The `plan_hash` from a dry run. Supplying it makes the commit refuse if anything the plan
+    /// depended on has moved since. Omit to commit without planning.
+    #[serde(default)]
+    plan_hash: Option<String>,
 }
 
 /// Set the recording disk limits at runtime (admin only) — the retention sweeper picks them up on its
@@ -250,16 +257,27 @@ pub struct RetentionUpdate {
     operation_id = "setRetentionLimits",
     request_body = RetentionUpdate,
     responses(
-        (status = 200, description = "The new effective limits", body = RetentionLimits),
+        (status = 200, description = "The new effective limits, or the PLAN when `dry_run` is set — \
+                                      how much is recorded, the new cap, how much the sweeper \
+                                      would evict, and a `plan_hash` to present on commit"),
         (status = 400, description = "`max_recordings_gb` <= 0, or `min_free_disk_gb` < 0", body = crate::openapi::ErrorBody),
         (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 409, description = "The supplied `plan_hash` no longer describes current state — \
+                                      something moved between planning and committing (#121)", body = crate::openapi::ErrorBody),
     ),
 )]
+/// `dry_run` computes the effect and writes nothing. Supplying the resulting `plan_hash` on the
+/// commit makes it REFUSE if anything the plan depended on has moved — without that, a
+/// confirm-after-plan flow confirms a plan that no longer describes reality, which is worse than no
+/// plan at all because the operator believes they checked.
+///
+/// Omitting `plan_hash` commits directly, deliberately: a plan hash is a safety belt for automation,
+/// not a way to stop a human with an admin key changing a setting.
 pub async fn put_retention(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<RetentionUpdate>,
-) -> AppResult<Json<RetentionLimits>> {
+) -> AppResult<Json<serde_json::Value>> {
     principal.require(principal.can_admin(), "change recording limits")?;
     // Box-level setting with no camera to scope by, so refusal is the only coherent answer.
     // This one is the sharpest of the four: the value lands in settings, and the retention sweeper
@@ -268,6 +286,62 @@ pub async fn put_retention(
     // credential that can shrink this cap deletes other cameras' footage without ever naming them —
     // the request is scope-clean and the damage happens after it returns.
     crate::routes::cameras::require_fleet_scope(&principal, "change recording limits")?;
+
+    // WHAT THIS WOULD DELETE, before it deletes it (#121). The sweeper evicts oldest-first,
+    // fleet-wide, with no principal in scope — so an operator who shrinks the cap has already
+    // decided how much footage to destroy, whether or not they realise it.
+    let current_bytes: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(size_bytes), 0) FROM segments")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap_or(0);
+    let protected: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(size_bytes), 0) FROM segments WHERE evidence_locked = 1",
+    )
+    .fetch_one(&st.pool)
+    .await
+    .unwrap_or(0);
+    let new_cap_bytes = body.max_recordings_gb.map(|gb| (gb * BYTES_PER_GB) as i64);
+    let would_evict = new_cap_bytes
+        .map(|cap| (current_bytes - cap).max(0))
+        .unwrap_or(0);
+
+    let request = json!({
+        "max_recordings_gb": body.max_recordings_gb,
+        "min_free_disk_gb": body.min_free_disk_gb,
+    });
+    // The state the EFFECT depends on — not a timestamp, and not the whole database. A hash over
+    // everything changes constantly and trains people to retry without reading.
+    let state = json!({ "recorded_bytes": current_bytes, "evidence_locked_bytes": protected });
+    let plan_hash = crate::services::plan::hash(&request, &state);
+
+    if body.dry_run {
+        return Ok(Json(json!({
+            "plan_hash": plan_hash,
+            "confirmation_required": would_evict > 0,
+            "effect": {
+                "recorded_bytes": current_bytes,
+                "new_cap_bytes": new_cap_bytes,
+                "would_evict_bytes": would_evict,
+                "evidence_locked_bytes": protected,
+            },
+            "note": if would_evict > 0 {
+                "Committing this shrinks the cap below what is already recorded, so the sweeper \
+                 will delete the oldest footage on its next pass — fleet-wide, oldest-first. \
+                 Evidence-locked segments are never evicted and are excluded from what can be \
+                 freed, so a cap below `evidence_locked_bytes` cannot be met."
+            } else {
+                "Committing this evicts nothing now."
+            },
+        })));
+    }
+
+    // A supplied hash is checked; an absent one is allowed. A plan hash is a safety belt for
+    // automation, not a way to stop a human with an admin key changing a setting directly.
+    if let Err(refusal) = crate::services::plan::check(body.plan_hash.as_deref(), &plan_hash) {
+        return Err(AppError::Conflict(refusal.message()));
+    }
+
     if let Some(gb) = body.max_recordings_gb {
         if !gb.is_finite() || gb <= 0.0 {
             return Err(AppError::BadRequest(
@@ -303,7 +377,11 @@ pub async fn put_retention(
         json!({ "max_recordings_gb": body.max_recordings_gb, "min_free_disk_gb": body.min_free_disk_gb }),
     )
     .await;
-    Ok(Json(effective_limits(&st).await))
+    // The committed result, in the same envelope shape the dry run uses so a client parses one
+    // response type from this endpoint rather than two.
+    Ok(Json(
+        serde_json::to_value(effective_limits(&st).await).unwrap_or_default(),
+    ))
 }
 
 /// The live-preview transcode engine: effective value + which hardware encoders LOOK available on

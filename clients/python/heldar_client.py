@@ -634,8 +634,10 @@ class RetentionLimits:
 
 @dataclass
 class RetentionUpdate:
+    dry_run: bool = None
     max_recordings_gb: float | None = None
     min_free_disk_gb: float | None = None
+    plan_hash: str | None = None
 
 
 @dataclass
