@@ -202,8 +202,11 @@ jobs:
           TAG: ${{ github.ref_name }}
           ASSET: ${{ steps.build.outputs.asset }}
           CLI: ${{ steps.build.outputs.cli-asset }}
+          ARCH_LABEL: ${{ matrix.arch }}
         shell: bash
         run: |
           gh release upload "$TAG" "$ASSET" "$ASSET.sha256" "$ASSET.spdx.json" --clobber
           # heldarctl ships for every architecture the core does (#122).
           gh release upload "$TAG" "$CLI" "$CLI.sha256" --clobber
+          MCP="heldar-mcp-${TAG}-${ARCH_LABEL}-linux-musl"
+          gh release upload "$TAG" "$MCP" "$MCP.sha256" --clobber

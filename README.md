@@ -100,6 +100,9 @@ recording gaps — under one Ed25519 signature, verifiable offline with `python3
 [`docs/EVIDENCE.md`](docs/EVIDENCE.md). It states what it cannot prove, too: the appliance stamps its
 own clock, so the signature attests to origin and integrity, never to time.
 
+**`heldar-mcp`** lets an agent ask a box questions over MCP — a separate read-only sidecar, never an
+LLM endpoint inside the recorder: [`docs/MCP.md`](docs/MCP.md).
+
 **`heldarctl`** is the supported operator and automation interface — contexts for multiple boxes,
 stable JSON, documented exit codes, and `heldarctl doctor` as the one command that tells an installer
 what to fix: [`docs/HELDARCTL.md`](docs/HELDARCTL.md). It ships for the same architectures as the

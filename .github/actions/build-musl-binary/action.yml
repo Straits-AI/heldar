@@ -31,7 +31,7 @@ runs:
       shell: bash
       env:
         TARGET: ${{ inputs.target }}
-      run: cross build --release --locked --target "$TARGET" -p heldar-server -p heldarctl
+      run: cross build --release --locked --target "$TARGET" -p heldar-server -p heldarctl -p heldar-mcp
     - name: Package + checksum
       id: package
       shell: bash
@@ -45,7 +45,7 @@ runs:
         # on the box an installer is standing in front of is not the supported interface, whatever
         # the docs say.
         assets=()
-        for name in heldar-core heldarctl; do
+        for name in heldar-core heldarctl heldar-mcp; do
           bin="target/$TARGET/release/$name"
           test -f "$bin" || { echo "::error::binary not found: $bin"; exit 1; }
           asset="$name-$VERSION-$ARCH-linux-musl"
