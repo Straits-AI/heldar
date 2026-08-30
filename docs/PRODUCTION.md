@@ -174,6 +174,35 @@ stands before committing to the flag. The full evaluation — including the loop
 and why it is deferred — is in
 [ADR 0006](adr/0006-rtsp-credential-exposure.md).
 
+**Plan a change before making it.** The retention cap is the sharpest mutation on a box: the value
+lands in settings and the sweeper reads it *later*, evicting oldest-first fleet-wide. Shrinking it is
+deciding how much footage to destroy, whether or not you realise it.
+
+```bash
+# What would this do?
+curl -sX PUT $H/api/v1/system/retention -H "$AUTH" -H 'content-type: application/json' \
+  -d '{"max_recordings_gb": 500, "dry_run": true}'
+# -> { "plan_hash": "…", "confirmation_required": true,
+#      "effect": { "recorded_bytes": …, "would_evict_bytes": …, "evidence_locked_bytes": … } }
+
+# Commit exactly that plan:
+curl -sX PUT $H/api/v1/system/retention -H "$AUTH" -H 'content-type: application/json' \
+  -d '{"max_recordings_gb": 500, "plan_hash": "…"}'
+```
+
+Supplying the hash makes the commit **refuse with 409** if anything the plan depended on has moved —
+another operator changed a setting, or more footage was recorded. Without it, a confirm-after-plan
+flow confirms a plan that no longer describes reality, which is worse than no plan at all because the
+operator believes they checked.
+
+Omitting `plan_hash` commits directly, deliberately: it is a safety belt for automation, not a way to
+stop a human with an admin key changing a setting — making it mandatory would push people to script
+around it.
+
+**Evidence-locked segments are never evicted**, so a cap below `evidence_locked_bytes` cannot be met.
+The plan reports that figure so you can see it before committing rather than discovering it from a
+sweeper that never converges.
+
 **Container hardening:** add `deploy/compose.hardened.yml` as a third overlay —
 `-f compose.yml -f compose.prod.yml -f compose.hardened.yml`. `compose.prod.yml` hardens the
 *application* posture (auth, cookies, sessions); this hardens the *container*: read-only root

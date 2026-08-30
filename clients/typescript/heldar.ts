@@ -542,8 +542,10 @@ export interface RetentionLimits {
 }
 
 export interface RetentionUpdate {
+  dry_run?: boolean;
   max_recordings_gb?: number | null;
   min_free_disk_gb?: number | null;
+  plan_hash?: string | null;
 }
 
 export interface SemanticBody {
@@ -1797,8 +1799,8 @@ export class HeldarClient {
   }
 
   /** Requires admin, fleet-only. */
-  setRetentionLimits(body: RetentionUpdate): Promise<RetentionLimits> {
-    return this.call<RetentionLimits>("PUT", `/api/v1/system/retention`, body);
+  setRetentionLimits(body: RetentionUpdate): Promise<unknown> {
+    return this.call<unknown>("PUT", `/api/v1/system/retention`, body);
   }
 
   /** Requires capability `system:read`, scope-neutral. */

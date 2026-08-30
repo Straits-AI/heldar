@@ -679,8 +679,10 @@ pub struct RetentionLimits {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetentionUpdate {
+    pub dry_run: Option<bool>,
     pub max_recordings_gb: Option<f64>,
     pub min_free_disk_gb: Option<f64>,
+    pub plan_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
