@@ -510,6 +510,23 @@ fn forward_response_header(name: &str) -> bool {
     )
 }
 
+/// A relay error body in the SAME shape `AppError::into_response` emits.
+///
+/// The relay hand-builds its responses (it is proxying, not returning from a handler), so it does not
+/// go through `AppError` — and without this it was the one production path where a client got
+/// `{"error": …}` with no `code`/`retryable` beside it. A caller using one parser for local and
+/// relayed calls would silently see `code: undefined` only over the remote path.
+fn relay_error(msg: &str, status: u16) -> String {
+    let status =
+        axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+    serde_json::json!({
+        "error": msg,
+        "code": crate::error::AppError::code_for_status(status),
+        "retryable": crate::error::AppError::retryable_for_status(status),
+    })
+    .to_string()
+}
+
 /// Replay one relay job against the local kernel; returns (status, response headers, base64 body).
 async fn replay_relay_job(
     state: &AppState,
@@ -529,7 +546,7 @@ async fn replay_relay_job(
             return (
                 400,
                 HashMap::new(),
-                B64.encode(br#"{"error":"bad relay path"}"#),
+                B64.encode(relay_error("bad relay path", 400).as_bytes()),
             );
         }
     };
@@ -540,7 +557,7 @@ async fn replay_relay_job(
         return (
             403,
             HashMap::new(),
-            B64.encode(br#"{"error":"relay path not allowed"}"#),
+            B64.encode(relay_error("relay path not allowed", 403).as_bytes()),
         );
     }
     let method = reqwest::Method::from_bytes(job.method.as_bytes()).unwrap_or(reqwest::Method::GET);
@@ -582,7 +599,9 @@ async fn replay_relay_job(
                 return (
                     413,
                     HashMap::new(),
-                    B64.encode(br#"{"error":"relay response too large; use range requests"}"#),
+                    B64.encode(
+                        relay_error("relay response too large; use range requests", 413).as_bytes(),
+                    ),
                 );
             }
             let body = resp.bytes().await.unwrap_or_default();
@@ -596,7 +615,7 @@ async fn replay_relay_job(
         Err(e) => (
             502,
             HashMap::new(),
-            B64.encode(format!(r#"{{"error":"relay upstream: {e}"}}"#).as_bytes()),
+            B64.encode(relay_error(&format!("relay upstream: {e}"), 502).as_bytes()),
         ),
     }
 }

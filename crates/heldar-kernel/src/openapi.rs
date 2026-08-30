@@ -28,7 +28,7 @@ use crate::state::AppState;
 ///
 /// One shape, documented once and referenced everywhere, so a client writes one error path instead
 /// of guessing per route. This mirrors what `AppError::into_response` actually emits today
-/// (`{"error": "..."}`) rather than an aspirational envelope — a spec that describes a body the
+/// (`{"error": "...", "code": "...", "retryable": false}`) rather than an aspirational envelope — a spec that describes a body the
 /// server does not send is worse than no spec.
 #[derive(serde::Serialize, utoipa::ToSchema)]
 pub struct ErrorBody {

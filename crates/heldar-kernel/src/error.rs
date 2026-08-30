@@ -29,44 +29,47 @@ pub enum AppError {
 pub type AppResult<T> = Result<T, AppError>;
 
 impl AppError {
-    /// A stable, machine-readable identifier for this failure.
+    /// The stable machine-readable code for a response status.
     ///
-    /// Separate from the message on purpose: messages get reworded, and an integration that matched
-    /// on prose would break silently when someone improved a sentence. These strings are API.
-    pub fn code(&self) -> &'static str {
-        match self {
-            AppError::NotFound(_) => "not_found",
-            AppError::BadRequest(_) => "bad_request",
-            AppError::Conflict(_) => "conflict",
-            AppError::Unauthorized(_) => "unauthorized",
-            AppError::Forbidden(_) => "forbidden",
-            AppError::Unavailable(_) => "unavailable",
-            // The DB variant splits by cause: a busy pool is worth retrying, a constraint violation
-            // never is, and a client cannot tell them apart from a bare 500.
-            AppError::Db(sqlx::Error::RowNotFound) => "not_found",
-            AppError::Db(sqlx::Error::PoolTimedOut) => "busy",
-            AppError::Db(sqlx::Error::Database(_)) => "conflict",
-            AppError::Db(_) => "internal",
-            AppError::Other(_) => "internal",
+    /// Derived from the STATUS the classifier already chose, not from the variant. Deriving it from
+    /// the variant meant classifying twice, and the two disagreed: `into_response` splits
+    /// `Db(Database(_))` four ways — busy is 503, a unique violation 409, a foreign-key violation
+    /// 400, anything else 500 — while a second match here returned "conflict" for all four. A busy
+    /// SQLite therefore answered `503` with `Retry-After` AND `code: "conflict", retryable: false`,
+    /// contradicting itself inside one response.
+    ///
+    /// One classification, one place. This is the same rule that `CapSet::expanded` and
+    /// `subject_still_stands` exist to enforce: a question with two implementations eventually has
+    /// two answers.
+    pub fn code_for_status(status: StatusCode) -> &'static str {
+        match status {
+            StatusCode::BAD_REQUEST => "bad_request",
+            StatusCode::UNAUTHORIZED => "unauthorized",
+            StatusCode::FORBIDDEN => "forbidden",
+            StatusCode::NOT_FOUND => "not_found",
+            StatusCode::CONFLICT => "conflict",
+            StatusCode::PAYLOAD_TOO_LARGE => "payload_too_large",
+            StatusCode::TOO_MANY_REQUESTS => "rate_limited",
+            StatusCode::SERVICE_UNAVAILABLE => "unavailable",
+            _ => "internal",
         }
     }
 
     /// Whether retrying the SAME request could plausibly succeed.
     ///
-    /// Only transient saturation qualifies. A 404 or a validation failure will fail identically
-    /// forever, and a client that retries them just adds load to a box already answering correctly.
-    pub fn is_retryable(&self) -> bool {
+    /// Only transient saturation: 503 (a backend missing, or the database busy) and 429. A 404 or a
+    /// validation failure fails identically forever, and a client retrying them only adds load to a
+    /// box that is answering correctly.
+    pub fn retryable_for_status(status: StatusCode) -> bool {
         matches!(
-            self,
-            AppError::Unavailable(_) | AppError::Db(sqlx::Error::PoolTimedOut)
+            status,
+            StatusCode::SERVICE_UNAVAILABLE | StatusCode::TOO_MANY_REQUESTS
         )
     }
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let code = self.code();
-        let retryable = self.is_retryable();
         let (status, msg) = match self {
             AppError::NotFound(m) => (StatusCode::NOT_FOUND, m),
             AppError::BadRequest(m) => (StatusCode::BAD_REQUEST, m),
@@ -141,6 +144,9 @@ impl IntoResponse for AppError {
         // object renders as "[object Object]". The machine-readable half is added ALONGSIDE instead —
         // same information, no migration, no version bump. Nest it later only if something actually
         // needs the nesting.
+        // Derived AFTER the classifier, from its own answer.
+        let code = AppError::code_for_status(status);
+        let retryable = AppError::retryable_for_status(status);
         let mut resp = (
             status,
             Json(json!({
@@ -209,12 +215,11 @@ mod tests {
             (AppError::BadRequest("x".into()), false),
             (AppError::Forbidden("x".into()), false),
         ] {
-            let code = e.code();
-            let (_, body) = body_of(e).await;
+            let (status, body) = body_of(e).await;
             assert_eq!(
                 body["retryable"].as_bool(),
                 Some(want),
-                "wrong retryability for code `{code}`"
+                "wrong retryability for status {status}"
             );
         }
     }
@@ -230,12 +235,97 @@ mod tests {
         );
     }
 
-    /// The DB variant splits by cause — a busy pool is worth retrying, a constraint violation is not,
-    /// and a bare 500 cannot tell a client which it hit.
-    #[test]
-    fn db_errors_split_by_cause() {
-        assert_eq!(AppError::Db(sqlx::Error::PoolTimedOut).code(), "busy");
-        assert_eq!(AppError::Db(sqlx::Error::RowNotFound).code(), "not_found");
-        assert_eq!(AppError::Other(anyhow::anyhow!("x")).code(), "internal");
+    /// The bug this replaced: `code`/`retryable` were derived from the VARIANT while the status came
+    /// from a four-way split inside `Db(Database(_))`. A busy SQLite answered 503 + Retry-After and
+    /// `code: "conflict", retryable: false` in the same response.
+    ///
+    /// Driven through a REAL sqlx error, because the previous test asserted on `.code()` directly and
+    /// never constructed the `Database(_)` variant at all — the one whose name promised to cover the
+    /// split was the one that skipped it.
+    #[tokio::test]
+    async fn a_busy_database_is_not_labelled_a_conflict() {
+        // A real SQLITE_BUSY, produced by holding a write lock on one connection while another
+        // writes with no busy_timeout to wait it out.
+        let dir = std::env::temp_dir().join(format!("heldar_busy_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("busy.db");
+        let url = format!("sqlite://{}?mode=rwc", db.display());
+        let holder = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect(&url)
+            .await
+            .unwrap();
+        sqlx::query("CREATE TABLE IF NOT EXISTS t (a INTEGER)")
+            .execute(&holder)
+            .await
+            .unwrap();
+        let mut tx = holder.begin().await.unwrap();
+        sqlx::query("INSERT INTO t VALUES (1)")
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+
+        // busy_timeout(0) so the second writer reports SQLITE_BUSY immediately instead of waiting.
+        let opts: sqlx::sqlite::SqliteConnectOptions = url
+            .parse::<sqlx::sqlite::SqliteConnectOptions>()
+            .unwrap()
+            .busy_timeout(std::time::Duration::from_millis(0));
+        let other = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .unwrap();
+        let err = sqlx::query("INSERT INTO t VALUES (2)")
+            .execute(&other)
+            .await
+            .expect_err("the write should hit the holder's lock");
+
+        let (status, body) = body_of(AppError::Db(err)).await;
+        let _ = tx.rollback().await;
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Whatever the classifier decided, the code and retryability must AGREE with it.
+        assert_eq!(
+            body["code"].as_str(),
+            Some(AppError::code_for_status(status)),
+            "code disagrees with the status the classifier chose ({status})"
+        );
+        assert_eq!(
+            body["retryable"].as_bool(),
+            Some(AppError::retryable_for_status(status))
+        );
+        if status == StatusCode::SERVICE_UNAVAILABLE {
+            assert_eq!(body["code"].as_str(), Some("unavailable"));
+            assert_eq!(body["retryable"].as_bool(), Some(true));
+        }
+    }
+
+    /// The general form of the same rule: for every variant, the emitted code and retryability are
+    /// the ones the chosen status implies. Nothing may classify twice.
+    #[tokio::test]
+    async fn code_and_retryable_always_agree_with_the_status() {
+        for e in [
+            AppError::NotFound("x".into()),
+            AppError::BadRequest("x".into()),
+            AppError::Conflict("x".into()),
+            AppError::Unauthorized("x".into()),
+            AppError::Forbidden("x".into()),
+            AppError::Unavailable("x".into()),
+            AppError::Db(sqlx::Error::PoolTimedOut),
+            AppError::Db(sqlx::Error::RowNotFound),
+            AppError::Other(anyhow::anyhow!("x")),
+        ] {
+            let (status, body) = body_of(e).await;
+            assert_eq!(
+                body["code"].as_str(),
+                Some(AppError::code_for_status(status)),
+                "code disagrees with status {status}"
+            );
+            assert_eq!(
+                body["retryable"].as_bool(),
+                Some(AppError::retryable_for_status(status)),
+                "retryable disagrees with status {status}"
+            );
+        }
     }
 }
