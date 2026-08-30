@@ -127,8 +127,14 @@ import type {
 
 export class ApiError extends Error {
   status: number;
-  constructor(status: number, message: string) {
+  /** Stable server-side identifier (`not_found`, `busy`, …). Branch on this, never on `message`. */
+  code?: string;
+  /** Server's own answer to "is retrying this worth it". Absent on network-level failures. */
+  retryable?: boolean;
+  constructor(status: number, message: string, code?: string, retryable?: boolean) {
     super(message);
+    this.code = code;
+    this.retryable = retryable;
     this.name = "ApiError";
     this.status = status;
   }
@@ -201,13 +207,23 @@ export async function request<T>(
 
   if (!res.ok) {
     let message = `HTTP ${res.status} ${res.statusText}`;
+    let code: string | undefined;
+    let retryable: boolean | undefined;
     try {
-      const data = (await res.json()) as { error?: string; message?: string };
+      const data = (await res.json()) as {
+        error?: string;
+        message?: string;
+        code?: string;
+        retryable?: boolean;
+      };
       message = data.error ?? data.message ?? message;
+      // Optional: an older box, or a non-kernel error body, simply has neither.
+      code = data.code;
+      retryable = data.retryable;
     } catch {
       /* non-JSON error body — keep the status line */
     }
-    throw new ApiError(res.status, message);
+    throw new ApiError(res.status, message, code, retryable);
   }
 
   if (res.status === 204) return undefined as T;

@@ -35,6 +35,14 @@ pub struct ErrorBody {
     /// Human-readable message. Not a stable identifier — do not match on it.
     #[schema(example = "camera cam_x not found")]
     pub error: String,
+    /// Stable machine-readable identifier: `not_found`, `bad_request`, `conflict`, `unauthorized`,
+    /// `forbidden`, `unavailable`, `busy`, `internal`. Branch on this, not on `error`.
+    #[schema(example = "not_found")]
+    pub code: String,
+    /// Whether retrying the SAME request could plausibly succeed. True only for transient
+    /// saturation; a `404` or a validation failure will fail identically forever. Retryable
+    /// responses also carry `Retry-After`.
+    pub retryable: bool,
 }
 
 #[derive(OpenApi)]
