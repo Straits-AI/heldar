@@ -105,3 +105,23 @@ export function friendlyError(e: unknown): string {
   }
   return e instanceof Error ? e.message : String(e);
 }
+
+/**
+ * How to label a bare "HH:MM" schedule window with the clock it is actually read in (#125).
+ *
+ * A recording window is a wall-clock rule evaluated in the camera's site timezone, or — when no zone
+ * is configured anywhere — the server's own clock. Rendering "18:00" unlabelled is how an operator
+ * in Kuala Lumpur comes to believe they scheduled 6pm local on a box running UTC, and the recorder
+ * is then eight hours out every day with nothing on screen to say so.
+ *
+ * Returns `null` only while the setting is still loading, so the caller renders the panel unchanged
+ * rather than flashing a wrong label.
+ */
+export function scheduleClockLabel(
+  tz: { configured: string | null; server_local_offset: string } | null | undefined,
+): string | null {
+  if (!tz) return null;
+  // An explicit zone names itself. Otherwise say WHOSE clock it is, not "UTC" — "the server's
+  // clock" is the honest description, and it is the thing an operator can go and check.
+  return tz.configured ?? `server clock (${tz.server_local_offset})`;
+}

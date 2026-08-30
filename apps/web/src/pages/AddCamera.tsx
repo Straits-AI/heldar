@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { ChangeEventHandler, FormEvent, ReactNode } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
+import { usePoll } from "../lib/usePoll";
 import type { CameraCreate, Principal, RecordMode, RecordStream } from "../lib/types";
 import {
   Button,
@@ -152,6 +153,8 @@ export function AddCamera() {
   const [name, setName] = useState(() => searchParams.get("name") ?? "");
   const [id, setId] = useState("");
   const [siteId, setSiteId] = useState("");
+  const sites = usePoll(() => api.listSites(), 60000);
+  const chosenSite = (sites.data?.sites ?? []).find((s) => s.id === siteId);
   const [vendor, setVendor] = useState<Vendor>(() => {
     const v = searchParams.get("vendor");
     return v === "hikvision" || v === "dahua" || v === "generic" ? v : "hikvision";
@@ -327,13 +330,29 @@ export function AddCamera() {
                   placeholder="auto from name"
                 />
               </Field>
-              <Field label="Site ID (optional)" htmlFor="site">
-                <Input
-                  id="site"
-                  value={siteId}
-                  onChange={(e) => setSiteId(e.target.value)}
-                  placeholder="hq-lobby"
-                />
+              {/* A PICKER, NOT FREE TEXT (#125). A camera's site decides which clock its recording
+                  schedule is read in, and an unknown id is refused by the foreign key — so typing
+                  one was a 400 waiting to happen, with nothing to say which ids were real. The
+                  chosen site's timezone is shown because that is the consequence of the choice. */}
+              <Field
+                label="Site (optional)"
+                htmlFor="site"
+                hint={
+                  chosenSite?.timezone
+                    ? `Schedules for this camera follow ${chosenSite.timezone}`
+                    : chosenSite
+                      ? "This site has no timezone set — the box-wide one applies"
+                      : undefined
+                }
+              >
+                <Select id="site" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
+                  <option value="">No site</option>
+                  {(sites.data?.sites ?? []).map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} ({s.id}){s.timezone ? ` — ${s.timezone}` : ""}
+                    </option>
+                  ))}
+                </Select>
               </Field>
               <Field label="Vendor" htmlFor="vendor">
                 <Select

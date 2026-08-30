@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { friendlyError } from "./format";
+import { friendlyError, scheduleClockLabel } from "./format";
 import { ApiError } from "./api";
 
 describe("friendlyError", () => {
@@ -29,5 +29,28 @@ describe("ApiError", () => {
     expect(e.code).toBeUndefined();
     expect(e.retryable).toBeUndefined();
     expect(friendlyError(e)).toBe("gone");
+  });
+});
+
+describe("scheduleClockLabel", () => {
+  it("names the configured zone", () => {
+    expect(
+      scheduleClockLabel({ configured: "Asia/Kuala_Lumpur", server_local_offset: "+00:00" }),
+    ).toBe("Asia/Kuala_Lumpur");
+  });
+
+  it("says whose clock it is when nothing is configured, rather than implying UTC", () => {
+    // The failure this guards: labelling an unconfigured box "UTC" reads as a deliberate choice,
+    // when the schedule actually follows whatever TZ the container happens to have.
+    const label = scheduleClockLabel({ configured: null, server_local_offset: "+08:00" });
+    expect(label).toContain("server clock");
+    expect(label).toContain("+08:00");
+    expect(label).not.toBe("UTC");
+  });
+
+  it("renders nothing while the setting is still loading", () => {
+    // Rather than flashing a label that might be wrong.
+    expect(scheduleClockLabel(null)).toBeNull();
+    expect(scheduleClockLabel(undefined)).toBeNull();
   });
 });

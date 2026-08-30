@@ -16,6 +16,7 @@ import { hevcDecodeSupported, HEVC_UNSUPPORTED_NOTE } from "../lib/codec";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { api, ApiError } from "../lib/api";
+import { scheduleClockLabel } from "../lib/format";
 import { usePoll } from "../lib/usePoll";
 import type {
   CameraUpdate,
@@ -396,6 +397,12 @@ export function RecordingSchedulePanel({
   canManage: boolean;
 }) {
   const schedules = usePoll(() => api.listSchedules(cameraId), 20000, [cameraId]);
+  /* WHOSE 18:00 IS THIS? The bare "HH:MM" below is a wall-clock rule read in the camera's site
+   * timezone (#125), or the server's own clock when no zone is configured. Rendering it unlabelled
+   * is how an operator in Kuala Lumpur comes to believe they scheduled 6pm local on a box running
+   * UTC — and the recorder is then eight hours out, every day, with nothing on screen to say so. */
+  const tz = usePoll(() => api.getTimezone(), 60000);
+  const clock = scheduleClockLabel(tz.data);
 
   const [days, setDays] = useState<number[]>([0, 1, 2, 3, 4]);
   const [start, setStart] = useState("08:00");
@@ -462,11 +469,17 @@ export function RecordingSchedulePanel({
   return (
     <Panel
       title="Recording Schedule"
-      subtitle="Time-of-day windows"
+      subtitle={clock ? `Time-of-day windows — ${clock}` : "Time-of-day windows"}
       actions={
         <span className="font-mono text-[11px] tabular-nums text-fg-muted">{list.length}</span>
       }
     >
+      {tz.data && tz.data.source === "unset" ? (
+        <p className="mb-3 font-mono text-[11px] leading-relaxed text-fg-muted">
+          These times follow the server&apos;s clock ({tz.data.server_local_offset}) because no
+          timezone is set. Set one on the System page so they follow the site instead.
+        </p>
+      ) : null}
       {list.length === 0 ? (
         <p className="font-mono text-xs text-fg-muted">
           {schedules.error ?? "No windows. Add one below — the recorder runs only inside these windows."}

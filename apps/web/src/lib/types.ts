@@ -455,6 +455,29 @@ export interface RetentionUpdate {
 }
 
 /** Live-preview transcode engine (effective value + detected hardware encoders). */
+/** The clock this box interprets schedules and relative searches in (#125). */
+export interface TimezoneSettings {
+  /** IANA identifier configured box-wide, or null when nothing is configured. */
+  configured: string | null;
+  /** Where the effective zone came from — `site` beats `default` beats nothing. */
+  source: "site" | "default" | "unset";
+  /** The server's own local offset, for spotting a container whose TZ disagrees. */
+  server_local_offset: string;
+  unconfigured_behaviour: string;
+}
+export interface TimezoneUpdate {
+  timezone: string;
+}
+
+/** A site, and the timezone its cameras' schedules are read in. */
+export interface Site {
+  id: string;
+  name: string;
+  /** null means no zone chosen — NOT UTC. The box-wide default applies. */
+  timezone: string | null;
+  created_at: string;
+}
+
 export interface TranscodeSettings {
   engine: "software" | "vaapi" | "nvenc" | string;
   overridden: boolean;

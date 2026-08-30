@@ -89,6 +89,9 @@ import type {
   RetentionLimits,
   RetentionUpdate,
   TranscodeSettings,
+  TimezoneSettings,
+  TimezoneUpdate,
+  Site,
   TranscodeUpdate,
   DbStatus,
   DbLimitUpdate,
@@ -370,6 +373,14 @@ export const api = {
       method: "PUT",
       body: JSON.stringify(body),
     }),
+  getTimezone: () => request<TimezoneSettings>("/api/v1/system/timezone"),
+  setTimezone: (body: TimezoneUpdate) =>
+    request<TimezoneSettings>("/api/v1/system/timezone", {
+      method: "PUT",
+      body: JSON.stringify(body),
+    }),
+  listSites: () => request<{ sites: Site[] }>("/api/v1/sites"),
+
   getTranscode: () => request<TranscodeSettings>("/api/v1/system/transcode"),
   setTranscode: (body: TranscodeUpdate) =>
     request<TranscodeSettings>("/api/v1/system/transcode", {
