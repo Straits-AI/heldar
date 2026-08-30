@@ -34,7 +34,7 @@ pub const MAX_IMAGE_B64_CHARS: usize = 10_000_000;
 const MAX_K: usize = 100;
 const DEFAULT_K: usize = 24;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SemanticBody {
     pub text: Option<String>,
     /// Base64 image (JPEG/PNG). A `data:` URL prefix is tolerated and stripped.

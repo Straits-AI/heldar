@@ -695,6 +695,20 @@ async fn run_subcommand(cmd: &str, cfg: &Config) -> anyhow::Result<()> {
 
 /// Count clip files on disk that predate the `media_artifacts` sidecar, and say so once at boot.
 ///
+/// The WHOLE API contract: the kernel's routes plus every app crate's.
+///
+/// Assembled here because this is the only crate that depends on all of them — the kernel cannot
+/// name an app crate's handler, and an app crate cannot name the kernel's document. Serving a
+/// partial document would be worse than serving none: an integrator reasonably reads a missing
+/// route as a route that does not exist.
+pub fn api_document() -> serde_json::Value {
+    heldar_kernel::openapi::document_with(&[
+        heldar_entry::openapi::fragment(),
+        heldar_movement::openapi::fragment(),
+        heldar_search::openapi::fragment(),
+    ])
+}
+
 /// There is no `clips` table and no camera id inside `clip_<uuid>.mp4`, so migration 0013 cannot
 /// backfill attribution for clips exported before it ran. Those files stay readable for every
 /// unscoped credential (which is every human role) and become 403 for a camera-SCOPED credential.

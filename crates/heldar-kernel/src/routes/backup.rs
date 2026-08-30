@@ -213,7 +213,19 @@ fn merge_secret_config(old: &serde_json::Value, mut new: serde_json::Value) -> s
 
 // ---- Destinations ----
 
-async fn list_destinations(
+/// Backup destinations, with every secret `config` value masked to `***`.
+///
+/// Refused outright to a camera-scoped credential: a destination is an off-box egress channel that
+/// names no camera, and reading where footage is shipped is most of what it takes to repoint it.
+#[utoipa::path(
+    get, path = "/api/v1/backup/destinations", tag = "backup",
+    operation_id = "listBackupDestinations",
+    responses(
+        (status = 200, description = "Destinations, credentials masked", body = [BackupDestinationView]),
+        (status = 403, description = "Missing `system:read`, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_destinations(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<BackupDestinationView>>> {
@@ -232,7 +244,21 @@ async fn list_destinations(
     ))
 }
 
-async fn create_destination(
+/// Create a backup destination.
+///
+/// Refused to a camera-scoped credential: footage leaves via rclone rather than over HTTP, so no
+/// per-route media check would ever see the bytes this channel ships.
+#[utoipa::path(
+    post, path = "/api/v1/backup/destinations", tag = "backup",
+    operation_id = "createBackupDestination",
+    request_body = BackupDestinationCreate,
+    responses(
+        (status = 201, description = "The created destination, credentials masked", body = BackupDestinationView),
+        (status = 400, description = "Missing `name`, `kind` outside local|sftp|ftp|s3, or a non-object `config`", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn create_destination(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<BackupDestinationCreate>,
@@ -296,7 +322,23 @@ async fn create_destination(
     Ok((StatusCode::CREATED, Json(BackupDestinationView::from(dest))))
 }
 
-async fn update_destination(
+/// Update a backup destination.
+///
+/// A secret sent back as the `***` placeholder keeps its stored value, so editing an unrelated
+/// field never wipes the credentials.
+#[utoipa::path(
+    patch, path = "/api/v1/backup/destinations/{id}", tag = "backup",
+    operation_id = "updateBackupDestination",
+    params(("id" = String, Path, description = "Destination id")),
+    request_body = BackupDestinationUpdate,
+    responses(
+        (status = 200, description = "The updated destination, credentials masked", body = BackupDestinationView),
+        (status = 400, description = "`kind` outside local|sftp|ftp|s3, or a non-object `config`", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown destination", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn update_destination(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -366,7 +408,18 @@ async fn update_destination(
     Ok(Json(BackupDestinationView::from(dest)))
 }
 
-async fn delete_destination(
+/// Delete a backup destination.
+#[utoipa::path(
+    delete, path = "/api/v1/backup/destinations/{id}", tag = "backup",
+    operation_id = "deleteBackupDestination",
+    params(("id" = String, Path, description = "Destination id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 403, description = "Missing `registry:manage`, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown destination", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_destination(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -401,7 +454,21 @@ async fn delete_destination(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn test_destination(
+/// Probe a destination for connectivity and writability.
+///
+/// A failed probe is a 200 carrying `ok: false` and the error, not a 4xx — the request succeeded,
+/// the transfer would not have.
+#[utoipa::path(
+    post, path = "/api/v1/backup/destinations/{id}/test", tag = "backup",
+    operation_id = "testBackupDestination",
+    params(("id" = String, Path, description = "Destination id")),
+    responses(
+        (status = 200, description = "Probe result (`ok: false` when the destination is unreachable)", body = BackupTestResult),
+        (status = 403, description = "Missing `registry:manage`, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown destination", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn test_destination(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -428,7 +495,20 @@ async fn test_destination(
 
 // ---- Policies ----
 
-async fn list_policies(
+/// Scheduled backup policies visible to this credential.
+///
+/// A camera-scoped credential sees only policies whose stored selection is a subset of its own
+/// cameras. A fleet-wide policy — an EMPTY `camera_ids`, which means every camera on the box — is
+/// owned by no scoped credential and is not listed for one.
+#[utoipa::path(
+    get, path = "/api/v1/backup/policies", tag = "backup",
+    operation_id = "listBackupPolicies",
+    responses(
+        (status = 200, description = "Policies visible to this credential, oldest first", body = [BackupPolicy]),
+        (status = 403, description = "Missing `system:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_policies(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<BackupPolicy>>> {
@@ -452,7 +532,23 @@ async fn list_policies(
     Ok(Json(query.fetch_all(&st.pool).await?))
 }
 
-async fn create_policy(
+/// Create a scheduled backup policy.
+///
+/// An empty or omitted `camera_ids` means every camera on the box for an unscoped caller; for a
+/// camera-scoped one it is confined to that credential's own cameras, never the fleet.
+/// `schedule_interval_s` is clamped to a 60s floor.
+#[utoipa::path(
+    post, path = "/api/v1/backup/policies", tag = "backup",
+    operation_id = "createBackupPolicy",
+    request_body = BackupPolicyCreate,
+    responses(
+        (status = 201, description = "The created policy", body = BackupPolicy),
+        (status = 400, description = "Missing `name`, or `camera_ids` that is not an array of id strings", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or `camera_ids` naming a camera outside the credential's scope", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown `destination_id`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn create_policy(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<BackupPolicyCreate>,
@@ -506,7 +602,24 @@ async fn create_policy(
     Ok((StatusCode::CREATED, Json(policy)))
 }
 
-async fn update_policy(
+/// Update a backup policy.
+///
+/// Omitting `camera_ids` leaves the stored selection byte-for-byte alone; sending one may narrow or
+/// re-point it but never widen it past the caller's scope. A policy this credential does not own
+/// answers 404, identical to an unknown id, so the id space cannot be probed.
+#[utoipa::path(
+    patch, path = "/api/v1/backup/policies/{id}", tag = "backup",
+    operation_id = "updateBackupPolicy",
+    params(("id" = String, Path, description = "Policy id")),
+    request_body = BackupPolicyUpdate,
+    responses(
+        (status = 200, description = "The updated policy", body = BackupPolicy),
+        (status = 400, description = "`camera_ids` that is not an array of id strings", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or `camera_ids` naming a camera outside the credential's scope", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown policy, one this credential does not own, or an unknown `destination_id`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn update_policy(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -579,7 +692,20 @@ async fn update_policy(
     Ok(Json(policy))
 }
 
-async fn delete_policy(
+/// Delete a backup policy.
+///
+/// A policy this credential does not own answers the same 404 as an unknown id.
+#[utoipa::path(
+    delete, path = "/api/v1/backup/policies/{id}", tag = "backup",
+    operation_id = "deleteBackupPolicy",
+    params(("id" = String, Path, description = "Policy id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 403, description = "Missing `registry:manage`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown policy, or one this credential does not own", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_policy(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -609,7 +735,22 @@ async fn delete_policy(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn trigger_policy(
+/// Run a policy now, outside its schedule.
+///
+/// Returns 202 with the created job: the transfer continues after the response. The selection is
+/// re-confined to the caller's scope at this moment, and the ordering credential is recorded on the
+/// job so a revocation mid-transfer can stop it.
+#[utoipa::path(
+    post, path = "/api/v1/backup/policies/{id}/trigger", tag = "backup",
+    operation_id = "triggerBackupPolicy",
+    params(("id" = String, Path, description = "Policy id")),
+    responses(
+        (status = 202, description = "The job created for this run", body = BackupJob),
+        (status = 403, description = "Missing `registry:manage`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown policy, or one this credential does not own", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn trigger_policy(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -650,7 +791,7 @@ async fn trigger_policy(
 // ---- Jobs ----
 
 #[derive(Debug, Deserialize)]
-struct JobQuery {
+pub struct JobQuery {
     policy_id: Option<String>,
     status: Option<String>,
     limit: Option<i64>,
@@ -673,7 +814,25 @@ fn redact_creator(principal: &Principal, mut jobs: Vec<BackupJob>) -> Vec<Backup
     jobs
 }
 
-async fn list_jobs(
+/// The backup job ledger, newest first.
+///
+/// Scope-filtered in SQL, before `limit`, so a scoped caller's own rows cannot fall off the end
+/// behind newer fleet ones. `created_by`/`created_by_kind` are blanked for a camera-scoped reader —
+/// they identify a credential, which that reader is refused elsewhere.
+#[utoipa::path(
+    get, path = "/api/v1/backup/jobs", tag = "backup",
+    operation_id = "listBackupJobs",
+    params(
+        ("policy_id" = Option<String>, Query, description = "Only jobs from this policy"),
+        ("status" = Option<String>, Query, description = "pending | running | completed | error"),
+        ("limit" = Option<i64>, Query, description = "Max rows, clamped to 1..=2000 (default 100)"),
+    ),
+    responses(
+        (status = 200, description = "Jobs visible to this credential, newest first", body = [BackupJob]),
+        (status = 403, description = "Missing `system:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_jobs(
     State(st): State<AppState>,
     principal: Principal,
     Query(q): Query<JobQuery>,
@@ -708,7 +867,20 @@ async fn list_jobs(
     Ok(Json(redact_creator(&principal, rows)))
 }
 
-async fn get_job(
+/// One backup job.
+///
+/// A job this credential does not own answers 404, identical to an unknown id.
+#[utoipa::path(
+    get, path = "/api/v1/backup/jobs/{id}", tag = "backup",
+    operation_id = "getBackupJob",
+    params(("id" = String, Path, description = "Job id")),
+    responses(
+        (status = 200, description = "The job", body = BackupJob),
+        (status = 403, description = "Missing `system:read`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown job, or one this credential does not own", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_job(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -723,7 +895,21 @@ async fn get_job(
     ))
 }
 
-async fn delete_job(
+/// Delete a job row and the archive file it produced.
+///
+/// The artifact is unlinked, not archived: this is permanent. A job this credential does not own
+/// answers the same 404 as an unknown id.
+#[utoipa::path(
+    delete, path = "/api/v1/backup/jobs/{id}", tag = "backup",
+    operation_id = "deleteBackupJob",
+    params(("id" = String, Path, description = "Job id")),
+    responses(
+        (status = 204, description = "Deleted, along with any produced archive file"),
+        (status = 403, description = "Missing `registry:manage`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown job, or one this credential does not own", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_job(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -777,7 +963,23 @@ fn parse_opt_ts(s: &Option<String>, field: &str) -> AppResult<Option<DateTime<Ut
     }
 }
 
-async fn archive_export(
+/// Zip a selection of recorded footage on demand.
+///
+/// The archive is built INLINE: the 201 arrives when the zip exists, so this request can take as
+/// long as the selection is large. `trim` requires both `from` and `to`, and a selection over
+/// `HELDAR_ARCHIVE_MAX_BYTES` is refused rather than truncated.
+#[utoipa::path(
+    post, path = "/api/v1/archive/export", tag = "backup",
+    operation_id = "createArchiveExport",
+    request_body = ArchiveExportRequest,
+    responses(
+        (status = 201, description = "The completed export job, carrying the archive's `output_url`", body = BackupJob),
+        (status = 400, description = "Unparseable or inverted `from`/`to`, `trim` without both bounds, or a selection over the archive size limit", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or `camera_ids` naming a camera outside the credential's scope", body = crate::openapi::ErrorBody),
+        (status = 404, description = "No recorded footage matches the selection", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn archive_export(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<ArchiveExportRequest>,
@@ -820,11 +1022,25 @@ async fn archive_export(
 }
 
 #[derive(Debug, Deserialize)]
-struct LimitQuery {
+pub struct LimitQuery {
     limit: Option<i64>,
 }
 
-async fn list_archive_exports(
+/// On-demand archive exports, newest first.
+///
+/// A subset filter rather than a refusal: a camera-scoped credential creates exports here, so it
+/// keeps seeing its own — including the `/media/archives/...` URL it needs to fetch them — while
+/// fleet-wide ones stay hidden.
+#[utoipa::path(
+    get, path = "/api/v1/archive/exports", tag = "backup",
+    operation_id = "listArchiveExports",
+    params(("limit" = Option<i64>, Query, description = "Max rows, clamped to 1..=2000 (default 100)")),
+    responses(
+        (status = 200, description = "Exports visible to this credential, newest first", body = [BackupJob]),
+        (status = 403, description = "Missing `system:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_archive_exports(
     State(st): State<AppState>,
     principal: Principal,
     Query(q): Query<LimitQuery>,

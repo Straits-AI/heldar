@@ -131,7 +131,15 @@ const ENTRY_UI_BUNDLE: &str = include_str!("../ui/entry.js");
 /// Serve the runtime-loaded entry module UI (the dashboard imports it via `ModuleHost`). Any
 /// authenticated viewer may load it — it is inert frontend code; the data it fetches is separately
 /// gated by the kernel's RBAC.
-async fn serve_ui(principal: Principal) -> AppResult<axum::response::Response> {
+#[utoipa::path(
+    get, path = "/api/v1/modules/entry/ui/index.js", tag = "entry",
+    operation_id = "getEntryModuleUi",
+    responses(
+        (status = 200, description = "The module UI bundle, as `text/javascript`"),
+        (status = 403, description = "Missing `events:read`", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn serve_ui(principal: Principal) -> AppResult<axum::response::Response> {
     principal.require_cap(Cap::EventsRead, "load the entry module UI")?;
     Ok((
         [
@@ -164,14 +172,32 @@ fn parse_opt_ts(s: &Option<String>, field: &str) -> AppResult<Option<DateTime<Ut
 // ---- Vehicles ------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct VehicleQuery {
+pub struct VehicleQuery {
     plate: Option<String>,
     owner_type: Option<String>,
     q: Option<String>,
     limit: Option<i64>,
 }
 
-async fn list_vehicles(
+/// Registered vehicles, newest first.
+///
+/// `plate` matches the NORMALIZED plate (case and separators folded), so `ABC 123` and `abc-123` are
+/// the same query; `q` is a substring search over owner name, plate and owner reference.
+#[utoipa::path(
+    get, path = "/api/v1/vehicles", tag = "entry-registry",
+    operation_id = "listVehicles",
+    params(
+        ("plate" = Option<String>, Query, description = "Exact match on the normalized plate"),
+        ("owner_type" = Option<String>, Query, description = "student|staff|resident|contractor|visitor"),
+        ("q" = Option<String>, Query, description = "Substring over owner name, plate and owner ref"),
+        ("limit" = Option<i64>, Query, description = "1..=2000, default 200"),
+    ),
+    responses(
+        (status = 200, description = "Matching vehicles", body = Vec<Vehicle>),
+        (status = 403, description = "Missing `identity:read`", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_vehicles(
     State(st): State<AppState>,
     principal: Principal,
     Query(q): Query<VehicleQuery>,
@@ -201,7 +227,18 @@ async fn list_vehicles(
     Ok(Json(rows))
 }
 
-async fn get_vehicle(
+/// One registered vehicle.
+#[utoipa::path(
+    get, path = "/api/v1/vehicles/{id}", tag = "entry-registry",
+    operation_id = "getVehicle",
+    params(("id" = String, Path, description = "Vehicle id")),
+    responses(
+        (status = 200, description = "The vehicle", body = Vehicle),
+        (status = 403, description = "Missing `identity:read`", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "No such vehicle", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_vehicle(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -215,7 +252,21 @@ async fn get_vehicle(
     Ok(Json(v))
 }
 
-async fn create_vehicle(
+/// Register a vehicle.
+///
+/// Refused to a camera-scoped credential: the registry carries no camera column and the ANPR
+/// pipeline matches on plate alone, so a row written here can auto-open EVERY barrier on the box.
+#[utoipa::path(
+    post, path = "/api/v1/vehicles", tag = "entry-registry",
+    operation_id = "createVehicle",
+    request_body = VehicleCreate,
+    responses(
+        (status = 201, description = "The registered vehicle", body = Vehicle),
+        (status = 400, description = "Missing plate, unknown `owner_type`, or `valid_until` before `valid_from`", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera-scoped credential", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn create_vehicle(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<VehicleCreate>,
@@ -289,7 +340,22 @@ async fn create_vehicle(
     Ok((StatusCode::CREATED, Json(v)))
 }
 
-async fn update_vehicle(
+/// Update a registered vehicle. Omitted fields keep their current value.
+///
+/// Refused to a camera-scoped credential, for the same reason as registering one.
+#[utoipa::path(
+    patch, path = "/api/v1/vehicles/{id}", tag = "entry-registry",
+    operation_id = "updateVehicle",
+    params(("id" = String, Path, description = "Vehicle id")),
+    request_body = VehicleUpdate,
+    responses(
+        (status = 200, description = "The updated vehicle", body = Vehicle),
+        (status = 400, description = "Empty plate, unknown `owner_type`, or `valid_until` before `valid_from`", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera-scoped credential", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "No such vehicle", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn update_vehicle(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -378,7 +444,18 @@ async fn update_vehicle(
     Ok(Json(v))
 }
 
-async fn delete_vehicle(
+/// Delete a registered vehicle.
+#[utoipa::path(
+    delete, path = "/api/v1/vehicles/{id}", tag = "entry-registry",
+    operation_id = "deleteVehicle",
+    params(("id" = String, Path, description = "Vehicle id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 403, description = "Missing `registry:manage`, or a camera-scoped credential", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "No such vehicle", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_vehicle(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -412,13 +489,27 @@ async fn delete_vehicle(
 // ---- Visitor passes ------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct PassQuery {
+pub struct PassQuery {
     status: Option<String>,
     q: Option<String>,
     limit: Option<i64>,
 }
 
-async fn list_passes(
+/// Visitor passes, newest first.
+#[utoipa::path(
+    get, path = "/api/v1/passes", tag = "entry-registry",
+    operation_id = "listVisitorPasses",
+    params(
+        ("status" = Option<String>, Query, description = "active|checked_in|checked_out|expired|revoked"),
+        ("q" = Option<String>, Query, description = "Substring over visitor name, plate, code and host"),
+        ("limit" = Option<i64>, Query, description = "1..=2000, default 200"),
+    ),
+    responses(
+        (status = 200, description = "Matching passes", body = Vec<VisitorPass>),
+        (status = 403, description = "Missing `identity:read`", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_passes(
     State(st): State<AppState>,
     principal: Principal,
     Query(q): Query<PassQuery>,
@@ -445,7 +536,18 @@ async fn list_passes(
     Ok(Json(rows))
 }
 
-async fn get_pass(
+/// One visitor pass.
+#[utoipa::path(
+    get, path = "/api/v1/passes/{id}", tag = "entry-registry",
+    operation_id = "getVisitorPass",
+    params(("id" = String, Path, description = "Pass id")),
+    responses(
+        (status = 200, description = "The pass", body = VisitorPass),
+        (status = 403, description = "Missing `identity:read`", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "No such pass", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_pass(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -462,7 +564,21 @@ async fn load_pass(pool: &sqlx::SqlitePool, id: &str) -> AppResult<VisitorPass> 
         .ok_or_else(|| AppError::NotFound(format!("pass {id} not found")))
 }
 
-async fn create_pass(
+/// Issue a visitor pass.
+///
+/// The box mints `code`; `valid_from` defaults to now and `valid_until` to 24 hours out. Refused to
+/// a camera-scoped credential — a pass is matched by plate on every lane, not on one.
+#[utoipa::path(
+    post, path = "/api/v1/passes", tag = "entry-registry",
+    operation_id = "createVisitorPass",
+    request_body = VisitorPassCreate,
+    responses(
+        (status = 201, description = "The issued pass", body = VisitorPass),
+        (status = 400, description = "Missing `visitor_name`, or `valid_until` before `valid_from`", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `gate:operate`, or a camera-scoped credential", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn create_pass(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<VisitorPassCreate>,
@@ -532,7 +648,23 @@ async fn create_pass(
     Ok((StatusCode::CREATED, Json(load_pass(&st.pool, &id).await?)))
 }
 
-async fn update_pass(
+/// Update a visitor pass. Omitted fields keep their current value.
+///
+/// `revoked` is terminal for a guard: moving a pass OUT of it additionally requires
+/// `registry:manage`, so a revoked pass cannot be resurrected by editing its status.
+#[utoipa::path(
+    patch, path = "/api/v1/passes/{id}", tag = "entry-registry",
+    operation_id = "updateVisitorPass",
+    params(("id" = String, Path, description = "Pass id")),
+    request_body = VisitorPassUpdate,
+    responses(
+        (status = 200, description = "The updated pass", body = VisitorPass),
+        (status = 400, description = "Unknown `status`, or `valid_until` before `valid_from`", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `gate:operate`, a camera-scoped credential, or reinstating a revoked pass without `registry:manage`", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "No such pass", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn update_pass(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -608,7 +740,18 @@ async fn update_pass(
     Ok(Json(load_pass(&st.pool, &id).await?))
 }
 
-async fn delete_pass(
+/// Delete a visitor pass.
+#[utoipa::path(
+    delete, path = "/api/v1/passes/{id}", tag = "entry-registry",
+    operation_id = "deleteVisitorPass",
+    params(("id" = String, Path, description = "Pass id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 403, description = "Missing `registry:manage`, or a camera-scoped credential", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "No such pass", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_pass(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -631,7 +774,22 @@ async fn delete_pass(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn checkin_pass(
+/// Check a visitor in, and record it in the canonical entry feed.
+///
+/// Only an `active` (or already `checked_in`, so this is idempotent) pass may be checked in — a
+/// revoked, expired or checked-out pass is refused rather than silently reactivated.
+#[utoipa::path(
+    post, path = "/api/v1/passes/{id}/checkin", tag = "entry-registry",
+    operation_id = "checkInVisitorPass",
+    params(("id" = String, Path, description = "Pass id")),
+    responses(
+        (status = 200, description = "The checked-in pass", body = VisitorPass),
+        (status = 400, description = "The pass is revoked, expired or already checked out", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `gate:operate`, or a camera-scoped credential", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "No such pass", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn checkin_pass(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -666,7 +824,22 @@ async fn checkin_pass(
     Ok(Json(load_pass(&st.pool, &id).await?))
 }
 
-async fn checkout_pass(
+/// Check a visitor out, and record it in the canonical entry feed.
+///
+/// A `revoked` or `expired` pass is refused: flipping it to `checked_out` would leave it checkable
+/// back in.
+#[utoipa::path(
+    post, path = "/api/v1/passes/{id}/checkout", tag = "entry-registry",
+    operation_id = "checkOutVisitorPass",
+    params(("id" = String, Path, description = "Pass id")),
+    responses(
+        (status = 200, description = "The checked-out pass", body = VisitorPass),
+        (status = 400, description = "The pass is revoked or expired", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `gate:operate`, or a camera-scoped credential", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "No such pass", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn checkout_pass(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -759,7 +932,16 @@ async fn record_manual_entry(
 
 // ---- Watchlist -----------------------------------------------------------
 
-async fn list_watchlist(
+/// The plate watchlist, newest first. Capped at 1000 rows — it is an operator view, not an export.
+#[utoipa::path(
+    get, path = "/api/v1/watchlist", tag = "entry-registry",
+    operation_id = "listWatchlist",
+    responses(
+        (status = 200, description = "Watchlist entries", body = Vec<Watchlist>),
+        (status = 403, description = "Missing `identity:read`", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_watchlist(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<Watchlist>>> {
@@ -774,7 +956,21 @@ async fn list_watchlist(
     Ok(Json(rows))
 }
 
-async fn create_watch(
+/// Add a plate to the watchlist.
+///
+/// Refused to a camera-scoped credential: the ANPR pipeline reads the watchlist by plate alone, so
+/// an entry here acts on every lane on the box.
+#[utoipa::path(
+    post, path = "/api/v1/watchlist", tag = "entry-registry",
+    operation_id = "createWatchlistEntry",
+    request_body = WatchlistCreate,
+    responses(
+        (status = 201, description = "The watchlist entry", body = Watchlist),
+        (status = 400, description = "Missing plate, or unknown `kind`/`severity`", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera-scoped credential", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn create_watch(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<WatchlistCreate>,
@@ -836,7 +1032,20 @@ async fn create_watch(
     Ok((StatusCode::CREATED, Json(w)))
 }
 
-async fn update_watch(
+/// Update a watchlist entry. The plate itself is immutable — delete and re-add to change it.
+#[utoipa::path(
+    patch, path = "/api/v1/watchlist/{id}", tag = "entry-registry",
+    operation_id = "updateWatchlistEntry",
+    params(("id" = String, Path, description = "Watchlist entry id")),
+    request_body = WatchlistUpdate,
+    responses(
+        (status = 200, description = "The updated entry", body = Watchlist),
+        (status = 400, description = "Unknown `kind` or `severity`", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera-scoped credential", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "No such watchlist entry", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn update_watch(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -893,7 +1102,18 @@ async fn update_watch(
     Ok(Json(w))
 }
 
-async fn delete_watch(
+/// Remove a watchlist entry.
+#[utoipa::path(
+    delete, path = "/api/v1/watchlist/{id}", tag = "entry-registry",
+    operation_id = "deleteWatchlistEntry",
+    params(("id" = String, Path, description = "Watchlist entry id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 403, description = "Missing `registry:manage`, or a camera-scoped credential", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "No such watchlist entry", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_watch(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -929,7 +1149,7 @@ async fn delete_watch(
 // ---- Entry events + guard workflow --------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct EntryEventQuery {
+pub struct EntryEventQuery {
     from: Option<String>,
     to: Option<String>,
     plate: Option<String>,
@@ -939,7 +1159,29 @@ struct EntryEventQuery {
     limit: Option<i64>,
 }
 
-async fn list_entry_events(
+/// The canonical entry-event feed, newest first.
+///
+/// A camera-scoped credential sees only its own lanes. Guard-recorded manual check-ins carry no lane
+/// at all, so they are absent from a scoped caller's feed — the fail-closed answer, not an omission.
+#[utoipa::path(
+    get, path = "/api/v1/entry-events", tag = "entry",
+    operation_id = "listEntryEvents",
+    params(
+        ("from" = Option<String>, Query, description = "RFC3339 lower bound (inclusive)"),
+        ("to" = Option<String>, Query, description = "RFC3339 upper bound (inclusive)"),
+        ("plate" = Option<String>, Query, description = "Exact match on the normalized plate"),
+        ("auth_status" = Option<String>, Query, description = "matched|blocked|exception|unmatched"),
+        ("workflow_status" = Option<String>, Query, description = "pending|confirmed|rejected"),
+        ("event_type" = Option<String>, Query, description = "e.g. anpr, visitor_checkin, visitor_checkout"),
+        ("limit" = Option<i64>, Query, description = "1..=5000, default 200"),
+    ),
+    responses(
+        (status = 200, description = "Matching entry events, newest first"),
+        (status = 400, description = "Invalid `from`/`to` timestamp", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `events:read`", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_entry_events(
     State(st): State<AppState>,
     principal: Principal,
     Query(q): Query<EntryEventQuery>,
@@ -989,7 +1231,21 @@ async fn list_entry_events(
     Ok(Json(rows))
 }
 
-async fn get_entry_event(
+/// One entry event.
+///
+/// For a camera-scoped credential another lane's event, a lane-less event and an event that never
+/// existed all return the SAME refusal, byte for byte — the event id space is not enumerable.
+#[utoipa::path(
+    get, path = "/api/v1/entry-events/{id}", tag = "entry",
+    operation_id = "getEntryEvent",
+    params(("id" = String, Path, description = "Entry event id")),
+    responses(
+        (status = 200, description = "The entry event"),
+        (status = 403, description = "Missing `events:read`, or an event outside this credential's lanes", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "No such entry event", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_entry_event(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -1006,12 +1262,24 @@ async fn get_entry_event(
     Ok(Json(ev))
 }
 
-#[derive(Debug, Deserialize, Default)]
-struct ResolveBody {
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
+pub struct ResolveBody {
     note: Option<String>,
 }
 
-async fn confirm_event(
+/// Confirm an entry event: a durable, attributed guard judgement recorded on its workflow.
+#[utoipa::path(
+    post, path = "/api/v1/entry-events/{id}/confirm", tag = "entry",
+    operation_id = "confirmEntryEvent",
+    params(("id" = String, Path, description = "Entry event id")),
+    request_body(content = ResolveBody, description = "Optional resolution note"),
+    responses(
+        (status = 200, description = "The resolved entry event"),
+        (status = 403, description = "Missing `gate:operate`, or an event outside this credential's lanes", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "No such entry event", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn confirm_event(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -1027,7 +1295,19 @@ async fn confirm_event(
     .await
 }
 
-async fn reject_event(
+/// Reject an entry event: a durable, attributed guard judgement recorded on its workflow.
+#[utoipa::path(
+    post, path = "/api/v1/entry-events/{id}/reject", tag = "entry",
+    operation_id = "rejectEntryEvent",
+    params(("id" = String, Path, description = "Entry event id")),
+    request_body(content = ResolveBody, description = "Optional resolution note"),
+    responses(
+        (status = 200, description = "The resolved entry event"),
+        (status = 403, description = "Missing `gate:operate`, or an event outside this credential's lanes", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "No such entry event", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn reject_event(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -1095,7 +1375,7 @@ async fn resolve_event(
 // ---- Reports -------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
-struct ReportQuery {
+pub struct ReportQuery {
     date: Option<String>,
     from: Option<String>,
     to: Option<String>,
@@ -1230,7 +1510,30 @@ async fn report_window(st: &AppState, principal: &Principal, q: &ReportQuery) ->
     })
 }
 
-async fn report_entry_log(
+/// Daily entry log: the events in a window, plus a count by authorization status.
+///
+/// `date` is a CALENDAR day, which only means something in a timezone, so every response echoes the
+/// zone it used under `interpretation`. On a box whose sites span more than one zone, `date` is
+/// refused rather than silently resolved — pass `tz`, or absolute `from`/`to`, which are instants
+/// and need no zone. The aggregate is scope-filtered too, so it cannot report traffic on lanes this
+/// credential does not hold.
+#[utoipa::path(
+    get, path = "/api/v1/reports/entry-log", tag = "entry",
+    operation_id = "getEntryLogReport",
+    params(
+        ("date" = Option<String>, Query, description = "YYYY-MM-DD, a calendar day in `tz`. Defaults to today when no from/to is given"),
+        ("from" = Option<String>, Query, description = "RFC3339 lower bound; overrides `date`"),
+        ("to" = Option<String>, Query, description = "RFC3339 upper bound; overrides `date`"),
+        ("tz" = Option<String>, Query, description = "IANA zone `date` is read in. Omit to resolve from the site, then the box default"),
+        ("limit" = Option<i64>, Query, description = "1..=10000, default 1000"),
+    ),
+    responses(
+        (status = 200, description = "The window, the zone it was computed in, the events and the counts"),
+        (status = 400, description = "Bad `date`/`tz`/timestamp, `to` before `from`, or a calendar day across several site zones", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `events:read`", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn report_entry_log(
     State(st): State<AppState>,
     principal: Principal,
     Query(q): Query<ReportQuery>,
@@ -1262,7 +1565,27 @@ async fn report_entry_log(
     })))
 }
 
-async fn report_exceptions(
+/// Entry exceptions in a window: blocked, exception and unmatched events, plus anything a guard
+/// rejected.
+///
+/// Same window and timezone rules as the entry log.
+#[utoipa::path(
+    get, path = "/api/v1/reports/exceptions", tag = "entry",
+    operation_id = "getEntryExceptionsReport",
+    params(
+        ("date" = Option<String>, Query, description = "YYYY-MM-DD, a calendar day in `tz`. Defaults to today when no from/to is given"),
+        ("from" = Option<String>, Query, description = "RFC3339 lower bound; overrides `date`"),
+        ("to" = Option<String>, Query, description = "RFC3339 upper bound; overrides `date`"),
+        ("tz" = Option<String>, Query, description = "IANA zone `date` is read in. Omit to resolve from the site, then the box default"),
+        ("limit" = Option<i64>, Query, description = "1..=10000, default 1000"),
+    ),
+    responses(
+        (status = 200, description = "The window, the zone it was computed in, and the exception events"),
+        (status = 400, description = "Bad `date`/`tz`/timestamp, `to` before `from`, or a calendar day across several site zones", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `events:read`", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn report_exceptions(
     State(st): State<AppState>,
     principal: Principal,
     Query(q): Query<ReportQuery>,
@@ -1324,7 +1647,7 @@ async fn auth_status_counts(
 }
 
 #[derive(Debug, Deserialize)]
-struct AuditQuery {
+pub struct AuditQuery {
     from: Option<String>,
     to: Option<String>,
     actor: Option<String>,
@@ -1332,7 +1655,28 @@ struct AuditQuery {
     limit: Option<i64>,
 }
 
-async fn list_audit(
+/// The audit log — who did what — newest first.
+///
+/// Manager-gated because it reveals operator activity. A camera-scoped credential sees only rows
+/// whose derived subject camera it holds, plus multi-camera acts where it holds EVERY camera named;
+/// fleet-level rows naming no camera are hidden from it.
+#[utoipa::path(
+    get, path = "/api/v1/audit", tag = "entry",
+    operation_id = "listAuditLog",
+    params(
+        ("from" = Option<String>, Query, description = "RFC3339 lower bound (inclusive)"),
+        ("to" = Option<String>, Query, description = "RFC3339 upper bound (inclusive)"),
+        ("actor" = Option<String>, Query, description = "Exact principal id"),
+        ("action" = Option<String>, Query, description = "Exact action slug, e.g. `gate_manual_open`"),
+        ("limit" = Option<i64>, Query, description = "1..=5000, default 200"),
+    ),
+    responses(
+        (status = 200, description = "Audit rows visible to this credential, newest first"),
+        (status = 400, description = "Invalid `from`/`to` timestamp", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_audit(
     State(st): State<AppState>,
     principal: Principal,
     Query(q): Query<AuditQuery>,
@@ -1418,8 +1762,19 @@ async fn list_audit(
 
 // ---- Gate actuation (issue #44) -------------------------------------------
 
-/// Full gate state: global settings + every configured lane policy. Any authenticated viewer.
-async fn get_gate_state(
+/// Full gate state: the global kill-switch plus every lane policy this credential may see.
+///
+/// The policy list is confined to the caller's cameras — unfiltered it is the roster of every camera
+/// wired to a barrier, together with its relay port.
+#[utoipa::path(
+    get, path = "/api/v1/entry/gate", tag = "entry-gate",
+    operation_id = "getGateState",
+    responses(
+        (status = 200, description = "`kill_switch` plus the lane policies this credential may see"),
+        (status = 403, description = "Missing `identity:read`", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_gate_state(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Value>> {
@@ -1443,13 +1798,25 @@ async fn get_gate_state(
     ))
 }
 
-#[derive(Debug, Deserialize)]
-struct GateSettingsUpdate {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct GateSettingsUpdate {
     kill_switch: bool,
 }
 
-/// Flip the global kill-switch (halts ALL actuation, auto and manual). Manager+.
-async fn put_gate_settings(
+/// Flip the global kill-switch, which halts (or re-enables) ALL actuation, automatic and manual.
+///
+/// Box-level: there is no camera id to scope it by, so a camera-scoped credential is refused rather
+/// than allowed to freeze — or unfreeze — barriers it does not hold.
+#[utoipa::path(
+    put, path = "/api/v1/entry/gate/settings", tag = "entry-gate",
+    operation_id = "updateGateSettings",
+    request_body = GateSettingsUpdate,
+    responses(
+        (status = 200, description = "The kill-switch as it now stands"),
+        (status = 403, description = "Missing `registry:manage`, or a camera-scoped credential", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_gate_settings(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<GateSettingsUpdate>,
@@ -1476,8 +1843,8 @@ async fn put_gate_settings(
     Ok(Json(json!({ "kill_switch": body.kill_switch })))
 }
 
-#[derive(Debug, Deserialize)]
-struct GatePolicyUpdate {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct GatePolicyUpdate {
     #[serde(default)]
     enabled: Option<bool>,
     #[serde(default)]
@@ -1486,8 +1853,22 @@ struct GatePolicyUpdate {
     pulse_ms: Option<i64>,
 }
 
-/// Upsert a camera's gate policy (auto-open flag + relay port + pulse width). Manager+.
-async fn put_gate_policy(
+/// Upsert a camera's gate policy: the auto-open flag, the relay output port and the pulse width.
+///
+/// Omitted fields keep their current value; `output_port` is floored at 1 and `pulse_ms` clamped to
+/// 100..=30000. A camera this credential does not hold is 403; a camera the box does not know, 404.
+#[utoipa::path(
+    put, path = "/api/v1/entry/gate/policies/{camera_id}", tag = "entry-gate",
+    operation_id = "putGatePolicy",
+    params(("camera_id" = String, Path, description = "Camera id of the lane")),
+    request_body = GatePolicyUpdate,
+    responses(
+        (status = 200, description = "The stored policy", body = crate::gate::GatePolicy),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "No such camera", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_gate_policy(
     State(st): State<AppState>,
     Path(camera_id): Path<String>,
     principal: Principal,
@@ -1552,8 +1933,18 @@ async fn put_gate_policy(
     Ok(Json(policy))
 }
 
-/// Remove a camera's gate policy entirely. Manager+.
-async fn delete_gate_policy(
+/// Remove a camera's gate policy, disabling both auto-open and manual open for that lane.
+#[utoipa::path(
+    delete, path = "/api/v1/entry/gate/policies/{camera_id}", tag = "entry-gate",
+    operation_id = "deleteGatePolicy",
+    params(("camera_id" = String, Path, description = "Camera id of the lane")),
+    responses(
+        (status = 204, description = "Policy removed"),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "That camera has no gate policy", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_gate_policy(
     State(st): State<AppState>,
     Path(camera_id): Path<String>,
     principal: Principal,
@@ -1583,9 +1974,22 @@ async fn delete_gate_policy(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Manual guard-open (PHYSICAL-WORLD side effect): pulse the lane's configured relay now. Guard+
-/// (`can_operate_gate`); the kill-switch still wins; audited with the acting principal.
-async fn gate_open(
+/// Pulse a lane's configured relay now — a PHYSICAL-WORLD side effect, audited with the acting
+/// principal.
+///
+/// 400, not 500, when the lane has no policy, when the kill-switch is on, or when the device itself
+/// refuses the pulse: a camera with no relay port has to say so in words an operator can act on.
+#[utoipa::path(
+    post, path = "/api/v1/entry/gate/open/{camera_id}", tag = "entry-gate",
+    operation_id = "openGate",
+    params(("camera_id" = String, Path, description = "Camera id of the lane")),
+    responses(
+        (status = 200, description = "Pulsed; the body reports the pulse width actually used"),
+        (status = 400, description = "No policy on this lane, the kill-switch is on, or the device refused the pulse", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `gate:operate`, or a camera this credential does not hold", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn gate_open(
     State(st): State<AppState>,
     Path(camera_id): Path<String>,
     principal: Principal,

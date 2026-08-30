@@ -25,7 +25,7 @@ use heldar_kernel::repo;
 use heldar_kernel::services::camera_control;
 
 /// A camera's gate-actuation policy row.
-#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct GatePolicy {
     pub camera_id: String,
     /// Auto-open on `matched` entry events (manual guard-open works whenever a policy row exists).

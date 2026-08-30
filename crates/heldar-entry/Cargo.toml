@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 heldar-kernel = { path = "../heldar-kernel", version = "0.5.0" }
 axum = { version = "0.8", features = ["macros"] }
+utoipa = { version = "5.5.0", features = ["axum_extras", "chrono"] }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio",
     "sqlite",

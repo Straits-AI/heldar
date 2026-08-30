@@ -180,7 +180,15 @@ const MOVEMENT_UI_BUNDLE: &str = include_str!("../ui/movement.js");
 /// Serve the runtime-loaded movement module UI (the dashboard imports it via `ModuleHost`). Any
 /// authenticated viewer may load it — it is inert frontend code; the data it fetches is separately
 /// gated by the kernel's RBAC.
-async fn serve_ui(principal: Principal) -> AppResult<axum::response::Response> {
+#[utoipa::path(
+    get, path = "/api/v1/modules/movement/ui/index.js", tag = "movement",
+    operation_id = "getMovementModuleUi",
+    responses(
+        (status = 200, description = "The module's JavaScript bundle", content_type = "text/javascript"),
+        (status = 403, description = "Missing `events:read`", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn serve_ui(principal: Principal) -> AppResult<axum::response::Response> {
     principal.require_cap(Cap::EventsRead, "load the movement module UI")?;
     Ok((
         [
@@ -198,7 +206,19 @@ async fn serve_ui(principal: Principal) -> AppResult<axum::response::Response> {
 }
 
 /// Run the ReID proposer + breach sweep once (ops / testing); both also run on a timer.
-async fn trigger_run(
+///
+/// The sweep is box-wide — there is no camera id to narrow it by — so a camera-scoped credential is
+/// refused outright rather than served a partial run.
+#[utoipa::path(
+    post, path = "/api/v1/movement/run", tag = "movement",
+    operation_id = "runMovementEngines",
+    responses(
+        (status = 200, description = "Both engines completed one sweep"),
+        (status = 403, description = "Missing `registry:manage`, or a camera-scoped credential", body = heldar_kernel::openapi::ErrorBody),
+        (status = 500, description = "An engine failed mid-sweep", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn trigger_run(
     State(st): State<AppState>,
     principal: Principal,
     Extension(cfg): Extension<Arc<MovementConfig>>,
@@ -228,7 +248,20 @@ fn normalize_plate(s: &str) -> String {
 
 // ---- Topology ----
 
-async fn list_links(
+/// The camera-topology links (which camera leads to which, and how long the walk takes).
+///
+/// A link names TWO cameras, so a camera-scoped credential sees one only when it holds BOTH ends —
+/// otherwise the topology is a roster of the cameras it does not hold, annotated with the distance
+/// to each.
+#[utoipa::path(
+    get, path = "/api/v1/movement/links", tag = "movement",
+    operation_id = "listMovementLinks",
+    responses(
+        (status = 200, description = "Links visible to this credential, ordered by camera pair"),
+        (status = 403, description = "Missing `events:read`", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_links(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<CameraLink>>> {
@@ -260,7 +293,22 @@ async fn list_links(
     Ok(Json(rows))
 }
 
-async fn create_link(
+/// Link two cameras. Both ends must be held by the credential, and a camera cannot link to itself.
+///
+/// The refusal names the camera ids, uniquely on this route: they are the caller's own input, so it
+/// confirms nothing the caller did not already say. `transit_seconds` defaults to 120 and is clamped
+/// to 1..=86400.
+#[utoipa::path(
+    post, path = "/api/v1/movement/links", tag = "movement",
+    operation_id = "createMovementLink",
+    request_body = crate::models::CameraLinkCreate,
+    responses(
+        (status = 201, description = "The created link"),
+        (status = 400, description = "Missing endpoint, or a self-link", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or an endpoint this credential does not hold", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn create_link(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<CameraLinkCreate>,
@@ -320,7 +368,21 @@ async fn create_link(
     Ok((StatusCode::CREATED, Json(link)))
 }
 
-async fn delete_link(
+/// Delete a topology link.
+///
+/// For a camera-scoped credential, a link it does not hold both ends of and a link that does not
+/// exist produce the SAME 403 — the 204-vs-404 split would otherwise enumerate the link id space.
+#[utoipa::path(
+    delete, path = "/api/v1/movement/links/{id}", tag = "movement",
+    operation_id = "deleteMovementLink",
+    params(("id" = String, Path, description = "Camera link id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 403, description = "Missing `registry:manage`, or — for a camera-scoped credential — a link it does not hold both ends of (indistinguishable from an unknown id)", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "Unknown link (fleet-wide credentials only)", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_link(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -371,13 +433,31 @@ async fn delete_link(
 // ---- Candidate review workflow ----
 
 #[derive(Debug, Deserialize)]
-struct CandQuery {
+pub struct CandQuery {
     status: Option<String>,
     anchor: Option<String>,
     limit: Option<i64>,
 }
 
-async fn list_candidates(
+/// Proposed cross-camera ReID matches awaiting human review, best score first.
+///
+/// An `anchor` filter is a plate lookup, so it is written to the audit log exactly as
+/// `/search/plate` is. A candidate names TWO cameras: a camera-scoped credential sees one only when
+/// it holds both ends, and a partially-resolved candidate (a NULL endpoint) never appears for it.
+#[utoipa::path(
+    get, path = "/api/v1/movement/candidates", tag = "movement",
+    operation_id = "listMovementCandidates",
+    params(
+        ("status" = Option<String>, Query, description = "Filter by review status (`pending`, `confirmed`, `rejected`)"),
+        ("anchor" = Option<String>, Query, description = "Filter by anchor plate; normalized to uppercase alphanumerics, and AUDITED as a plate search"),
+        ("limit" = Option<i64>, Query, description = "Max rows, default 200, clamped to 1..=5000"),
+    ),
+    responses(
+        (status = 200, description = "Candidates visible to this credential"),
+        (status = 403, description = "Missing `events:read`", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_candidates(
     State(st): State<AppState>,
     principal: Principal,
     Query(q): Query<CandQuery>,
@@ -432,14 +512,40 @@ async fn list_candidates(
     Ok(Json(rows))
 }
 
-async fn confirm_candidate(
+/// Confirm a candidate match. The judgement is attributed to the caller and audited.
+///
+/// ReID is probabilistic correlation, not identity — this records a human's call, it does not assert
+/// one. For a camera-scoped credential a candidate it does not hold both ends of is refused exactly
+/// as a nonexistent one is.
+#[utoipa::path(
+    post, path = "/api/v1/movement/candidates/{id}/confirm", tag = "movement",
+    operation_id = "confirmMovementCandidate",
+    params(("id" = String, Path, description = "Candidate id")),
+    responses(
+        (status = 200, description = "The candidate, now `confirmed`"),
+        (status = 403, description = "Missing `gate:operate`, or — for a camera-scoped credential — a candidate it does not hold both ends of (indistinguishable from an unknown id)", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "Unknown candidate (fleet-wide credentials only)", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn confirm_candidate(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<MovementCandidate>> {
     resolve_candidate(st, principal, id, "confirmed").await
 }
-async fn reject_candidate(
+/// Reject a candidate match. The judgement is attributed to the caller and audited.
+#[utoipa::path(
+    post, path = "/api/v1/movement/candidates/{id}/reject", tag = "movement",
+    operation_id = "rejectMovementCandidate",
+    params(("id" = String, Path, description = "Candidate id")),
+    responses(
+        (status = 200, description = "The candidate, now `rejected`"),
+        (status = 403, description = "Missing `gate:operate`, or — for a camera-scoped credential — a candidate it does not hold both ends of (indistinguishable from an unknown id)", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "Unknown candidate (fleet-wide credentials only)", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn reject_candidate(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -499,12 +605,28 @@ async fn resolve_candidate(
 // ---- Breach incident workflow ----
 
 #[derive(Debug, Deserialize)]
-struct BreachQuery {
+pub struct BreachQuery {
     status: Option<String>,
     limit: Option<i64>,
 }
 
-async fn list_breaches(
+/// Red-zone breach alerts, newest first.
+///
+/// An alert carries a camera, a zone name and an evidence frame path, so a camera-scoped credential
+/// sees only its own cameras' alerts — and never a camera-less one, which it holds by no camera.
+#[utoipa::path(
+    get, path = "/api/v1/movement/breaches", tag = "movement",
+    operation_id = "listMovementBreaches",
+    params(
+        ("status" = Option<String>, Query, description = "Filter by status (`open`, `acknowledged`, `resolved`)"),
+        ("limit" = Option<i64>, Query, description = "Max rows, default 200, clamped to 1..=5000"),
+    ),
+    responses(
+        (status = 200, description = "Breach alerts visible to this credential"),
+        (status = 403, description = "Missing `events:read`", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_breaches(
     State(st): State<AppState>,
     principal: Principal,
     Query(q): Query<BreachQuery>,
@@ -530,14 +652,38 @@ async fn list_breaches(
     Ok(Json(rows))
 }
 
-async fn ack_breach(
+/// Acknowledge a breach alert. Audited against the alert's camera, so its holder sees the act.
+///
+/// Acknowledging does not stamp `resolved_by`/`resolved_at` — only resolving does.
+#[utoipa::path(
+    post, path = "/api/v1/movement/breaches/{id}/ack", tag = "movement",
+    operation_id = "ackMovementBreach",
+    params(("id" = String, Path, description = "Breach alert id")),
+    responses(
+        (status = 200, description = "The alert, now `acknowledged`"),
+        (status = 403, description = "Missing `gate:operate`, or — for a camera-scoped credential — an alert on a camera it does not hold (indistinguishable from an unknown id)", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "Unknown alert (fleet-wide credentials only)", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn ack_breach(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<BreachAlert>> {
     set_breach_status(st, principal, id, "acknowledged").await
 }
-async fn resolve_breach(
+/// Resolve a breach alert, stamping the caller as `resolved_by`. Audited against the alert's camera.
+#[utoipa::path(
+    post, path = "/api/v1/movement/breaches/{id}/resolve", tag = "movement",
+    operation_id = "resolveMovementBreach",
+    params(("id" = String, Path, description = "Breach alert id")),
+    responses(
+        (status = 200, description = "The alert, now `resolved`"),
+        (status = 403, description = "Missing `gate:operate`, or — for a camera-scoped credential — an alert on a camera it does not hold (indistinguishable from an unknown id)", body = heldar_kernel::openapi::ErrorBody),
+        (status = 404, description = "Unknown alert (fleet-wide credentials only)", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn resolve_breach(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -602,7 +748,23 @@ async fn set_breach_status(
 
 // ---- Audited identity-search ----
 
-async fn search_plate(
+/// The sighting trail for one plate: where it was seen, and the candidate matches anchored on it.
+///
+/// EVERY call is written to the audit log — this is an identity-like query and the privacy gate is
+/// unconditional. The plate is normalized to uppercase alphanumerics, so punctuation and spacing do
+/// not matter but an all-punctuation plate is a 400. A camera-scoped credential gets the trail as
+/// ITS OWN cameras saw it rather than a refusal; cameras it does not hold simply do not appear.
+#[utoipa::path(
+    get, path = "/api/v1/movement/search/plate/{plate}", tag = "movement",
+    operation_id = "searchMovementByPlate",
+    params(("plate" = String, Path, description = "Plate; normalized to uppercase alphanumerics")),
+    responses(
+        (status = 200, description = "Appearances and candidates for the plate, plus a note that the correlation is probabilistic"),
+        (status = 400, description = "Plate is empty once normalized", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `events:read`", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn search_plate(
     State(st): State<AppState>,
     principal: Principal,
     Path(plate): Path<String>,
@@ -649,14 +811,34 @@ async fn search_plate(
 }
 
 #[derive(Debug, Deserialize)]
-struct PersonQuery {
+pub struct PersonQuery {
     camera: String,
     track: String,
     /// RFC3339 time of the source appearance.
     at: String,
 }
 
-async fn search_person(
+/// Where a person track on one camera may have gone next, walking the topology forward.
+///
+/// Audited, like every identity-like search here. The scoring uses ONLY topology and transit time —
+/// no plate, no appearance embedding — so the candidates are deliberately weak (0.4 within the
+/// transit window, 0.25 outside it) and are triage material, never identity. Linked cameras the
+/// credential does not hold are dropped from the walk rather than refusing it.
+#[utoipa::path(
+    get, path = "/api/v1/movement/search/person", tag = "movement",
+    operation_id = "searchMovementByPersonTrack",
+    params(
+        ("camera" = String, Query, description = "Source camera id (required)"),
+        ("track" = String, Query, description = "Source person track id (required)"),
+        ("at" = String, Query, description = "RFC3339 time of the source appearance (required)"),
+    ),
+    responses(
+        (status = 200, description = "Downstream candidate tracks, best score first, with a note that these are low-confidence"),
+        (status = 400, description = "Missing query parameter, or an unparseable `at`", body = heldar_kernel::openapi::ErrorBody),
+        (status = 403, description = "Missing `events:read`, or a source camera this credential does not hold", body = heldar_kernel::openapi::ErrorBody),
+    ),
+)]
+pub async fn search_person(
     State(st): State<AppState>,
     principal: Principal,
     Query(q): Query<PersonQuery>,

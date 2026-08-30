@@ -11,9 +11,6 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-use heldar_kernel::openapi::ApiDoc;
-use utoipa::OpenApi;
-
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -27,141 +24,30 @@ fn repo_root() -> PathBuf {
 /// Each entry is an endpoint an integrator cannot generate a client for. Documenting one means
 /// adding `#[utoipa::path]` to its handler, listing it in `ApiDoc`, and deleting the line here.
 const NOT_YET_DOCUMENTED: &[&str] = &[
-    "/api/v1/ai-tasks/{task_id}",
-    "/api/v1/ai/embed-queries",
-    "/api/v1/ai/embed-queries/{id}/result",
-    "/api/v1/ai/embeddings",
-    "/api/v1/ai/events",
-    "/api/v1/ai/leases",
-    "/api/v1/ai/leases/{lease_id}",
-    "/api/v1/ai/samplers",
-    "/api/v1/ai/tasks",
-    "/api/v1/api-keys",
-    "/api/v1/api-keys/{id}",
-    "/api/v1/archive/export",
-    "/api/v1/archive/exports",
-    "/api/v1/audit",
-    "/api/v1/auth/login",
-    "/api/v1/auth/logout",
-    "/api/v1/auth/me",
-    "/api/v1/backup/destinations",
-    "/api/v1/backup/destinations/{id}",
-    "/api/v1/backup/destinations/{id}/test",
-    "/api/v1/backup/jobs",
-    "/api/v1/backup/jobs/{id}",
-    "/api/v1/backup/policies",
-    "/api/v1/backup/policies/{id}",
-    "/api/v1/backup/policies/{id}/trigger",
-    "/api/v1/cameras/config/bulk",
-    "/api/v1/cameras/{id}/ai-tasks",
-    "/api/v1/cameras/{id}/config/device_info",
-    "/api/v1/cameras/{id}/config/onvif",
-    "/api/v1/cameras/{id}/config/onvif/ensure_user",
-    "/api/v1/cameras/{id}/config/osd",
-    "/api/v1/cameras/{id}/config/reboot",
-    "/api/v1/cameras/{id}/config/time",
-    "/api/v1/cameras/{id}/config/time/ntp",
-    "/api/v1/cameras/{id}/config/time/sync_now",
-    "/api/v1/cameras/{id}/config/video",
-    "/api/v1/cameras/{id}/config/video/{channel}",
-    "/api/v1/cameras/{id}/control/capabilities",
-    "/api/v1/cameras/{id}/control/day_night",
-    "/api/v1/cameras/{id}/control/detections/{kind}",
-    "/api/v1/cameras/{id}/control/image",
-    "/api/v1/cameras/{id}/control/intrusion",
-    "/api/v1/cameras/{id}/control/io/outputs",
-    "/api/v1/cameras/{id}/control/io/outputs/{port}/pulse",
-    "/api/v1/cameras/{id}/control/line_crossing",
-    "/api/v1/cameras/{id}/control/motion",
-    "/api/v1/cameras/{id}/control/probe",
-    "/api/v1/cameras/{id}/detections",
-    "/api/v1/cameras/{id}/frame",
     "/api/v1/cameras/{id}/health",
     "/api/v1/cameras/{id}/liveview",
-    "/api/v1/cameras/{id}/onvif",
-    "/api/v1/cameras/{id}/onvif/probe",
-    "/api/v1/cameras/{id}/ptz/continuous",
-    "/api/v1/cameras/{id}/ptz/goto_preset",
-    "/api/v1/cameras/{id}/ptz/presets",
-    "/api/v1/cameras/{id}/ptz/presets/refresh",
-    "/api/v1/cameras/{id}/ptz/stop",
     "/api/v1/cameras/{id}/recording-gaps",
     "/api/v1/cameras/{id}/recording-gaps/{gap_id}/retry",
     "/api/v1/cameras/{id}/schedules",
     "/api/v1/cameras/{id}/snapshot-schedules",
     "/api/v1/cameras/{id}/snapshots",
     "/api/v1/cameras/{id}/test",
-    "/api/v1/cameras/{id}/zone-events",
-    "/api/v1/cameras/{id}/zone-events/aggregates",
-    "/api/v1/cameras/{id}/zones",
-    "/api/v1/cameras/{id}/zones/occupancy",
     "/api/v1/discover",
-    "/api/v1/entry-events",
-    "/api/v1/entry-events/{id}",
-    "/api/v1/entry-events/{id}/confirm",
-    "/api/v1/entry-events/{id}/reject",
-    "/api/v1/entry/gate",
-    "/api/v1/entry/gate/open/{camera_id}",
-    "/api/v1/entry/gate/policies/{camera_id}",
-    "/api/v1/entry/gate/settings",
     "/api/v1/events",
-    "/api/v1/events/types",
     "/api/v1/health/cameras",
     "/api/v1/incidents",
     "/api/v1/incidents/{incident_id}/segments",
     "/api/v1/modules",
-    "/api/v1/modules/entry/ui/index.js",
-    "/api/v1/modules/movement/ui/index.js",
-    "/api/v1/modules/search/ui/index.js",
     "/api/v1/modules/{id}",
-    "/api/v1/movement/breaches",
-    "/api/v1/movement/breaches/{id}/ack",
-    "/api/v1/movement/breaches/{id}/resolve",
-    "/api/v1/movement/candidates",
-    "/api/v1/movement/candidates/{id}/confirm",
-    "/api/v1/movement/candidates/{id}/reject",
-    "/api/v1/movement/links",
-    "/api/v1/movement/links/{id}",
-    "/api/v1/movement/run",
-    "/api/v1/movement/search/person",
-    "/api/v1/movement/search/plate/{plate}",
-    "/api/v1/onvif/discover",
     "/api/v1/openapi.json",
     "/api/v1/outbox",
-    "/api/v1/passes",
-    "/api/v1/passes/{id}",
-    "/api/v1/passes/{id}/checkin",
-    "/api/v1/passes/{id}/checkout",
     "/api/v1/registry",
     "/api/v1/registry/refresh",
-    "/api/v1/reports/entry-log",
-    "/api/v1/reports/exceptions",
     "/api/v1/schedules/{schedule_id}",
-    "/api/v1/search/events",
-    "/api/v1/search/nl",
-    "/api/v1/search/plan",
-    "/api/v1/search/semantic",
     "/api/v1/segments/{id}/evidence-lock",
     "/api/v1/segments/{id}/incident",
     "/api/v1/site",
     "/api/v1/snapshot-schedules/{schedule_id}",
-    "/api/v1/system",
-    "/api/v1/system/db",
-    "/api/v1/system/db/convert",
-    "/api/v1/system/retention",
-    "/api/v1/system/transcode",
-    "/api/v1/users",
-    "/api/v1/users/{id}",
-    "/api/v1/users/{id}/unlock",
-    "/api/v1/vehicles",
-    "/api/v1/vehicles/{id}",
-    "/api/v1/watchlist",
-    "/api/v1/watchlist/{id}",
-    "/api/v1/webhooks",
-    "/api/v1/webhooks/{id}",
-    "/api/v1/webhooks/{id}/deliveries",
-    "/api/v1/webhooks/{id}/test",
-    "/api/v1/zones/{zone_id}",
 ];
 
 /// Every `/api/v1` route the box serves is either documented or explicitly named as not yet.
@@ -187,8 +73,16 @@ fn openapi_covers_every_route() {
         served.len()
     );
 
-    let spec = ApiDoc::openapi();
-    let documented: BTreeSet<String> = spec.paths.paths.keys().cloned().collect();
+    // The COMPOSED document — kernel plus every app crate. Reading only the kernel's `ApiDoc`
+    // here would report every app-crate route as undocumented while the served surface documents
+    // them perfectly well.
+    let spec = heldar_server::api_document();
+    let documented: BTreeSet<String> = spec["paths"]
+        .as_object()
+        .expect("paths")
+        .keys()
+        .cloned()
+        .collect();
     let allowed: BTreeSet<String> = NOT_YET_DOCUMENTED.iter().map(|s| s.to_string()).collect();
 
     let undocumented: Vec<&String> = served
@@ -234,7 +128,7 @@ fn openapi_covers_every_route() {
 /// The spec must be valid OpenAPI 3.1 and actually describe something.
 #[test]
 fn the_spec_is_well_formed() {
-    let json = serde_json::to_value(ApiDoc::openapi()).expect("spec serializes");
+    let json = heldar_server::api_document();
     assert!(
         json["openapi"]
             .as_str()
@@ -301,7 +195,7 @@ fn codes_documented_match_codes_returned() {
 
     // And the served spec's own description must name them, so the JSON an integrator reads is the
     // same list. This is the artifact that actually reaches a client.
-    let spec = serde_json::to_value(ApiDoc::openapi()).expect("spec");
+    let spec = heldar_server::api_document();
     let desc = spec["components"]["schemas"]["ErrorBody"]["properties"]["code"]["description"]
         .as_str()
         .unwrap_or_default();
@@ -328,39 +222,66 @@ fn codes_documented_match_codes_returned() {
 /// how the next response type carrying a secret gets missed.
 #[test]
 fn no_response_schema_exposes_a_write_only_secret() {
-    let spec = serde_json::to_value(ApiDoc::openapi()).expect("spec");
+    let spec = heldar_server::api_document();
     let schemas = spec["components"]["schemas"]
         .as_object()
         .expect("components.schemas");
 
-    // Names that must never appear as a property of a schema a client READS. `has_password` is the
-    // deliberate, safe alternative and is allowed by name.
+    // Names that must never appear as a property of a schema a client READS. `has_password` and
+    // `has_secret` are the deliberate, safe alternatives — a boolean saying whether one is set.
     const FORBIDDEN: &[&str] = &["password", "secret", "token", "private_key", "api_key"];
 
-    // Request bodies legitimately carry credentials — that is how a camera is enrolled. Only
-    // schemas a response can reference are swept.
-    let request_only: std::collections::BTreeSet<&str> = [
-        "CameraCreate",
-        "CameraUpdate",
-        "SiteCreate",
-        "SiteUpdate",
-        "TimezoneUpdate",
-    ]
-    .into_iter()
-    .collect();
+    // WHICH SCHEMAS A RESPONSE CAN REACH, derived from the document rather than listed by hand.
+    //
+    // Request bodies legitimately carry credentials — that is how a camera is enrolled and how
+    // anyone logs in. The first version of this exempted them by NAME, which is the same
+    // hardcoded-list shape that has gone stale three times in this repository already: it listed
+    // five types, and the moment the contract grew it flagged `LoginRequest.password` as a leak.
+    //
+    // A schema is a response schema if a 2xx response references it, directly or through another
+    // response schema. Nothing else needs saying, and nothing goes stale.
+    let mut response_roots: std::collections::BTreeSet<String> = Default::default();
+    for (_, item) in spec["paths"].as_object().expect("paths") {
+        for (_, op) in item.as_object().expect("path item") {
+            let Some(responses) = op["responses"].as_object() else {
+                continue;
+            };
+            for (code, resp) in responses {
+                if !code.starts_with('2') {
+                    continue;
+                }
+                collect_refs(&resp["content"], &mut response_roots);
+            }
+        }
+    }
+    // Transitively: a response schema's own properties are also read by a client.
+    let mut reachable = response_roots.clone();
+    let mut frontier: Vec<String> = response_roots.into_iter().collect();
+    while let Some(name) = frontier.pop() {
+        let Some(schema) = schemas.get(&name) else {
+            continue;
+        };
+        let mut refs = Default::default();
+        collect_refs(schema, &mut refs);
+        for r in refs {
+            if reachable.insert(r.clone()) {
+                frontier.push(r);
+            }
+        }
+    }
 
     let mut offences: Vec<String> = Vec::new();
     for (name, schema) in schemas {
-        if request_only.contains(name.as_str()) {
-            continue;
+        if !reachable.contains(name.as_str()) {
+            continue; // a request-only schema; credentials belong in those
         }
         let Some(props) = schema["properties"].as_object() else {
             continue;
         };
         for prop in props.keys() {
             let p = prop.to_ascii_lowercase();
-            if p == "has_password" {
-                continue;
+            if p.starts_with("has_") {
+                continue; // `has_password` / `has_secret`: the safe alternative, a boolean
             }
             if FORBIDDEN
                 .iter()
@@ -385,7 +306,7 @@ fn no_response_schema_exposes_a_write_only_secret() {
 /// module exists to prevent.
 #[test]
 fn write_the_served_document_for_diffing() {
-    let spec = heldar_kernel::openapi::document();
+    let spec = heldar_server::api_document();
     let out = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(|p| p.parent())
@@ -415,7 +336,7 @@ fn write_the_served_document_for_diffing() {
 fn every_operation_id_is_unique() {
     use std::collections::BTreeMap;
 
-    let spec = heldar_kernel::openapi::document();
+    let spec = heldar_server::api_document();
     let mut seen: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for (path, item) in spec["paths"].as_object().expect("paths") {
         for (method, op) in item.as_object().expect("path item") {
@@ -461,7 +382,7 @@ fn the_dashboard_types_agree_with_the_contract_where_they_overlap() {
         .expect("repo root");
     let dash = std::fs::read_to_string(root.join("apps/web/src/lib/types.ts"))
         .expect("the dashboard's types");
-    let spec = heldar_kernel::openapi::document();
+    let spec = heldar_server::api_document();
     let schemas = spec["components"]["schemas"].as_object().expect("schemas");
 
     // Interfaces the dashboard defines under the same name as a contract schema.
@@ -506,4 +427,26 @@ fn the_dashboard_types_agree_with_the_contract_where_they_overlap() {
         "only {checked} shared type(s) were compared — if the dashboard renamed its interfaces this \
          test silently stops checking anything"
     );
+}
+
+/// Every `#/components/schemas/X` referenced anywhere inside a JSON value.
+fn collect_refs(v: &serde_json::Value, out: &mut std::collections::BTreeSet<String>) {
+    match v {
+        serde_json::Value::Object(o) => {
+            if let Some(r) = o.get("$ref").and_then(|r| r.as_str()) {
+                if let Some(name) = r.strip_prefix("#/components/schemas/") {
+                    out.insert(name.to_string());
+                }
+            }
+            for (_, x) in o {
+                collect_refs(x, out);
+            }
+        }
+        serde_json::Value::Array(a) => {
+            for x in a {
+                collect_refs(x, out);
+            }
+        }
+        _ => {}
+    }
 }

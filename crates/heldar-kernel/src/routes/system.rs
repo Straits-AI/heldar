@@ -138,8 +138,8 @@ const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 /// The recording disk-limit policy enforced by the retention sweeper. Each value is the operator
 /// override (settings table) when set, otherwise the env default — `overridden` flags which is which.
-#[derive(Debug, Serialize)]
-struct RetentionLimits {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RetentionLimits {
     max_recordings_gb: f64,
     max_recordings_bytes: i64,
     max_overridden: bool,
@@ -167,8 +167,19 @@ async fn effective_limits(st: &AppState) -> RetentionLimits {
     }
 }
 
-/// Current recording disk limits (effective values). Any authenticated viewer may read.
-async fn get_retention(
+/// Current recording disk limits (effective values), as the retention sweeper will enforce them.
+///
+/// Each value is the operator override when one is set, otherwise the env default; the
+/// `*_overridden` flags say which, so a caller can tell "configured to 500 GB" from "defaulted".
+#[utoipa::path(
+    get, path = "/api/v1/system/retention", tag = "system",
+    operation_id = "getRetentionLimits",
+    responses(
+        (status = 200, description = "Effective recording disk limits", body = RetentionLimits),
+        (status = 403, description = "Missing `system:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_retention(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<RetentionLimits>> {
@@ -176,8 +187,8 @@ async fn get_retention(
     Ok(Json(effective_limits(&st).await))
 }
 
-#[derive(Debug, Deserialize)]
-struct RetentionUpdate {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct RetentionUpdate {
     /// New global recordings cap in GB (> 0). Omit to leave unchanged.
     max_recordings_gb: Option<f64>,
     /// New free-disk floor in GB (>= 0; 0 disables the floor). Omit to leave unchanged.
@@ -186,7 +197,21 @@ struct RetentionUpdate {
 
 /// Set the recording disk limits at runtime (admin only) — the retention sweeper picks them up on its
 /// next pass, no restart. Stored in the settings table; clearing them reverts to the env defaults.
-async fn put_retention(
+///
+/// REFUSED FOR A CAMERA-SCOPED CREDENTIAL: the sweeper that later enforces this cap evicts the
+/// oldest segments fleet-wide, with no principal in scope, so shrinking it deletes other cameras'
+/// footage without ever naming them. Omitted fields are left unchanged.
+#[utoipa::path(
+    put, path = "/api/v1/system/retention", tag = "system",
+    operation_id = "setRetentionLimits",
+    request_body = RetentionUpdate,
+    responses(
+        (status = 200, description = "The new effective limits", body = RetentionLimits),
+        (status = 400, description = "`max_recordings_gb` <= 0, or `min_free_disk_gb` < 0", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_retention(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<RetentionUpdate>,
@@ -239,8 +264,8 @@ async fn put_retention(
 
 /// The live-preview transcode engine: effective value + which hardware encoders LOOK available on
 /// this box (device-node presence — a hint for the picker, not a guarantee the driver works).
-#[derive(Debug, Serialize)]
-struct TranscodeSettings {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TranscodeSettings {
     /// The engine new live publishers use: `software` | `vaapi` | `nvenc`.
     engine: String,
     /// True when the engine is an operator override (settings table) vs the env default.
@@ -274,8 +299,19 @@ async fn transcode_settings(st: &AppState) -> TranscodeSettings {
     }
 }
 
-/// Current live-transcode engine (effective value + detected hardware). Any viewer may read.
-async fn get_transcode(
+/// Current live-transcode engine (effective value + detected hardware).
+///
+/// `vaapi_available` / `nvenc_available` are device-node presence only — a hint for the picker, not
+/// a promise the driver works.
+#[utoipa::path(
+    get, path = "/api/v1/system/transcode", tag = "system",
+    operation_id = "getTranscodeSettings",
+    responses(
+        (status = 200, description = "Effective engine plus detected hardware encoders", body = TranscodeSettings),
+        (status = 403, description = "Missing `system:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_transcode(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<TranscodeSettings>> {
@@ -283,8 +319,8 @@ async fn get_transcode(
     Ok(Json(transcode_settings(&st).await))
 }
 
-#[derive(Debug, Deserialize)]
-struct TranscodeUpdate {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct TranscodeUpdate {
     /// New engine (`software` | `vaapi` | `nvenc`).
     engine: String,
 }
@@ -293,7 +329,19 @@ struct TranscodeUpdate {
 /// already-running publishers (warm AND watched on-demand) are restarted onto it within seconds
 /// (the write pokes a reconcile pass) — attached viewers see a brief reconnect. Stored in the
 /// settings table; the env default remains the fallback.
-async fn put_transcode(
+///
+/// REFUSED FOR A CAMERA-SCOPED CREDENTIAL: it restarts every publisher on the box.
+#[utoipa::path(
+    put, path = "/api/v1/system/transcode", tag = "system",
+    operation_id = "setTranscodeEngine",
+    request_body = TranscodeUpdate,
+    responses(
+        (status = 200, description = "The new effective engine", body = TranscodeSettings),
+        (status = 400, description = "`engine` is not one of `software`, `vaapi`, `nvenc`", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_transcode(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<TranscodeUpdate>,
@@ -326,8 +374,8 @@ async fn put_transcode(
 /// Metadata-DB (`heldar.db`) status + size cap. `incremental` = the DB is in `auto_vacuum=INCREMENTAL`
 /// mode, in which the size cap can reclaim freed space back to the OS. `max_overridden` flags an
 /// operator override (settings table) vs the env default.
-#[derive(Debug, Serialize)]
-struct DbStatus {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct DbStatus {
     db_bytes: i64,
     max_db_gb: f64,
     max_db_bytes: i64,
@@ -351,8 +399,20 @@ async fn db_status(st: &AppState) -> AppResult<DbStatus> {
     })
 }
 
-/// Current metadata-DB size + cap + conversion status. Any authenticated viewer may read.
-async fn get_db_status(
+/// Current metadata-DB size + cap + conversion status.
+///
+/// REFUSED FOR A CAMERA-SCOPED CREDENTIAL despite being a read: `db_bytes` grows with the fleet's
+/// cameras, segments and events, which is the same fleet-shape signal `GET /api/v1/system` scopes
+/// away — and a single aggregate cannot be scoped.
+#[utoipa::path(
+    get, path = "/api/v1/system/db", tag = "system",
+    operation_id = "getDbStatus",
+    responses(
+        (status = 200, description = "Metadata-DB size, cap, and auto_vacuum mode", body = DbStatus),
+        (status = 403, description = "Missing `system:read`, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_db_status(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<DbStatus>> {
@@ -364,15 +424,29 @@ async fn get_db_status(
     Ok(Json(db_status(&st).await?))
 }
 
-#[derive(Debug, Deserialize)]
-struct DbLimitUpdate {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct DbLimitUpdate {
     /// New metadata-DB size cap in GB (> 0). Omit to leave unchanged.
     max_db_gb: Option<f64>,
 }
 
 /// Set the metadata-DB size cap at runtime (admin only) — the retention sweeper picks it up on its
 /// next pass, no restart. Stored in the settings table; clearing it reverts to the env default.
-async fn put_db_limit(
+///
+/// REFUSED FOR A CAMERA-SCOPED CREDENTIAL — same deferred-execution shape as the recording cap:
+/// written now, enforced later by a fleet-wide sweep that has no principal. Omitting `max_db_gb`
+/// leaves the cap unchanged.
+#[utoipa::path(
+    put, path = "/api/v1/system/db", tag = "system",
+    operation_id = "setDbLimit",
+    request_body = DbLimitUpdate,
+    responses(
+        (status = 200, description = "The new effective DB cap", body = DbStatus),
+        (status = 400, description = "`max_db_gb` <= 0", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_db_limit(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<DbLimitUpdate>,
@@ -401,8 +475,8 @@ async fn put_db_limit(
     Ok(Json(db_status(&st).await?))
 }
 
-#[derive(Debug, Serialize)]
-struct DbConvertResult {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct DbConvertResult {
     /// "already-incremental" (no-op) or "started" (a background conversion was kicked off).
     status: &'static str,
 }
@@ -411,7 +485,18 @@ struct DbConvertResult {
 /// already incremental; otherwise spawns the conversion in the BACKGROUND (it holds a write lock for
 /// its duration) and returns immediately — the UI polls `GET /api/v1/system/db` until `incremental`
 /// flips true. Best-effort + disk-gated + convergence-checked (see `ensure_incremental_autovacuum`).
-async fn post_db_convert(
+///
+/// The 200 means "accepted", not "converted". Refused for a camera-scoped credential — it rewrites
+/// the whole database file.
+#[utoipa::path(
+    post, path = "/api/v1/system/db/convert", tag = "system",
+    operation_id = "convertDbAutoVacuum",
+    responses(
+        (status = 200, description = "`already-incremental` (no-op) or `started` (running in the background)", body = DbConvertResult),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn post_db_convert(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<DbConvertResult>> {
@@ -516,7 +601,7 @@ async fn readyz(State(st): State<AppState>) -> Response {
 }
 
 #[derive(Debug, Serialize)]
-struct SystemInfo {
+pub struct SystemInfo {
     name: &'static str,
     /// The build's own version (`CARGO_PKG_VERSION`).
     version: &'static str,
@@ -604,7 +689,22 @@ fn relay_status(st: &AppState) -> RelayStatus {
     }
 }
 
-async fn system_info(
+/// Box identity, version, uptime and operational health in one call.
+///
+/// Every fleet-shape number here (`cameras_total`, `cameras_recording`, `segments_total`,
+/// `recordings_bytes`, `active_recorders`) is confined to the caller's own cameras, and a scoped
+/// caller's `storage` reports its own footprint with no fleet retention horizon or projection — an
+/// unscoped count beside a one-camera `GET /api/v1/cameras` would be the inventory disclosure the
+/// per-camera checks exist to prevent. `api_version` is the CONTRACT's version, not the build's.
+#[utoipa::path(
+    get, path = "/api/v1/system", tag = "system",
+    operation_id = "getSystemInfo",
+    responses(
+        (status = 200, description = "Box status, scoped to the caller's cameras"),
+        (status = 403, description = "Missing `system:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn system_info(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<SystemInfo>> {

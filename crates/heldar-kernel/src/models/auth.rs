@@ -19,7 +19,7 @@ pub struct User {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct UserView {
     pub id: String,
     pub username: String,
@@ -44,7 +44,7 @@ impl From<User> for UserView {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct UserCreate {
     pub username: String,
     pub password: String,
@@ -53,7 +53,7 @@ pub struct UserCreate {
     pub active: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct UserUpdate {
     pub password: Option<String>,
     pub role: Option<String>,
@@ -61,7 +61,7 @@ pub struct UserUpdate {
     pub active: Option<bool>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct LoginRequest {
     pub username: String,
     pub password: String,
@@ -113,7 +113,7 @@ pub struct ApiKeyView {
     pub revoked_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct ApiKeyCreate {
     pub name: String,
     pub role: Option<String>,
@@ -130,7 +130,7 @@ pub struct ApiKeyCreate {
 }
 
 /// Partial update of an api key. Every field is optional; `revoked_at` is the soft-revoke switch.
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct ApiKeyUpdate {
     pub active: Option<bool>,
     pub capabilities: Option<Vec<String>>,

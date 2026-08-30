@@ -54,7 +54,22 @@ const PRIVILEGED_CAPS: [Cap; 3] = [Cap::Admin, Cap::RegistryManage, Cap::GateOpe
 /// refusal came to be defeated by construction.
 use crate::auth::UNSCOPABLE_CAPS;
 
-async fn login(
+/// Exchange a username and password for a session token.
+///
+/// The token is also set as an HttpOnly session cookie, which is what a browser should rely on — the
+/// copy in the body is for non-browser clients. Every failure is the SAME 401: a wrong password, an
+/// unknown username, a disabled account and one locked out by repeated failures are deliberately
+/// indistinguishable, and the argon2 verification runs even for a missing user so the latency is too.
+#[utoipa::path(
+    post, path = "/api/v1/auth/login", tag = "auth",
+    operation_id = "login",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "The session token, its expiry and the caller's user record; the token is also returned as an HttpOnly `Set-Cookie`"),
+        (status = 401, description = "Invalid credentials — also what a disabled or locked-out account gets, deliberately", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn login(
     State(st): State<AppState>,
     Json(body): Json<LoginRequest>,
 ) -> AppResult<impl IntoResponse> {
@@ -176,7 +191,21 @@ async fn register_login_failure(
     }
 }
 
-async fn logout(State(st): State<AppState>, headers: HeaderMap) -> AppResult<impl IntoResponse> {
+/// Revoke the caller's session token and clear the session cookie.
+///
+/// Unauthenticated and idempotent on purpose: an already-expired session still gets a clean
+/// cookie-clearing 204 rather than a 401, so a client can always reach a logged-out state.
+#[utoipa::path(
+    post, path = "/api/v1/auth/logout", tag = "auth",
+    operation_id = "logout",
+    responses(
+        (status = 204, description = "Session revoked (if any) and the cookie cleared"),
+    ),
+)]
+pub async fn logout(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<impl IntoResponse> {
     if let Some(tok) = auth::token_from_headers(&headers) {
         auth::revoke_session(&st.pool, &tok).await?;
     }
@@ -188,7 +217,20 @@ async fn logout(State(st): State<AppState>, headers: HeaderMap) -> AppResult<imp
     ))
 }
 
-async fn me(principal: Principal) -> AppResult<Json<Value>> {
+/// The caller this credential resolves to: id, display name, role, and whether it is a user, an API
+/// key or the system principal.
+///
+/// It reports no capabilities and no camera scope — role is not the grant. A key minted with an
+/// explicit capability list holds what that list says, which `GET /api/v1/api-keys` shows.
+#[utoipa::path(
+    get, path = "/api/v1/auth/me", tag = "auth",
+    operation_id = "getCurrentPrincipal",
+    responses(
+        (status = 200, description = "The resolved caller"),
+        (status = 401, description = "No credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn me(principal: Principal) -> AppResult<Json<Value>> {
     Ok(Json(json!({
         "id": principal.id,
         "name": principal.name,
@@ -201,7 +243,19 @@ async fn me(principal: Principal) -> AppResult<Json<Value>> {
     })))
 }
 
-async fn list_users(
+/// Every operator account on the box.
+///
+/// Refused outright to a camera-scoped credential rather than filtered: the operator roster has no
+/// camera to filter it by, so an empty list would be a lie and a full one a disclosure.
+#[utoipa::path(
+    get, path = "/api/v1/users", tag = "auth",
+    operation_id = "listUsers",
+    responses(
+        (status = 200, description = "Every user, ordered by username", body = [UserView]),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_users(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<UserView>>> {
@@ -217,7 +271,19 @@ async fn list_users(
     Ok(Json(users.into_iter().map(UserView::from).collect()))
 }
 
-async fn create_user(
+/// Create an operator account. Passwords must be at least 8 characters; `role` defaults to `viewer`.
+#[utoipa::path(
+    post, path = "/api/v1/users", tag = "auth",
+    operation_id = "createUser",
+    request_body = UserCreate,
+    responses(
+        (status = 201, description = "The created user", body = UserView),
+        (status = 400, description = "Empty username, a password under 8 characters, or an unknown role", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 409, description = "That username already exists", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn create_user(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<UserCreate>,
@@ -278,7 +344,24 @@ async fn create_user(
     Ok((StatusCode::CREATED, Json(UserView::from(user))))
 }
 
-async fn update_user(
+/// Amend a user: role, display name, active flag, or password. Omitted fields are left alone.
+///
+/// Disabling the account or resetting its password revokes every live session it holds and tears
+/// down its streams immediately — a password reset is the remediation for a compromised account, so
+/// a stolen token must not outlive it. The last active admin cannot be demoted or disabled.
+#[utoipa::path(
+    patch, path = "/api/v1/users/{id}", tag = "auth",
+    operation_id = "updateUser",
+    params(("id" = String, Path, description = "User id")),
+    request_body = UserUpdate,
+    responses(
+        (status = 200, description = "The updated user", body = UserView),
+        (status = 400, description = "Unknown role, a password under 8 characters, or a change that would demote or disable the last active admin", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown user", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn update_user(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -385,7 +468,17 @@ async fn update_user(
 
 /// Admin-only: clear a user's brute-force lockout (reset the failure counter + unlock immediately),
 /// without otherwise editing the account. Auto-unlock still happens on its own once the window passes.
-async fn unlock_user(
+#[utoipa::path(
+    post, path = "/api/v1/users/{id}/unlock", tag = "auth",
+    operation_id = "unlockUser",
+    params(("id" = String, Path, description = "User id")),
+    responses(
+        (status = 200, description = "The unlocked user", body = UserView),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown user", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn unlock_user(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -411,7 +504,22 @@ async fn unlock_user(
     Ok(Json(UserView::from(user)))
 }
 
-async fn delete_user(
+/// Delete an operator account.
+///
+/// You cannot delete your own account, and the last active admin cannot be deleted — both are 400,
+/// not 403. Deleting a user withdraws their live streams at once.
+#[utoipa::path(
+    delete, path = "/api/v1/users/{id}", tag = "auth",
+    operation_id = "deleteUser",
+    params(("id" = String, Path, description = "User id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 400, description = "Your own account, or the last active admin", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown user", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_user(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -597,7 +705,20 @@ fn validate_grant(
     ))
 }
 
-async fn list_api_keys(
+/// Every API key on the box, newest first, with the capabilities each one EFFECTIVELY holds.
+///
+/// A legacy key stored without an explicit grant is rendered as the expansion of its role under the
+/// running enforcement tier, flagged `legacy_role_expansion: true`, rather than as `null`. Slugs this
+/// kernel does not recognise are surfaced in `unknown_capabilities` and grant nothing.
+#[utoipa::path(
+    get, path = "/api/v1/api-keys", tag = "auth",
+    operation_id = "listApiKeys",
+    responses(
+        (status = 200, description = "Every key, newest first, with `key_prefix` but never the key itself"),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_api_keys(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<ApiKeyView>>> {
@@ -617,7 +738,23 @@ async fn list_api_keys(
     ))
 }
 
-async fn create_api_key(
+/// Mint an API key. The plaintext key is in this response and nowhere else — only its hash is stored.
+///
+/// Omitting `capabilities` falls back to expanding `role`, reported back as
+/// `legacy_role_expansion: true`. Granting `admin`, `registry:manage` or `gate:operate` requires
+/// `confirm_privileged: true`, and `scope_kind: "cameras"` is refused for any grant that reads
+/// cross-camera tables — `admin` included, because it implies them at request time.
+#[utoipa::path(
+    post, path = "/api/v1/api-keys", tag = "auth",
+    operation_id = "createApiKey",
+    request_body = ApiKeyCreate,
+    responses(
+        (status = 201, description = "The created key, carrying the plaintext `key` exactly once"),
+        (status = 400, description = "Empty name, unknown role, unknown or empty capability list, a privileged grant without `confirm_privileged`, or a camera scope on capabilities that cannot carry one", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn create_api_key(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<ApiKeyCreate>,
@@ -730,7 +867,19 @@ async fn create_api_key(
 /// Revocation was previously only a hard `DELETE`, which destroys the audit linkage for everything the
 /// key ever did — precisely when an incident responder needs it. `revoked_at` denies the credential on
 /// the next request while leaving the row (and its `audit_log` references) intact.
-async fn update_api_key(
+#[utoipa::path(
+    patch, path = "/api/v1/api-keys/{id}", tag = "auth",
+    operation_id = "updateApiKey",
+    params(("id" = String, Path, description = "API key id")),
+    request_body = ApiKeyUpdate,
+    responses(
+        (status = 200, description = "The amended key, with its effective capabilities"),
+        (status = 400, description = "The WHOLE resulting grant is re-validated, not just the fields sent: same refusals as minting, plus sending `scope_kind` for a key that has no explicit capability list", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown key", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn update_api_key(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -839,7 +988,22 @@ async fn update_api_key(
     Ok(Json(api_key_view(k, st.cfg.machine_auth)))
 }
 
-async fn delete_api_key(
+/// Hard-delete a key.
+///
+/// Prefer soft revocation (`PATCH` with `revoked_at`): deleting the row destroys the audit linkage
+/// for everything the key ever did, which is exactly what an incident responder needs. Either way
+/// the key's live streams are withdrawn immediately.
+#[utoipa::path(
+    delete, path = "/api/v1/api-keys/{id}", tag = "auth",
+    operation_id = "deleteApiKey",
+    params(("id" = String, Path, description = "API key id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown key", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_api_key(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,

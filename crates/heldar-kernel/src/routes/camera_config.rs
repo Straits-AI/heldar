@@ -88,7 +88,22 @@ async fn provider_for(
 
 // ========================= Device identity =========================
 
-async fn get_device_info(
+/// The camera's device identity (name, model, firmware, serial), read live from the device.
+///
+/// A successful read also refreshes the kernel's cached identity row for this camera.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/config/device_info", tag = "cameras",
+    operation_id = "getCameraDeviceInfo",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "Device identity", body = DeviceInfo),
+        (status = 400, description = "Camera is not configurable: no address/credentials, or an unsupported vendor", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `camera:read`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "The device was unreachable or its ISAPI answer could not be parsed", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_device_info(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -120,7 +135,20 @@ async fn get_device_info(
 
 // ========================= Video encoding =========================
 
-async fn get_video_list(
+/// Every streaming channel's video-encoding configuration (main, sub and any extras).
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/config/video", tag = "cameras",
+    operation_id = "listCameraVideoConfigs",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "One entry per streaming channel", body = Vec<VideoConfig>),
+        (status = 400, description = "Camera is not configurable: no address/credentials, or an unsupported vendor", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `camera:read`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "The device was unreachable or its ISAPI answer could not be parsed", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_video_list(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -130,7 +158,26 @@ async fn get_video_list(
     Ok(Json(provider.list_video_configs().await?))
 }
 
-async fn get_video(
+/// One streaming channel's video-encoding configuration.
+///
+/// `channel` is the device's own channel number, not an index: `101` is the main stream and `102`
+/// the sub stream on a HikVision camera. `fps` is centi-fps as the device reports it (2000 = 20fps).
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/config/video/{channel}", tag = "cameras",
+    operation_id = "getCameraVideoConfig",
+    params(
+        ("id" = String, Path, description = "Camera id"),
+        ("channel" = u32, Path, description = "Device channel number, e.g. 101 main / 102 sub"),
+    ),
+    responses(
+        (status = 200, description = "The channel's encoding configuration", body = VideoConfig),
+        (status = 400, description = "Camera is not configurable, or the device has no such channel", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `camera:read`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "The device was unreachable or its ISAPI answer could not be parsed", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_video(
     State(st): State<AppState>,
     Path((id, channel)): Path<(String, u32)>,
     principal: Principal,
@@ -140,7 +187,27 @@ async fn get_video(
     Ok(Json(provider.get_video_config(channel).await?))
 }
 
-async fn put_video(
+/// Update one streaming channel's video-encoding configuration.
+///
+/// A PARTIAL update applied read-modify-write: only the fields present in the body change, and the
+/// response is the configuration re-read from the device afterwards, not the request echoed back.
+#[utoipa::path(
+    put, path = "/api/v1/cameras/{id}/config/video/{channel}", tag = "cameras",
+    operation_id = "putCameraVideoConfig",
+    params(
+        ("id" = String, Path, description = "Camera id"),
+        ("channel" = u32, Path, description = "Device channel number, e.g. 101 main / 102 sub"),
+    ),
+    request_body = VideoConfigPatch,
+    responses(
+        (status = 200, description = "The configuration re-read from the device after the write", body = VideoConfig),
+        (status = 400, description = "Camera is not configurable, no such channel, or the device rejected the settings", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "The device was unreachable or its ISAPI answer could not be parsed", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_video(
     State(st): State<AppState>,
     Path((id, channel)): Path<(String, u32)>,
     principal: Principal,
@@ -171,7 +238,20 @@ async fn put_video(
 
 // ========================= Clock / NTP =========================
 
-async fn get_time(
+/// The camera's clock configuration (mode, local time, timezone).
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/config/time", tag = "cameras",
+    operation_id = "getCameraTime",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The device clock configuration", body = TimeConfig),
+        (status = 400, description = "Camera is not configurable: no address/credentials, or an unsupported vendor", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `camera:read`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "The device was unreachable or its ISAPI answer could not be parsed", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_time(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -181,7 +261,24 @@ async fn get_time(
     Ok(Json(provider.get_time_config().await?))
 }
 
-async fn put_time(
+/// Set the camera's clock configuration.
+///
+/// A FULL replacement, not a patch: every field is written. The response is the configuration
+/// re-read from the device afterwards.
+#[utoipa::path(
+    put, path = "/api/v1/cameras/{id}/config/time", tag = "cameras",
+    operation_id = "putCameraTime",
+    params(("id" = String, Path, description = "Camera id")),
+    request_body = TimeConfig,
+    responses(
+        (status = 200, description = "The clock configuration re-read from the device after the write", body = TimeConfig),
+        (status = 400, description = "Camera is not configurable, or the device rejected the settings", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "The device was unreachable or its ISAPI answer could not be parsed", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_time(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -203,7 +300,20 @@ async fn put_time(
     Ok(Json(updated))
 }
 
-async fn get_ntp(
+/// The camera's configured NTP server.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/config/time/ntp", tag = "cameras",
+    operation_id = "getCameraNtp",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The device NTP configuration", body = NtpConfig),
+        (status = 400, description = "Camera is not configurable: no address/credentials, or an unsupported vendor", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `camera:read`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "The device was unreachable or its ISAPI answer could not be parsed", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_ntp(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -213,7 +323,24 @@ async fn get_ntp(
     Ok(Json(provider.get_ntp_config().await?))
 }
 
-async fn put_ntp(
+/// Set the camera's NTP server.
+///
+/// `addressing_format` must match `host_name` (`hostname` or `ipaddress`); the device stores the two
+/// separately and will not infer one from the other. The response is re-read from the device.
+#[utoipa::path(
+    put, path = "/api/v1/cameras/{id}/config/time/ntp", tag = "cameras",
+    operation_id = "putCameraNtp",
+    params(("id" = String, Path, description = "Camera id")),
+    request_body = NtpConfig,
+    responses(
+        (status = 200, description = "The NTP configuration re-read from the device after the write", body = NtpConfig),
+        (status = 400, description = "Camera is not configurable, or the device rejected the settings", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "The device was unreachable or its ISAPI answer could not be parsed", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_ntp(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -238,7 +365,23 @@ async fn put_ntp(
     Ok(Json(updated))
 }
 
-async fn sync_now(
+/// Switch the camera's clock to NTP now, if it is still in manual mode.
+///
+/// Idempotent and body-less: a camera already on NTP is left alone and its current clock returned.
+/// This does not set the NTP server — do that first via `PUT .../config/time/ntp`.
+#[utoipa::path(
+    post, path = "/api/v1/cameras/{id}/config/time/sync_now", tag = "cameras",
+    operation_id = "syncCameraTimeNow",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The clock configuration after the switch", body = TimeConfig),
+        (status = 400, description = "Camera is not configurable: no address/credentials, or an unsupported vendor", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "The device was unreachable or its ISAPI answer could not be parsed", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn sync_now(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -260,7 +403,20 @@ async fn sync_now(
 
 // ========================= ONVIF / ISAPI integration =========================
 
-async fn get_onvif_settings(
+/// The camera's ONVIF/ISAPI integration toggles.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/config/onvif", tag = "cameras",
+    operation_id = "getCameraOnvifSettings",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The integration toggles", body = OnvifSettings),
+        (status = 400, description = "Camera is not configurable: no address/credentials, or an unsupported vendor", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `camera:read`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "The device was unreachable or its ISAPI answer could not be parsed", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_onvif_settings(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -270,7 +426,24 @@ async fn get_onvif_settings(
     Ok(Json(provider.get_onvif_settings().await?))
 }
 
-async fn put_onvif_settings(
+/// Set the camera's ONVIF/ISAPI integration toggles.
+///
+/// Enabling ONVIF is only half the job — the device still needs an ONVIF user, which is
+/// `POST .../config/onvif/ensure_user`. The response is re-read from the device.
+#[utoipa::path(
+    put, path = "/api/v1/cameras/{id}/config/onvif", tag = "cameras",
+    operation_id = "putCameraOnvifSettings",
+    params(("id" = String, Path, description = "Camera id")),
+    request_body = OnvifSettings,
+    responses(
+        (status = 200, description = "The toggles re-read from the device after the write", body = OnvifSettings),
+        (status = 400, description = "Camera is not configurable, or the device rejected the settings", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "The device was unreachable or its ISAPI answer could not be parsed", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_onvif_settings(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -295,7 +468,26 @@ async fn put_onvif_settings(
     Ok(Json(updated))
 }
 
-async fn ensure_onvif_user(
+/// Provision a dedicated ONVIF user on the camera, creating it if absent.
+///
+/// `user_type` defaults to `operator` (media + PTZ, not device configuration). The device treats a
+/// duplicate create as success and never reports created-vs-existed, so the `created` flag in the
+/// response is the KERNEL's record: it is `true` only the first time this endpoint provisions the
+/// user for this camera, and `false` on every later call.
+#[utoipa::path(
+    post, path = "/api/v1/cameras/{id}/config/onvif/ensure_user", tag = "cameras",
+    operation_id = "ensureCameraOnvifUser",
+    params(("id" = String, Path, description = "Camera id")),
+    request_body = EnsureOnvifUserRequest,
+    responses(
+        (status = 200, description = "`{\"ok\": true, \"created\": bool}` — `created` is false when the kernel had already provisioned this user"),
+        (status = 400, description = "Camera is not configurable, or the device rejected the user", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "The device was unreachable or its ISAPI answer could not be parsed", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn ensure_onvif_user(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -344,7 +536,20 @@ async fn ensure_onvif_user(
 
 // ========================= On-screen-display overlays =========================
 
-async fn get_osd(
+/// The camera's on-screen-display overlay configuration (timestamp / channel name).
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/config/osd", tag = "cameras",
+    operation_id = "getCameraOsd",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The overlay configuration", body = OsdConfig),
+        (status = 400, description = "Camera is not configurable: no address/credentials, or an unsupported vendor", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `camera:read`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "The device was unreachable or its ISAPI answer could not be parsed", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_osd(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -354,7 +559,24 @@ async fn get_osd(
     Ok(Json(provider.get_osd_config().await?))
 }
 
-async fn put_osd(
+/// Set the camera's on-screen-display overlays.
+///
+/// Overlays are burned into the recorded video, so this changes what every future segment looks
+/// like, not just the live view. The response is re-read from the device.
+#[utoipa::path(
+    put, path = "/api/v1/cameras/{id}/config/osd", tag = "cameras",
+    operation_id = "putCameraOsd",
+    params(("id" = String, Path, description = "Camera id")),
+    request_body = OsdConfig,
+    responses(
+        (status = 200, description = "The overlay configuration re-read from the device after the write", body = OsdConfig),
+        (status = 400, description = "Camera is not configurable, or the device rejected the settings", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "The device was unreachable or its ISAPI answer could not be parsed", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_osd(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -384,7 +606,25 @@ async fn put_osd(
 
 // ========================= Reboot (DISRUPTIVE) =========================
 
-async fn reboot(
+/// Reboot the camera. DISRUPTIVE: the device drops its streams for the duration.
+///
+/// Refused with 400 unless the body carries `confirm: true`. That is deliberate, not a validation
+/// artefact — the confirmation is the only thing standing between a mistyped path and a camera that
+/// stops recording for a minute.
+#[utoipa::path(
+    post, path = "/api/v1/cameras/{id}/config/reboot", tag = "cameras",
+    operation_id = "rebootCamera",
+    params(("id" = String, Path, description = "Camera id")),
+    request_body = RebootRequest,
+    responses(
+        (status = 200, description = "`{\"ok\": true, \"rebooting\": true}` — the device accepted the reboot"),
+        (status = 400, description = "`confirm` was not `true`, or the camera is not configurable", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 500, description = "The device was unreachable or refused the reboot", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn reboot(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -414,7 +654,27 @@ async fn reboot(
 
 // ========================= Bulk apply =========================
 
-async fn bulk_config(
+/// Apply one configuration action across many cameras.
+///
+/// Omitting `camera_ids` means "every enabled camera this credential holds" — for a camera-scoped
+/// credential that is its own cameras, never the fleet. An EXPLICIT list naming a camera outside the
+/// scope is refused whole rather than silently narrowed, and the refusal names no camera, so it
+/// cannot be used to probe ids one at a time.
+///
+/// Cameras are walked SERIALLY and each one is bounded by a timeout, so an unreachable device does
+/// not abort the run: it returns 200 with `ok: false` and an `error` for that camera. Check
+/// `failed`, not the status code.
+#[utoipa::path(
+    post, path = "/api/v1/cameras/config/bulk", tag = "cameras",
+    operation_id = "bulkCameraConfig",
+    request_body = BulkConfigRequest,
+    responses(
+        (status = 200, description = "Per-camera outcomes plus succeeded/failed counts. A per-camera failure is reported here, not as an error status", body = BulkConfigResponse),
+        (status = 403, description = "Missing `registry:manage`, or an explicit `camera_ids` naming a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 500, description = "The target set could not be read from the database. A per-camera device failure is NOT reported here", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn bulk_config(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<BulkConfigRequest>,

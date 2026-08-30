@@ -123,7 +123,18 @@ fn validate_severity(s: &str) -> AppResult<()> {
     }
 }
 
-async fn list_zones(
+/// The zones configured on a camera, oldest first.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/zones", tag = "zones",
+    operation_id = "listZones",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The camera's zones, oldest first"),
+        (status = 403, description = "Missing `events:read`, or a camera outside this credential's scope", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_zones(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -139,7 +150,26 @@ async fn list_zones(
     Ok(Json(zones))
 }
 
-async fn create_zone(
+/// Create a zone on a camera.
+///
+/// Idempotent per `(camera, name)`: if a zone of that name already exists it is RETURNED with `200`
+/// rather than duplicated, because stacked identical zones each fire their own copy of every
+/// enter/dwell event. Change an existing zone with `PATCH /api/v1/zones/{zone_id}`, not by
+/// re-POSTing it.
+#[utoipa::path(
+    post, path = "/api/v1/cameras/{id}/zones", tag = "zones",
+    operation_id = "createZone",
+    params(("id" = String, Path, description = "Camera id")),
+    request_body = ZoneCreate,
+    responses(
+        (status = 201, description = "The zone was created"),
+        (status = 200, description = "A zone of this name already existed on the camera and is returned unchanged"),
+        (status = 400, description = "Bad `name`, `kind` (`region`|`presence`|`line`), `labels` or `severity` (`info`|`warning`|`critical`), or a `polygon` that is not 3..=512 points normalized to 0..1 — exactly 2 points when `kind` is `line`", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera outside this credential's scope", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn create_zone(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -221,7 +251,24 @@ async fn create_zone(
     Ok((StatusCode::CREATED, Json(zone)))
 }
 
-async fn update_zone(
+/// Update a zone, addressed by its own id.
+///
+/// Every field is optional and an omitted one keeps its stored value. Geometry stays consistent with
+/// `kind`, so flipping `kind` to `line` on a zone whose stored polygon is not a 2-point polyline is
+/// a `400` — send the new `polygon` in the same request.
+#[utoipa::path(
+    patch, path = "/api/v1/zones/{zone_id}", tag = "zones",
+    operation_id = "updateZone",
+    params(("zone_id" = String, Path, description = "Zone id")),
+    request_body = ZoneUpdate,
+    responses(
+        (status = 200, description = "The updated zone"),
+        (status = 403, description = "Missing `registry:manage`. A camera-scoped credential also gets this for a zone it does not hold, byte-identical to the answer for a zone that does not exist, so the zone id space cannot be enumerated", body = crate::openapi::ErrorBody),
+        (status = 400, description = "Bad `kind`, `polygon`, `labels` or `severity`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown zone — only ever seen by a fleet-wide credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn update_zone(
     State(st): State<AppState>,
     Path(zone_id): Path<String>,
     principal: Principal,
@@ -306,7 +353,18 @@ async fn update_zone(
     Ok(Json(zone))
 }
 
-async fn delete_zone(
+/// Delete a zone.
+#[utoipa::path(
+    delete, path = "/api/v1/zones/{zone_id}", tag = "zones",
+    operation_id = "deleteZone",
+    params(("zone_id" = String, Path, description = "Zone id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 403, description = "Missing `registry:manage`. A camera-scoped credential also gets this for a zone it does not hold, byte-identical to the answer for a zone that does not exist, so the zone id space cannot be enumerated", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown zone — only ever seen by a fleet-wide credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_zone(
     State(st): State<AppState>,
     Path(zone_id): Path<String>,
     principal: Principal,
@@ -337,7 +395,7 @@ async fn delete_zone(
 }
 
 #[derive(Debug, Deserialize)]
-struct ZoneEventQuery {
+pub struct ZoneEventQuery {
     from: Option<String>,
     to: Option<String>,
     zone_id: Option<String>,
@@ -349,14 +407,37 @@ struct ZoneEventQuery {
 /// A zone event enriched with the recorded segment covering its timestamp (when the indexer has
 /// caught up) — the UI turns it into a playback link.
 #[derive(Debug, serde::Serialize, sqlx::FromRow)]
-struct ZoneEventView {
+pub struct ZoneEventView {
     #[sqlx(flatten)]
     #[serde(flatten)]
     event: ZoneEvent,
     segment_id: Option<String>,
 }
 
-async fn list_zone_events(
+/// A camera's zone events (enter, exit, dwell, line crossings), newest first.
+///
+/// Each row carries `segment_id`: the recorded segment covering the event's timestamp, or `null`
+/// when the recording indexer has not caught up yet or nothing was recorded then.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/zone-events", tag = "zones",
+    operation_id = "listZoneEvents",
+    params(
+        ("id" = String, Path, description = "Camera id"),
+        ("from" = Option<String>, Query, description = "RFC3339 lower bound on `timestamp`"),
+        ("to" = Option<String>, Query, description = "RFC3339 upper bound on `timestamp`"),
+        ("zone_id" = Option<String>, Query, description = "Only events from this zone"),
+        ("event_type" = Option<String>, Query, description = "Only events of this type"),
+        ("track_id" = Option<String>, Query, description = "Only events for this track"),
+        ("limit" = Option<i64>, Query, description = "Max rows, default 200, clamped to 1..=5000"),
+    ),
+    responses(
+        (status = 200, description = "Matching zone events, newest first"),
+        (status = 400, description = "Unparseable `from` or `to` timestamp", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `events:read`, or a camera outside this credential's scope", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_zone_events(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -408,7 +489,7 @@ async fn list_zone_events(
 }
 
 #[derive(Debug, Deserialize)]
-struct AggregateQuery {
+pub struct AggregateQuery {
     from: Option<String>,
     to: Option<String>,
     /// Bucket width in minutes (default 60, clamped 1..=1440).
@@ -418,7 +499,23 @@ struct AggregateQuery {
 /// Server-side zone-event aggregates: per (zone, event_type, time bucket) counts — the data
 /// behind occupancy/throughput charts (line-crossing tallies, enters per hour) without shipping
 /// raw events to the client.
-async fn zone_event_aggregates(
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/zone-events/aggregates", tag = "zones",
+    operation_id = "getZoneEventAggregates",
+    params(
+        ("id" = String, Path, description = "Camera id"),
+        ("from" = Option<String>, Query, description = "RFC3339 start, default `to` minus 24 hours"),
+        ("to" = Option<String>, Query, description = "RFC3339 end, default now"),
+        ("bucket_minutes" = Option<i64>, Query, description = "Bucket width, default 60, clamped to 1..=1440"),
+    ),
+    responses(
+        (status = 200, description = "`{from, to, bucket_minutes, buckets[]}` — one bucket per (zone, event_type, window), ascending by `bucket_start`. A window with no events has no bucket rather than a zero"),
+        (status = 400, description = "Unparseable `from` or `to` timestamp", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `events:read`, or a camera outside this credential's scope", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn zone_event_aggregates(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -479,7 +576,17 @@ async fn zone_event_aggregates(
 /// Live per-zone occupancy (tracks currently inside), maintained by the zone engine as a
 /// write-behind aggregate. `updated_at` tells the reader how fresh each count is (engine state is
 /// in-memory and resets on restart).
-async fn zone_occupancy(
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/zones/occupancy", tag = "zones",
+    operation_id = "getZoneOccupancy",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "`{zones: [{zone_id, count, updated_at}]}` for the camera's ENABLED zones only. Counts come from in-memory engine state, so they are zero after a restart until traffic re-populates them — read `updated_at` for freshness"),
+        (status = 403, description = "Missing `events:read`, or a camera outside this credential's scope", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn zone_occupancy(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,

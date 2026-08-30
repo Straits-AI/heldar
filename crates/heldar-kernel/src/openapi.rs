@@ -97,6 +97,108 @@ pub const API_VERSION: &str = "0.1.0";
         crate::routes::playback_sessions::create_session,
         crate::routes::playback_sessions::delete_session,
         crate::routes::recording_control::record_trigger,
+        crate::routes::ai::acquire_lease,
+        crate::routes::ai::claim_embed_queries,
+        crate::routes::ai::create_task,
+        crate::routes::ai::delete_task,
+        crate::routes::ai::embed_query_result,
+        crate::routes::ai::ingest,
+        crate::routes::ai::ingest_embeddings,
+        crate::routes::ai::latest_frame,
+        crate::routes::ai::list_all_tasks,
+        crate::routes::ai::list_camera_tasks,
+        crate::routes::ai::list_detections,
+        crate::routes::ai::release_lease,
+        crate::routes::ai::sampler_status,
+        crate::routes::ai::update_task,
+        crate::routes::auth::create_api_key,
+        crate::routes::auth::create_user,
+        crate::routes::auth::delete_api_key,
+        crate::routes::auth::delete_user,
+        crate::routes::auth::list_api_keys,
+        crate::routes::auth::list_users,
+        crate::routes::auth::login,
+        crate::routes::auth::logout,
+        crate::routes::auth::me,
+        crate::routes::auth::unlock_user,
+        crate::routes::auth::update_api_key,
+        crate::routes::auth::update_user,
+        crate::routes::backup::archive_export,
+        crate::routes::backup::create_destination,
+        crate::routes::backup::create_policy,
+        crate::routes::backup::delete_destination,
+        crate::routes::backup::delete_job,
+        crate::routes::backup::delete_policy,
+        crate::routes::backup::get_job,
+        crate::routes::backup::list_archive_exports,
+        crate::routes::backup::list_destinations,
+        crate::routes::backup::list_jobs,
+        crate::routes::backup::list_policies,
+        crate::routes::backup::test_destination,
+        crate::routes::backup::trigger_policy,
+        crate::routes::backup::update_destination,
+        crate::routes::backup::update_policy,
+        crate::routes::camera_config::bulk_config,
+        crate::routes::camera_config::ensure_onvif_user,
+        crate::routes::camera_config::get_device_info,
+        crate::routes::camera_config::get_ntp,
+        crate::routes::camera_config::get_onvif_settings,
+        crate::routes::camera_config::get_osd,
+        crate::routes::camera_config::get_time,
+        crate::routes::camera_config::get_video,
+        crate::routes::camera_config::get_video_list,
+        crate::routes::camera_config::put_ntp,
+        crate::routes::camera_config::put_onvif_settings,
+        crate::routes::camera_config::put_osd,
+        crate::routes::camera_config::put_time,
+        crate::routes::camera_config::put_video,
+        crate::routes::camera_config::reboot,
+        crate::routes::camera_config::sync_now,
+        crate::routes::camera_control::get_capabilities,
+        crate::routes::camera_control::get_day_night,
+        crate::routes::camera_control::get_image,
+        crate::routes::camera_control::get_intrusion,
+        crate::routes::camera_control::get_line_crossing,
+        crate::routes::camera_control::get_motion,
+        crate::routes::camera_control::list_outputs,
+        crate::routes::camera_control::probe,
+        crate::routes::camera_control::pulse_output,
+        crate::routes::camera_control::put_day_night,
+        crate::routes::camera_control::put_detection,
+        crate::routes::camera_control::put_image,
+        crate::routes::camera_control::put_intrusion,
+        crate::routes::camera_control::put_line_crossing,
+        crate::routes::camera_control::put_motion,
+        crate::routes::onvif::continuous_move,
+        crate::routes::onvif::discover,
+        crate::routes::onvif::get_onvif,
+        crate::routes::onvif::goto_preset,
+        crate::routes::onvif::list_presets,
+        crate::routes::onvif::probe,
+        crate::routes::onvif::ptz_stop,
+        crate::routes::onvif::refresh_presets,
+        crate::routes::system::get_db_status,
+        crate::routes::system::get_retention,
+        crate::routes::system::get_transcode,
+        crate::routes::system::post_db_convert,
+        crate::routes::system::put_db_limit,
+        crate::routes::system::put_retention,
+        crate::routes::system::put_transcode,
+        crate::routes::system::system_info,
+        crate::routes::webhooks::create,
+        crate::routes::webhooks::delete,
+        crate::routes::webhooks::event_types,
+        crate::routes::webhooks::list,
+        crate::routes::webhooks::list_deliveries,
+        crate::routes::webhooks::test,
+        crate::routes::webhooks::update,
+        crate::routes::zones::create_zone,
+        crate::routes::zones::delete_zone,
+        crate::routes::zones::list_zone_events,
+        crate::routes::zones::list_zones,
+        crate::routes::zones::update_zone,
+        crate::routes::zones::zone_event_aggregates,
+        crate::routes::zones::zone_occupancy,
     ),
     components(schemas(ErrorBody, crate::models::CameraView)),
     tags(
@@ -119,6 +221,26 @@ pub fn router() -> Router<AppState> {
 
 async fn spec() -> Json<serde_json::Value> {
     Json(document())
+}
+
+/// The kernel's own fragment, for a composer that adds the app crates' routes.
+///
+/// The app crates depend on the kernel, so the kernel cannot name their handlers — the composed
+/// document has to be assembled one layer up, exactly as `/metrics` is. `document()` below returns
+/// the KERNEL's routes only; `heldar_server::api_document()` is the whole surface.
+pub fn kernel_fragment() -> utoipa::openapi::OpenApi {
+    ApiDoc::openapi()
+}
+
+/// Merge extra fragments into the kernel's document and decorate the result.
+pub fn document_with(extra: &[utoipa::openapi::OpenApi]) -> serde_json::Value {
+    let mut doc = ApiDoc::openapi();
+    for e in extra {
+        doc.merge(e.clone());
+    }
+    let mut spec = serde_json::to_value(doc).unwrap_or_else(|_| serde_json::json!({}));
+    crate::openapi_security::decorate(&mut spec);
+    spec
 }
 
 /// The served document: generated from the handlers, then decorated with what each route REQUIRES.
