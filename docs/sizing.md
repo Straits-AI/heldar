@@ -4,6 +4,13 @@ This guide turns the sizing model and the deployment topology into worked number
 deployment against. Every formula and the anchor examples are kept internally consistent so the
 math lines up end to end.
 
+> **What this document is, and is not.** Sections 1–5 are ARITHMETIC: bandwidth, bytes per day,
+> and the topologies that follow from them. They are reliable in the way multiplication is reliable,
+> and they say nothing about whether a given box keeps up. What a real appliance actually sustained —
+> measured, with faults injected — is in **§6, Qualification status**, and every camera-count claim
+> there is either backed by a named run or labelled an extrapolation. If you are choosing hardware,
+> read §6 first and treat §1–5 as the model it is checked against.
+
 The four things you size for a camera deployment:
 
 1. **Network bandwidth** — can the LAN/switch/uplink carry the streams.
@@ -227,6 +234,10 @@ Same 32 cameras — a **~45×** difference in pixel throughput, and a totally di
 
 ## 5. Topology recommendations
 
+> The camera counts below are **topology** guidance — where the network and storage boundaries
+> fall — not qualified throughput limits for any particular box. For what a box was measured doing,
+> see §6.
+
 ### Small site — 4–16 cameras
 
 ```text
@@ -267,7 +278,49 @@ Building C cameras → local media node ┘
 
 ---
 
-## 6. This dev host (Stage 0)
+## 6. Qualification status
+
+Formulas are not limits. This table is the only place in this document where a camera count is a
+**measurement**, and every row states its basis.
+
+A row reading `qualified: <file>` cites a run whose recorded metrics met every threshold in
+`scripts/bench/thresholds.json`. `scripts/verify_capacity_claims.py` runs in CI and refuses this
+table if a row cites a missing run, a run that FAILED, a run of a different profile, or a run judged
+against thresholds that have since been changed — so a bar cannot be loosened to rescue a claim
+without invalidating the claim. The verdict is recomputed from the raw measurements rather than read
+from the result's `verdict` field.
+
+`EXTRAPOLATED` means the arithmetic in §1–4 says it should work and **nobody has run it**. It is not
+a weaker qualification; it is not a qualification.
+
+<!-- qualification-table -->
+
+| Profile | Cameras | Codec | Bitrate | AI | Hardware class | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| Small site, 720p | 16 | H.264 | 2 Mbps | off | appliance-x86 | EXTRAPOLATED |
+| Small site, 1080p | 16 | H.265 | 4 Mbps | off | appliance-x86 | EXTRAPOLATED |
+| Medium site, 1080p | 32 | H.265 | 4 Mbps | off | appliance-x86 | EXTRAPOLATED |
+| Medium site + AI | 32 | H.265 | 4 Mbps | motion | appliance-x86 | EXTRAPOLATED |
+| Large site | 64 | H.265 | 4 Mbps | off | appliance-x86 | EXTRAPOLATED |
+
+### What the qualified rows do and do not establish
+
+- They are **synthetic**: `testsrc` through a real encoder, a real MediaMTX and the real recorder.
+  They establish that the box ingests, records, indexes, exports and survives faults at that load.
+  They establish **nothing** about detection accuracy — no result here may be cited for whether
+  ANPR reads a plate or a ReID embedding matches the right person.
+- They qualify **the hardware class named in the row**. A run on a developer laptop qualifies a
+  developer laptop; the gate checks the row's class against the class recorded in the run.
+- They are **30-minute runs** unless the row says otherwise. A 24-hour and a seven-day profile exist
+  in `scripts/bench/scenarios.json` and are dispatched separately; until one appears in this table,
+  no long-run claim is qualified.
+
+See `docs/benchmarks/README.md` for how to run one, what each metric means, and — as importantly —
+the list of metrics that are **not** measured and are reported as `unmeasured` rather than assumed.
+
+---
+
+## 7. This dev host (Stage 0)
 
 Measured specs of the development machine:
 
@@ -300,7 +353,7 @@ Recommended dev settings:
 
 ---
 
-## 7. Sizing worksheet
+## 8. Sizing worksheet
 
 Fill in the blanks for your deployment.
 

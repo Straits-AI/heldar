@@ -196,6 +196,17 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: gh release upload "$TAG" heldar-release-manifest.json --clobber
 
+      # A release must not ship a sizing document whose camera counts no run supports (#119). The
+      # gate recomputes each cited run's verdict from its raw measurements and refuses a claim whose
+      # thresholds have moved since the run — so this cannot be satisfied by editing a number.
+      - name: Capacity claims are backed by a run that passed
+        if: matrix.arch == 'x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/bench/test_capacity_gate.py
+          python3 scripts/verify_capacity_claims.py
+
       # The skill bundle ships as a release asset (#124), pinned to the contract this tag serves.
       # A skill is only meaningful against an API it was written for, and its frontmatter says which.
       - name: Package the skill bundle

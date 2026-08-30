@@ -1,0 +1,93 @@
+{
+  "_comment": [
+    "Pass/fail bars for a qualification run (#119). DECLARED BEFORE RUNNING, on purpose.",
+    "",
+    "The issue's sharpest instruction is 'avoid moving the threshold after seeing the result'. That",
+    "is unenforceable as advice, so it is enforced instead: every result records the sha256 of this",
+    "file, and scripts/verify_capacity_claims.py refuses a capacity claim whose cited run was judged",
+    "against a different version of it. Loosening a bar to turn a red run green therefore",
+    "invalidates the claim it was loosened for, and the profile has to be re-run.",
+    "",
+    "Only metrics that EVERY qualification scenario measures are gated. A metric the harness cannot",
+    "observe is reported as unmeasured, and a threshold over an unmeasured metric fails rather than",
+    "passing quietly — so adding a bar here for something nothing measures breaks every run, which",
+    "is the correct outcome and not a reason to soften the rule.",
+    "",
+    "CHANGE LOG. 1.1.0: `api_5xx_rate` and `api_seconds_p95` were REDEFINED (not re-valued) to cover the control plane only, after the first smoke run showed the 2 s bar failing snapshots that the same file separately allows 10 s. A threshold set that grades one call against two contradictory bars is broken, so the definition was fixed and the version moved — which invalidates any claim citing 1.0.0, exactly as intended. No bar was loosened: every VALUE here is unchanged from the set declared before the first run."
+  ],
+  "version": "1.1.0",
+  "thresholds": [
+    {
+      "metric": "unexplained_gap_seconds_per_camera_hour",
+      "op": "<=",
+      "value": 30,
+      "why": "30 s/camera-hour is 99.2% coverage. Gaps the harness itself caused by unplugging a publisher are subtracted; what remains is coverage the recorder lost on its own, which is the number a retention or evidence claim rests on."
+    },
+    {
+      "metric": "unplayable_segment_count",
+      "op": "<=",
+      "value": 0,
+      "why": "A segment that indexes but will not decode is worse than a missing one: the timeline says the footage exists. Zero, not a rate — one unplayable segment is one piece of evidence that is not there."
+    },
+    {
+      "metric": "recorder_reconnect_seconds_p95",
+      "op": "<=",
+      "value": 60,
+      "why": "A camera that drops must be back within a minute at P95, or a fleet with ordinary network churn accumulates gaps faster than the coverage bar allows."
+    },
+    {
+      "metric": "restart_recovery_seconds",
+      "op": "<=",
+      "value": 120,
+      "why": "Recovery is every camera recording again, not the API answering. Two minutes is an upgrade window an operator can accept; longer and a routine restart becomes a scheduled outage."
+    },
+    {
+      "metric": "liveview_failure_rate",
+      "op": "<=",
+      "value": 0.01,
+      "why": "Live view is the most-used operator path. One failure in a hundred is already noticeable at a video wall refreshing every few seconds."
+    },
+    {
+      "metric": "liveview_seconds_p95",
+      "op": "<=",
+      "value": 5.0,
+      "why": "Beyond five seconds to hand back a live URL, an operator assumes the camera is down and starts investigating a system that is working."
+    },
+    {
+      "metric": "snapshot_failure_rate",
+      "op": "<=",
+      "value": 0.02,
+      "why": "Snapshots contend with the recorder for the same stream, so a slightly looser bar than live view — but a failing snapshot is a failing thumbnail everywhere in the dashboard."
+    },
+    {
+      "metric": "snapshot_seconds_p95",
+      "op": "<=",
+      "value": 10.0,
+      "why": "A snapshot must wait for a keyframe; ten seconds covers a two-second GOP with contention and still fails a box that is genuinely saturated."
+    },
+    {
+      "metric": "clip_success_rate",
+      "op": ">=",
+      "value": 0.99,
+      "why": "Clip export is the evidence path. Windows with no footage are excluded from the rate (a 404 is a fact about the window); what is graded is whether existing footage could be exported."
+    },
+    {
+      "metric": "clip_seconds_p95",
+      "op": "<=",
+      "value": 30.0,
+      "why": "A 30-second clip is `-c copy`, so it is a concat and a trim. If P95 exceeds 30 s the disk, not the encoder, is the limit — and that is a capacity finding."
+    },
+    {
+      "metric": "api_5xx_rate",
+      "op": "<=",
+      "value": 0.005,
+      "why": "Counts connection failures as well as 5xx, over CONTROL-PLANE calls: snapshot, live view and clip have their own bars below. Calls to a camera the harness has deliberately unplugged are excluded; calls to any other camera are not. This is the externally visible superset of SQLite contention, which the kernel exposes no counter for."
+    },
+    {
+      "metric": "api_seconds_p95",
+      "op": "<=",
+      "value": 2.0,
+      "why": "Control-plane calls only — the dashboard makes several per view, and a two-second P95 is already a sluggish page. Media paths are measured separately because a snapshot must wait for a keyframe and cannot be held to a control-plane bar."
+    }
+  ]
+}

@@ -1,0 +1,225 @@
+{
+  "smoke-2cam": {
+    "description": "Two cameras, five minutes. The shape check that runs in CI — not a capacity claim.",
+    "mode": "synthetic",
+    "cameras": 2,
+    "resolution": "640x360",
+    "fps": 10,
+    "codec": "h264",
+    "bitrate_kbps": 800,
+    "gop": 20,
+    "segment_seconds": 10,
+    "retention_hours": 1,
+    "max_recordings_gb": 1,
+    "ai_profile": "off",
+    "duration_s": 300,
+    "sample_interval_s": 5,
+    "probe_interval_s": 60,
+    "api_port": 8021,
+    "rtsp_port": 8654,
+    "faults": [
+      { "at_s": 90, "kind": "publisher_stop", "count": 1 },
+      { "at_s": 150, "kind": "publisher_start", "count": 1 },
+      { "at_s": 210, "kind": "core_restart" }
+    ]
+  },
+
+  "qual-4cam-h264": {
+    "description": "4 x 720p H.264 @ 2 Mbps, 30 min, AI off.",
+    "mode": "synthetic",
+    "cameras": 4,
+    "resolution": "1280x720",
+    "fps": 15,
+    "codec": "h264",
+    "bitrate_kbps": 2000,
+    "gop": 30,
+    "segment_seconds": 10,
+    "retention_hours": 2,
+    "max_recordings_gb": 5,
+    "ai_profile": "off",
+    "duration_s": 1800,
+    "sample_interval_s": 10,
+    "probe_interval_s": 120,
+    "api_port": 8021,
+    "rtsp_port": 8654,
+    "faults": [
+      { "at_s": 300, "kind": "publisher_stop", "count": 1 },
+      { "at_s": 420, "kind": "publisher_start", "count": 1 },
+      { "at_s": 720, "kind": "mediamtx_restart" },
+      { "at_s": 1200, "kind": "core_restart" }
+    ]
+  },
+
+  "qual-8cam-h264": {
+    "description": "8 x 720p H.264 @ 2 Mbps, 30 min, AI off.",
+    "mode": "synthetic",
+    "cameras": 8,
+    "resolution": "1280x720",
+    "fps": 15,
+    "codec": "h264",
+    "bitrate_kbps": 2000,
+    "gop": 30,
+    "segment_seconds": 10,
+    "retention_hours": 2,
+    "max_recordings_gb": 10,
+    "ai_profile": "off",
+    "duration_s": 1800,
+    "sample_interval_s": 10,
+    "probe_interval_s": 120,
+    "api_port": 8021,
+    "rtsp_port": 8654,
+    "faults": [
+      { "at_s": 300, "kind": "publisher_stop", "count": 2 },
+      { "at_s": 420, "kind": "publisher_start", "count": 2 },
+      { "at_s": 720, "kind": "mediamtx_restart" },
+      { "at_s": 1200, "kind": "core_restart" }
+    ]
+  },
+
+  "qual-8cam-motion-ai": {
+    "description": "8 x 720p H.264 with the motion sampler at 2 FPS — AI and recording contending.",
+    "mode": "synthetic",
+    "cameras": 8,
+    "resolution": "1280x720",
+    "fps": 15,
+    "codec": "h264",
+    "bitrate_kbps": 2000,
+    "gop": 30,
+    "segment_seconds": 10,
+    "retention_hours": 2,
+    "max_recordings_gb": 10,
+    "ai_profile": "motion",
+    "ai_fps": 2,
+    "ai_width": 480,
+    "duration_s": 1800,
+    "sample_interval_s": 10,
+    "probe_interval_s": 120,
+    "api_port": 8021,
+    "rtsp_port": 8654,
+    "faults": [
+      { "at_s": 300, "kind": "publisher_stop", "count": 2 },
+      { "at_s": 420, "kind": "publisher_start", "count": 2 },
+      { "at_s": 1200, "kind": "core_restart" }
+    ]
+  },
+
+  "qual-16cam-h265": {
+    "description": "16 x 1080p H.265 @ 4 Mbps, 30 min, AI off.",
+    "mode": "synthetic",
+    "cameras": 16,
+    "resolution": "1920x1080",
+    "fps": 15,
+    "codec": "h265",
+    "bitrate_kbps": 4000,
+    "gop": 30,
+    "segment_seconds": 10,
+    "retention_hours": 2,
+    "max_recordings_gb": 20,
+    "ai_profile": "off",
+    "duration_s": 1800,
+    "sample_interval_s": 10,
+    "probe_interval_s": 180,
+    "api_port": 8021,
+    "rtsp_port": 8654,
+    "faults": [
+      { "at_s": 300, "kind": "publisher_stop", "count": 4 },
+      { "at_s": 480, "kind": "publisher_start", "count": 4 },
+      { "at_s": 900, "kind": "mediamtx_restart" },
+      { "at_s": 1300, "kind": "core_restart" }
+    ]
+  },
+
+  "qual-32cam-h265": {
+    "description": "32 x 1080p H.265 @ 4 Mbps, 30 min, AI off. Needs a host that can ENCODE 32 streams as well as record them — see docs/benchmarks/README.md before trusting a result from a laptop.",
+    "mode": "synthetic",
+    "cameras": 32,
+    "resolution": "1920x1080",
+    "fps": 15,
+    "codec": "h265",
+    "bitrate_kbps": 4000,
+    "gop": 30,
+    "segment_seconds": 10,
+    "retention_hours": 2,
+    "max_recordings_gb": 40,
+    "ai_profile": "off",
+    "duration_s": 1800,
+    "sample_interval_s": 10,
+    "probe_interval_s": 300,
+    "api_port": 8021,
+    "rtsp_port": 8654,
+    "faults": [
+      { "at_s": 300, "kind": "publisher_stop", "count": 8 },
+      { "at_s": 540, "kind": "publisher_start", "count": 8 },
+      { "at_s": 900, "kind": "mediamtx_restart" },
+      { "at_s": 1300, "kind": "core_restart" }
+    ]
+  },
+
+  "rc-24h-8cam": {
+    "description": "The release-candidate run: 8 x 720p for 24 hours, with a retention squeeze.",
+    "mode": "synthetic",
+    "cameras": 8,
+    "resolution": "1280x720",
+    "fps": 15,
+    "codec": "h264",
+    "bitrate_kbps": 2000,
+    "gop": 30,
+    "segment_seconds": 30,
+    "retention_hours": 6,
+    "max_recordings_gb": 20,
+    "ai_profile": "off",
+    "duration_s": 86400,
+    "sample_interval_s": 30,
+    "probe_interval_s": 900,
+    "api_port": 8021,
+    "rtsp_port": 8654,
+    "faults": [
+      { "at_s": 3600, "kind": "publisher_stop", "count": 2 },
+      { "at_s": 3900, "kind": "publisher_start", "count": 2 },
+      { "at_s": 14400, "kind": "mediamtx_restart" },
+      { "at_s": 28800, "kind": "core_restart" },
+      { "at_s": 43200, "kind": "disk_pressure", "max_recordings_gb": 2 },
+      { "at_s": 72000, "kind": "core_restart" }
+    ]
+  },
+
+  "soak-7d-8cam": {
+    "description": "The seven-day soak for the recommended appliance profile. Bounded, not fast.",
+    "mode": "synthetic",
+    "cameras": 8,
+    "resolution": "1280x720",
+    "fps": 15,
+    "codec": "h264",
+    "bitrate_kbps": 2000,
+    "gop": 30,
+    "segment_seconds": 30,
+    "retention_hours": 24,
+    "max_recordings_gb": 60,
+    "ai_profile": "off",
+    "duration_s": 604800,
+    "sample_interval_s": 60,
+    "probe_interval_s": 3600,
+    "api_port": 8021,
+    "rtsp_port": 8654,
+    "faults": [
+      { "at_s": 7200, "kind": "publisher_stop", "count": 2 },
+      { "at_s": 7800, "kind": "publisher_start", "count": 2 },
+      { "at_s": 86400, "kind": "core_restart" },
+      { "at_s": 172800, "kind": "mediamtx_restart" },
+      { "at_s": 259200, "kind": "disk_pressure", "max_recordings_gb": 10 },
+      { "at_s": 432000, "kind": "core_restart" }
+    ]
+  },
+
+  "field-1h": {
+    "description": "Field qualification against a real box and real cameras. Boots nothing, creates nothing, injects nothing. Set HELDAR_URL and HELDAR_TOKEN.",
+    "mode": "field",
+    "cameras": 0,
+    "duration_s": 3600,
+    "sample_interval_s": 30,
+    "probe_interval_s": 600,
+    "segment_seconds": 10,
+    "ai_profile": "off",
+    "faults": []
+  }
+}
