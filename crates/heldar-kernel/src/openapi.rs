@@ -61,10 +61,14 @@ pub struct ErrorBody {
         crate::routes::evidence::list,
         crate::routes::evidence::get_one,
         crate::routes::evidence::signing_key,
+        crate::routes::system::get_timezone,
+        crate::routes::system::put_timezone,
     ),
     components(schemas(ErrorBody, crate::models::CameraView)),
     tags(
         (name = "cameras", description = "Camera registry. Every route here is camera-scoped."),
+        (name = "system", description = "Box-wide operational settings. Fleet-wide by nature: a \
+         camera-scoped credential cannot change them."),
         (name = "evidence", description = "Signed, offline-verifiable evidence bundles (#118). \
          Every route is camera-scoped, and gated on `video:export` except the public signing key."),
     )

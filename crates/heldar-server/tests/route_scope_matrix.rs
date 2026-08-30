@@ -1470,6 +1470,12 @@ const SCOPE_NEUTRAL: &[(&str, &str)] = &[
          incident) and camera_scope_checks it before any footage is read",
     ),
     (
+        "/api/v1/system/timezone",
+        "the box-wide timezone. GET is SystemRead and discloses no camera; PUT refuses a \
+         camera-scoped credential outright (require_fleet_scope) because a zone reinterprets every \
+         schedule and every relative search on the box",
+    ),
+    (
         "/api/v1/evidence/signing-key",
         "an Ed25519 PUBLIC key. Deliberately readable by any authenticated credential, scoped \
          included: a scoped operator who exported a bundle needs it to verify one, and a public \

@@ -43,6 +43,7 @@ pub mod settings;
 pub mod snapshot;
 pub mod snapshot_scheduler;
 pub mod storage;
+pub mod tz;
 pub mod webhooks;
 pub mod webrtc_rendezvous;
 pub mod worker_shard;

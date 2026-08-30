@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Datelike, Local, Timelike, Utc};
+use chrono::{DateTime, Datelike, Local, TimeZone, Timelike, Utc};
 use serde_json::{json, Value};
 use sqlx::SqlitePool;
 use tokio::io::AsyncReadExt;
@@ -124,7 +124,8 @@ impl RecorderManager {
     /// IGNORING event triggers (those are handled by the event supervisor / [`Self::trigger`]):
     /// - `continuous` is always on.
     /// - `scheduled` / `scheduled_event` are on only inside an enabled time-of-day window for today's
-    ///   weekday, evaluated against the SERVER's LOCAL timezone (chrono::Local), with overnight wrap.
+    ///   weekday, with overnight wrap, evaluated against the camera's SITE timezone (#125) — or,
+    ///   when no zone is configured anywhere, against the SERVER's local zone exactly as before.
     /// - `event` (and any unknown mode) has no time-based recording, so it is off here; it records
     ///   only while a trigger window is active.
     pub async fn eval_schedule(&self, camera_id: &str) -> bool {
@@ -145,8 +146,26 @@ impl RecorderManager {
                 .fetch_all(&self.pool)
                 .await
                 .unwrap_or_default();
-                let now = Local::now();
-                rows.iter().any(|s| schedule_active_at(s, now))
+                // WHICH CLOCK A RECORDING WINDOW FOLLOWS. This is the line, and the fallback is
+                // deliberate: an unconfigured box keeps evaluating against the server's local zone,
+                // because moving a working site's recording windows on upgrade day — silently, with
+                // no error — is the worst thing this change could do. Set a zone and everything
+                // moves together, which is the point of setting one.
+                //
+                // ponytail: one site lookup per scheduled camera per 30s tick. Cache it on
+                // RecorderManager and invalidate on a site/timezone update if that ever shows up in
+                // a profile; measuring first is cheaper than a cache that goes stale.
+                let (tz, _src) = crate::services::tz::site_tz(&self.pool, Some(camera_id)).await;
+                match tz {
+                    Some(tz) => {
+                        let now = Utc::now().with_timezone(&tz);
+                        rows.iter().any(|s| schedule_active_at(s, now))
+                    }
+                    None => {
+                        let now = Local::now();
+                        rows.iter().any(|s| schedule_active_at(s, now))
+                    }
+                }
             }
             _ => false,
         }
@@ -782,8 +801,19 @@ fn window_active(days: &[i64], start: i32, end: i32, wd: i64, minute: i32) -> bo
     }
 }
 
-/// Whether a single schedule row is active at local instant `now`. Malformed times never match.
-fn schedule_active_at(s: &RecordSchedule, now: DateTime<Local>) -> bool {
+/// Whether a single schedule row is active at wall-clock instant `now`. Malformed times never match.
+///
+/// Generic over the zone so the caller decides which clock a window follows. The body needs no
+/// awareness of it: `weekday()`, `hour()` and `minute()` already read the wall clock of whatever
+/// zone the value carries.
+///
+/// DAYLIGHT SAVING FALLS OUT WITH NO SPECIAL CASE, but only because the caller converts an *instant*
+/// into a zone (`Utc::now().with_timezone(&tz)`), which is total — every instant is exactly one wall
+/// clock. Do NOT rewrite this to build a local time and convert the other way; that direction has
+/// skipped and repeated readings, and it is where an hour of footage goes missing one Sunday a year.
+/// The 30s poll is what makes the total direction sufficient: nothing precomputes a boundary instant
+/// that could go stale across an offset change.
+fn schedule_active_at<T: TimeZone>(s: &RecordSchedule, now: DateTime<T>) -> bool {
     let (Some(start), Some(end)) = (parse_hhmm(&s.time_start), parse_hhmm(&s.time_end)) else {
         return false;
     };
@@ -797,6 +827,175 @@ fn schedule_active_at(s: &RecordSchedule, now: DateTime<Local>) -> bool {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Build a schedule row: `days` as JSON ints (0=Mon), "HH:MM" bounds.
+    fn sched(days: &str, start: &str, end: &str) -> RecordSchedule {
+        RecordSchedule {
+            id: "sch_1".into(),
+            camera_id: "cam_a".into(),
+            days: sqlx::types::Json(serde_json::from_str(days).unwrap()),
+            time_start: start.into(),
+            time_end: end.into(),
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    /// THE POINT OF #125, as an assertion.
+    ///
+    /// A site in Kuala Lumpur schedules 18:00–22:00. At 12:00 UTC it is 20:00 there and the window
+    /// is open; the server's own clock — UTC on a default container — reads 12:00 and would say it
+    /// is shut. Evaluating a Malaysian operator's evening schedule on the container's clock is how a
+    /// recorder records the wrong four hours of the day, every day, silently.
+    #[test]
+    fn a_window_follows_the_sites_wall_clock_not_the_servers() {
+        let s = sched("[0,1,2,3,4,5,6]", "18:00", "22:00");
+        let noon_utc = Utc.with_ymd_and_hms(2026, 6, 1, 12, 0, 0).unwrap();
+
+        assert!(
+            schedule_active_at(
+                &s,
+                noon_utc.with_timezone(&crate::services::tz::Tz::Asia__Kuala_Lumpur)
+            ),
+            "20:00 in Kuala Lumpur is inside an 18:00-22:00 window"
+        );
+        assert!(
+            !schedule_active_at(&s, noon_utc.with_timezone(&crate::services::tz::Tz::UTC)),
+            "the same instant read on a UTC box is 12:00 and must NOT be inside it — if this \
+             passes, the zone is not reaching the comparison and the test proves nothing"
+        );
+    }
+
+    /// Daylight saving, on the two Sundays a year that decide whether a recorder has a gap.
+    ///
+    /// The window is a WALL-CLOCK rule, so it opens whenever the local clock says so, however many
+    /// real hours that turns out to be. This works with no special-case code only because the caller
+    /// converts an instant INTO a zone, which is total — see `schedule_active_at`'s docs.
+    #[test]
+    fn daylight_saving_transitions_keep_a_wall_clock_window_honest() {
+        use crate::services::tz::Tz;
+        // Europe/London springs forward 2026-03-29: 01:00 -> 02:00, so 01:30 local never happens.
+        // A 01:00-05:00 window must still be open right after the jump.
+        let s = sched("[0,1,2,3,4,5,6]", "01:00", "05:00");
+        let just_after_jump = Utc.with_ymd_and_hms(2026, 3, 29, 1, 5, 0).unwrap();
+        let local = just_after_jump.with_timezone(&Tz::Europe__London);
+        assert_eq!(local.hour(), 2, "the clock has jumped to 02:0x local");
+        assert!(
+            schedule_active_at(&s, local),
+            "a window whose start hour was skipped must still be open afterwards, or the box \
+             records nothing until 05:00"
+        );
+
+        // Autumn back 2026-10-25: 02:00 -> 01:00, so 01:30 local happens twice. A 01:00-03:00
+        // window must be open for BOTH, i.e. three real hours.
+        let s = sched("[0,1,2,3,4,5,6]", "01:00", "03:00");
+        for utc_hour in [0, 1, 2] {
+            let at = Utc.with_ymd_and_hms(2026, 10, 25, utc_hour, 30, 0).unwrap();
+            assert!(
+                schedule_active_at(&s, at.with_timezone(&Tz::Europe__London)),
+                "{utc_hour:02}:30Z falls inside the repeated local hour and must record"
+            );
+        }
+    }
+
+    /// A window that wraps midnight has to wrap the SITE's midnight.
+    #[test]
+    fn an_overnight_window_wraps_the_sites_midnight() {
+        use crate::services::tz::Tz;
+        // Sunday 22:00 -> Monday 06:00, KL. 2026-06-01 is a Monday.
+        let s = sched("[6]", "22:00", "06:00");
+        // 16:00Z Sunday = 00:00 Monday in KL — inside the tail of Sunday's window.
+        let tail = Utc.with_ymd_and_hms(2026, 5, 31, 16, 30, 0).unwrap();
+        assert!(
+            schedule_active_at(&s, tail.with_timezone(&Tz::Asia__Kuala_Lumpur)),
+            "00:30 Monday KL belongs to the window that started Sunday evening"
+        );
+        // The same instant in UTC is 16:30 Sunday — outside it.
+        assert!(!schedule_active_at(&s, tail.with_timezone(&Tz::UTC)));
+    }
+
+    /// END-TO-END, and the reason it exists: the three tests above call `schedule_active_at`
+    /// DIRECTLY, so they prove the function honours whatever zone it is handed — and prove exactly
+    /// nothing about whether `eval_schedule` ever hands it one. Ripping the site lookup out of
+    /// `eval_schedule` leaves all three green. This one goes through the real path, so it fails.
+    ///
+    /// The window is built around the CURRENT wall clock in Kuala Lumpur, so the assertion holds at
+    /// any time of day: KL is +08:00 with no daylight saving, so the same instant can never fall in
+    /// the same one-hour window in both zones.
+    #[tokio::test]
+    async fn eval_schedule_actually_consults_the_cameras_site_zone() {
+        use crate::services::tz::Tz;
+
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let cfg = Arc::new(Config::from_env());
+        let mgr = RecorderManager::new(pool.clone(), cfg);
+
+        let now = Utc::now();
+        let kl_hour = now.with_timezone(&Tz::Asia__Kuala_Lumpur).hour();
+        // The whole current KL hour. Wrapping past midnight is fine — `window_active`'s overnight
+        // branch is exercised for free when kl_hour is 23.
+        let start = format!("{kl_hour:02}:00");
+        let end = format!("{:02}:00", (kl_hour + 1) % 24);
+
+        for (site, tz, cam) in [
+            ("site_kl", "Asia/Kuala_Lumpur", "cam_kl"),
+            ("site_utc", "UTC", "cam_utc"),
+        ] {
+            sqlx::query("INSERT INTO sites (id, name, timezone, created_at) VALUES (?,?,?,?)")
+                .bind(site)
+                .bind(site)
+                .bind(tz)
+                .bind(now)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO cameras (id, site_id, name, record_mode, created_at, updated_at)
+                 VALUES (?,?,?,'scheduled',?,?)",
+            )
+            .bind(cam)
+            .bind(site)
+            .bind(cam)
+            .bind(now)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO camera_schedules
+                   (id, camera_id, days, time_start, time_end, enabled, created_at, updated_at)
+                 VALUES (?,?,'[0,1,2,3,4,5,6]',?,?,1,?,?)",
+            )
+            .bind(format!("sch_{cam}"))
+            .bind(cam)
+            .bind(&start)
+            .bind(&end)
+            .bind(now)
+            .bind(now)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        assert!(
+            mgr.eval_schedule("cam_kl").await,
+            "a camera on a Kuala Lumpur site must be recording during the current KL hour \
+             ({start}-{end} local)"
+        );
+        assert!(
+            !mgr.eval_schedule("cam_utc").await,
+            "the SAME window on a UTC site must be shut at this instant — KL is +08:00, so one \
+             instant cannot be inside the same one-hour window in both zones. If this fails, \
+             eval_schedule is not reading the camera's site at all and the other schedule tests \
+             are proving nothing about the code path that actually runs."
+        );
+    }
 
     #[test]
     fn event_capable_modes() {
