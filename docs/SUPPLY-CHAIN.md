@@ -86,7 +86,12 @@ Every published musl binary and every pushed `ghcr.io/straits-ai/*` image carrie
   tag that produced it,
 - an **SBOM attestation** binding that SBOM to the same artifact.
 
-All three are signed **keylessly** through Sigstore using the workflow's short-lived OIDC identity.
+The **release manifest** (`heldar-release-manifest.json`, #112) carries a build-provenance
+attestation too. It is the one artifact that is not a thing you run — it is the document naming
+which binaries, images and deployment files belong to one release, so an unattested one could be
+swapped for a manifest pinning a different combination and the pinning would authenticate nothing.
+
+All of these are signed **keylessly** through Sigstore using the workflow's short-lived OIDC identity.
 There is no private signing key in repository secrets — which is the point, since a stolen key
 forges everything a signature is supposed to prevent.
 
@@ -100,6 +105,13 @@ gh attestation verify "heldar-core-$V-$ARCH-linux-musl" --repo Straits-AI/heldar
 # A pushed image, by DIGEST
 gh attestation verify oci://ghcr.io/straits-ai/heldar-core@sha256:<digest> \
   --repo Straits-AI/heldar
+
+# The release manifest, then the deployment it describes. Verify the manifest FIRST — checking a
+# deployment against an unverified manifest proves only that it matches something.
+gh release download "$V" -p heldar-release-manifest.json
+gh attestation verify heldar-release-manifest.json --repo Straits-AI/heldar
+HELDAR_DB=/var/lib/heldar/heldar.db \
+  ./scripts/verify_release_manifest.py heldar-release-manifest.json
 ```
 
 Verify the **digest**, never the tag. A tag is mutable, so verifying one certifies whatever it points
@@ -120,4 +132,5 @@ travel with the image and can be checked from a mirror.
 ## Follow-up (not implemented here)
 
 Nothing outstanding here beyond the two items listed under "Still open" above — SBOMs, signing and
-provenance are implemented in `.github/workflows/release.yml` and `docker-open.yml`.
+provenance are implemented in `.github/workflows/release.yml` and `docker-open.yml`, and the release
+manifest they pin together is described in `docs/PRODUCTION.md`.

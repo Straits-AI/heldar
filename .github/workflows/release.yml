@@ -134,8 +134,37 @@ jobs:
           sbom-path: ${{ steps.build.outputs.asset }}.spdx.json
 
       # The manifest is generated once, on the x86_64 leg, and pinned+attested like any other asset.
+      #
+      # It has to WAIT for the images first. docker-open.yml builds and pushes them on the same
+      # `push: tags: ["v*"]` event as this workflow, and GitHub gives no ordering between two
+      # workflows triggered by one push — so without this the generator asks ghcr for a digest that
+      # has not been pushed yet, gets nothing, and REQUIRE_DIGESTS turns that into a failed job.
+      # An unpinned manifest for a perfectly good release would be worse: it would ship, attested,
+      # promising a pinning it does not carry.
+      - name: Wait for the release images to be pushed
+        if: matrix.arch == 'x86_64'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            missing=""
+            for n in core web ai; do
+              docker buildx imagetools inspect "ghcr.io/straits-ai/heldar-$n:$TAG" \
+                --format '{{json .Manifest.Digest}}' >/dev/null 2>&1 || missing="$missing $n"
+            done
+            [ -z "$missing" ] && { echo "all images present"; exit 0; }
+            echo "waiting for:$missing (attempt $i/60)"
+            sleep 30
+          done
+          echo "images never appeared — docker-open.yml likely failed for this tag" >&2
+          exit 1
+
       - name: Release manifest
         if: matrix.arch == 'x86_64'
+        env:
+          # A release manifest whose whole purpose is pinning must not ship unpinned.
+          REQUIRE_DIGESTS: "1"
         run: ./scripts/gen_release_manifest.sh "${{ github.ref_name }}" > heldar-release-manifest.json
       - name: Attest the manifest
         if: matrix.arch == 'x86_64'

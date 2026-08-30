@@ -22,7 +22,7 @@ and after an upgrade:
 ```bash
 gh release download "$V" -p heldar-release-manifest.json
 gh attestation verify heldar-release-manifest.json --repo Straits-AI/heldar   # it is signed too
-HELDAR_DB=/var/lib/heldar/heldar.db ./scripts/verify_release_manifest.sh heldar-release-manifest.json
+HELDAR_DB=/var/lib/heldar/heldar.db ./scripts/verify_release_manifest.py heldar-release-manifest.json
 ```
 
 The verifier fails closed on a modified deployment file and — the one that matters on an upgrade — on
