@@ -132,7 +132,7 @@ jobs:
           subject-path: ${{ steps.build.outputs.cli-asset }}
 
       - name: Attest the SBOM
-        uses: actions/attest-sbom@v2
+        uses: actions/attest-sbom@v4
         with:
           subject-path: ${{ steps.build.outputs.asset }}
           sbom-path: ${{ steps.build.outputs.asset }}.spdx.json
