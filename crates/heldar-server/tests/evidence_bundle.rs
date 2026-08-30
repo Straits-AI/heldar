@@ -1202,6 +1202,50 @@ async fn slack_inside_an_entrys_declared_data_cannot_hide_a_member() {
             .output()
             .expect("building the slack attack");
         assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+
+        // THE PREMISE, proven rather than assumed: a front-to-back reader really does reach the
+        // hidden member. Done with an independent parse rather than a system tool, because which
+        // tool reads a zip from a pipe is platform-dependent — macOS `tar` is libarchive and does,
+        // GNU `tar` does not — and a premise check that silently cannot run is the exact failure
+        // this whole file exists to prevent. (CI caught this: the first version passed on macOS and
+        // failed on Linux, which is a premise that was never being checked on one of them.)
+        let streaming_parse = "import struct, sys, zlib\n\
+                               d = open(sys.argv[1], 'rb').read()\n\
+                               off = 0\n\
+                               while d[off:off+4] == b'PK\\x03\\x04':\n    \
+                                   fl, m = struct.unpack('<HH', d[off+6:off+10])\n    \
+                                   cs, = struct.unpack('<I', d[off+18:off+22])\n    \
+                                   nl, el = struct.unpack('<HH', d[off+26:off+30])\n    \
+                                   name = d[off+30:off+30+nl].decode('utf-8', 'replace')\n    \
+                                   at = off + 30 + nl + el\n    \
+                                   if m == 8:\n        \
+                                       o = zlib.decompressobj(-15)\n        \
+                                       body = o.decompress(d[at:])\n        \
+                                       used = len(d) - at - len(o.unused_data)\n    \
+                                   else:\n        \
+                                       body = d[at:at+cs]\n        \
+                                       used = cs\n    \
+                                   print(name + '\\t' + repr(body[:40]))\n    \
+                                   off = at + used\n    \
+                                   if fl & 8:\n        \
+                                       for w in (16, 24, 12, 20):\n            \
+                                           if d[off+w:off+w+4] in (b'PK\\x03\\x04', b'PK\\x01\\x02'):\n                \
+                                               off += w; break\n        \
+                                       else: break\n";
+        let seen = Command::new("python3")
+            .arg("-c")
+            .arg(streaming_parse)
+            .arg(out)
+            .output()
+            .expect("streaming parse");
+        let seen = String::from_utf8_lossy(&seen.stdout).to_string();
+        assert!(
+            seen.contains("FORGED CLIP"),
+            "this test is only meaningful if a front-to-back reader actually reaches the hidden \
+             member. It did not, so the attack being guarded against is not the one being built — \
+             fix the test, not the assertion. A streaming parse saw:\n{seen}"
+        );
+
         let (code, msg) = verify(out, &["--key-id", key_id.as_str()]);
         assert_ne!(
             code, 0,
@@ -1209,35 +1253,4 @@ async fn slack_inside_an_entrys_declared_data_cannot_hide_a_member() {
              — every byte is accounted for by the directory, so byte-counting alone passes it:\n{msg}"
         );
     }
-
-    // The premise: a streaming extractor really does write the forged clip from this file.
-    let streamed = dir.join("streamed-out");
-    let _ = std::fs::remove_dir_all(&streamed);
-    std::fs::create_dir_all(&streamed).unwrap();
-    let piped = Command::new("sh")
-        .arg("-c")
-        .arg(format!(
-            "cat {} | tar -xf - -C {}",
-            attack.display(),
-            streamed.display()
-        ))
-        .output()
-        .expect("streaming extraction");
-    assert!(piped.status.success() || streamed.join("media/clip.mp4").exists());
-    let written = std::fs::read_to_string(streamed.join("media/clip.mp4")).unwrap_or_default();
-    assert!(
-        written.contains("FORGED CLIP"),
-        "this test is only meaningful if a streaming extractor actually writes the hidden member. \
-         It did not, so the attack being guarded against is not the one being built — fix the test, \
-         not the assertion. Got {} bytes",
-        written.len()
-    );
-
-    let (code, out) = verify(&attack, &["--key-id", key_id.as_str()]);
-    assert_ne!(
-        code, 0,
-        "a member hidden in an entry's declared compressed slack must be refused — every byte is \
-         accounted for by the directory, so byte-counting alone passes it while an extractor \
-         writes forged footage:\n{out}"
-    );
 }

@@ -29,7 +29,7 @@ jobs:
       # tool is missing — a test that quietly skips in CI is indistinguishable from one that passes,
       # and this suite is the only thing standing between a tampered bundle and a "VALID" verdict.
       - name: install ffmpeg (evidence bundle tests remux real media)
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg zip
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg zip unzip
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy (deny warnings)
