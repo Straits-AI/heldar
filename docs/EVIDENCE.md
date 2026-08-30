@@ -73,10 +73,28 @@ made the key.
 | 2 | `MISSING` | the manifest lists a file the bundle does not contain |
 | 3 | `UNKNOWN-KEY` | self-consistent, but the key is unverified or not the one you named |
 | 4 | `UNSUPPORTED` | a format version this verifier does not understand |
-| 5 | `MALFORMED` | not a bundle: unreadable zip, absent manifest, unparseable JSON |
+| 5 | `MALFORMED` | not a bundle: unreadable zip, absent manifest, unparseable JSON, or an archive whose shape does not match the signed manifest |
 
 `MISSING` and `MODIFIED` are deliberately distinct: "this was altered" and "part of it was not handed
 to you" are different accusations.
+
+### The archive's shape is checked before its content
+
+The verifier requires the zip to contain **exactly** the manifest's files plus `manifest.json`,
+`signature.json` and `hashes.sha256`, each spelled once, with no `.` or `..` path component, no
+absolute path, no backslash and no duplicate name. Anything else is `MALFORMED`.
+
+That strictness is not fastidiousness. An adversarial review of the first version produced a bundle
+that verified `VALID` against the appliance's real key while every extractor wrote a *forged*
+manifest and forged footage to disk: the verifier resolved entry names through a normalising step
+that stripped one leading `./`, so a second manifest stored as `././manifest.json` was invisible to
+it and authoritative to `unzip`. The forged tree even passed `sha256sum -c hashes.sha256`, because
+the attacker rewrote that too.
+
+The fix is to **refuse rather than normalise**. Any mapping between "what is in the archive" and
+"what the verifier checks" is a place the extractor can disagree, and that disagreement is the whole
+attack. An unlisted entry is refused for the same reason: it extracts into the same folder as the
+attested files, indistinguishable to whoever opens it, covered by no signature.
 
 ## What a signature here does and does not establish
 

@@ -378,6 +378,7 @@ fn artifact_path(cfg: &crate::config::Config, key: &str) -> Option<std::path::Pa
         "clips" => Some(cfg.clips_dir.join(rest)),
         "snapshots" => Some(cfg.snapshots_dir.join(rest)),
         "archives" => Some(cfg.archive_dir.join(rest)),
+        "evidence" => Some(cfg.evidence_dir.join(rest)),
         "playback" => Some(cfg.playback_dir.join(rest)),
         _ => None,
     }
@@ -512,11 +513,13 @@ mod tests {
         cfg.snapshots_dir = root.join("snapshots");
         cfg.archive_dir = root.join("archives");
         cfg.playback_dir = root.join("playback");
+        cfg.evidence_dir = root.join("evidence");
         for d in [
             &cfg.clips_dir,
             &cfg.snapshots_dir,
             &cfg.archive_dir,
             &cfg.playback_dir,
+            &cfg.evidence_dir,
         ] {
             std::fs::create_dir_all(d).unwrap();
         }
@@ -551,6 +554,17 @@ mod tests {
             (
                 "/media/playback/pbs_x/index.m3u8",
                 cfg.playback_dir.join("pbs_x"),
+            ),
+            // #118. Absent this arm `artifact_path` returned None for every evidence key, so
+            // `sweep_orphans` could never decide an evidence file was gone and `media_artifacts`
+            // grew one permanent row per exported bundle for the life of the box — the exact
+            // unbounded growth this sweeper exists to prevent. It fails SAFE (rows leak, nothing is
+            // falsely denied), which is why nothing else noticed. This table is the thing that would
+            // have: it asserts the two functions invert each other for EVERY subtree, and a new
+            // subtree added to one and not the other is caught here.
+            (
+                "/media/evidence/ev_x.heldar-evidence",
+                cfg.evidence_dir.join("ev_x.heldar-evidence"),
             ),
         ] {
             let key = artifact_key(url).expect("guard derives a key");

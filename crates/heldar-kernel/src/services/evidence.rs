@@ -318,7 +318,7 @@ pub async fn export(
     )
     .await;
 
-    sqlx::query(
+    let indexed = sqlx::query(
         "INSERT INTO evidence_bundles
            (id, camera_id, site_id, incident_id, filename, from_time, to_time, size_bytes,
             sha256, manifest_sha256, key_id, exported_by, audit_id, request_id, created_at)
@@ -340,7 +340,31 @@ pub async fn export(
     .bind(request_id)
     .bind(Utc::now())
     .execute(&st.pool)
-    .await?;
+    .await;
+
+    // A BUNDLE THE INDEX DOES NOT KNOW ABOUT MUST NOT SURVIVE.
+    //
+    // Everything above this point has already happened: the file is written, signed, and attributed
+    // to its camera, so it is downloadable at `/media/evidence/<file>`. If the index write then
+    // fails (a locked or full database) and we simply returned the error, the operator would be told
+    // the export failed while a genuine, appliance-signed evidence document stayed live on the box
+    // and absent from `GET /api/v1/evidence/exports` — which is precisely the "so an operator can
+    // list what left the appliance" claim migration 0018 makes.
+    //
+    // An unlisted signed bundle is worse than no bundle: it is real, it verifies, and nothing on the
+    // appliance records that it exists or who caused it.
+    if let Err(e) = indexed {
+        let _ = tokio::fs::remove_file(&out_path).await;
+        crate::services::media_scope::forget(&st.pool, &format!("evidence/{filename}")).await;
+        tracing::error!(
+            target: "heldar::security",
+            error = %e,
+            bundle = %id,
+            "evidence: could not index a bundle; removed it rather than leave a signed artifact \
+             the appliance cannot account for"
+        );
+        return Err(e.into());
+    }
 
     Ok(BundleResult {
         id,
@@ -772,7 +796,11 @@ async fn zip_dir(stage: &Path, out: &Path) -> AppResult<()> {
             .kill_on_drop(true)
             .arg("-r")
             .arg("-q")
+            // -X drops uid/gid/extra attributes, -D writes no directory entries. Together the
+            // archive's entry list is EXACTLY the file list the manifest attests to, which is what
+            // the verifier requires: anything else present is refused rather than ignored.
             .arg("-X")
+            .arg("-D")
             .arg(&out_abs)
             .arg(".")
             .current_dir(stage)

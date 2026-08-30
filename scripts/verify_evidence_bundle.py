@@ -64,20 +64,49 @@ def main() -> int:
         return MALFORMED
 
     with zf:
-        names = set(zf.namelist())
-        # Zip entries can be written as "./manifest.json"; normalise once so every later lookup and
-        # every membership test agrees on one spelling.
-        norm = {n[2:] if n.startswith("./") else n: n for n in names}
+        names = zf.namelist()
+
+        # THE ARCHIVE'S SHAPE IS CHECKED BEFORE ANY OF ITS CONTENT.
+        #
+        # The first version of this resolved manifest keys through a normalising dict:
+        #
+        #     norm = {n[2:] if n.startswith("./") else n: n for n in names}
+        #
+        # which strips ONE leading "./" and nothing else, and silently ignored any entry it did not
+        # recognise. Both halves were exploitable, and together they were a working forgery:
+        #
+        #   * `././manifest.json` and `media/./clip.mp4` are invisible to that mapping but collapse
+        #     onto the real paths when ANY extractor writes them out. A bundle carrying both the
+        #     genuine `manifest.json` (which the verifier hashed and reported VALID) and a forged
+        #     `././manifest.json` (which unzip, bsdtar, Finder and zipfile.extractall all wrote over
+        #     it) verified clean while naming a different camera on disk. The forged tree even
+        #     passed `sha256sum -c hashes.sha256`, because the attacker rewrote that too.
+        #   * unlisted extra entries were accepted outright, so a fabricated second camera angle and
+        #     an "EXHIBIT-B.txt" could be carried inside a VALID signed evidence package.
+        #   * `names` was a `set`, and CPython randomises str hashing per process, so when two
+        #     spellings did collide the verdict flipped between VALID and MODIFIED across runs on
+        #     the identical file. A forensic tool that answers differently on alternate runs is
+        #     unusable regardless of which answer is right.
+        #
+        # So: REFUSE, do not normalise. Normalising is what created the gap — it invents a mapping
+        # from what is in the archive to what the verifier checks, and every such mapping is a place
+        # the extractor can disagree. The manifest names an exact set of files; the archive must
+        # contain exactly that set plus its own three metadata files, each spelled exactly once, in
+        # a form no extractor will reinterpret.
+        problem = reject_unsafe_names(names)
+        if problem:
+            out("MALFORMED", problem)
+            return MALFORMED
 
         for required in ("manifest.json", "signature.json"):
-            if required not in norm:
+            if required not in names:
                 out("MALFORMED", f"the bundle has no {required}")
                 return MALFORMED
 
-        manifest_bytes = zf.read(norm["manifest.json"])
+        manifest_bytes = zf.read("manifest.json")
         try:
             manifest = json.loads(manifest_bytes)
-            signature = json.loads(zf.read(norm["signature.json"]))
+            signature = json.loads(zf.read("signature.json"))
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             out("MALFORMED", f"manifest or signature is not valid JSON: {e}")
             return MALFORMED
@@ -130,9 +159,27 @@ def main() -> int:
             out("MALFORMED", "the manifest lists no files — it attests to nothing")
             return MALFORMED
 
+        # The archive must contain EXACTLY the manifest's files plus this format's own three, each
+        # spelled once. An unlisted entry is not "extra harmless content": it is a file that will be
+        # written to disk beside the attested ones, indistinguishable to whoever opens the folder,
+        # and covered by no signature.
+        expected = set(files) | {"manifest.json", "signature.json", "hashes.sha256"}
+        sizes = {i.filename: i.file_size for i in zf.infolist()}
+        unexpected = sorted(
+            n for n in names
+            if n not in expected and not is_dir_entry(n, expected, sizes.get(n, 0))
+        )
+        if unexpected:
+            out("MALFORMED",
+                "the archive carries entries the signed manifest does not list: "
+                + ", ".join(unexpected)
+                + " — refusing rather than ignoring them, because they extract into the same "
+                  "directory as the attested files and nothing signed says they do not belong")
+            return MALFORMED
+
         missing, modified, checked = [], [], 0
         for rel, entry in sorted(files.items()):
-            if rel not in norm:
+            if rel not in names:
                 missing.append(rel)
                 continue
             want = (entry or {}).get("sha256")
@@ -140,7 +187,7 @@ def main() -> int:
                 out("MALFORMED", f"the manifest gives no usable sha256 for {rel}")
                 return MALFORMED
             h = hashlib.sha256()
-            with zf.open(norm[rel]) as fh:
+            with zf.open(rel) as fh:
                 for chunk in iter(lambda: fh.read(1 << 20), b""):
                     h.update(chunk)
             checked += 1
@@ -164,14 +211,13 @@ def main() -> int:
         # hashes.sha256 is a convenience for `sha256sum -c`. It is NOT the authority — the signed
         # manifest is — so if the two disagree, a reader using coreutils alone would be shown hashes
         # nobody signed. That is a modification, not a nit.
-        if "hashes.sha256" in norm:
+        if "hashes.sha256" in names:
             side = {}
-            for line in zf.read(norm["hashes.sha256"]).decode("utf-8", "replace").splitlines():
+            for line in zf.read("hashes.sha256").decode("utf-8", "replace").splitlines():
                 parts = line.split(None, 1)
                 if len(parts) == 2:
                     side[parts[1].strip()] = parts[0].strip()
-            expected = {rel: e["sha256"] for rel, e in files.items()}
-            if side != expected:
+            if side != {rel: e["sha256"] for rel, e in files.items()}:
                 out("MODIFIED", "hashes.sha256 disagrees with the signed manifest — a reader "
                                 "verifying with sha256sum alone would be checking unsigned hashes")
                 return MODIFIED
@@ -203,6 +249,55 @@ def main() -> int:
         for limit in manifest.get("attestation", {}).get("limits", []):
             print(f"  note: {limit}")
         return VALID
+
+
+def reject_unsafe_names(names: list) -> str:
+    """A refusal message, or "" if every entry name is one no extractor will reinterpret.
+
+    Everything here is about the gap between what THIS program reads out of the archive and what the
+    operating system writes when someone unzips it. Any name where those two differ is a place a
+    forged file can hide behind a verified one, so each is refused outright rather than resolved.
+    """
+    seen = set()
+    for n in names:
+        # A duplicate name means the archive holds two different byte streams for one path. Readers
+        # disagree about which one wins — `zipfile` returns the last central-directory entry,
+        # `unzip -p` concatenates both — so there is no single thing to attest to.
+        if n in seen:
+            return (f"the archive contains {n!r} more than once; readers disagree about which copy "
+                    f"is the real one, so no signature over 'that file' means anything")
+        seen.add(n)
+
+        if not n or n != n.strip():
+            return f"entry name {n!r} has leading or trailing whitespace"
+        if n.startswith("/") or (len(n) > 1 and n[1] == ":"):
+            return f"entry name {n!r} is an absolute path"
+        if "\\" in n:
+            return (f"entry name {n!r} contains a backslash, which is a path separator on Windows "
+                    f"and a literal character here — the two extract differently")
+        parts = n.split("/")
+        # A trailing "" is the directory marker and is legitimate; anything else empty is "//".
+        body = parts[:-1] if parts[-1] == "" else parts
+        for p in body:
+            if p in ("", ".", ".."):
+                return (f"entry name {n!r} contains a {p!r} path component; it resolves to a "
+                        f"different file than it is stored under, which is how a forged copy hides "
+                        f"behind a verified one")
+        # NUL and control characters truncate paths in some tools.
+        if any(ord(c) < 0x20 for c in n):
+            return f"entry name {n!r} contains a control character"
+    return ""
+
+
+def is_dir_entry(name: str, expected: set, size: int) -> bool:
+    """A genuinely EMPTY directory marker for a directory an expected file actually lives in.
+
+    `zip -r` writes `media/` and `metadata/`. They are tolerated because they carry nothing and
+    create only directories that have to exist anyway. Both conditions are checked: a `media/` entry
+    with content is not a directory marker, and a bare `anything/` would still appear as a folder in
+    the investigator's extracted tree with nothing signed saying it belongs.
+    """
+    return name.endswith("/") and size == 0 and any(f.startswith(name) for f in expected)
 
 
 def describe(m: dict) -> str:

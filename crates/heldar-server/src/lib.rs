@@ -868,6 +868,7 @@ mod tests {
             "/media/snapshots/s.jpg",
             "/media/playback/pbs_1/index.m3u8",
             "/media/archives/backup.zip",
+            "/media/evidence/ev_x.heldar-evidence",
         ] {
             assert!(
                 requirement(path).is_some(),

@@ -548,3 +548,252 @@ async fn the_audit_trail_holds_what_the_bundle_says_it_holds() {
     let (code, out) = verify(&bundle, &["--key-id", r.key_id.as_str()]);
     assert_eq!(code, 0, "the bundle must still verify:\n{out}");
 }
+
+// =================================================================================================
+// Archive-shape attacks.
+//
+// An adversarial review produced a bundle that exited VALID against the appliance's real key id
+// while every extraction tool on the machine wrote a forged manifest and forged footage to disk.
+// The verifier resolved manifest keys through a normalising dict that stripped ONE leading "./" and
+// silently ignored anything it did not recognise, so `././manifest.json` was invisible to it and
+// authoritative to `unzip`. These tests are that attack, and its neighbours.
+//
+// Each asserts on what an INVESTIGATOR ends up holding, not only on the exit code — the whole defect
+// was a gap between what the verifier read and what the extractor wrote, and a test that only reads
+// through the verifier is blind to exactly that gap.
+// =================================================================================================
+
+/// Build a bundle with extra raw zip entries appended, bypassing any name sanitisation.
+fn with_entries(src: &Path, dst: &Path, entries: &[(&str, &str)]) {
+    let adds: String = entries
+        .iter()
+        .map(|(n, body)| format!("    z.writestr({n:?}, {body:?})\n"))
+        .collect();
+    let script = format!(
+        "import sys, zipfile\n\
+         zin = zipfile.ZipFile(sys.argv[1])\n\
+         with zipfile.ZipFile(sys.argv[2], 'w') as z:\n    \
+             for n in zin.namelist():\n        \
+                 z.writestr(n, zin.read(n))\n{adds}"
+    );
+    let o = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(src)
+        .arg(dst)
+        .output()
+        .expect("building the attack bundle");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+}
+
+/// Extract with the system `unzip` and return the text of one extracted file.
+fn extract_and_read(bundle: &Path, into: &Path, rel: &str) -> String {
+    let _ = std::fs::remove_dir_all(into);
+    std::fs::create_dir_all(into).unwrap();
+    let o = Command::new("unzip")
+        .arg("-oq")
+        .arg(bundle)
+        .current_dir(into)
+        .output()
+        .expect("running unzip");
+    assert!(
+        o.status.success(),
+        "unzip failed: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    std::fs::read_to_string(into.join(rel)).unwrap_or_default()
+}
+
+/// THE FORGERY. A second `manifest.json` hidden behind a `.` path component: invisible to a
+/// verifier that resolves names, authoritative to every extractor that resolves paths.
+#[tokio::test]
+async fn a_manifest_hidden_behind_a_path_component_cannot_verify() {
+    require("ffmpeg");
+    require("zip");
+    require("openssl");
+    require("unzip");
+    let dir = scratch("shadow");
+    let (_st, bundle, key_id) = build(&dir).await;
+
+    let forged = r#"{"format":"heldar-evidence/1","camera":{"id":"cam_forged"},"files":{}}"#;
+    for shadow in ["././manifest.json", "./manifest.json", "media/./clip.mp4"] {
+        let m = dir.join(format!(
+            "shadow-{}.heldar-evidence",
+            shadow.replace(['/', '.'], "_")
+        ));
+        with_entries(&bundle, &m, &[(shadow, forged)]);
+
+        let (code, out) = verify(&m, &["--key-id", key_id.as_str()]);
+        assert_ne!(
+            code, 0,
+            "a bundle carrying a shadow copy of {shadow} must NOT verify. The extractor writes it \
+             over the attested file, so a VALID here means the verifier and the investigator are \
+             looking at different documents:\n{out}"
+        );
+    }
+
+    // And prove the premise rather than asserting it: `unzip` really does let the shadow win.
+    let m = dir.join("shadow-proof.heldar-evidence");
+    with_entries(&bundle, &m, &[("././manifest.json", forged)]);
+    let extracted = extract_and_read(&m, &dir.join("x"), "manifest.json");
+    assert!(
+        extracted.contains("cam_forged"),
+        "this test is only meaningful if unzip actually resolves `././manifest.json` onto \
+         `manifest.json`. It did not, so the attack it guards against is not the attack being \
+         built here — fix the test, not the assertion. Extracted: {extracted:.200}"
+    );
+}
+
+/// Content the manifest does not list is not "harmless extra": it lands in the same folder as the
+/// attested files, indistinguishable to whoever opens it, covered by no signature.
+#[tokio::test]
+async fn entries_the_manifest_does_not_list_are_refused() {
+    require("ffmpeg");
+    require("zip");
+    require("openssl");
+    let dir = scratch("extra");
+    let (_st, bundle, key_id) = build(&dir).await;
+
+    let m = dir.join("extra.heldar-evidence");
+    with_entries(
+        &bundle,
+        &m,
+        &[
+            ("EXHIBIT-B.txt", "the suspect confessed"),
+            ("media/clip2.mp4", "FABRICATED SECOND ANGLE"),
+        ],
+    );
+    let (code, out) = verify(&m, &["--key-id", key_id.as_str()]);
+    assert_ne!(code, 0, "unlisted files must be refused:\n{out}");
+    assert!(
+        out.contains("EXHIBIT-B.txt"),
+        "the refusal must name what it found:\n{out}"
+    );
+}
+
+/// Two byte streams under one path. `zipfile` returns the last, `unzip -p` concatenates both — there
+/// is no single "that file" for a signature to be about.
+#[tokio::test]
+async fn duplicate_entry_names_are_refused() {
+    require("ffmpeg");
+    require("zip");
+    require("openssl");
+    let dir = scratch("dup");
+    let (_st, bundle, key_id) = build(&dir).await;
+
+    let m = dir.join("dup.heldar-evidence");
+    with_entries(&bundle, &m, &[("media/clip.mp4", "FORGED FOOTAGE")]);
+    let (code, out) = verify(&m, &["--key-id", key_id.as_str()]);
+    assert_ne!(code, 0, "a duplicated entry must be refused:\n{out}");
+    assert!(out.contains("more than once"), "{out}");
+}
+
+/// The verdict must not depend on which run it is.
+///
+/// The original resolved names through a dict built from a `set`, and CPython randomises `str`
+/// hashing per process — so on a bundle with two colliding spellings the answer flipped between
+/// VALID and MODIFIED across runs on the identical file. Which answer is "right" does not matter: a
+/// forensic tool that disagrees with itself is unusable as evidence.
+#[tokio::test]
+async fn the_verdict_is_the_same_every_run() {
+    require("ffmpeg");
+    require("zip");
+    require("openssl");
+    let dir = scratch("determinism");
+    let (_st, bundle, key_id) = build(&dir).await;
+    let k = ["--key-id", key_id.as_str()];
+
+    let m = dir.join("collide.heldar-evidence");
+    with_entries(&bundle, &m, &[("./media/clip.mp4", "FORGED FOOTAGE")]);
+
+    // Each run is a fresh process, so each gets a different PYTHONHASHSEED.
+    for target in [&bundle, &m] {
+        let first = verify(target, &k).0;
+        for run in 2..=12 {
+            let again = verify(target, &k).0;
+            assert_eq!(
+                again, first,
+                "run {run} of {target:?} answered {again} where run 1 answered {first} — the same \
+                 bytes must always get the same verdict"
+            );
+        }
+    }
+}
+
+/// `key_id` is a claim inside the file; the identity is the public key. They must agree, or the
+/// document is asserting an identity its own key does not support. (This check existed but had no
+/// test — a mutation that stopped enforcing it survived the whole suite.)
+#[tokio::test]
+async fn a_signature_claiming_a_key_id_its_key_does_not_produce_is_refused() {
+    require("ffmpeg");
+    require("zip");
+    require("openssl");
+    let dir = scratch("keyidlie");
+    let (_st, bundle, key_id) = build(&dir).await;
+
+    let m = dir.join("keyidlie.heldar-evidence");
+    mutate(
+        &bundle,
+        &m,
+        "signature.json",
+        "import json as _j; d = _j.loads(data); d['key_id'] = 'sha256:' + '0'*64; \
+         data = _j.dumps(d).encode()",
+    );
+    // Refused even when the operator asks for exactly the id the file claims — the claim is not the
+    // identity, so believing it would let an attacker choose which appliance to impersonate.
+    let (code, out) = verify(&m, &["--key-id", &format!("sha256:{}", "0".repeat(64))]);
+    assert_ne!(code, 0, "a lying key_id must be refused:\n{out}");
+    assert!(out.contains("claims key_id"), "{out}");
+
+    let (code, _) = verify(&m, &["--key-id", key_id.as_str()]);
+    assert_ne!(code, 0, "and refused against the real id too");
+}
+
+/// A bundle the index cannot record must not survive.
+///
+/// By the time the index write runs, the file is written, signed and attributed — so it is live at
+/// `/media/evidence/<file>`. Returning the error without cleaning up told the operator the export
+/// failed while a genuine, appliance-signed evidence document stayed on the box, absent from the
+/// list of what left it. An unlisted signed bundle is worse than no bundle: it is real, it verifies,
+/// and nothing on the appliance records that it exists or who caused it.
+#[tokio::test]
+async fn a_bundle_the_index_cannot_record_does_not_survive() {
+    require("ffmpeg");
+    require("zip");
+    require("openssl");
+    let dir = scratch("orphan");
+    let st = state(&dir).await;
+    let (from, to) = seed(&st, "cam_a").await;
+
+    // Stands in for a locked, full or otherwise unwritable database at exactly the wrong moment.
+    sqlx::query("DROP TABLE evidence_bundles")
+        .execute(&st.pool)
+        .await
+        .unwrap();
+
+    let p = heldar_kernel::auth::Principal::system_admin();
+    let err = evidence::export(&st, &p, "cam_a", from, to, None, None, None).await;
+    assert!(err.is_err(), "the export must report failure");
+
+    let left: Vec<String> = std::fs::read_dir(&st.cfg.evidence_dir)
+        .map(|d| {
+            d.flatten()
+                .map(|e| e.file_name().to_string_lossy().to_string())
+                .filter(|n| !n.starts_with(".stage-"))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        left.is_empty(),
+        "a failed export must leave no downloadable bundle behind, found: {left:?}"
+    );
+
+    let rows: Vec<(String,)> = sqlx::query_as("SELECT path FROM media_artifacts")
+        .fetch_all(&st.pool)
+        .await
+        .unwrap();
+    assert!(
+        rows.is_empty(),
+        "and no attribution row pointing at a file that is not there: {rows:?}"
+    );
+}
