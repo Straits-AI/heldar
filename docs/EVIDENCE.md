@@ -108,12 +108,28 @@ seeking reader see as the genuine bundle alone, while **7z's default mode** and 
 reported `VALID` against the appliance's real key while a streamed extraction wrote `cam_EVIL` and
 fabricated footage to disk.
 
-So the verifier now checks a structural invariant before it looks at any name: **a streaming reader
-and a seeking reader must see the same archive.** That holds exactly when every byte of the file
-belongs to an entry the central directory names — the entries must tile the file contiguously from
-byte 0 to the directory, the directory must end where the end-of-archive record begins, and that
-record must end at EOF. A prepended archive, an appended one, or a repaired offset covering either
-is `MALFORMED`.
+So the verifier checks a structural invariant before it looks at any name: **a streaming reader and
+a seeking reader must see the same archive.**
+
+That invariant is now checked *directly* — the file is parsed front-to-back the way a streaming
+extractor does, hashing what it would write, and the result compared against what the central
+directory says. A third adversarial pass is why. The first attempt checked an arithmetic stand-in
+(every byte covered by an entry the directory names) and was broken in **both** directions:
+
+- **A forgery got through.** Inflating one entry's central-directory compressed size opens slack
+  inside its declared region. Byte-counting still balanced — but an inflater stops at the DEFLATE
+  end-of-stream, not at the declared size, and read the slack as a whole extra member. `VALID` three
+  runs running while `cat bundle | tar -x` wrote forged footage.
+- **Genuine evidence was refused.** The arithmetic read the classic 32-bit end-of-archive record, so
+  any ZIP64 archive was rejected — *including the appliance's own exports above 4 GiB*, which a
+  multi-hour recording reaches easily. ZIP64 data descriptors are 24 bytes rather than 16, which
+  broke streamed bundles too.
+
+A verifier that refuses real evidence fails the investigator exactly as badly as one that accepts a
+forgery, so both are treated as the same severity. The direct comparison needs no end-of-archive
+arithmetic, so ZIP64 is simply not its problem, and it takes the inflater's own stopping point as
+the truth, so a declared size cannot lie. The cost is decompressing the archive twice; for an
+evidence document that is worth paying.
 
 ### A crash is not a verdict
 

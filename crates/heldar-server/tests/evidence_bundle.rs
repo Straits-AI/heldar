@@ -685,7 +685,10 @@ async fn duplicate_entry_names_are_refused() {
     with_entries(&bundle, &m, &[("media/clip.mp4", "FORGED FOOTAGE")]);
     let (code, out) = verify(&m, &["--key-id", key_id.as_str()]);
     assert_ne!(code, 0, "a duplicated entry must be refused:\n{out}");
-    assert!(out.contains("more than once"), "{out}");
+    assert!(
+        out.contains("more than once") || out.contains("twice"),
+        "the refusal must say the entry appears more than once:\n{out}"
+    );
 }
 
 /// The verdict must not depend on which run it is.
@@ -999,5 +1002,242 @@ async fn a_file_that_will_not_decompress_is_reported_as_modified_and_named() {
     assert!(
         out.contains("media/clip.mp4"),
         "and it must name the file that would not come out:\n{out}"
+    );
+}
+
+// =================================================================================================
+// Round three. The container check from round two was itself broken, in BOTH directions.
+//
+// It asserted an arithmetic stand-in for the invariant — every byte covered by an entry the central
+// directory names — rather than the invariant itself. Byte contiguity turns out to be strictly
+// weaker than "the two readers agree":
+//
+//   * FORGERY ACCEPTED. Inflating one entry's CENTRAL-directory compressed size opens slack inside
+//     its declared region. The cursor still landed exactly on the directory, so every byte was
+//     accounted for — but a front-to-back inflater stops at the DEFLATE end-of-stream, not at the
+//     declared size, and read the slack as a whole extra member. VALID three runs running while
+//     `cat bundle | tar -x` wrote "FORGED CLIP - plate ABC-999" to disk.
+//   * GENUINE EVIDENCE REFUSED. The arithmetic read the classic 32-bit end-of-archive record, so
+//     any ZIP64 archive was rejected — including the appliance's OWN output above 4 GiB, which a
+//     multi-hour export reaches easily. A verifier that refuses real evidence fails the
+//     investigator exactly as badly as one that accepts a forgery.
+//
+// So the check now compares a streaming parse against the seeking one directly. These tests pin
+// both directions, because fixing one by breaking the other is the obvious wrong turn.
+// =================================================================================================
+
+/// Repack a bundle's contents with a given command, producing an archive of identical content but a
+/// different container shape. Returns the new bundle path.
+fn repack(bundle: &Path, dir: &Path, tag: &str, args: &[&str]) -> PathBuf {
+    let tree = dir.join(format!("tree-{tag}"));
+    let _ = std::fs::remove_dir_all(&tree);
+    std::fs::create_dir_all(&tree).unwrap();
+    let o = Command::new("unzip")
+        .arg("-oq")
+        .arg(bundle)
+        .current_dir(&tree)
+        .output()
+        .expect("unzip");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+
+    let out = dir.join(format!("repack-{tag}.heldar-evidence"));
+    let _ = std::fs::remove_file(&out);
+    let o = Command::new("zip")
+        .args(args)
+        .arg(&out)
+        .arg(".")
+        .current_dir(&tree)
+        .output()
+        .expect("zip");
+    assert!(
+        o.status.success(),
+        "zip {args:?}: {}",
+        String::from_utf8_lossy(&o.stderr)
+    );
+    out
+}
+
+/// A bundle whose content is byte-identical must verify however it was packed. The appliance's own
+/// producer emits ZIP64 above 4 GiB — routine for a multi-hour export — and that was refused.
+#[tokio::test]
+async fn honestly_produced_containers_are_not_accused_of_forgery() {
+    require("ffmpeg");
+    require("zip");
+    require("unzip");
+    require("openssl");
+    let dir = scratch("containers");
+    let (_st, bundle, key_id) = build(&dir).await;
+    let k = ["--key-id", key_id.as_str()];
+
+    // -D drops directory entries (what the appliance passes); without it they are present; -fz
+    // forces ZIP64 on a small archive, standing in for the >4 GiB export that CI cannot afford to
+    // build. All three hold the same files.
+    for (tag, args, note) in [
+        ("appliance", vec!["-qXrD"], "the appliance's own flags"),
+        (
+            "dirents",
+            vec!["-qXr"],
+            "the same, keeping directory entries",
+        ),
+        (
+            "zip64",
+            vec!["-qXrDfz"],
+            "ZIP64 — what the appliance emits above 4 GiB",
+        ),
+    ] {
+        let p = repack(&bundle, &dir, tag, &args);
+        let (code, out) = verify(&p, &k);
+        assert_eq!(
+            code, 0,
+            "a bundle repacked with {note} holds exactly the same evidence and must verify. \
+             Refusing it accuses the appliance's own output of being a forgery:\n{out}"
+        );
+    }
+
+    // And the ZIP64 repack must really be ZIP64, or the test above proves nothing about ZIP64.
+    let z64 = dir.join("repack-zip64.heldar-evidence");
+    let bytes = std::fs::read(&z64).unwrap();
+    let has = |sig: &[u8]| bytes.windows(4).any(|w| w == sig);
+    assert!(
+        has(b"PK\x06\x06") && has(b"PK\x06\x07"),
+        "the zip64 fixture carries no ZIP64 records, so it is not exercising the path it names"
+    );
+}
+
+/// A streamed producer writes data descriptors after each entry — 24 bytes with ZIP64 sizes, 16
+/// without. Guessing 16 refused every ZIP64-streamed bundle, so the width is now taken from where
+/// the next real record actually begins.
+#[tokio::test]
+async fn a_streamed_producers_data_descriptors_are_read_at_either_width() {
+    require("ffmpeg");
+    require("zip");
+    require("openssl");
+    let dir = scratch("descriptors");
+    let (_st, bundle, key_id) = build(&dir).await;
+
+    let script = "import sys, zipfile\n\
+                  src = zipfile.ZipFile(sys.argv[1])\n\
+                  class NoSeek:\n    \
+                      def __init__(s, f): s.f = f\n    \
+                      def write(s, b): return s.f.write(b)\n    \
+                      def flush(s): return s.f.flush()\n    \
+                      def tell(s): raise OSError('not seekable')\n\
+                  force = sys.argv[3] == 'zip64'\n\
+                  with open(sys.argv[2], 'wb') as raw, \\\n     \
+                          zipfile.ZipFile(NoSeek(raw), 'w', zipfile.ZIP_DEFLATED) as z:\n    \
+                      for n in src.namelist():\n        \
+                          with z.open(n, 'w', force_zip64=force) as fh:\n            \
+                              fh.write(src.read(n))\n";
+    for width in ["classic", "zip64"] {
+        let out = dir.join(format!("streamed-{width}.heldar-evidence"));
+        let o = Command::new("python3")
+            .arg("-c")
+            .arg(script)
+            .arg(&bundle)
+            .arg(&out)
+            .arg(width)
+            .output()
+            .expect("streaming the bundle");
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let (code, msg) = verify(&out, &["--key-id", key_id.as_str()]);
+        assert_eq!(
+            code, 0,
+            "a bundle streamed with {width} data descriptors holds the same evidence and must \
+             verify:\n{msg}"
+        );
+    }
+}
+
+/// THE FORGERY THAT DEFEATED BYTE-COUNTING. Slack inside an entry's declared compressed region is
+/// invisible to arithmetic and is a whole extra member to an inflater.
+#[tokio::test]
+async fn slack_inside_an_entrys_declared_data_cannot_hide_a_member() {
+    require("ffmpeg");
+    require("zip");
+    require("openssl");
+    let dir = scratch("slack");
+    let (_st, bundle, key_id) = build(&dir).await;
+
+    // Insert a complete STORED local member in the gap before the central directory, charge its
+    // bytes to the LAST entry's central-directory compressed size, and move the directory offset.
+    // Every byte is then accounted for by the directory — and a streaming reader sees an extra file.
+    let script = "import struct, sys, zipfile\n\
+                  p = sys.argv[1]\n\
+                  d = bytearray(open(p, 'rb').read())\n\
+                  z = zipfile.ZipFile(p)\n\
+                  last = max(z.infolist(), key=lambda i: i.header_offset)\n\
+                  eocd = d.rfind(b'PK\\x05\\x06')\n\
+                  cd_off = int.from_bytes(d[eocd+16:eocd+20], 'little')\n\
+                  name = sys.argv[3].encode()\n\
+                  body = b'FORGED CLIP - plate ABC-999 (a streaming reader saw this)'\n\
+                  member = (b'PK\\x03\\x04'\n            \
+                            + struct.pack('<HHHHHIIIHH', 20, 0, 0, 0, 0, 0, len(body), len(body), len(name), 0)\n            \
+                            + name + body)\n\
+                  d[cd_off:cd_off] = member\n\
+                  j = cd_off + len(member)\n\
+                  while d[j:j+4] == b'PK\\x01\\x02':\n    \
+                      nl = int.from_bytes(d[j+28:j+30], 'little')\n    \
+                      el = int.from_bytes(d[j+30:j+32], 'little')\n    \
+                      cl = int.from_bytes(d[j+32:j+34], 'little')\n    \
+                      if bytes(d[j+46:j+46+nl]).decode() == last.filename:\n        \
+                          cs = int.from_bytes(d[j+20:j+24], 'little')\n        \
+                          d[j+20:j+24] = struct.pack('<I', cs + len(member))\n    \
+                      j += 46 + nl + el + cl\n\
+                  e2 = d.rfind(b'PK\\x05\\x06')\n\
+                  d[e2+16:e2+20] = struct.pack('<I', cd_off + len(member))\n\
+                  open(sys.argv[2], 'wb').write(bytes(d))\n";
+    // Two shapes, because they are stopped by different things. Overwriting an attested name is
+    // caught as a duplicate; a NEW name is not a duplicate of anything and is only caught by the
+    // two readers disagreeing about what the archive contains. Testing only the first would leave
+    // the general case — hide any file at all — unguarded.
+    let attack = dir.join("slack.heldar-evidence");
+    let sneaked = dir.join("slack-new-name.heldar-evidence");
+    for (out, hidden) in [(&attack, "media/clip.mp4"), (&sneaked, "EXHIBIT-C.txt")] {
+        let o = Command::new("python3")
+            .arg("-c")
+            .arg(script)
+            .arg(&bundle)
+            .arg(out)
+            .arg(hidden)
+            .output()
+            .expect("building the slack attack");
+        assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        let (code, msg) = verify(out, &["--key-id", key_id.as_str()]);
+        assert_ne!(
+            code, 0,
+            "a member hidden as {hidden} in an entry's declared compressed slack must be refused \
+             — every byte is accounted for by the directory, so byte-counting alone passes it:\n{msg}"
+        );
+    }
+
+    // The premise: a streaming extractor really does write the forged clip from this file.
+    let streamed = dir.join("streamed-out");
+    let _ = std::fs::remove_dir_all(&streamed);
+    std::fs::create_dir_all(&streamed).unwrap();
+    let piped = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "cat {} | tar -xf - -C {}",
+            attack.display(),
+            streamed.display()
+        ))
+        .output()
+        .expect("streaming extraction");
+    assert!(piped.status.success() || streamed.join("media/clip.mp4").exists());
+    let written = std::fs::read_to_string(streamed.join("media/clip.mp4")).unwrap_or_default();
+    assert!(
+        written.contains("FORGED CLIP"),
+        "this test is only meaningful if a streaming extractor actually writes the hidden member. \
+         It did not, so the attack being guarded against is not the one being built — fix the test, \
+         not the assertion. Got {} bytes",
+        written.len()
+    );
+
+    let (code, out) = verify(&attack, &["--key-id", key_id.as_str()]);
+    assert_ne!(
+        code, 0,
+        "a member hidden in an entry's declared compressed slack must be refused — every byte is \
+         accounted for by the directory, so byte-counting alone passes it while an extractor \
+         writes forged footage:\n{out}"
     );
 }

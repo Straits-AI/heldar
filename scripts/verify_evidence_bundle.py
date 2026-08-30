@@ -35,6 +35,7 @@ import subprocess
 import sys
 import tempfile
 import zipfile
+import zlib
 from pathlib import Path
 
 VALID, MODIFIED, MISSING, UNKNOWN_KEY, UNSUPPORTED, MALFORMED = 0, 1, 2, 3, 4, 5
@@ -81,10 +82,14 @@ def main() -> int:
         # in the directory the verifier reads. The invariant that does reach it is structural — a
         # streaming reader and a seeking reader must see the same archive — and it holds exactly
         # when every byte of the file is accounted for by the central directory.
-        problem = reject_concatenated_archive(args.bundle, zf)
+        state, problem = reject_concatenated_archive(args.bundle, zf)
         if problem:
-            out("MALFORMED", problem)
-            return MALFORMED
+            # The STATE matters as much as the refusal. This check runs first, so without it a
+            # damaged clip would be reported as "not a bundle" rather than as altered evidence —
+            # and an investigator holding a tampered-with recording needs MODIFIED, which names
+            # what happened, not MALFORMED, which says the file is unreadable.
+            out("MODIFIED" if state == MODIFIED else "MALFORMED", problem)
+            return state
 
         names = zf.namelist()
 
@@ -297,86 +302,230 @@ def main() -> int:
         return VALID
 
 
-def reject_concatenated_archive(path: str, zf: zipfile.ZipFile) -> str:
-    """A refusal message, or "" if every byte of the file belongs to the archive the directory names.
+def reject_concatenated_archive(path: str, zf: zipfile.ZipFile):
+    """(state, message). `message` is "" when a STREAMING and a SEEKING reader see the same archive.
 
-    The check is arithmetic, not heuristic. Walking the central directory's entries in file order,
-    each local header must begin exactly where the previous entry's data ended, the first at offset
-    0, the last ending exactly at the central directory, which must end exactly at the EOCD, which
-    must end exactly at EOF. Any byte that is not covered by that walk is a second archive — or the
-    remains of one — sitting in a file that claims to be evidence.
+    THIS IS CHECKED DIRECTLY, NOT BY PROXY, AND THE DIFFERENCE IS THE WHOLE POINT.
+
+    The previous version asserted an arithmetic stand-in: every byte of the file is covered by an
+    entry the central directory names — entries tiling contiguously from 0 to the directory, the
+    directory ending at the end-of-archive record, that record ending at EOF. It was defeated, and
+    the defeat is instructive: byte contiguity is a WEAKER property than "the two readers agree".
+
+    An attacker inflated one entry's *central-directory* compressed size and hid a complete local
+    file header plus a forged `media/clip.mp4` inside the slack that created. The cursor still landed
+    exactly on the central directory, so every byte was accounted for and the check passed — but a
+    front-to-back inflater stops at the DEFLATE end-of-stream, not at the declared size, so it read
+    the slack as the next member. The verifier said VALID three runs running while `cat bundle |
+    tar -x` wrote "FORGED CLIP - plate ABC-999" to disk.
+
+    The arithmetic was also wrong in the other direction, and that mattered more in practice: it read
+    the classic 32-bit end-of-archive record, so any ZIP64 archive was refused. Since the appliance's
+    own `zip -r -q -X -D` emits ZIP64 above 4 GiB, and a multi-hour export passes 4 GiB easily, the
+    check accused the appliance's own genuine evidence of being a forgery. ZIP64 data descriptors are
+    24 bytes rather than 16, which broke a second shape. Both were false refusals of real evidence —
+    a verifier that rejects genuine evidence fails the investigator exactly as badly as one that
+    accepts a forgery.
+
+    So this now does the obvious thing instead of the clever one: parse the file from byte 0 the way
+    a streaming extractor does, hashing what it would write, and compare that against what the
+    central directory says. Equal maps and nothing left over means no reader can be shown a different
+    archive than the one verified. It needs no EOCD arithmetic, so ZIP64 is simply not its problem,
+    and it takes the inflater's own stopping point as the truth, so a declared size cannot lie.
+
+    Cost: the archive is decompressed twice, once here and once when the manifest's hashes are
+    checked. That is the price of the guarantee and it is worth paying for an evidence document.
     """
-    size = os.path.getsize(path)
-    infos = sorted(zf.infolist(), key=lambda i: i.header_offset)
-    if not infos:
-        return "the archive contains no entries at all"
+    try:
+        streamed, entries_end = stream_view(path)
+    except StreamProblem as e:
+        return e.state, str(e)
+
+    seeking = {}
+    for info in zf.infolist():
+        if info.filename.endswith("/") and info.file_size == 0:
+            continue
+        h = hashlib.sha256()
+        try:
+            with zf.open(info) as fh:
+                for chunk in iter(lambda: fh.read(1 << 20), b""):
+                    h.update(chunk)
+        except (zipfile.BadZipFile, EOFError, OSError) as e:
+            return MODIFIED, f"{info.filename!r} will not come out of the archive ({e})"
+        seeking[info.filename] = h.hexdigest()
+
+    if streamed != seeking:
+        only_stream = sorted(set(streamed) - set(seeking))
+        only_seek = sorted(set(seeking) - set(streamed))
+        differ = sorted(k for k in set(streamed) & set(seeking) if streamed[k] != seeking[k])
+        detail = []
+        if only_stream:
+            detail.append(f"a front-to-back reader also finds {', '.join(only_stream)}")
+        if only_seek:
+            detail.append(f"a front-to-back reader never reaches {', '.join(only_seek)}")
+        if differ:
+            detail.append(f"the two readers get different content for {', '.join(differ)}")
+        return MALFORMED, ("this file is two different archives depending on how it is opened — "
+                           + "; ".join(detail)
+                           + ". Whatever this verifier attested, an extractor may write "
+                             "something else")
 
     with open(path, "rb") as fh:
-        if infos[0].header_offset != 0:
-            return (f"{infos[0].header_offset} bytes precede the first entry the archive's directory "
-                    f"knows about — a streaming reader would extract them as a different archive "
-                    f"than the one this verifier just read")
+        fh.seek(entries_end)
+        if fh.read(4) != b"PK\x01\x02":
+            return MALFORMED, (f"the entries end at byte {entries_end}, where the archive's "
+                               f"directory does not begin — bytes belong to neither")
+        size = os.path.getsize(path)
+        at, comment_len = classic_eocd(fh, size)
+        if at is None:
+            return MALFORMED, "could not locate the end of the archive"
+        if at + 22 + comment_len != size:
+            return MALFORMED, f"{size - (at + 22 + comment_len)} bytes follow the end of the archive"
+    return VALID, ""
 
-        cursor = 0
-        for i in infos:
-            if i.header_offset != cursor:
-                return (f"a {i.header_offset - cursor}-byte gap precedes {i.filename!r}; every byte "
-                        f"of an evidence bundle must belong to an entry its directory names")
-            fh.seek(cursor)
+
+class StreamProblem(Exception):
+    """Something a front-to-back reader cannot make sense of. Always a refusal.
+
+    Carries the STATE, because the two causes are different accusations: a container that does not
+    parse is MALFORMED, while content that will not decompress is MODIFIED — the bytes of the
+    evidence changed, which is the thing an investigator needs told.
+    """
+
+    def __init__(self, message, state=MALFORMED):
+        super().__init__(message)
+        self.state = state
+
+
+def stream_view(path: str):
+    """({name: sha256}, offset where the entries end) as a FRONT-TO-BACK reader sees the file.
+
+    This is deliberately a separate implementation from `zipfile`'s: the whole question is whether
+    two independent readers agree, and asking the same reader twice cannot answer it.
+    """
+    seen = {}
+    with open(path, "rb") as fh:
+        off = 0
+        while True:
+            fh.seek(off)
             head = fh.read(30)
             if len(head) < 30 or head[:4] != b"PK\x03\x04":
-                return f"no local file header where the directory says {i.filename!r} begins"
+                break
             flags = int.from_bytes(head[6:8], "little")
+            method = int.from_bytes(head[8:10], "little")
+            csize = int.from_bytes(head[18:22], "little")
             name_len = int.from_bytes(head[26:28], "little")
             extra_len = int.from_bytes(head[28:30], "little")
-            stored_name = fh.read(name_len)
+            raw_name = fh.read(name_len)
             try:
-                decoded = stored_name.decode("utf-8" if flags & 0x800 else "cp437")
+                name = raw_name.decode("utf-8" if flags & 0x800 else "cp437")
             except UnicodeDecodeError:
-                return f"the local header for {i.filename!r} has an undecodable name"
-            if decoded != i.filename:
-                return (f"the directory calls this entry {i.filename!r} but the archive body calls "
-                        f"it {decoded!r}; the two readers of this file disagree about what it holds")
-            cursor = cursor + 30 + name_len + extra_len + i.compress_size
+                raise StreamProblem(f"an entry name in the archive body is not decodable: {raw_name!r}")
+            if name in seen:
+                raise StreamProblem(f"a front-to-back reader meets {name!r} twice")
+            extra = fh.read(extra_len)
+            if csize == 0xFFFFFFFF:
+                # ZIP64: the 32-bit field holds a sentinel and the real size is in extra record
+                # 0x0001. Only STORED entries need it — for deflate the inflater finds the end
+                # itself — but reading 0xFFFFFFFF bytes as a length is how the appliance's own
+                # >4 GiB exports got refused, so it is resolved rather than trusted.
+                csize = zip64_compressed_size(extra)
+                if csize is None:
+                    raise StreamProblem(f"{name!r} declares a ZIP64 size with no ZIP64 extra record")
+            data_at = off + 30 + name_len + extra_len
+
+            fh.seek(data_at)
+            h = hashlib.sha256()
+            if method == 8:
+                # The INFLATER decides where the data ends, not the declared size. That is the
+                # asymmetry the forgery exploited, so the truth is taken from the stream itself.
+                dec = zlib.decompressobj(-15)
+                consumed = 0
+                while not dec.eof:
+                    chunk = fh.read(1 << 20)
+                    if not chunk:
+                        raise StreamProblem(
+                            f"the compressed data for {name!r} ends mid-stream", MODIFIED
+                        )
+                    try:
+                        h.update(dec.decompress(chunk))
+                    except zlib.error as e:
+                        raise StreamProblem(
+                            f"the compressed data for {name!r} is not readable ({e})", MODIFIED
+                        )
+                    consumed += len(chunk)
+                consumed -= len(dec.unused_data)
+            elif method == 0:
+                if flags & 0x08 and csize == 0:
+                    raise StreamProblem(
+                        f"{name!r} is stored with its length only in a trailing descriptor; a "
+                        f"streaming reader cannot know where it ends, so neither can this verifier"
+                    )
+                left = csize
+                while left:
+                    chunk = fh.read(min(left, 1 << 20))
+                    if not chunk:
+                        raise StreamProblem(f"the data for {name!r} ends early")
+                    h.update(chunk)
+                    left -= len(chunk)
+                consumed = csize
+            else:
+                raise StreamProblem(f"{name!r} uses compression method {method}, which an evidence "
+                                    f"bundle does not use and this verifier will not guess at")
+
+            if not (name.endswith("/") and consumed == 0):
+                seen[name] = h.hexdigest()
+            off = data_at + consumed
+
             if flags & 0x08:
-                # A data descriptor follows the data: optional signature + crc + two sizes.
-                fh.seek(cursor)
-                desc = fh.read(4)
-                cursor += 16 if desc == b"PK\x07\x08" else 12
-
-        # ZIP64 puts the real offsets in an extra record; rather than reimplement that here, only
-        # the arithmetic above is trusted, and a mismatch is reported rather than waved through.
-        cd_offset, cd_size, eocd_at, comment_len = eocd_fields(fh, size)
-        if cd_offset is None:
-            return "could not locate the archive's central directory"
-        if cursor != cd_offset:
-            return (f"the entries end at byte {cursor} but the directory starts at {cd_offset} — "
-                    f"{abs(cd_offset - cursor)} bytes belong to neither, which is what a second "
-                    f"archive concatenated into this file looks like")
-        if cd_offset + cd_size != eocd_at:
-            return "the central directory does not end where the end-of-archive record begins"
-        if eocd_at + 22 + comment_len != size:
-            return (f"{size - (eocd_at + 22 + comment_len)} bytes follow the end of the archive")
-    return ""
+                # A data descriptor follows, in one of four widths (with or without its optional
+                # signature, classic or ZIP64 sizes). Rather than guess — guessing 16 where it was
+                # 24 is what refused honest streamed bundles — take the width that lands on the next
+                # real record.
+                fh.seek(off)
+                probe = fh.read(28)
+                for width in (16, 24, 12, 20):
+                    if probe[width:width + 4] in (b"PK\x03\x04", b"PK\x01\x02"):
+                        off += width
+                        break
+                else:
+                    raise StreamProblem(f"the data descriptor after {name!r} is not one this "
+                                        f"verifier recognises")
+    if not seen:
+        return {}, 0
+    return seen, off
 
 
-def eocd_fields(fh, size: int):
-    """(cd_offset, cd_size, eocd_offset, comment_len) from the LAST EOCD record, or Nones."""
+def zip64_compressed_size(extra: bytes):
+    """The compressed size from a local header's ZIP64 extra record (0x0001), or None."""
+    at = 0
+    while at + 4 <= len(extra):
+        hid = int.from_bytes(extra[at:at + 2], "little")
+        n = int.from_bytes(extra[at + 2:at + 4], "little")
+        body = extra[at + 4:at + 4 + n]
+        # In a LOCAL header the record carries uncompressed then compressed size, both 8 bytes and
+        # both always present (unlike the central-directory form, where fields are omitted when the
+        # 32-bit slot sufficed).
+        if hid == 0x0001 and len(body) >= 16:
+            return int.from_bytes(body[8:16], "little")
+        at += 4 + n
+    return None
+
+
+def classic_eocd(fh, size: int):
+    """(offset, comment_len) of the last end-of-central-directory record, or (None, None).
+
+    Only used for the "nothing follows the archive" check. The classic record is last even in a
+    ZIP64 archive, so no ZIP64 parsing is needed here — and none is done, because the previous
+    version's attempt to do arithmetic on this record is what refused honest ZIP64 bundles.
+    """
     span = min(size, 66 * 1024)
     fh.seek(size - span)
     tail = fh.read(span)
     at = tail.rfind(b"PK\x05\x06")
-    if at < 0:
-        return None, None, None, None
-    rec = tail[at:at + 22]
-    if len(rec) < 22:
-        return None, None, None, None
-    return (
-        int.from_bytes(rec[16:20], "little"),
-        int.from_bytes(rec[12:16], "little"),
-        size - span + at,
-        int.from_bytes(rec[20:22], "little"),
-    )
+    if at < 0 or len(tail) - at < 22:
+        return None, None
+    return size - span + at, int.from_bytes(tail[at + 20:at + 22], "little")
 
 
 def reject_unsafe_names(names: list) -> str:
