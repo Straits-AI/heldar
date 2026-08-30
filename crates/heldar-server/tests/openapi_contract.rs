@@ -11,7 +11,6 @@
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 
-
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .parent()
