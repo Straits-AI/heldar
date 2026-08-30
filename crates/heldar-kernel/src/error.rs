@@ -55,6 +55,30 @@ impl AppError {
         }
     }
 
+    /// Every code [`code_for_status`] can return, in the order a reader would want them.
+    ///
+    /// THE PUBLISHED CONTRACT ENUMERATES THIS LIST, and it must not be a second, hand-typed copy.
+    /// It was: the OpenAPI schema's description listed `busy` — a code this function has never
+    /// returned — and omitted `payload_too_large` and `rate_limited`, which it returns routinely.
+    /// A client branching on `busy` would have waited forever for a code that does not exist, and
+    /// one hitting a 429 would have met an identifier the contract never mentioned.
+    ///
+    /// That is the exact drift the contract module was written to prevent, inside the contract
+    /// module. `codes_documented_match_codes_returned` now holds the two together.
+    ///
+    /// [`code_for_status`]: AppError::code_for_status
+    pub const ALL_CODES: &'static [&'static str] = &[
+        "bad_request",
+        "unauthorized",
+        "forbidden",
+        "not_found",
+        "conflict",
+        "payload_too_large",
+        "rate_limited",
+        "unavailable",
+        "internal",
+    ];
+
     /// Whether retrying the SAME request could plausibly succeed.
     ///
     /// Only transient saturation: 503 (a backend missing, or the database busy) and 429. A 404 or a

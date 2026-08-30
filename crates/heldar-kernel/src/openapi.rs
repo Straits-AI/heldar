@@ -35,8 +35,16 @@ pub struct ErrorBody {
     /// Human-readable message. Not a stable identifier — do not match on it.
     #[schema(example = "camera cam_x not found")]
     pub error: String,
-    /// Stable machine-readable identifier: `not_found`, `bad_request`, `conflict`, `unauthorized`,
-    /// `forbidden`, `unavailable`, `busy`, `internal`. Branch on this, not on `error`.
+    /// Stable machine-readable identifier. Branch on this, not on `error`.
+    ///
+    /// Exactly one of: `bad_request`, `unauthorized`, `forbidden`, `not_found`, `conflict`,
+    /// `payload_too_large`, `rate_limited`, `unavailable`, `internal`.
+    ///
+    /// This list is held to `AppError::ALL_CODES` by `codes_documented_match_codes_returned`, in
+    /// both directions — a code the server can emit must appear here, and a code named here must be
+    /// reachable. It previously listed one the server has never returned and omitted two it returns
+    /// routinely, which is why the test exists rather than a correction. (The test also refuses the
+    /// obsolete identifier by name, so this text cannot quietly reintroduce it while explaining it.)
     #[schema(example = "not_found")]
     pub code: String,
     /// Whether retrying the SAME request could plausibly succeed. True only for transient
@@ -45,10 +53,23 @@ pub struct ErrorBody {
     pub retryable: bool,
 }
 
+/// The API CONTRACT's version, reported by `GET /api/v1/system` and stamped into the served spec.
+///
+/// Deliberately not the crate version. A patch release bumps the binary without moving a single
+/// field, and a client that pinned to it would churn for nothing; a breaking API change can land in
+/// any release, and a client that ignored it would break silently. This number moves only when the
+/// contract does — minor for additive changes, major for anything a generated client must be
+/// regenerated for.
+///
+/// While the contract is partial (most routes are still undocumented, see the module docs) this
+/// stays `0.x`: a `1.0` would promise a completeness the document does not yet have.
+pub const API_VERSION: &str = "0.1.0";
+
 #[derive(OpenApi)]
 #[openapi(
     info(
         title = "Heldar Core API",
+        version = API_VERSION,
         description = "Media kernel, perception ingest and access-control surface for a Heldar box.",
         license(name = "Apache-2.0"),
     ),

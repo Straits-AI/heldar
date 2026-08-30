@@ -516,7 +516,15 @@ async fn readyz(State(st): State<AppState>) -> Response {
 #[derive(Debug, Serialize)]
 struct SystemInfo {
     name: &'static str,
+    /// The build's own version (`CARGO_PKG_VERSION`).
     version: &'static str,
+    /// The API CONTRACT's version, which is not the build's (#120).
+    ///
+    /// A client needs to know what shape to expect, and the binary version does not answer that: a
+    /// patch release changes `version` without changing a single field, while a breaking API change
+    /// could ship in any release. This is the number a generated client pins against, and
+    /// `GET /api/v1/openapi.json` serves the document it describes.
+    api_version: &'static str,
     started_at: DateTime<Utc>,
     uptime_seconds: i64,
     recorder_enabled: bool,
@@ -707,6 +715,7 @@ async fn system_info(
     Ok(Json(SystemInfo {
         name: "Heldar Core",
         version: env!("CARGO_PKG_VERSION"),
+        api_version: crate::openapi::API_VERSION,
         started_at: st.started_at,
         uptime_seconds: (Utc::now() - st.started_at).num_seconds(),
         recorder_enabled: st.cfg.recorder_enabled,
