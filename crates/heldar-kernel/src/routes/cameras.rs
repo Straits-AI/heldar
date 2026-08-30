@@ -624,7 +624,19 @@ pub async fn delete_camera(
 }
 
 /// Probe the camera's recording stream to confirm reachability and read its codec/dimensions.
-async fn test_camera(
+/// Probe a camera's stream URL and report whether it answers.
+#[utoipa::path(
+    post, path = "/api/v1/cameras/{id}/test", tag = "cameras",
+    operation_id = "testCamera",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "Whether the camera answered, and what it reported"),
+        (status = 400, description = "The camera has no stream URL to test", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `camera:read`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera, or one this credential does not hold", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn test_camera(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,

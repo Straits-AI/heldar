@@ -2459,6 +2459,14 @@ async fn every_declared_capability_is_one_the_kernel_enforces() {
             ("/api/v1/webhooks", "post") => r#"{"name":"w","url":"http://127.0.0.1/x"}"#,
             ("/api/v1/search/nl", "post") => r#"{"query":"red car"}"#,
             ("/api/v1/search/plan", "post") => r#"{"query":"red car"}"#,
+            ("/api/v1/modules", "post") => {
+                r#"{"id":"m","name":"M","base_url":"http://127.0.0.1:1/","routes":[]}"#
+            }
+            ("/api/v1/cameras/{id}/schedules", "post") => {
+                r#"{"days":[0],"time_start":"01:00","time_end":"02:00"}"#
+            }
+            ("/api/v1/cameras/{id}/snapshot-schedules", "post") => r#"{"interval_seconds":60}"#,
+            ("/api/v1/discover", "post") => r#"{"targets":"127.0.0.1"}"#,
             _ => "{}",
         }
     };

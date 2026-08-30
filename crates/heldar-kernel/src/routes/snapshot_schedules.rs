@@ -39,7 +39,18 @@ fn clamp_interval(seconds: i64) -> i64 {
     seconds.clamp(5, 86_400)
 }
 
-async fn list_schedules(
+/// The snapshot schedules on a camera, oldest first.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/snapshot-schedules", tag = "cameras",
+    operation_id = "listSnapshotSchedules",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "Schedules for this camera, oldest first", body = Vec<SnapshotSchedule>),
+        (status = 403, description = "Missing `camera:read`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_schedules(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -55,7 +66,22 @@ async fn list_schedules(
     Ok(Json(rows))
 }
 
-async fn create_schedule(
+/// Create a snapshot schedule on a camera.
+///
+/// `interval_seconds` is clamped to 5..=86400 rather than rejected, so the stored value can differ
+/// from the one sent — read it back from the response.
+#[utoipa::path(
+    post, path = "/api/v1/cameras/{id}/snapshot-schedules", tag = "cameras",
+    operation_id = "createSnapshotSchedule",
+    params(("id" = String, Path, description = "Camera id")),
+    request_body = SnapshotScheduleCreate,
+    responses(
+        (status = 201, description = "The created schedule", body = SnapshotSchedule),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn create_schedule(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -100,7 +126,23 @@ async fn create_schedule(
     Ok((StatusCode::CREATED, Json(schedule)))
 }
 
-async fn update_schedule(
+/// Update a snapshot schedule's interval or enabled flag.
+///
+/// Scope is resolved from the schedule's owning camera BEFORE the row is disclosed: to a
+/// camera-scoped credential, someone else's schedule and a nonexistent one both answer 403 with the
+/// same message. `interval_seconds` is clamped to 5..=86400.
+#[utoipa::path(
+    patch, path = "/api/v1/snapshot-schedules/{schedule_id}", tag = "cameras",
+    operation_id = "updateSnapshotSchedule",
+    params(("schedule_id" = String, Path, description = "Snapshot schedule id")),
+    request_body = SnapshotScheduleUpdate,
+    responses(
+        (status = 200, description = "The updated schedule", body = SnapshotSchedule),
+        (status = 403, description = "Missing `registry:manage`, or a schedule this credential does not hold — indistinguishable from an unknown one", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown schedule (fleet-scoped credentials only)", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn update_schedule(
     State(st): State<AppState>,
     Path(schedule_id): Path<String>,
     principal: Principal,
@@ -156,7 +198,22 @@ async fn update_schedule(
     Ok(Json(schedule))
 }
 
-async fn delete_schedule(
+/// Delete a snapshot schedule.
+///
+/// Scope is checked before the DELETE, so the 204-vs-404 shape cannot be used as an id-space oracle:
+/// a camera-scoped credential gets the same 403 for someone else's schedule and for one that does
+/// not exist.
+#[utoipa::path(
+    delete, path = "/api/v1/snapshot-schedules/{schedule_id}", tag = "cameras",
+    operation_id = "deleteSnapshotSchedule",
+    params(("schedule_id" = String, Path, description = "Snapshot schedule id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 403, description = "Missing `registry:manage`, or a schedule this credential does not hold — indistinguishable from an unknown one", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown schedule (fleet-scoped credentials only)", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_schedule(
     State(st): State<AppState>,
     Path(schedule_id): Path<String>,
     principal: Principal,
@@ -193,7 +250,7 @@ async fn delete_schedule(
 }
 
 #[derive(Debug, Deserialize)]
-struct SnapshotRangeQuery {
+pub struct SnapshotRangeQuery {
     from: Option<String>,
     to: Option<String>,
     limit: Option<i64>,
@@ -221,7 +278,26 @@ impl SnapshotView {
     }
 }
 
-async fn list_snapshots(
+/// Snapshots captured for a camera, newest first.
+///
+/// `limit` is clamped to 1..=5000 (default 500), so a larger value silently returns fewer rows.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/snapshots", tag = "recordings",
+    operation_id = "listCameraSnapshots",
+    params(
+        ("id" = String, Path, description = "Camera id"),
+        ("from" = Option<String>, Query, description = "RFC3339 lower bound on `taken_at`"),
+        ("to" = Option<String>, Query, description = "RFC3339 upper bound on `taken_at`"),
+        ("limit" = Option<i64>, Query, description = "Max rows, clamped to 1..=5000 (default 500)"),
+    ),
+    responses(
+        (status = 200, description = "Captured snapshots, newest first, each with its `/media/snapshots/...` URL"),
+        (status = 400, description = "Unparseable `from`/`to`, or `from` after `to`", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `video:playback`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_snapshots(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,

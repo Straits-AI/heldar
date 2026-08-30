@@ -26,7 +26,7 @@ pub fn router() -> Router<AppState> {
 
 /// One durable outbox row (a committed detection batch). Mirrors the `outbox` table (migration 0006).
 #[derive(Debug, Serialize, sqlx::FromRow)]
-struct OutboxEntry {
+pub struct OutboxEntry {
     seq: i64,
     topic: String,
     camera_id: Option<String>,
@@ -39,7 +39,7 @@ struct OutboxEntry {
 
 /// A page of outbox rows plus the cursor to continue from (pass `next_seq` as the next `since_seq`).
 #[derive(Debug, Serialize)]
-struct OutboxPage {
+pub struct OutboxPage {
     entries: Vec<OutboxEntry>,
     /// Highest `seq` in this page; null when the page is empty (caller is caught up).
     next_seq: Option<i64>,
@@ -47,7 +47,7 @@ struct OutboxPage {
 }
 
 #[derive(Debug, Deserialize)]
-struct OutboxQuery {
+pub struct OutboxQuery {
     /// Return rows with `seq` strictly greater than this cursor (default 0 = from the start).
     since_seq: Option<i64>,
     /// Page size (default 100, clamped 1..1000).
@@ -55,7 +55,23 @@ struct OutboxQuery {
 }
 
 /// Drain the outbox in `seq` order from a cursor (admin-only, audited).
-async fn list_outbox(
+///
+/// A camera-scoped credential is REFUSED, not filtered: `seq` is a contiguous fleet-wide cursor, and
+/// omitting rows would leave a consumer believing it had drained batches it never saw. Pass the
+/// returned `next_seq` as the next `since_seq`; a null `next_seq` means the caller is caught up.
+#[utoipa::path(
+    get, path = "/api/v1/outbox", tag = "system",
+    operation_id = "listOutbox",
+    params(
+        ("since_seq" = Option<i64>, Query, description = "Return rows with `seq` strictly greater than this cursor (default 0)"),
+        ("limit" = Option<i64>, Query, description = "Page size, default 100, clamped to 1..1000"),
+    ),
+    responses(
+        (status = 200, description = "A page of outbox rows in ascending `seq` order, plus the cursor to continue from"),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_outbox(
     State(st): State<AppState>,
     principal: Principal,
     Query(q): Query<OutboxQuery>,
@@ -98,19 +114,31 @@ async fn list_outbox(
     }))
 }
 
-/// This node's fleet identity (site_id, version, uptime). Requires an authenticated principal: when
-/// auth is disabled (LAN default) the extractor yields the synthetic admin so this stays open, but on
-/// an auth-enabled / internet-exposed box it no longer discloses the site identity + version to
-/// anonymous callers.
 #[derive(Debug, Serialize)]
-struct SiteInfo {
+pub struct SiteInfo {
     site_id: Option<String>,
     name: &'static str,
     version: &'static str,
     started_at: DateTime<Utc>,
 }
 
-async fn site_info(State(st): State<AppState>, principal: Principal) -> AppResult<Json<SiteInfo>> {
+/// This node's fleet identity: `site_id`, build version and boot time.
+///
+/// Carries no secrets, but is not anonymous: when auth is disabled (the LAN default) the extractor
+/// yields the synthetic admin so this stays open, while an auth-enabled box will not disclose the
+/// site identity and version to an unauthenticated caller.
+#[utoipa::path(
+    get, path = "/api/v1/site", tag = "system",
+    operation_id = "getSiteInfo",
+    responses(
+        (status = 200, description = "This node's site id, name, version and start time"),
+        (status = 403, description = "Missing `system:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn site_info(
+    State(st): State<AppState>,
+    principal: Principal,
+) -> AppResult<Json<SiteInfo>> {
     principal.require_cap(Cap::SystemRead, "read site info")?;
     Ok(Json(SiteInfo {
         site_id: st.cfg.site_id.clone(),

@@ -26,7 +26,7 @@ pub enum ModuleKind {
 
 /// A nav destination a module contributes to the dashboard. `icon` is a key the dashboard resolves to
 /// a glyph, falling back to a generic module glyph for unknown keys (so imported plugins still render).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct NavEntry {
     /// Client route path, e.g. `/entry`.
     pub path: String,
@@ -136,7 +136,7 @@ impl NavEntry {
 
 /// The manifest a sidecar plugin presents to register itself (POST /api/v1/modules). The kernel mints
 /// a scoped API key + a webhook subscription from it and reverse-proxies `/m/{id}/*` to `base_url`.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, utoipa::ToSchema)]
 pub struct ModuleRegisterRequest {
     /// Stable id (slug): the `/m/{id}/` mount + nav key. Must not collide with a compiled module.
     pub id: String,

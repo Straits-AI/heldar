@@ -353,6 +353,12 @@ export interface VisionEvent {
 }
 
 export interface DiscoverOptions {
+  /** Per-device connect timeout for the probe, in milliseconds. */
+  connect_timeout_ms?: number | null;
+  /** Credentials to try against each discovered device. */
+  credentials?: Array<{ username: string; password: string }> | null;
+  /** Also try each vendor's factory-default credentials. */
+  try_default_creds?: boolean | null;
   /** CIDR ("192.168.0.0/24"), range ("192.168.0.2-192.168.0.12"), single IP, or comma list. */
   targets: string;
   username?: string;

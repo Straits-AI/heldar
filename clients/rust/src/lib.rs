@@ -272,6 +272,12 @@ pub struct CreateSessionRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Credential {
+    pub password: String,
+    pub username: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DayNightConfig {
     pub mode: String,
     pub sensitivity: Option<i64>,
@@ -325,6 +331,20 @@ pub struct DeviceInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoverOptions {
+    pub auto_add: Option<bool>,
+    pub connect_timeout_ms: Option<i64>,
+    pub credentials: Option<Vec<Credential>>,
+    pub password: Option<String>,
+    #[serde(rename = "rtsp_port")]
+    pub rtsp_port: Option<i64>,
+    pub targets: String,
+    pub try_default_creds: Option<bool>,
+    pub username: Option<String>,
+    pub verify: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EmbeddingIngest {
     pub camera_id: String,
     pub dim: i64,
@@ -358,6 +378,11 @@ pub struct ErrorBody {
     pub error: String,
     #[serde(rename = "retryable")]
     pub retryable: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvidenceLockBody {
+    pub incident_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -410,6 +435,20 @@ pub struct ImageConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncidentSummary {
+    pub incident_id: String,
+    pub newest_end: String,
+    pub oldest_start: String,
+    pub segment_count: i64,
+    pub total_bytes: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncidentTagBody {
+    pub incident_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IngestEvent {
     pub event_type: String,
     pub payload: Option<serde_json::Value>,
@@ -451,9 +490,30 @@ pub struct LoginRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModuleRegisterRequest {
+    pub base_url: String,
+    pub description: Option<String>,
+    pub id: String,
+    pub name: String,
+    pub nav: Option<Vec<NavEntry>>,
+    pub publisher: Option<String>,
+    #[serde(rename = "role")]
+    pub role: Option<String>,
+    pub subscribes: Option<Vec<String>>,
+    pub version: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MotionConfig {
     pub enabled: bool,
     pub sensitivity: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NavEntry {
+    pub icon: String,
+    pub label: String,
+    pub path: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -538,6 +598,22 @@ pub struct RebootRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordScheduleCreate {
+    pub days: serde_json::Value,
+    pub enabled: Option<bool>,
+    pub time_end: String,
+    pub time_start: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordScheduleUpdate {
+    pub days: Option<serde_json::Value>,
+    pub enabled: Option<bool>,
+    pub time_end: Option<String>,
+    pub time_start: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolveBody {
     pub note: Option<String>,
 }
@@ -607,6 +683,29 @@ pub struct SmartRegion {
     pub points: Vec<Vec<f64>>,
     pub sensitivity: i64,
     pub time_threshold: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotSchedule {
+    pub camera_id: String,
+    pub created_at: String,
+    pub enabled: bool,
+    pub id: String,
+    pub interval_seconds: i64,
+    pub last_fired_at: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotScheduleCreate {
+    pub enabled: Option<bool>,
+    pub interval_seconds: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotScheduleUpdate {
+    pub enabled: Option<bool>,
+    pub interval_seconds: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1005,6 +1104,8 @@ pub const REQUIREMENTS: &[(&str, &str, Option<&str>, &str)] = &[
     ("GET", "/api/v1/cameras/{id}/detections", Some("events:read"), "camera-keyed"),
     ("GET", "/api/v1/cameras/{id}/frame", Some("ai:frames"), "camera-keyed"),
     ("GET", "/api/v1/cameras/{id}/gaps", Some("video:playback"), "camera-keyed"),
+    ("GET", "/api/v1/cameras/{id}/health", Some("camera:read"), "camera-keyed"),
+    ("GET", "/api/v1/cameras/{id}/liveview", Some("video:live"), "camera-keyed"),
     ("GET", "/api/v1/cameras/{id}/onvif", Some("camera:read"), "camera-keyed"),
     ("POST", "/api/v1/cameras/{id}/onvif/probe", Some("registry:manage"), "camera-keyed"),
     ("POST", "/api/v1/cameras/{id}/playback/sessions", Some("video:playback"), "camera-keyed"),
@@ -1014,14 +1115,23 @@ pub const REQUIREMENTS: &[(&str, &str, Option<&str>, &str)] = &[
     ("POST", "/api/v1/cameras/{id}/ptz/presets/refresh", Some("registry:manage"), "camera-keyed"),
     ("POST", "/api/v1/cameras/{id}/ptz/stop", Some("registry:manage"), "camera-keyed"),
     ("POST", "/api/v1/cameras/{id}/record-trigger", Some("registry:manage"), "camera-keyed"),
+    ("GET", "/api/v1/cameras/{id}/recording-gaps", Some("video:playback"), "camera-keyed"),
+    ("POST", "/api/v1/cameras/{id}/recording-gaps/{gap_id}/retry", Some("registry:manage"), "camera-keyed"),
+    ("GET", "/api/v1/cameras/{id}/schedules", Some("camera:read"), "camera-keyed"),
+    ("POST", "/api/v1/cameras/{id}/schedules", Some("registry:manage"), "camera-keyed"),
     ("GET", "/api/v1/cameras/{id}/segments", Some("video:playback"), "camera-keyed"),
     ("GET", "/api/v1/cameras/{id}/snapshot", Some("video:playback"), "camera-keyed"),
+    ("GET", "/api/v1/cameras/{id}/snapshot-schedules", Some("camera:read"), "camera-keyed"),
+    ("POST", "/api/v1/cameras/{id}/snapshot-schedules", Some("registry:manage"), "camera-keyed"),
+    ("GET", "/api/v1/cameras/{id}/snapshots", Some("video:playback"), "camera-keyed"),
+    ("POST", "/api/v1/cameras/{id}/test", Some("camera:read"), "camera-keyed"),
     ("GET", "/api/v1/cameras/{id}/timeline", Some("video:playback"), "camera-keyed"),
     ("GET", "/api/v1/cameras/{id}/zone-events", Some("events:read"), "camera-keyed"),
     ("GET", "/api/v1/cameras/{id}/zone-events/aggregates", Some("events:read"), "camera-keyed"),
     ("GET", "/api/v1/cameras/{id}/zones", Some("events:read"), "camera-keyed"),
     ("POST", "/api/v1/cameras/{id}/zones", Some("registry:manage"), "camera-keyed"),
     ("GET", "/api/v1/cameras/{id}/zones/occupancy", Some("events:read"), "camera-keyed"),
+    ("POST", "/api/v1/discover", Some("net:scan"), "fleet-only"),
     ("GET", "/api/v1/entry-events", Some("events:read"), "scope-filtered"),
     ("GET", "/api/v1/entry-events/{id}", Some("events:read"), "camera-keyed"),
     ("POST", "/api/v1/entry-events/{id}/confirm", Some("gate:operate"), "camera-keyed"),
@@ -1031,14 +1141,22 @@ pub const REQUIREMENTS: &[(&str, &str, Option<&str>, &str)] = &[
     ("DELETE", "/api/v1/entry/gate/policies/{camera_id}", Some("registry:manage"), "camera-keyed"),
     ("PUT", "/api/v1/entry/gate/policies/{camera_id}", Some("registry:manage"), "camera-keyed"),
     ("PUT", "/api/v1/entry/gate/settings", Some("registry:manage"), "fleet-only"),
+    ("GET", "/api/v1/events", Some("events:read"), "fleet-only"),
     ("GET", "/api/v1/events/types", Some("events:read"), "scope-neutral"),
     ("GET", "/api/v1/evidence/exports", Some("video:export"), "scope-filtered"),
     ("POST", "/api/v1/evidence/exports", Some("video:export"), "camera-keyed"),
     ("GET", "/api/v1/evidence/exports/{id}", Some("video:export"), "camera-keyed"),
     ("GET", "/api/v1/evidence/signing-key", Some("camera:read"), "scope-neutral"),
+    ("GET", "/api/v1/health/cameras", Some("camera:read"), "scope-filtered"),
+    ("GET", "/api/v1/incidents", Some("events:read"), "scope-filtered"),
+    ("GET", "/api/v1/incidents/{incident_id}/segments", Some("video:playback"), "scope-filtered"),
+    ("GET", "/api/v1/modules", Some("system:read"), "fleet-only"),
+    ("POST", "/api/v1/modules", None, "fleet-only"),
     ("GET", "/api/v1/modules/entry/ui/index.js", Some("events:read"), "scope-neutral"),
     ("GET", "/api/v1/modules/movement/ui/index.js", Some("events:read"), "scope-neutral"),
     ("GET", "/api/v1/modules/search/ui/index.js", Some("events:read"), "scope-neutral"),
+    ("DELETE", "/api/v1/modules/{id}", None, "camera-keyed"),
+    ("GET", "/api/v1/modules/{id}", None, "camera-keyed"),
     ("GET", "/api/v1/movement/breaches", Some("events:read"), "scope-filtered"),
     ("POST", "/api/v1/movement/breaches/{id}/ack", Some("gate:operate"), "camera-keyed"),
     ("POST", "/api/v1/movement/breaches/{id}/resolve", Some("gate:operate"), "camera-keyed"),
@@ -1052,6 +1170,8 @@ pub const REQUIREMENTS: &[(&str, &str, Option<&str>, &str)] = &[
     ("GET", "/api/v1/movement/search/person", Some("events:read"), "camera-keyed"),
     ("GET", "/api/v1/movement/search/plate/{plate}", Some("events:read"), "scope-filtered"),
     ("POST", "/api/v1/onvif/discover", Some("registry:manage"), "fleet-only"),
+    ("GET", "/api/v1/openapi.json", None, "scope-neutral"),
+    ("GET", "/api/v1/outbox", None, "fleet-only"),
     ("GET", "/api/v1/passes", Some("identity:read"), "scope-neutral"),
     ("POST", "/api/v1/passes", Some("gate:operate"), "fleet-only"),
     ("DELETE", "/api/v1/passes/{id}", Some("registry:manage"), "fleet-only"),
@@ -1060,17 +1180,27 @@ pub const REQUIREMENTS: &[(&str, &str, Option<&str>, &str)] = &[
     ("POST", "/api/v1/passes/{id}/checkin", Some("gate:operate"), "fleet-only"),
     ("POST", "/api/v1/passes/{id}/checkout", Some("gate:operate"), "fleet-only"),
     ("DELETE", "/api/v1/playback/sessions/{session_id}", Some("video:playback"), "camera-keyed"),
+    ("GET", "/api/v1/registry", Some("system:read"), "fleet-only"),
+    ("POST", "/api/v1/registry/refresh", None, "fleet-only"),
     ("GET", "/api/v1/reports/entry-log", Some("events:read"), "scope-filtered"),
     ("GET", "/api/v1/reports/exceptions", Some("events:read"), "scope-filtered"),
+    ("DELETE", "/api/v1/schedules/{schedule_id}", Some("registry:manage"), "scope-filtered"),
+    ("PATCH", "/api/v1/schedules/{schedule_id}", Some("registry:manage"), "scope-filtered"),
     ("POST", "/api/v1/search/events", Some("events:read"), "scope-filtered"),
     ("POST", "/api/v1/search/nl", Some("events:read"), "scope-filtered"),
     ("POST", "/api/v1/search/plan", Some("events:read"), "scope-filtered"),
     ("POST", "/api/v1/search/semantic", Some("events:read"), "scope-filtered"),
+    ("DELETE", "/api/v1/segments/{id}/evidence-lock", Some("registry:manage"), "camera-keyed"),
+    ("POST", "/api/v1/segments/{id}/evidence-lock", Some("registry:manage"), "camera-keyed"),
+    ("PATCH", "/api/v1/segments/{id}/incident", Some("registry:manage"), "camera-keyed"),
+    ("GET", "/api/v1/site", Some("system:read"), "scope-filtered"),
     ("GET", "/api/v1/sites", Some("camera:read"), "scope-filtered"),
     ("POST", "/api/v1/sites", None, "fleet-only"),
     ("DELETE", "/api/v1/sites/{id}", None, "fleet-only"),
     ("GET", "/api/v1/sites/{id}", Some("camera:read"), "camera-keyed"),
     ("PATCH", "/api/v1/sites/{id}", None, "fleet-only"),
+    ("DELETE", "/api/v1/snapshot-schedules/{schedule_id}", Some("registry:manage"), "fleet-only"),
+    ("PATCH", "/api/v1/snapshot-schedules/{schedule_id}", Some("registry:manage"), "fleet-only"),
     ("GET", "/api/v1/system", Some("system:read"), "scope-filtered"),
     ("GET", "/api/v1/system/db", Some("system:read"), "fleet-only"),
     ("PUT", "/api/v1/system/db", None, "fleet-only"),

@@ -35,20 +35,20 @@ pub fn router() -> Router<AppState> {
 }
 
 /// Lock body: an optional incident tag to attach when pinning the segment.
-#[derive(Debug, Deserialize)]
-struct EvidenceLockBody {
-    incident_id: Option<String>,
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct EvidenceLockBody {
+    pub incident_id: Option<String>,
 }
 
 /// Tag body: the incident to set, or JSON `null` to clear the tag.
-#[derive(Debug, Deserialize)]
-struct IncidentTagBody {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct IncidentTagBody {
     #[serde(default)]
-    incident_id: Option<String>,
+    pub incident_id: Option<String>,
 }
 
 /// Roll-up of one incident: how many segments are tagged to it, their footprint, and span.
-#[derive(Debug, Serialize, sqlx::FromRow)]
+#[derive(Debug, Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct IncidentSummary {
     pub incident_id: String,
     pub segment_count: i64,
@@ -88,7 +88,21 @@ async fn load_segment(pool: &sqlx::SqlitePool, id: &str) -> AppResult<Segment> {
         .ok_or_else(|| AppError::NotFound(format!("segment {id} not found")))
 }
 
-async fn lock_evidence(
+/// Pin a segment against retention, optionally tagging it to an incident.
+///
+/// A blank or whitespace-only `incident_id` is treated as absent, not as a tag.
+#[utoipa::path(
+    post, path = "/api/v1/segments/{id}/evidence-lock", tag = "recordings",
+    operation_id = "lockSegmentEvidence",
+    params(("id" = String, Path, description = "Segment id")),
+    request_body = EvidenceLockBody,
+    responses(
+        (status = 200, description = "The pinned segment"),
+        (status = 403, description = "Missing `registry:manage`, or a segment on a camera this credential does not hold — answered identically to an unknown segment id, so the id space cannot be enumerated", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown segment (fleet-scoped credentials only)", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn lock_evidence(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -111,7 +125,20 @@ async fn lock_evidence(
     Ok(Json(SegmentView::new(seg)))
 }
 
-async fn unlock_evidence(
+/// Release a segment's evidence hold, handing it back to the retention sweeper.
+///
+/// The `incident_id` is preserved, so the case tag survives unlocking.
+#[utoipa::path(
+    delete, path = "/api/v1/segments/{id}/evidence-lock", tag = "recordings",
+    operation_id = "unlockSegmentEvidence",
+    params(("id" = String, Path, description = "Segment id")),
+    responses(
+        (status = 200, description = "The released segment"),
+        (status = 403, description = "Missing `registry:manage`, or a segment on a camera this credential does not hold — answered identically to an unknown segment id", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown segment (fleet-scoped credentials only)", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn unlock_evidence(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -135,7 +162,21 @@ async fn unlock_evidence(
     Ok(Json(SegmentView::new(seg)))
 }
 
-async fn tag_incident(
+/// Set or clear a segment's incident tag.
+///
+/// A null, blank or omitted `incident_id` CLEARS the tag rather than leaving it alone.
+#[utoipa::path(
+    patch, path = "/api/v1/segments/{id}/incident", tag = "recordings",
+    operation_id = "tagSegmentIncident",
+    params(("id" = String, Path, description = "Segment id")),
+    request_body = IncidentTagBody,
+    responses(
+        (status = 200, description = "The retagged segment"),
+        (status = 403, description = "Missing `registry:manage`, or a segment on a camera this credential does not hold — answered identically to an unknown segment id", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown segment (fleet-scoped credentials only)", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn tag_incident(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -163,7 +204,19 @@ async fn tag_incident(
     Ok(Json(SegmentView::new(seg)))
 }
 
-async fn list_incidents(
+/// Every incident with at least one tagged segment, newest activity first.
+///
+/// Confined to the caller's cameras: a scoped credential's counts and byte totals cover only its own
+/// segments, and an incident living entirely on other cameras does not appear. Capped at 1000 rows.
+#[utoipa::path(
+    get, path = "/api/v1/incidents", tag = "recordings",
+    operation_id = "listIncidents",
+    responses(
+        (status = 200, description = "Incident roll-ups, newest activity first", body = Vec<IncidentSummary>),
+        (status = 403, description = "Missing `events:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_incidents(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<IncidentSummary>>> {
@@ -204,7 +257,21 @@ async fn list_incidents(
 /// handful of pinned clips in practice); a hit is logged so truncation is never silent.
 const INCIDENT_SEGMENTS_CAP: i64 = 5000;
 
-async fn incident_segments(
+/// The segments tagged to one incident, oldest first.
+///
+/// An incident id is guessable, so results are confined to the caller's cameras; an unknown incident
+/// and one held entirely on other cameras both answer with an empty list, not a 404. Truncated at
+/// 5000 segments (a hit is logged server-side).
+#[utoipa::path(
+    get, path = "/api/v1/incidents/{incident_id}/segments", tag = "recordings",
+    operation_id = "listIncidentSegments",
+    params(("incident_id" = String, Path, description = "Incident tag")),
+    responses(
+        (status = 200, description = "The incident's segments visible to this credential, oldest first"),
+        (status = 403, description = "Missing `video:playback`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn incident_segments(
     State(st): State<AppState>,
     Path(incident_id): Path<String>,
     principal: Principal,

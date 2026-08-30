@@ -23,32 +23,7 @@ fn repo_root() -> PathBuf {
 ///
 /// Each entry is an endpoint an integrator cannot generate a client for. Documenting one means
 /// adding `#[utoipa::path]` to its handler, listing it in `ApiDoc`, and deleting the line here.
-const NOT_YET_DOCUMENTED: &[&str] = &[
-    "/api/v1/cameras/{id}/health",
-    "/api/v1/cameras/{id}/liveview",
-    "/api/v1/cameras/{id}/recording-gaps",
-    "/api/v1/cameras/{id}/recording-gaps/{gap_id}/retry",
-    "/api/v1/cameras/{id}/schedules",
-    "/api/v1/cameras/{id}/snapshot-schedules",
-    "/api/v1/cameras/{id}/snapshots",
-    "/api/v1/cameras/{id}/test",
-    "/api/v1/discover",
-    "/api/v1/events",
-    "/api/v1/health/cameras",
-    "/api/v1/incidents",
-    "/api/v1/incidents/{incident_id}/segments",
-    "/api/v1/modules",
-    "/api/v1/modules/{id}",
-    "/api/v1/openapi.json",
-    "/api/v1/outbox",
-    "/api/v1/registry",
-    "/api/v1/registry/refresh",
-    "/api/v1/schedules/{schedule_id}",
-    "/api/v1/segments/{id}/evidence-lock",
-    "/api/v1/segments/{id}/incident",
-    "/api/v1/site",
-    "/api/v1/snapshot-schedules/{schedule_id}",
-];
+const NOT_YET_DOCUMENTED: &[&str] = &[];
 
 /// Every `/api/v1` route the box serves is either documented or explicitly named as not yet.
 #[test]
@@ -449,4 +424,70 @@ fn collect_refs(v: &serde_json::Value, out: &mut std::collections::BTreeSet<Stri
         }
         _ => {}
     }
+}
+
+/// The shipped example must keep working against the generated client (#120).
+///
+/// An example that calls a method the generator no longer emits is worse than no example: it is the
+/// first thing an integrator copies, and it fails at their keyboard rather than in our CI. This
+/// regenerates the client from the served document and checks every `client.x(...)` the example
+/// names actually exists on it.
+///
+/// It does NOT run the example against a box — that needs a camera and footage. It checks the
+/// vocabulary, which is the part that goes stale when a route is renamed.
+#[test]
+fn the_shipped_example_calls_methods_the_generated_client_still_has() {
+    let root = repo_root();
+    let example = root.join("examples/api-client/recording_health.py");
+    if !example.is_file() {
+        panic!(
+            "the example named by docs/README is missing: {}",
+            example.display()
+        );
+    }
+
+    let out = std::process::Command::new("python3")
+        .arg("-c")
+        .arg(
+            "import re,sys\n\
+             sys.path.insert(0, sys.argv[2])\n\
+             import heldar_client as h\n\
+             src = open(sys.argv[1]).read()\n\
+             have = {m for m in dir(h.HeldarClient) if not m.startswith('_')}\n\
+             called = set(re.findall(r'client\\.(\\w+)\\(', src)) - {'HeldarClient'}\n\
+             missing = sorted(called - have)\n\
+             print('MISSING:' + ','.join(missing))\n\
+             print('CHECKED:' + str(len(called)))",
+        )
+        .arg(&example)
+        .arg(root.join("clients/python"))
+        .output()
+        .expect("running the vocabulary check");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        out.status.success(),
+        "could not check the example against the generated client: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let missing = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("MISSING:"))
+        .unwrap_or("?");
+    assert!(
+        missing.is_empty(),
+        "the example calls client method(s) the generator no longer emits: {missing}. An example \
+         that does not run is worse than none — it is the first thing an integrator copies."
+    );
+
+    let checked: usize = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("CHECKED:"))
+        .and_then(|n| n.parse().ok())
+        .unwrap_or(0);
+    assert!(
+        checked >= 2,
+        "only {checked} client call(s) were found in the example — if it stopped using the \
+         generated client, this test is asserting nothing"
+    );
 }

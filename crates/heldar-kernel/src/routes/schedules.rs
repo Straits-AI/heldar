@@ -103,7 +103,18 @@ fn normalize_hhmm(s: &str, field: &str) -> AppResult<String> {
     Ok(format!("{h:02}:{m:02}"))
 }
 
-async fn list_schedules(
+/// A camera's recording windows. Times are read in the camera's SITE timezone (#125).
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/schedules", tag = "recording",
+    operation_id = "listRecordingSchedules",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The camera's recording windows"),
+        (status = 403, description = "Missing `camera:read`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_schedules(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
@@ -119,7 +130,19 @@ async fn list_schedules(
     Ok(Json(rows))
 }
 
-async fn create_schedule(
+/// Add a recording window. `time_start` > `time_end` means an overnight window.
+#[utoipa::path(
+    post, path = "/api/v1/cameras/{id}/schedules", tag = "recording",
+    operation_id = "createRecordingSchedule",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 201, description = "The created window"),
+        (status = 400, description = "Malformed days or HH:MM bounds", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn create_schedule(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
@@ -173,7 +196,20 @@ async fn create_schedule(
     Ok((StatusCode::CREATED, Json(schedule)))
 }
 
-async fn update_schedule(
+/// Change a recording window. Disabling one stops a camera recording, so the owning camera is
+/// resolved — and scope-checked — before the row is disclosed.
+#[utoipa::path(
+    patch, path = "/api/v1/schedules/{schedule_id}", tag = "recording",
+    operation_id = "updateRecordingSchedule",
+    params(("schedule_id" = String, Path, description = "Schedule id")),
+    responses(
+        (status = 200, description = "The updated window"),
+        (status = 400, description = "Malformed days or HH:MM bounds", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `registry:manage`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown schedule, or one on a camera this credential does not hold — the same answer either way, so the id space cannot be walked", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn update_schedule(
     State(st): State<AppState>,
     Path(schedule_id): Path<String>,
     principal: Principal,
@@ -241,7 +277,18 @@ async fn update_schedule(
     Ok(Json(schedule))
 }
 
-async fn delete_schedule(
+/// Remove a recording window.
+#[utoipa::path(
+    delete, path = "/api/v1/schedules/{schedule_id}", tag = "recording",
+    operation_id = "deleteRecordingSchedule",
+    params(("schedule_id" = String, Path, description = "Schedule id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 403, description = "Missing `registry:manage`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown schedule, or one on a camera this credential does not hold", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_schedule(
     State(st): State<AppState>,
     Path(schedule_id): Path<String>,
     principal: Principal,

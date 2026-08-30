@@ -16,7 +16,22 @@ pub fn router() -> Router<AppState> {
 }
 
 /// Ensure a MediaMTX path exists for the camera and return live playback URLs.
-async fn liveview(
+/// Stream URLs for a camera's live view.
+///
+/// Registered for both GET and POST on the same handler, so the contract documents GET and the
+/// operation covers both.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/liveview", tag = "video",
+    operation_id = "getLiveView",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "HLS/WebRTC/RTSP URLs, and a signed read token MediaMTX honours"),
+        (status = 403, description = "Missing `video:live`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 503, description = "MediaMTX is unreachable", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn liveview(
     State(st): State<AppState>,
     principal: Principal,
     headers: HeaderMap,
