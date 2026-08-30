@@ -58,6 +58,7 @@ pub enum ExportResponse {
 /// nothing is written. Pass `dry_run: false` to produce the bundle.
 #[utoipa::path(
     post, path = "/api/v1/evidence/exports", tag = "evidence",
+    operation_id = "createEvidenceExport",
     responses(
         (status = 200, description = "The export plan (dry run), or the bundle that was written"),
         (status = 400, description = "Bad time range, or neither/both of camera_id and incident_id", body = crate::openapi::ErrorBody),
@@ -172,6 +173,7 @@ pub struct ListQuery {
 /// Bundles this credential may see. Camera-scoped: a scoped credential gets its cameras only.
 #[utoipa::path(
     get, path = "/api/v1/evidence/exports", tag = "evidence",
+    operation_id = "listEvidenceExports",
     params(
         ("camera_id" = Option<String>, Query, description = "Restrict to one camera"),
         ("limit" = Option<i64>, Query, description = "Max rows (1..=500, default 100)"),
@@ -224,6 +226,7 @@ pub async fn list(
 /// One bundle's record. An out-of-scope bundle is refused rather than described.
 #[utoipa::path(
     get, path = "/api/v1/evidence/exports/{id}", tag = "evidence",
+    operation_id = "getEvidenceExport",
     params(("id" = String, Path, description = "Bundle id")),
     responses(
         (status = 200, description = "The bundle record"),
@@ -286,6 +289,7 @@ pub struct BundleRow {
 /// unauthenticated only because the key identifies the appliance.
 #[utoipa::path(
     get, path = "/api/v1/evidence/signing-key", tag = "evidence",
+    operation_id = "getEvidenceSigningKey",
     responses(
         (status = 200, description = "The appliance's Ed25519 evidence-signing public key and its id"),
         (status = 403, description = "Missing `camera:read`", body = crate::openapi::ErrorBody),

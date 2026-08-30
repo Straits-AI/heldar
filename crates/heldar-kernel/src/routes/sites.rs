@@ -102,6 +102,7 @@ async fn camera_count(st: &AppState, site: &str) -> i64 {
 /// reason it does not see those cameras.
 #[utoipa::path(
     get, path = "/api/v1/sites", tag = "sites",
+    operation_id = "listSites",
     responses(
         (status = 200, description = "Sites visible to this credential"),
         (status = 403, description = "Missing `camera:read`", body = crate::openapi::ErrorBody),
@@ -136,6 +137,7 @@ pub async fn list(
 /// A site's own record. An out-of-scope site answers exactly as an unknown one.
 #[utoipa::path(
     get, path = "/api/v1/sites/{id}", tag = "sites",
+    operation_id = "getSite",
     params(("id" = String, Path, description = "Site id")),
     responses(
         (status = 200, description = "The site", body = SiteRow),
@@ -185,6 +187,7 @@ async fn visible(st: &AppState, principal: &Principal, site: &str) -> AppResult<
 /// camera later assigned to it.
 #[utoipa::path(
     post, path = "/api/v1/sites", tag = "sites",
+    operation_id = "createSite",
     request_body = SiteCreate,
     responses(
         (status = 200, description = "The created site", body = SiteRow),
@@ -261,6 +264,7 @@ pub async fn create(
 /// Update a site. Changing its timezone MOVES the recording windows of every camera on it.
 #[utoipa::path(
     patch, path = "/api/v1/sites/{id}", tag = "sites",
+    operation_id = "updateSite",
     params(("id" = String, Path, description = "Site id")),
     request_body = SiteUpdate,
     responses(
@@ -365,6 +369,7 @@ pub async fn update(
 /// Delete a site, but only once nothing depends on it.
 #[utoipa::path(
     delete, path = "/api/v1/sites/{id}", tag = "sites",
+    operation_id = "deleteSite",
     params(("id" = String, Path, description = "Site id")),
     responses(
         (status = 200, description = "Deleted"),

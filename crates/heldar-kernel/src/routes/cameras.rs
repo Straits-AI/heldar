@@ -95,6 +95,7 @@ pub fn require_fleet_scope(principal: &Principal, action: &str) -> AppResult<()>
 /// filtered list, not a 403 — a complete inventory would make the per-camera 403s pointless.
 #[utoipa::path(
     get, path = "/api/v1/cameras", tag = "cameras",
+    operation_id = "listCameras",
     responses(
         (status = 200, description = "Cameras visible to this credential", body = [CameraView]),
         (status = 401, description = "No credential", body = crate::openapi::ErrorBody),
@@ -128,6 +129,7 @@ pub async fn list_cameras(
 /// discover which cameras exist.
 #[utoipa::path(
     get, path = "/api/v1/cameras/{id}", tag = "cameras",
+    operation_id = "getCamera",
     params(("id" = String, Path, description = "Camera id")),
     responses(
         (status = 200, description = "The camera", body = CameraView),
@@ -525,6 +527,7 @@ pub async fn update_camera(
 /// Delete a camera and its registry rows.
 #[utoipa::path(
     delete, path = "/api/v1/cameras/{id}", tag = "cameras",
+    operation_id = "deleteCamera",
     params(("id" = String, Path, description = "Camera id")),
     responses(
         (status = 204, description = "Deleted"),
