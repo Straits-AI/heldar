@@ -25,6 +25,7 @@ lies, which is worse than one that refuses.
 import json
 import os
 import re
+import subprocess
 import sys
 
 METHODS = ("get", "put", "post", "delete", "patch")
@@ -440,6 +441,14 @@ def emit_rust(doc, ops, schemas, out):
         )
     lines.append("];")
     write(os.path.join(out, "rust/src"), "lib.rs", "\n".join(lines))
+    # RUSTFMT THE OUTPUT, because something else will otherwise.
+    #
+    # `cargo fmt --all` reaches this crate through heldarctl's path dependency — even though it is
+    # `exclude`d from the workspace — and reformats it. The committed copy then differs from what
+    # this generator emits, and the in-sync check in CI fails on formatting rather than on drift.
+    # Emitting canonical formatted Rust makes the two agree by construction. rustfmt's `ignore`
+    # option would be the other answer and is nightly-only.
+    rustfmt(os.path.join(out, "rust/src", "lib.rs"))
     write(
         os.path.join(out, "rust"),
         "Cargo.toml",
@@ -453,6 +462,17 @@ def emit_rust(doc, ops, schemas, out):
         "publish = false\n\n[dependencies]\n"
         'serde = { version = "1", features = ["derive"] }\nserde_json = "1"\n',
     )
+
+
+def rustfmt(path):
+    """Format a generated Rust file in place. A missing rustfmt is not fatal — the file is valid
+    Rust either way — but it is reported, because the committed copy will then not match CI's."""
+    try:
+        r = subprocess.run(["rustfmt", "--edition", "2021", path], capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"  ! rustfmt failed on {path}: {r.stderr.strip()[:200]}")
+    except FileNotFoundError:
+        print(f"  ! rustfmt not found; {path} is unformatted and may not match CI")
 
 
 def write(dirpath, name, content):
