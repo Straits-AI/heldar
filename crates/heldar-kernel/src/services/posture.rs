@@ -116,15 +116,29 @@ fn secret_key_source(cfg: &Config) -> Finding {
 ///
 /// THE SHARPEST EXPOSURE ON THE BOX, and the one none of #126's merged work addresses. Reported
 /// here so it is at least visible rather than implied by its absence.
+#[cfg(not(target_os = "linux"))]
 fn process_visibility() -> Finding {
-    #[cfg(target_os = "linux")]
+    Finding::new(
+        "process_visibility",
+        Status::Unknown,
+        "not a Linux host",
+        "camera credentials appear in ffmpeg's argv; process visibility is host-specific and was \
+         not assessed",
+    )
+}
+
+/// TWO WHOLE DEFINITIONS, not one function with `#[cfg]` blocks inside it. A `#[cfg]` attribute on
+/// a BLOCK makes it a statement, so `{ helper() }` evaluates to `()` and the function does not
+/// compile — on the other platform only, where the author cannot see it.
+#[cfg(target_os = "linux")]
+fn process_visibility() -> Finding {
     {
         // hidepid=2 makes /proc/<pid> of other users invisible; hidepid=1 hides their contents.
         let mounts = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
         let proc_line = mounts
             .lines()
             .find(|l| l.contains(" /proc ") && l.contains("proc"));
-        return match proc_line {
+        match proc_line {
             None => Finding::new(
                 "process_visibility",
                 Status::Unknown,
@@ -154,16 +168,8 @@ fn process_visibility() -> Finding {
                  /proc/<pid>/cmdline can read them. Mount /proc with hidepid=2, or run the box on a \
                  host with no untrusted local users",
             ),
-        };
+        }
     }
-    #[cfg(not(target_os = "linux"))]
-    Finding::new(
-        "process_visibility",
-        Status::Unknown,
-        "not a Linux host",
-        "camera credentials appear in ffmpeg's argv; process visibility is host-specific and was \
-         not assessed",
-    )
 }
 
 /// Whether the process runs as a dedicated non-root user.
@@ -203,8 +209,18 @@ fn service_user() -> Finding {
 /// produces. A cloud volume encrypted by the provider is invisible from in here and correctly
 /// reports `Unknown` — claiming otherwise would be exactly the kind of unearned assurance this
 /// module exists to avoid.
-fn volume_encryption(#[allow(unused_variables)] cfg: &Config) -> Finding {
-    #[cfg(target_os = "linux")]
+#[cfg(not(target_os = "linux"))]
+fn volume_encryption(_cfg: &Config) -> Finding {
+    Finding::new(
+        "recording_volume_encryption",
+        Status::Unknown,
+        "not a Linux host",
+        "volume encryption is host-specific and was not assessed",
+    )
+}
+
+#[cfg(target_os = "linux")]
+fn volume_encryption(cfg: &Config) -> Finding {
     {
         let mounts = std::fs::read_to_string("/proc/self/mountinfo").unwrap_or_default();
         if mounts.is_empty() {
@@ -225,7 +241,7 @@ fn volume_encryption(#[allow(unused_variables)] cfg: &Config) -> Finding {
                 path.starts_with(mount).then_some((mount.len(), l))
             })
             .max_by_key(|(n, _)| *n);
-        return match best {
+        match best {
             Some((_, line)) if line.contains("/dev/mapper/") || line.contains("dm-") => {
                 Finding::new(
                     "recording_volume_encryption",
@@ -248,15 +264,8 @@ fn volume_encryption(#[allow(unused_variables)] cfg: &Config) -> Finding {
                 "could not match the recordings directory to a mount",
                 "whether recorded footage is encrypted at rest could not be determined",
             ),
-        };
+        }
     }
-    #[cfg(not(target_os = "linux"))]
-    Finding::new(
-        "recording_volume_encryption",
-        Status::Unknown,
-        "not a Linux host",
-        "volume encryption is host-specific and was not assessed",
-    )
 }
 
 /// Whether cameras are streamed over plain RTSP.
