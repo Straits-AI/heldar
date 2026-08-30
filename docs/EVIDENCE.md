@@ -96,6 +96,35 @@ The fix is to **refuse rather than normalise**. Any mapping between "what is in 
 attack. An unlisted entry is refused for the same reason: it extracts into the same folder as the
 attested files, indistinguishable to whoever opens it, covered by no signature.
 
+### And the file must be one archive
+
+A second adversarial pass against the hardened version broke it again, past every name-level check —
+because the forged names never appeared in the directory the verifier read at all.
+
+A zip is read from the back: the record at the tail names the directory, and the directory names the
+entries. So `cat forged.zip genuine.zip` produces a file that `unzip`, Python's `zipfile` and any
+seeking reader see as the genuine bundle alone, while **7z's default mode** and **any streaming read**
+(`cat bundle | bsdtar -x`) walk the local headers from the front and see the forged one. The verifier
+reported `VALID` against the appliance's real key while a streamed extraction wrote `cam_EVIL` and
+fabricated footage to disk.
+
+So the verifier now checks a structural invariant before it looks at any name: **a streaming reader
+and a seeking reader must see the same archive.** That holds exactly when every byte of the file
+belongs to an entry the central directory names — the entries must tile the file contiguously from
+byte 0 to the directory, the directory must end where the end-of-archive record begins, and that
+record must end at EOF. A prepended archive, an appended one, or a repaired offset covering either
+is `MALFORMED`.
+
+### A crash is not a verdict
+
+Every uncaught exception used to exit `1` — which *is* the `MODIFIED` code. A malformed file
+therefore reported itself as *"the evidence was altered"*: a false accusation carrying the same exit
+code as a true one, which a caller branching on exit codes cannot tell apart. Non-object documents,
+undecodable entry names and unreadable compressed streams are now identified specifically, and a
+last-resort handler turns anything unanticipated into `MALFORMED` — *no conclusion was reached*,
+which is not the same as finding the bundle unaltered, and not the same as finding it tampered
+with.
+
 ## What a signature here does and does not establish
 
 **It does establish** that the appliance holding this key produced this bundle, and that its bytes

@@ -797,3 +797,207 @@ async fn a_bundle_the_index_cannot_record_does_not_survive() {
         "and no attribution row pointing at a file that is not there: {rows:?}"
     );
 }
+
+// =================================================================================================
+// Container-level attacks: the file is not what the archive says it is.
+//
+// A second adversarial pass, run against the HARDENED verifier above, broke it again — and the break
+// went straight past every name-level check, because the forged names never appear in the directory
+// the verifier reads at all.
+//
+// A zip is read from the back. `cat forged.zip genuine.zip` gives a file that Python's zipfile,
+// `unzip`, and any seeking reader see as the genuine bundle alone, while 7z's default mode and ANY
+// streaming read walk local headers from the front and see the forged one. The verifier said VALID
+// against the appliance's real key id, three runs running, while a streamed extraction wrote
+// `cam_EVIL` and "FORGED CLIP - plate ABC-999" to disk.
+//
+// The invariant that reaches this is structural, not lexical: a streaming reader and a seeking
+// reader must see the same archive, which holds exactly when every byte of the file belongs to an
+// entry the central directory names.
+// =================================================================================================
+
+/// Concatenate two files.
+fn concat(a: &Path, b: &Path, out: &Path) {
+    let mut bytes = std::fs::read(a).expect("read a");
+    bytes.extend_from_slice(&std::fs::read(b).expect("read b"));
+    std::fs::write(out, bytes).expect("write concat");
+}
+
+/// Build a small forged archive that claims to be a different camera entirely.
+fn forged_archive(dir: &Path) -> PathBuf {
+    let tree = dir.join("forged");
+    std::fs::create_dir_all(tree.join("media")).unwrap();
+    std::fs::write(
+        tree.join("manifest.json"),
+        r#"{"format":"heldar-evidence/1","camera":{"id":"cam_EVIL","name":"Fabricated"},"files":{}}"#,
+    )
+    .unwrap();
+    std::fs::write(tree.join("media/clip.mp4"), "FORGED CLIP - plate ABC-999").unwrap();
+    std::fs::write(tree.join("signature.json"), "{}").unwrap();
+    let out = dir.join("forged.zip");
+    let o = Command::new("zip")
+        .args(["-qXr"])
+        .arg(&out)
+        .arg(".")
+        .current_dir(&tree)
+        .output()
+        .expect("zip");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    out
+}
+
+#[tokio::test]
+async fn a_second_archive_concatenated_into_the_file_cannot_verify() {
+    require("ffmpeg");
+    require("zip");
+    require("openssl");
+    let dir = scratch("concat");
+    let (_st, bundle, key_id) = build(&dir).await;
+    let k = ["--key-id", key_id.as_str()];
+    let forged = forged_archive(&dir);
+
+    // Prepended: the genuine EOCD is last, so every seeking reader — including this verifier —
+    // sees only the genuine archive, while a streaming reader gets the forged one.
+    let combined = dir.join("prepended.heldar-evidence");
+    concat(&forged, &bundle, &combined);
+    let (code, out) = verify(&combined, &k);
+    assert_ne!(
+        code, 0,
+        "a forged archive concatenated in front of a genuine bundle must NOT verify — a streaming \
+         extraction of this exact file writes different footage and a different camera to disk:\n{out}"
+    );
+
+    // The obvious repair an attacker makes next: fix up the EOCD's central-directory offset so the
+    // arithmetic that catches the naive version no longer does.
+    let repaired = dir.join("repaired.heldar-evidence");
+    let script = "import struct, sys\n\
+                  d = bytearray(open(sys.argv[1],'rb').read())\n\
+                  shift = len(open(sys.argv[2],'rb').read())\n\
+                  at = d.rfind(b'PK\\x05\\x06')\n\
+                  off = int.from_bytes(d[at+16:at+20],'little')\n\
+                  d[at+16:at+20] = struct.pack('<I', off + shift)\n\
+                  open(sys.argv[3],'wb').write(bytes(d))\n";
+    let o = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(&combined)
+        .arg(&forged)
+        .arg(&repaired)
+        .output()
+        .expect("repairing the EOCD");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let (code, out) = verify(&repaired, &k);
+    assert_ne!(
+        code, 0,
+        "repairing the EOCD offset must not rescue it: the walk from byte 0 still meets local \
+         headers the directory does not name:\n{out}"
+    );
+
+    // Appended data after the end of the archive.
+    let appended = dir.join("appended.heldar-evidence");
+    let mut bytes = std::fs::read(&bundle).unwrap();
+    bytes.extend_from_slice(b"TRAILING FORGED DATA");
+    std::fs::write(&appended, bytes).unwrap();
+    let (code, out) = verify(&appended, &k);
+    assert_ne!(code, 0, "bytes after the archive must be refused:\n{out}");
+
+    // The control that makes the three above mean something.
+    let (code, out) = verify(&bundle, &k);
+    assert_eq!(code, 0, "the untouched bundle must still verify:\n{out}");
+}
+
+/// A crash is not a verdict — and it used to be indistinguishable from one.
+///
+/// Every uncaught exception exited 1, which IS the MODIFIED code, so a malformed file reported
+/// itself as "the evidence was altered": a false accusation carrying the same exit code as a true
+/// one, which a caller branching on exit codes cannot tell apart.
+#[tokio::test]
+async fn hostile_input_gets_a_verdict_not_a_traceback() {
+    require("ffmpeg");
+    require("zip");
+    require("openssl");
+    let dir = scratch("hostile");
+    let (_st, bundle, key_id) = build(&dir).await;
+    let k = ["--key-id", key_id.as_str()];
+
+    for (name, entry, body) in [
+        ("list-manifest", "manifest.json", "[1,2,3]"),
+        ("num-manifest", "manifest.json", "42"),
+        ("str-signature", "signature.json", "\"a string\""),
+        ("null-signature", "signature.json", "null"),
+    ] {
+        let m = dir.join(format!("{name}.heldar-evidence"));
+        mutate(&bundle, &m, entry, &format!("data = {body:?}.encode()"));
+        let (code, out) = verify(&m, &k);
+        assert_eq!(
+            code, 5,
+            "{name} must be MALFORMED (5). Anything else means the verifier either crashed or \
+             claimed a state it did not establish:\n{out}"
+        );
+        assert!(
+            !out.contains("Traceback"),
+            "{name} produced a traceback rather than a verdict:\n{out}"
+        );
+        // And it must be REFUSED BY NAME, not merely swallowed by the last-resort handler. The
+        // catch-all turns any crash into MALFORMED, so asserting only on the exit code would let
+        // the specific guards be deleted without a single test noticing — which is exactly how the
+        // key_id check ended up untested. This pins the guard, not the safety net.
+        assert!(
+            out.contains("not a JSON object"),
+            "{name} must be identified as a non-object document, not caught by the last-resort \
+             handler — a message of 'could not be processed' tells an investigator nothing about \
+             what is wrong with the file in front of them:\n{out}"
+        );
+    }
+
+    // Not a zip at all, and an empty one.
+    let junk = dir.join("junk.heldar-evidence");
+    std::fs::write(&junk, vec![0u8; 512]).unwrap();
+    assert_eq!(verify(&junk, &k).0, 5, "512 zero bytes must be MALFORMED");
+
+    let empty = dir.join("empty.heldar-evidence");
+    let o = Command::new("python3")
+        .arg("-c")
+        .arg("import sys,zipfile;zipfile.ZipFile(sys.argv[1],'w').close()")
+        .arg(&empty)
+        .output()
+        .unwrap();
+    assert!(o.status.success());
+    let (code, out) = verify(&empty, &k);
+    assert_eq!(code, 5, "an empty archive must be MALFORMED:\n{out}");
+}
+
+/// Damaged content must be reported as damaged content, naming the file — not as "could not be
+/// processed". An investigator needs to know WHICH file would not come out.
+#[tokio::test]
+async fn a_file_that_will_not_decompress_is_reported_as_modified_and_named() {
+    require("ffmpeg");
+    require("zip");
+    require("openssl");
+    let dir = scratch("crc");
+    let (_st, bundle, key_id) = build(&dir).await;
+
+    let broken = dir.join("crc.heldar-evidence");
+    let script = "import sys, zipfile\n\
+                  z = zipfile.ZipFile(sys.argv[1])\n\
+                  i = [x for x in z.infolist() if x.filename == 'media/clip.mp4'][0]\n\
+                  d = bytearray(open(sys.argv[1],'rb').read())\n\
+                  off = i.header_offset + 30 + len(i.filename) + 2000\n\
+                  d[off:off+40] = b'\\x00' * 40\n\
+                  open(sys.argv[2],'wb').write(bytes(d))\n";
+    let o = Command::new("python3")
+        .arg("-c")
+        .arg(script)
+        .arg(&bundle)
+        .arg(&broken)
+        .output()
+        .expect("corrupting the clip");
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+
+    let (code, out) = verify(&broken, &["--key-id", key_id.as_str()]);
+    assert_eq!(code, 1, "damaged content is MODIFIED:\n{out}");
+    assert!(
+        out.contains("media/clip.mp4"),
+        "and it must name the file that would not come out:\n{out}"
+    );
+}

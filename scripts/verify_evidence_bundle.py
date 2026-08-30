@@ -30,6 +30,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -64,6 +65,27 @@ def main() -> int:
         return MALFORMED
 
     with zf:
+        # THE FILE MUST BE ONE ARCHIVE, AND EVERY BYTE OF IT MUST BELONG TO THAT ARCHIVE.
+        #
+        # Checked before the entry names, because it decides WHICH archive the names come from.
+        #
+        # A zip is read from the back: the End Of Central Directory record at the tail names the
+        # directory, and the directory names the entries. So `cat forged.zip genuine.zip` produces a
+        # file that Python's zipfile — and `unzip`, and any seeking reader — sees as the genuine
+        # bundle alone, while 7z's default mode and ANY streaming read (`cat bundle | bsdtar -x`,
+        # `… | tar -x`) walk the local headers from the front and see the forged one. Demonstrated:
+        # the verifier said VALID against the appliance's real key id three times running while a
+        # streamed extraction wrote `cam_EVIL` and "FORGED CLIP - plate ABC-999" to disk.
+        #
+        # No amount of care about entry NAMES reaches this: the forged archive's names never appear
+        # in the directory the verifier reads. The invariant that does reach it is structural — a
+        # streaming reader and a seeking reader must see the same archive — and it holds exactly
+        # when every byte of the file is accounted for by the central directory.
+        problem = reject_concatenated_archive(args.bundle, zf)
+        if problem:
+            out("MALFORMED", problem)
+            return MALFORMED
+
         names = zf.namelist()
 
         # THE ARCHIVE'S SHAPE IS CHECKED BEFORE ANY OF ITS CONTENT.
@@ -109,6 +131,17 @@ def main() -> int:
             signature = json.loads(zf.read("signature.json"))
         except (json.JSONDecodeError, UnicodeDecodeError) as e:
             out("MALFORMED", f"manifest or signature is not valid JSON: {e}")
+            return MALFORMED
+
+        # `json.loads` happily returns a list, a number or a string. Every `.get()` below assumed an
+        # object, so a manifest of `[1,2,3]` raised AttributeError — an uncaught traceback, which
+        # exits 1, which IS the MODIFIED code. A caller branching on exit codes would have read a
+        # crash as "this evidence was altered": a false accusation produced by a malformed file.
+        if not isinstance(manifest, dict):
+            out("MALFORMED", f"manifest.json is a {type(manifest).__name__}, not a JSON object")
+            return MALFORMED
+        if not isinstance(signature, dict):
+            out("MALFORMED", f"signature.json is a {type(signature).__name__}, not a JSON object")
             return MALFORMED
 
         fmt = manifest.get("format")
@@ -187,9 +220,17 @@ def main() -> int:
                 out("MALFORMED", f"the manifest gives no usable sha256 for {rel}")
                 return MALFORMED
             h = hashlib.sha256()
-            with zf.open(rel) as fh:
-                for chunk in iter(lambda: fh.read(1 << 20), b""):
-                    h.update(chunk)
+            try:
+                with zf.open(rel) as fh:
+                    for chunk in iter(lambda: fh.read(1 << 20), b""):
+                        h.update(chunk)
+            except (zipfile.BadZipFile, EOFError, OSError) as e:
+                # The zip's own CRC or its compressed stream is broken. This IS a content failure and
+                # belongs with the others rather than in the catch-all: an investigator needs to know
+                # WHICH file would not come out, and "could not be processed" does not say that.
+                modified.append(f"{rel} (unreadable: {e})")
+                checked += 1
+                continue
             checked += 1
             if h.hexdigest() != want:
                 modified.append(rel)
@@ -213,7 +254,12 @@ def main() -> int:
         # nobody signed. That is a modification, not a nit.
         if "hashes.sha256" in names:
             side = {}
-            for line in zf.read("hashes.sha256").decode("utf-8", "replace").splitlines():
+            try:
+                sidecar = zf.read("hashes.sha256")
+            except (zipfile.BadZipFile, EOFError, OSError) as e:
+                out("MODIFIED", f"hashes.sha256 will not come out of the archive ({e})")
+                return MODIFIED
+            for line in sidecar.decode("utf-8", "replace").splitlines():
                 parts = line.split(None, 1)
                 if len(parts) == 2:
                     side[parts[1].strip()] = parts[0].strip()
@@ -249,6 +295,88 @@ def main() -> int:
         for limit in manifest.get("attestation", {}).get("limits", []):
             print(f"  note: {limit}")
         return VALID
+
+
+def reject_concatenated_archive(path: str, zf: zipfile.ZipFile) -> str:
+    """A refusal message, or "" if every byte of the file belongs to the archive the directory names.
+
+    The check is arithmetic, not heuristic. Walking the central directory's entries in file order,
+    each local header must begin exactly where the previous entry's data ended, the first at offset
+    0, the last ending exactly at the central directory, which must end exactly at the EOCD, which
+    must end exactly at EOF. Any byte that is not covered by that walk is a second archive — or the
+    remains of one — sitting in a file that claims to be evidence.
+    """
+    size = os.path.getsize(path)
+    infos = sorted(zf.infolist(), key=lambda i: i.header_offset)
+    if not infos:
+        return "the archive contains no entries at all"
+
+    with open(path, "rb") as fh:
+        if infos[0].header_offset != 0:
+            return (f"{infos[0].header_offset} bytes precede the first entry the archive's directory "
+                    f"knows about — a streaming reader would extract them as a different archive "
+                    f"than the one this verifier just read")
+
+        cursor = 0
+        for i in infos:
+            if i.header_offset != cursor:
+                return (f"a {i.header_offset - cursor}-byte gap precedes {i.filename!r}; every byte "
+                        f"of an evidence bundle must belong to an entry its directory names")
+            fh.seek(cursor)
+            head = fh.read(30)
+            if len(head) < 30 or head[:4] != b"PK\x03\x04":
+                return f"no local file header where the directory says {i.filename!r} begins"
+            flags = int.from_bytes(head[6:8], "little")
+            name_len = int.from_bytes(head[26:28], "little")
+            extra_len = int.from_bytes(head[28:30], "little")
+            stored_name = fh.read(name_len)
+            try:
+                decoded = stored_name.decode("utf-8" if flags & 0x800 else "cp437")
+            except UnicodeDecodeError:
+                return f"the local header for {i.filename!r} has an undecodable name"
+            if decoded != i.filename:
+                return (f"the directory calls this entry {i.filename!r} but the archive body calls "
+                        f"it {decoded!r}; the two readers of this file disagree about what it holds")
+            cursor = cursor + 30 + name_len + extra_len + i.compress_size
+            if flags & 0x08:
+                # A data descriptor follows the data: optional signature + crc + two sizes.
+                fh.seek(cursor)
+                desc = fh.read(4)
+                cursor += 16 if desc == b"PK\x07\x08" else 12
+
+        # ZIP64 puts the real offsets in an extra record; rather than reimplement that here, only
+        # the arithmetic above is trusted, and a mismatch is reported rather than waved through.
+        cd_offset, cd_size, eocd_at, comment_len = eocd_fields(fh, size)
+        if cd_offset is None:
+            return "could not locate the archive's central directory"
+        if cursor != cd_offset:
+            return (f"the entries end at byte {cursor} but the directory starts at {cd_offset} — "
+                    f"{abs(cd_offset - cursor)} bytes belong to neither, which is what a second "
+                    f"archive concatenated into this file looks like")
+        if cd_offset + cd_size != eocd_at:
+            return "the central directory does not end where the end-of-archive record begins"
+        if eocd_at + 22 + comment_len != size:
+            return (f"{size - (eocd_at + 22 + comment_len)} bytes follow the end of the archive")
+    return ""
+
+
+def eocd_fields(fh, size: int):
+    """(cd_offset, cd_size, eocd_offset, comment_len) from the LAST EOCD record, or Nones."""
+    span = min(size, 66 * 1024)
+    fh.seek(size - span)
+    tail = fh.read(span)
+    at = tail.rfind(b"PK\x05\x06")
+    if at < 0:
+        return None, None, None, None
+    rec = tail[at:at + 22]
+    if len(rec) < 22:
+        return None, None, None, None
+    return (
+        int.from_bytes(rec[16:20], "little"),
+        int.from_bytes(rec[12:16], "little"),
+        size - span + at,
+        int.from_bytes(rec[20:22], "little"),
+    )
 
 
 def reject_unsafe_names(names: list) -> str:
@@ -343,4 +471,19 @@ def ed25519_verify(pub: bytes, sig: bytes, msg: bytes):
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    # A LAST RESORT, NOT A SUBSTITUTE FOR THE CHECKS ABOVE.
+    #
+    # Every crash found in this file exited 1 — the same code as MODIFIED — so an unhandled type
+    # error, an undecodable entry name, or a truncated deflate stream all reported themselves as
+    # "the evidence was altered". That is a false accusation with the same exit code as a true one,
+    # and a caller cannot tell them apart. Anything unanticipated is MALFORMED: this program did not
+    # establish a state, and must not be read as having established one.
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except BaseException as e:  # noqa: BLE001 - deliberately total
+        out("MALFORMED", f"the bundle could not be processed ({type(e).__name__}: {e}) — no "
+                         f"conclusion was reached about it, which is NOT the same as finding it "
+                         f"unaltered or finding it tampered with")
+        sys.exit(MALFORMED)
