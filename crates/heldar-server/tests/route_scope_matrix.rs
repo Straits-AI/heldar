@@ -772,6 +772,12 @@ async fn a_scoped_credential_cannot_reach_the_egress_surfaces() {
         // calls the handlers directly with an admin-BUT-camera-scoped principal; the API refuses to
         // mint one (admin implies the unscopable caps), so it cannot be reached over HTTP at all.
         (
+            "GET",
+            "/api/v1/system/posture",
+            "",
+            "read the box's security posture",
+        ),
+        (
             "PUT",
             "/api/v1/system/timezone",
             r#"{"timezone":"America/New_York"}"#,

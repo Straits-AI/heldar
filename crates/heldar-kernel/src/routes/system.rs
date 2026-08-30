@@ -33,6 +33,50 @@ pub fn router() -> Router<AppState> {
             "/api/v1/system/timezone",
             get(get_timezone).put(put_timezone),
         )
+        .route("/api/v1/system/posture", get(get_posture))
+}
+
+/// This box's security posture as machine-readable findings (#126).
+///
+/// FLEET-WIDE and admin-only. The findings describe the HOST — the service user, `/proc`
+/// visibility, volume encryption, how many credentials are unsealed — which is not something a
+/// camera-scoped credential has any business reading, and is exactly the reconnaissance an attacker
+/// with a narrow foothold would want.
+///
+/// Findings never carry a secret or a camera URL, so the output is safe to paste into a support
+/// ticket. `Unknown` is reported where the answer is genuinely not determinable from inside the
+/// container, and is NOT a pass — claiming a control is in place because we could not check it is
+/// the kind of unearned assurance this endpoint exists to replace.
+#[utoipa::path(
+    get, path = "/api/v1/system/posture", tag = "system",
+    operation_id = "getSecurityPosture",
+    responses(
+        (status = 200, description = "Posture findings: id, status (ok|weak|unknown), what was observed, and why it matters"),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_posture(
+    State(st): State<AppState>,
+    principal: Principal,
+) -> AppResult<Json<serde_json::Value>> {
+    principal.require(principal.can_admin(), "read the security posture")?;
+    crate::routes::cameras::require_fleet_scope(&principal, "read the box security posture")?;
+    let findings = crate::services::posture::assess(&st.cfg, &st.pool).await;
+    let weak = findings
+        .iter()
+        .filter(|f| f.status == crate::services::posture::Status::Weak)
+        .count();
+    let unknown = findings
+        .iter()
+        .filter(|f| f.status == crate::services::posture::Status::Unknown)
+        .count();
+    Ok(Json(json!({
+        "findings": findings,
+        "weak": weak,
+        "unknown": unknown,
+        "note": "`unknown` is not a pass — it means the control could not be assessed from inside \
+                 this container. Treat it as unverified, not as satisfied.",
+    })))
 }
 
 /// The box-wide timezone, and — the part that matters — where the effective one comes from.

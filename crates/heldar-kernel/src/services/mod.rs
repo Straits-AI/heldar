@@ -32,6 +32,7 @@ pub mod native_anpr;
 pub mod onvif;
 pub mod perception_ingest;
 pub mod playback_session;
+pub mod posture;
 pub mod recorder;
 pub mod registry;
 pub mod remote_access;

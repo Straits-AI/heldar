@@ -1740,6 +1740,10 @@ class HeldarClient:
         """Requires admin, fleet-only."""
         return self._call('POST', f'/api/v1/system/db/convert')
 
+    def get_security_posture(self) -> Any:
+        """Requires admin, fleet-only."""
+        return self._call('GET', f'/api/v1/system/posture')
+
     def get_retention_limits(self) -> Any:
         """Requires capability `system:read`, scope-neutral."""
         return self._call('GET', f'/api/v1/system/retention')
