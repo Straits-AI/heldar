@@ -67,8 +67,12 @@ jobs:
           # read from its `verdict` field, and a run judged against different thresholds from the
           # ones in the tree today does not count — so loosening a bar to turn a red run green
           # invalidates the claim it was loosened for.
+          python3 scripts/bench/test_harness.py
           python3 scripts/bench/test_capacity_gate.py
           python3 scripts/verify_capacity_claims.py
+          # Documented metric names must match the exposition, both ways. An alerting rule copied
+          # from a drifted table matches nothing and never fires, which looks exactly like health.
+          python3 scripts/check_documented_metrics.py
       - name: read-seam lint (cross-app reads go through *_read views)
         run: ./scripts/check-read-seam.sh
       # A generated client that COMPILES is a stronger statement about the contract than any prose:
