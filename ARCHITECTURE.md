@@ -623,9 +623,20 @@ unreserved set) and assembled as `rtsp://user:pass@host:port/path`.
 | GET | `/api/v1/events` | Event log (filter by camera_id/event_type/severity, limit ≤2000) |
 | — | `/media/recordings/*`, `/media/clips/*`, `/media/snapshots/*`, `/media/playback/*`, `/media/archives/*` | Static file serving (`ServeDir`), behind the same auth + camera scope as the API (§ media plane) |
 
-Errors are normalized by `error::AppError` → JSON `{ "error": msg }` with
-NotFound→404, BadRequest→400, Conflict→409, DB/Other→500 (internal detail logged,
-not leaked).
+Errors are normalized by `error::AppError` → JSON
+`{ "error": msg, "code": "...", "retryable": bool }` with NotFound→404, BadRequest→400,
+Conflict→409, DB/Other→500 (internal detail logged, not leaked).
+
+`error` is prose and may be reworded; **`code` is API** — `not_found`, `bad_request`, `conflict`,
+`unauthorized`, `forbidden`, `unavailable`, `busy`, `internal` — and is what an integration should
+branch on. `retryable` is true only for transient saturation (`unavailable`, `busy`), and those
+responses also carry `Retry-After`; a 404 or a validation failure fails identically forever, and a
+client retrying them only adds load to a box that is answering correctly.
+
+The two machine fields sit BESIDE `error` rather than nesting it, which #120 proposed. Nesting would
+have changed `error` from a string to an object and broken every existing client in one release —
+the dashboard reads `data.error ?? data.message` — for information that is equally available
+alongside. Nest it if something ever actually needs the nesting.
 
 ---
 
