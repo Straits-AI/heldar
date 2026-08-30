@@ -227,14 +227,27 @@ jobs:
           name: upgrade-restore-report
           path: data/validate_upgrade_restore.txt
           retention-days: 7
-      # Deliberately NOT run in CI (they are not self-contained for a clean runner):
-      #   - validate_ai.sh: needs a REAL camera (cam_192_168_0_2) actively streaming so the sampler
-      #     produces frames — real hardware, cannot be satisfied synthetically here.
-      #   - validate_search.sh / validate_zones.sh / validate_entry.sh / validate_movement.sh: assume a
-      #     pre-running shared stack on :8000 with the dev box's camera cam_192_168_0_2 already
-      #     registered; they don't boot their own core, so they'd need extra orchestration to run in CI.
-      #     (Their event data is synthetic, but the harness assumption isn't — revisit if a headless
-      #     seed-core fixture is added.)
+      # The subsystem gate (#113): boots ONE synthetic stack and runs the zone, entry, movement and
+      # search validations against it. Those four used to be skipped here for a harness reason — they
+      # assumed a running dev box and a real camera — which was true, and also hid that they asserted
+      # NOTHING. They logged HTTP codes for a human and exited 0 regardless, so running them would
+      # have produced a gate that could not fail. validate_zones had been sending a `kind` the API
+      # stopped accepting, creating no zone at all, and "passing" throughout.
+      #
+      # They assert now, and the gate refuses a script that produces no RESULT marker — "it ran" is
+      # not "it passed".
+      - name: subsystem gate (zones · entry · movement · search)
+        run: ./scripts/validate_subsystems.sh
+      - name: upload subsystem report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: subsystem-report
+          path: data/validate_subsystems.txt
+          retention-days: 7
+      # Still NOT run in CI:
+      #   - validate_ai.sh: needs a REAL camera actively streaming so the sampler produces frames —
+      #     real hardware, cannot be satisfied synthetically here.
       - name: upload validation reports
         if: failure()
         uses: actions/upload-artifact@v4
