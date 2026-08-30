@@ -37,11 +37,17 @@ curl -fsSL https://heldar.swmengappdev.workers.dev/install.sh | sh
 
 Pulls the prebuilt **OPEN** images (kernel + generic apps) and starts MediaMTX + core + web — the
 dashboard is then at `http://localhost:8080`. Add the reference AI worker with `--profile ai`; update
-with `docker compose pull`. For production (auth on, secure cookies, strict boot guardrails) layer the
-hardening overlay, and add the TLS overlay to terminate HTTPS:
+with `docker compose pull`. For production layer three overlays — they harden different things and are
+separate on purpose:
+
+- `compose.prod.yml` — the **application** posture: auth on, secure cookies, strict boot guardrails.
+- `compose.hardened.yml` — the **container**: read-only root filesystems, all capabilities dropped,
+  `no-new-privileges`, CPU/memory/PID ceilings, bounded logs. See `docs/PRODUCTION.md`.
+- `compose.tls.yml` — terminates HTTPS.
 
 ```bash
-docker compose -f deploy/compose.yml -f deploy/compose.prod.yml -f deploy/compose.tls.yml up -d
+docker compose -f deploy/compose.yml -f deploy/compose.prod.yml \
+  -f deploy/compose.hardened.yml -f deploy/compose.tls.yml up -d
 ```
 
 The hardening overlay marks the session cookie `Secure`, so it expects HTTPS in front of it — the TLS

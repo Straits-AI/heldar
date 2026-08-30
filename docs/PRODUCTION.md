@@ -14,6 +14,26 @@ mode, short sessions) on top of the private full image — `docker compose -f de
 deploy/compose.prod.yml up -d` after `docker login ghcr.io`. Put `HELDAR_SECRET_KEY` +
 `HELDAR_CORS_ORIGINS` in `.env`. A flashed DVR/appliance uses native systemd instead (not Docker).
 
+**Container hardening:** add `deploy/compose.hardened.yml` as a third overlay —
+`-f compose.yml -f compose.prod.yml -f compose.hardened.yml`. `compose.prod.yml` hardens the
+*application* posture (auth, cookies, sessions); this hardens the *container*: read-only root
+filesystems, all capabilities dropped, `no-new-privileges`, PID/CPU/memory ceilings, bounded logs and
+explicit tmpfs mounts. The stack runs `network_mode: host` for camera discovery, multicast and WebRTC,
+which removes the network namespace as a boundary and makes these process-level ones matter more.
+
+Two services are deliberately **not** read-only. MediaMTX
+generates a self-signed TLS keypair into its working directory at startup, and the AI worker
+downloads model weights on first use — the MediaMTX and nginx exceptions come from observed boot
+failures; the AI one is reasoned from how that image resolves `HOME` and has not been exercised
+through a real model download. nginx keeps exactly three capabilities (`CHOWN`, `SETUID`,
+`SETGID`) because its entrypoint chowns its cache dirs before dropping to the worker user — not
+`NET_BIND_SERVICE`, since it listens on :8080.
+
+Verified by booting mediamtx, core and web: core healthy with a read-only rootfs and `/data` still
+writable, rootfs writes refused, the dashboard served, and the web→core proxy answering. The `ai`
+profile was not booted — it is opt-in and pulls model weights — so treat its settings as reasoned
+rather than proven.
+
 The kernel **fails loud** to stop you shipping an unsafe internet deployment. It treats the box as
 internet-exposed when **any** remote path is configured — the WebRTC rendezvous
 (`HELDAR_REMOTE_RENDEZVOUS_URL`), an overlay network (`HELDAR_OVERLAY_ENABLED`), or control-plane
