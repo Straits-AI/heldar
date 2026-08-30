@@ -89,6 +89,14 @@ pub const API_VERSION: &str = "0.1.0";
         crate::routes::sites::create,
         crate::routes::sites::update,
         crate::routes::sites::delete_site,
+        crate::routes::recordings::list_segments,
+        crate::routes::recordings::timeline,
+        crate::routes::recordings::gaps,
+        crate::routes::playback::export_clip,
+        crate::routes::playback::snapshot_handler,
+        crate::routes::playback_sessions::create_session,
+        crate::routes::playback_sessions::delete_session,
+        crate::routes::recording_control::record_trigger,
     ),
     components(schemas(ErrorBody, crate::models::CameraView)),
     tags(
@@ -97,6 +105,8 @@ pub const API_VERSION: &str = "0.1.0";
          camera-scoped credential cannot change them."),
         (name = "sites", description = "Sites and their timezones. A site's zone is what its \
          cameras' schedules and searches are read in, so changing it moves recording windows."),
+        (name = "recordings", description = "Recorded video: segments, timeline, gaps, clips, \
+         snapshots and HLS playback sessions. Every route is camera-scoped."),
         (name = "evidence", description = "Signed, offline-verifiable evidence bundles (#118). \
          Every route is camera-scoped, and gated on `video:export` except the public signing key."),
     )

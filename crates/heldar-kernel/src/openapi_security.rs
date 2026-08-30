@@ -169,6 +169,62 @@ pub const REQUIREMENTS: &[Requirement] = &[
         admin_only: true,
         scoping: Scoping::FleetOnly,
     },
+    Requirement {
+        path: "/api/v1/cameras/{id}/segments",
+        method: "get",
+        capability: Some(Cap::VideoPlayback),
+        admin_only: false,
+        scoping: Scoping::CameraKeyed,
+    },
+    Requirement {
+        path: "/api/v1/cameras/{id}/timeline",
+        method: "get",
+        capability: Some(Cap::VideoPlayback),
+        admin_only: false,
+        scoping: Scoping::CameraKeyed,
+    },
+    Requirement {
+        path: "/api/v1/cameras/{id}/gaps",
+        method: "get",
+        capability: Some(Cap::VideoPlayback),
+        admin_only: false,
+        scoping: Scoping::CameraKeyed,
+    },
+    Requirement {
+        path: "/api/v1/cameras/{id}/clip",
+        method: "post",
+        capability: Some(Cap::VideoExport),
+        admin_only: false,
+        scoping: Scoping::CameraKeyed,
+    },
+    Requirement {
+        path: "/api/v1/cameras/{id}/snapshot",
+        method: "get",
+        capability: Some(Cap::VideoPlayback),
+        admin_only: false,
+        scoping: Scoping::CameraKeyed,
+    },
+    Requirement {
+        path: "/api/v1/cameras/{id}/playback/sessions",
+        method: "post",
+        capability: Some(Cap::VideoPlayback),
+        admin_only: false,
+        scoping: Scoping::CameraKeyed,
+    },
+    Requirement {
+        path: "/api/v1/playback/sessions/{session_id}",
+        method: "delete",
+        capability: Some(Cap::VideoPlayback),
+        admin_only: false,
+        scoping: Scoping::CameraKeyed,
+    },
+    Requirement {
+        path: "/api/v1/cameras/{id}/record-trigger",
+        method: "post",
+        capability: Some(Cap::RegistryManage),
+        admin_only: false,
+        scoping: Scoping::CameraKeyed,
+    },
 ];
 
 /// Inject the security scheme and the per-operation requirements into a generated document.

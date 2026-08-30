@@ -44,6 +44,16 @@ export interface CameraView {
   vendor: string;
 }
 
+export interface ClipRequest {
+  from: string;
+  to: string;
+}
+
+export interface CreateSessionRequest {
+  from: string;
+  to: string;
+}
+
 export interface ErrorBody {
   code: string;
   error: string;
@@ -129,6 +139,41 @@ export class HeldarClient {
     return this.call<CameraView>("GET", `/api/v1/cameras/${encodeURIComponent(id)}`);
   }
 
+  /** Requires capability `video:export`, camera-keyed. */
+  exportClip(id: string, body: ClipRequest): Promise<unknown> {
+    return this.call<unknown>("POST", `/api/v1/cameras/${encodeURIComponent(id)}/clip`, body);
+  }
+
+  /** Requires capability `video:playback`, camera-keyed. */
+  listGaps(id: string): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/cameras/${encodeURIComponent(id)}/gaps`);
+  }
+
+  /** Requires capability `video:playback`, camera-keyed. */
+  createPlaybackSession(id: string, body: CreateSessionRequest): Promise<unknown> {
+    return this.call<unknown>("POST", `/api/v1/cameras/${encodeURIComponent(id)}/playback/sessions`, body);
+  }
+
+  /** Requires capability `registry:manage`, camera-keyed. */
+  triggerRecording(id: string): Promise<unknown> {
+    return this.call<unknown>("POST", `/api/v1/cameras/${encodeURIComponent(id)}/record-trigger`);
+  }
+
+  /** Requires capability `video:playback`, camera-keyed. */
+  listSegments(id: string): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/cameras/${encodeURIComponent(id)}/segments`);
+  }
+
+  /** Requires capability `video:playback`, camera-keyed. */
+  getSnapshot(id: string): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/cameras/${encodeURIComponent(id)}/snapshot`);
+  }
+
+  /** Requires capability `video:playback`, camera-keyed. */
+  getTimeline(id: string): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/cameras/${encodeURIComponent(id)}/timeline`);
+  }
+
   /** Requires capability `video:export`, scope-filtered. */
   listEvidenceExports(): Promise<unknown> {
     return this.call<unknown>("GET", `/api/v1/evidence/exports`);
@@ -147,6 +192,11 @@ export class HeldarClient {
   /** Requires capability `camera:read`, scope-neutral. */
   getEvidenceSigningKey(): Promise<unknown> {
     return this.call<unknown>("GET", `/api/v1/evidence/signing-key`);
+  }
+
+  /** Requires capability `video:playback`, camera-keyed. */
+  deletePlaybackSession(session_id: string): Promise<unknown> {
+    return this.call<unknown>("DELETE", `/api/v1/playback/sessions/${encodeURIComponent(session_id)}`);
   }
 
   /** Requires capability `camera:read`, scope-filtered. */
