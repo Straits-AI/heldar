@@ -27,8 +27,10 @@ pub struct BackupDestination {
 pub struct BackupDestinationView {
     pub id: String,
     pub name: String,
+    #[schema(value_type = BackupKind)]
     pub kind: String,
     /// The config blob with any secret values masked to `***`.
+    #[schema(value_type = std::collections::HashMap<String, String>)]
     pub config: Value,
     /// Whether at least one secret credential is configured (so the UI can show "set" without the value).
     pub has_credentials: bool,
@@ -142,6 +144,7 @@ pub struct BackupJob {
     pub policy_id: Option<String>,
     pub destination_id: Option<String>,
     /// `policy` | `on_demand_archive`.
+    #[schema(value_type = BackupKind)]
     pub kind: String,
     /// JSON array of camera ids the run covers; empty array means every camera on the box.
     #[schema(value_type = Vec<String>)]
@@ -150,6 +153,7 @@ pub struct BackupJob {
     pub to_time: Option<DateTime<Utc>>,
     pub incident_lock_only: bool,
     /// `pending` | `running` | `completed` | `error`.
+    #[schema(value_type = BackupJobStatus)]
     pub status: String,
     pub files_total: i64,
     pub files_copied: i64,
@@ -183,4 +187,34 @@ pub struct ArchiveExportRequest {
     pub incident_lock_only: Option<bool>,
     /// Trim each segment to the [from, to] window (re-mux with -c copy); requires both bounds.
     pub trim: Option<bool>,
+}
+
+/// Where a backup writes to, for the published schema only (#156).
+///
+/// Stored as a `String`; `routes::backup::VALID_KINDS` is what constrains writes. See
+/// [`crate::models::camera::RecordMode`] for why reads stay forgiving.
+#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupKind {
+    /// A directory on this box.
+    Local,
+    Sftp,
+    Ftp,
+    S3,
+}
+
+/// A backup job's lifecycle state, for the published schema only (#156).
+///
+/// Only ever written by the server, as one of these four literals.
+#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupJobStatus {
+    /// Queued, not yet started.
+    Pending,
+    /// Copying now.
+    Running,
+    /// Finished; check `files_copied` against `files_total`.
+    Completed,
+    /// Stopped on an error; `error` says what.
+    Error,
 }

@@ -224,6 +224,9 @@ pub struct SmartLine {
     /// `any` | `left-right` | `right-left` (verbatim device tokens).
     pub direction: String,
     /// Exactly two endpoints, normalized 0..1.
+    // The pairing is NOT expressible here: utoipa takes `min_items`/`max_items` only on a field,
+    // not on a newtype's own schema, so `[f64; 2]` arrives as a bare `number[][]`. The dashboard
+    // refines it locally; a generated client cannot. Tracked in #156 rather than fought.
     #[schema(value_type = Vec<Vec<f64>>)]
     pub points: Vec<[f64; 2]>,
 }
@@ -248,6 +251,9 @@ pub struct SmartRegion {
     /// Seconds a target must stay inside before the alarm fires (device `timeThreshold`).
     pub time_threshold: i64,
     /// Polygon vertices, normalized 0..1 (empty = slot unconfigured).
+    // The pairing is NOT expressible here: utoipa takes `min_items`/`max_items` only on a field,
+    // not on a newtype's own schema, so `[f64; 2]` arrives as a bare `number[][]`. The dashboard
+    // refines it locally; a generated client cannot. Tracked in #156 rather than fought.
     #[schema(value_type = Vec<Vec<f64>>)]
     pub points: Vec<[f64; 2]>,
 }

@@ -77,6 +77,7 @@ pub struct VisitorPass {
     pub site_id: Option<String>,
     pub valid_from: DateTime<Utc>,
     pub valid_until: DateTime<Utc>,
+    #[schema(value_type = PassStatus)]
     pub status: String,
     pub checked_in_at: Option<DateTime<Utc>>,
     pub checked_out_at: Option<DateTime<Utc>>,
@@ -176,4 +177,21 @@ pub struct AuditLog {
     pub target_id: Option<String>,
     pub detail: Json<Value>,
     pub created_at: DateTime<Utc>,
+}
+
+/// A visitor pass's state, for the published schema only (#156).
+///
+/// Stored as a `String`; `routes::update_pass` is what constrains writes to these five. Decoding
+/// into a strict enum would turn a legacy row into a 500 on read, so reads stay forgiving.
+#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PassStatus {
+    /// Issued and not yet used.
+    Active,
+    CheckedIn,
+    CheckedOut,
+    /// Past its validity window.
+    Expired,
+    /// Cancelled before use.
+    Revoked,
 }

@@ -77,12 +77,12 @@ export interface BackupDestinationUpdate {
 }
 
 export interface BackupDestinationView {
-  config: unknown;
+  config: Record<string, string>;
   created_at: string;
   enabled: boolean;
   has_credentials: boolean;
   id: string;
-  kind: string;
+  kind: BackupKind;
   name: string;
   updated_at: string;
 }
@@ -101,14 +101,18 @@ export interface BackupJob {
   from_time?: string | null;
   id: string;
   incident_lock_only: boolean;
-  kind: string;
+  kind: BackupKind;
   output_path?: string | null;
   output_url?: string | null;
   policy_id?: string | null;
   started_at?: string | null;
-  status: string;
+  status: BackupJobStatus;
   to_time?: string | null;
 }
+
+export type BackupJobStatus = "pending" | "running" | "completed" | "error";
+
+export type BackupKind = "local" | "sftp" | "ftp" | "s3";
 
 export interface BackupPolicy {
   camera_ids: string[];
@@ -202,7 +206,7 @@ export interface CameraView {
   priority: number;
   record_audio: boolean;
   record_enabled: boolean;
-  record_mode: string;
+  record_mode: RecordMode;
   record_stream: string;
   record_url_masked?: string | null;
   resolution_main?: string | null;
@@ -467,6 +471,8 @@ export interface OsdConfig {
   time_style?: string | null;
 }
 
+export type PassStatus = "active" | "checked_in" | "checked_out" | "expired" | "revoked";
+
 export interface ProbeRequest {
   device_url?: string | null;
 }
@@ -505,6 +511,8 @@ export interface QueryResult {
 export interface RebootRequest {
   confirm: boolean;
 }
+
+export type RecordMode = "continuous" | "scheduled" | "event" | "scheduled_event";
 
 export interface RecordScheduleCreate {
   days: unknown;
@@ -749,7 +757,7 @@ export interface VisitorPass {
   plate_norm?: string | null;
   purpose?: string | null;
   site_id?: string | null;
-  status: string;
+  status: PassStatus;
   updated_at: string;
   valid_from: string;
   valid_until: string;

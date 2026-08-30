@@ -31,16 +31,14 @@ export type RecordStream = "main" | "sub";
 /** When the recorder runs for a camera: `continuous` (always), `scheduled` (time-of-day window),
  * `event` (records only during a trigger window: a zone/breach event or a manual record-trigger
  * extends it to now + post_roll_seconds), or `scheduled_event` (windows AND triggers). */
-export type RecordMode = "continuous" | "scheduled" | "event" | "scheduled_event";
+export type RecordMode = Contract.RecordMode;
 
 /** Known vendors with auto-built RTSP URLs, plus the catch-all. */
 export type Vendor = "hikvision" | "dahua" | "generic" | (string & {});
 
 export type Severity = "info" | "warning" | "critical";
 
-export type CameraView = Omit<Contract.CameraView, "record_mode"> & {
-  record_mode: RecordMode;
-};
+export type CameraView = Contract.CameraView;
 
 export interface CameraCreate {
   id?: string;
@@ -809,11 +807,9 @@ export type VehicleCreate = Contract.VehicleCreate;
 
 export type VehicleUpdate = Partial<VehicleCreate>;
 
-export type PassStatus = "active" | "checked_in" | "checked_out" | "expired" | "revoked";
+export type PassStatus = Contract.PassStatus;
 
-export type VisitorPass = Omit<Contract.VisitorPass, "status"> & {
-  status: PassStatus;
-};
+export type VisitorPass = Contract.VisitorPass;
 
 export type VisitorPassCreate = Contract.VisitorPassCreate;
 
@@ -1062,16 +1058,12 @@ export interface SemanticSearchResponse {
 // ---- Backup subsystem: destinations, policies, jobs, archive export ----
 
 /** Transport for a backup destination. `local` copies via fs (NAS mounts); the rest use rclone. */
-export type BackupKind = "local" | "sftp" | "ftp" | "s3";
+export type BackupKind = Contract.BackupKind;
 
 /** Lifecycle of a backup job. */
-export type BackupJobStatus = "pending" | "running" | "completed" | "error";
+export type BackupJobStatus = Contract.BackupJobStatus;
 
-export type BackupDestinationView = Omit<Contract.BackupDestinationView, "kind" | "config"> & {
-  kind: BackupKind;
-  /** Free-form per-kind settings; the schema types it `unknown`. */
-  config: Record<string, unknown> | null;
-};
+export type BackupDestinationView = Contract.BackupDestinationView;
 
 export type BackupDestinationCreate = Contract.BackupDestinationCreate;
 
@@ -1086,10 +1078,7 @@ export type BackupPolicyCreate = Contract.BackupPolicyCreate;
 
 export type BackupPolicyUpdate = Partial<BackupPolicyCreate>;
 
-export type BackupJob = Omit<Contract.BackupJob, "status" | "kind"> & {
-  status: BackupJobStatus;
-  kind: BackupKind;
-};
+export type BackupJob = Contract.BackupJob;
 
 export type ArchiveExportRequest = Contract.ArchiveExportRequest;
 
