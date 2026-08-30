@@ -15,10 +15,15 @@ members = [
     "crates/heldar-server",
     "crates/heldar-testkit",
     "crates/heldar-wasm",
+    "crates/heldarctl",
 ]
 # The example Wasm guest targets wasm32-unknown-unknown and is built separately.
 exclude = [
     "examples/wasm-plugin",
+    # The generated Rust client declares its own [workspace] so it can be built standalone — that
+    # is the point of generating it. Excluding it here lets heldarctl depend on it by path without
+    # the two roots colliding.
+    "clients/rust",
 ]
 
 [profile.dev]

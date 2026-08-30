@@ -100,6 +100,11 @@ recording gaps — under one Ed25519 signature, verifiable offline with `python3
 [`docs/EVIDENCE.md`](docs/EVIDENCE.md). It states what it cannot prove, too: the appliance stamps its
 own clock, so the signature attests to origin and integrity, never to time.
 
+**`heldarctl`** is the supported operator and automation interface — contexts for multiple boxes,
+stable JSON, documented exit codes, and `heldarctl doctor` as the one command that tells an installer
+what to fix: [`docs/HELDARCTL.md`](docs/HELDARCTL.md). It ships for the same architectures as the
+core binary.
+
 Onboard a camera (you supply the address and credentials; the RTSP URL is built from the vendor
 template):
 
