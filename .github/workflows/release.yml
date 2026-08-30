@@ -87,6 +87,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Keyless Sigstore signing: a short-lived OIDC identity instead of a private key living in
+      # repository secrets, which is the thing #115 asks us not to have.
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -104,10 +108,35 @@ jobs:
           target: ${{ matrix.target }}
           arch-label: ${{ matrix.arch }}
           version: ${{ github.ref_name }}
+      # An SBOM answers "what is actually in this binary" without trusting our word for it. SPDX
+      # because that is what `gh attestation` and most consumers ingest.
+      - name: SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          file: ${{ steps.build.outputs.asset }}
+          format: spdx-json
+          output-file: ${{ steps.build.outputs.asset }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      # Binds this exact byte-for-byte artifact to the repository, commit, workflow and tag that
+      # produced it. A sha256 sidecar only detects corruption when you already trust where the
+      # checksum came from; this authenticates the publisher.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.build.outputs.asset }}
+
+      - name: Attest the SBOM
+        uses: actions/attest-sbom@v2
+        with:
+          subject-path: ${{ steps.build.outputs.asset }}
+          sbom-path: ${{ steps.build.outputs.asset }}.spdx.json
+
       - name: Upload to the Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
           ASSET: ${{ steps.build.outputs.asset }}
         shell: bash
-        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
+        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" "$ASSET.spdx.json" --clobber

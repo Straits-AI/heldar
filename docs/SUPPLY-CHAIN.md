@@ -73,19 +73,50 @@ leave a `TODO pin @sha256 digest` comment rather than fabricating one.
 move on a reviewed, deliberate cadence instead of drifting silently on a re-pull. Treat those PRs as
 the normal path for base-image and MediaMTX updates.
 
+## Verifiable outputs: SBOMs, signatures and provenance
+
+Pinning answers "what did we build from". These answer "is this the thing we built", which a sha256
+sidecar cannot: a checksum only detects corruption once you already trust where the checksum came
+from, and it authenticates nobody.
+
+Every published musl binary and every pushed `ghcr.io/straits-ai/*` image carries:
+
+- an **SPDX SBOM** (syft) — what is actually inside, without unpacking it,
+- a **build-provenance attestation** binding the artifact to the repository, commit, workflow and
+  tag that produced it,
+- an **SBOM attestation** binding that SBOM to the same artifact.
+
+All three are signed **keylessly** through Sigstore using the workflow's short-lived OIDC identity.
+There is no private signing key in repository secrets — which is the point, since a stolen key
+forges everything a signature is supposed to prevent.
+
+### Verifying before you run something
+
+```bash
+# A published binary
+gh attestation verify heldar-core-x86_64 --repo Straits-AI/heldar
+
+# A pushed image, by DIGEST
+gh attestation verify oci://ghcr.io/straits-ai/heldar-core@sha256:<digest> \
+  --repo Straits-AI/heldar
+```
+
+Verify the **digest**, never the tag. A tag is mutable, so verifying one certifies whatever it points
+at right now — exactly the substitution these attestations exist to detect. Resolve the digest first
+(see "Resolving and updating a digest" above), then verify that.
+
+Image attestations are pushed to the registry as OCI referrers (`push-to-registry: true`), so they
+travel with the image and can be checked from a mirror.
+
+### Still open
+
+- **Offline verification.** `gh attestation verify` reaches Sigstore's transparency log. An appliance
+  with no egress needs the trust material cached first (`gh attestation trusted-root`); we do not yet
+  ship that bundle or a verifier that uses it. Tracked in #115.
+- **Private/full images** built outside this repository are not covered here; the same three steps
+  belong in whatever workflow publishes them.
+
 ## Follow-up (not implemented here)
 
-These are the next steps to close the loop from "pinned inputs" to "verifiable outputs". They are
-**intentionally out of scope for this change** and tracked as follow-up work:
-
-- **SBOM generation** — produce a CycloneDX/SPDX SBOM per published image with
-  [`syft`](https://github.com/anchore/syft) in CI, and attach it to the release / push it as an OCI
-  referrer. This makes "what is actually inside `heldar-core:v1.4.0`" answerable without unpacking
-  the image, and feeds vulnerability scanning (e.g. `grype`).
-- **Image & binary signing** — sign the published container images and the prebuilt musl binaries
-  with [`cosign`](https://github.com/sigstore/cosign) (keyless / OIDC), and sign the SBOM
-  attestation too. Deployments can then `cosign verify` before running, so a tampered or
-  unrecognized image is rejected at pull time rather than trusted by tag alone.
-
-Signing is deliberately not implemented in this change; pinning is the prerequisite that makes those
-signatures meaningful.
+Nothing outstanding here beyond the two items listed under "Still open" above — SBOMs, signing and
+provenance are implemented in `.github/workflows/release.yml` and `docker-open.yml`.

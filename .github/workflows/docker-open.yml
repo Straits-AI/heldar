@@ -26,6 +26,9 @@ on:
 permissions:
   contents: read
   packages: write
+  # Keyless Sigstore signing of the image digest.
+  id-token: write
+  attestations: write
 
 concurrency:
   group: docker-open-${{ github.ref }}
@@ -68,6 +71,7 @@ jobs:
             type=raw,value=latest,enable=${{ github.event_name == 'push' }}
             type=raw,value=dev,enable=${{ github.event_name == 'workflow_dispatch' }}
       - name: Build + push
+        id: build
         uses: docker/build-push-action@v7
         with:
           context: ${{ matrix.context }}
@@ -78,3 +82,33 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Only for images we actually PUSHED — there is no registry digest to attest otherwise, and a
+      # dry-run build would fail the step for no reason.
+      - name: SBOM
+        if: steps.build.outputs.digest != ''
+        uses: anchore/sbom-action@v0
+        with:
+          image: ghcr.io/straits-ai/${{ matrix.name }}@${{ steps.build.outputs.digest }}
+          format: spdx-json
+          output-file: sbom-${{ matrix.name }}.spdx.json
+          upload-artifact: false
+
+      # Attested against the DIGEST, not a tag. A tag is mutable — attesting one would certify
+      # whatever it points at today, which is exactly the substitution this is meant to detect.
+      - name: Attest build provenance
+        if: steps.build.outputs.digest != ''
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ghcr.io/straits-ai/${{ matrix.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Attest the SBOM
+        if: steps.build.outputs.digest != ''
+        uses: actions/attest-sbom@v2
+        with:
+          subject-name: ghcr.io/straits-ai/${{ matrix.name }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          sbom-path: sbom-${{ matrix.name }}.spdx.json
+          push-to-registry: true
