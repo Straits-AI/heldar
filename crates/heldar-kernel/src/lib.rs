@@ -23,6 +23,7 @@ pub mod net_guard;
 pub mod openapi;
 pub mod registry;
 pub mod repo;
+pub mod request_id;
 pub mod routes;
 pub mod services;
 pub mod state;

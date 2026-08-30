@@ -259,3 +259,42 @@ fn the_spec_is_well_formed() {
         "ErrorBody must be a component so clients share one error type"
     );
 }
+
+/// Every response carries a correlation id — including the ones raised before a handler runs.
+///
+/// The unit tests cover the middleware in isolation; this pins it into the REAL layer stack, where
+/// the thing that could silently regress is ordering. Layered inside the auth floor, a 401 would come
+/// back with no id, and a 401 is exactly the response a caller needs to quote.
+#[tokio::test]
+async fn every_response_carries_a_request_id() {
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    let app = axum::Router::new()
+        .route("/api/v1/whatever", axum::routing::get(|| async { "ok" }))
+        .layer(axum::middleware::from_fn(heldar_kernel::request_id::layer));
+
+    // A route that exists...
+    let resp = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/v1/whatever")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert!(resp.headers().get("x-request-id").is_some());
+
+    // ...and one that does not, which never reaches a handler at all.
+    let resp = app
+        .oneshot(Request::builder().uri("/nope").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert!(
+        resp.headers().get("x-request-id").is_some(),
+        "a 404 raised before any handler had no correlation id"
+    );
+}

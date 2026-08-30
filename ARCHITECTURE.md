@@ -627,6 +627,13 @@ Errors are normalized by `error::AppError` → JSON
 `{ "error": msg, "code": "...", "retryable": bool }` with NotFound→404, BadRequest→400,
 Conflict→409, DB/Other→500 (internal detail logged, not leaked).
 
+Every response also carries **`X-Request-ID`** (`services/../request_id.rs`), generated unless the
+caller supplies `X-Request-ID` or `X-Heldar-Correlation-ID`. It is put on the tracing span, so
+`grep req_abc123` in the log returns the whole story of one request, and it is echoed on errors and
+on responses raised before any handler — a 401 or 404 is exactly what a caller needs to quote. A
+caller-supplied value is descriptive only, never an authorization input, and is sanitised and
+bounded to 64 characters because it reaches log lines.
+
 `error` is prose and may be reworded; **`code` is API** — `not_found`, `bad_request`, `conflict`,
 `unauthorized`, `forbidden`, `unavailable`, `busy`, `internal` — and is what an integration should
 branch on. `retryable` is true only for transient saturation (`unavailable`, `busy`), and those

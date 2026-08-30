@@ -555,6 +555,9 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
         }
     };
 
+    // Outermost of the app layers so EVERY response carries the id, including auth rejections and
+    // errors raised before a handler runs — those are exactly the ones a caller needs to quote.
+    let app = app.layer(axum::middleware::from_fn(heldar_kernel::request_id::layer));
     let app = app.layer(TraceLayer::new_for_http());
     // Same-origin-only attaches NO layer at all, rather than a permissive one.
     let app = match cors {
