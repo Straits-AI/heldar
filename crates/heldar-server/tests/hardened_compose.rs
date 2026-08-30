@@ -19,7 +19,6 @@ fn overlay() -> String {
     std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("reading {}: {e}", p.display()))
 }
 
-
 /// The overlay text for ONE service, so a check binds to the service it names.
 ///
 /// Global `count()` assertions were the first version and they were bypassable three ways: moving
@@ -120,7 +119,10 @@ fn every_service_has_resource_ceilings() {
 fn nginx_gets_the_minimum_capabilities_not_a_blanket_grant() {
     let y = overlay();
     for c in ["CHOWN", "SETUID", "SETGID"] {
-        assert!(y.contains(c), "nginx entrypoint needs {c} before it drops to the worker user");
+        assert!(
+            y.contains(c),
+            "nginx entrypoint needs {c} before it drops to the worker user"
+        );
     }
     // Checked against the actual `cap_add:` lines, not the whole file — the comment above the grant
     // mentions NET_BIND_SERVICE by name to explain why it is absent, and a naive substring search
