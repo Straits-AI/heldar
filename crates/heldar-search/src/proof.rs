@@ -10,7 +10,7 @@
 
 use serde_json::{json, Value};
 
-use crate::query::{breakdown, QueryPlan, SearchHit};
+use crate::query::{breakdown_in, QueryPlan, SearchHit};
 
 /// Build the proof object for a result set. `planner` is "rules" | "llm" | "structured". `truncated`
 /// is set when a source fetch hit its cap, so the count is a floor, not an exhaustive total.
@@ -63,7 +63,15 @@ pub fn build(
         "evidence": {
             "count": n,
             "truncated": truncated,
-            "breakdown": breakdown(hits),
+            // Keyed in the plan's own zone, so the histogram cannot disagree with the query it is
+            // proving. `plan.tz` is set by the route before execution.
+            "breakdown": breakdown_in(
+                hits,
+                plan.tz
+                    .as_deref()
+                    .and_then(heldar_kernel::services::tz::parse)
+                    .unwrap_or(chrono_tz::Tz::UTC),
+            ),
             "window": { "from": eff_from.to_rfc3339(), "to": eff_to.to_rfc3339(), "defaulted": defaulted },
         },
     }));

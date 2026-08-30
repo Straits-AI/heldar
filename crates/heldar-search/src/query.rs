@@ -451,6 +451,15 @@ fn parse_ts(s: &Option<String>) -> Option<DateTime<Utc>> {
 
 /// Build a quick aggregate breakdown (counts by source + by camera) over the hits — for the proof.
 pub fn breakdown(hits: &[SearchHit]) -> Value {
+    breakdown_in(hits, chrono_tz::Tz::UTC)
+}
+
+/// [`breakdown`] with the zone the day buckets are keyed in (#125).
+///
+/// A calendar day is a wall-clock notion, so a proof histogram keyed in UTC contradicts the query it
+/// is proving: a one-local-day search at a +08:00 site produced a `by_day` spanning two dates, which
+/// is exactly the kind of quiet disagreement the proof layer exists to rule out.
+pub fn breakdown_in(hits: &[SearchHit], tz: chrono_tz::Tz) -> Value {
     let mut by_source = serde_json::Map::new();
     let mut by_day = serde_json::Map::new();
     for h in hits {
@@ -461,11 +470,12 @@ pub fn breakdown(hits: &[SearchHit]) -> Value {
                 .unwrap_or(0)
                 + 1
         );
+        let local = h.timestamp.with_timezone(&tz);
         let day = format!(
             "{:04}-{:02}-{:02}",
-            h.timestamp.year(),
-            h.timestamp.month(),
-            h.timestamp.day()
+            local.year(),
+            local.month(),
+            local.day()
         );
         *by_day.entry(day.clone()).or_insert(json!(0)) =
             json!(by_day.get(&day).and_then(|v| v.as_i64()).unwrap_or(0) + 1);
@@ -617,13 +627,94 @@ mod tz_filter_tests {
         );
     }
 
-    #[test]
-    fn utc_stays_utc_when_nothing_is_configured() {
-        let h = hit("2026-06-01T19:00:00Z");
-        assert!(
-            passes(&h, Some(18), None, Tz::UTC),
-            "an unconfigured box must answer exactly as it always has"
+    /// The branch's central safety promise for search, and it was tested through the LOCAL `passes`
+    /// helper — so it stayed green when the executor was reverted, i.e. it proved nothing about
+    /// production. It goes through `execute_in` now.
+    #[tokio::test]
+    async fn utc_stays_utc_when_nothing_is_configured() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        heldar_kernel::db::run_migrations(&pool).await.unwrap();
+        // 19:00Z — after 6pm in UTC, and 03:00 the next day in Kuala Lumpur.
+        let at = chrono::DateTime::parse_from_rfc3339("2026-06-01T19:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        sqlx::query(
+            "INSERT INTO zone_events
+               (id, camera_id, zone_id, zone_name, event_type, label, timestamp, created_at)
+             VALUES ('ze_u','cam_a','z1','Gate','enter','person',?,?)",
+        )
+        .bind(at)
+        .bind(at)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let plan = QueryPlan {
+            from: Some("2026-05-01T00:00:00Z".into()),
+            to: Some("2026-07-01T00:00:00Z".into()),
+            hour_min: Some(18),
+            sources: vec!["zone".into()],
+            ..Default::default()
+        };
+        let out = execute_in(&pool, &plan, 100, Tz::UTC).await.unwrap();
+        assert_eq!(
+            out.hits.len(),
+            1,
+            "an unconfigured box must answer exactly as it always has: 19:00Z is after 6pm UTC"
         );
         let _ = Utc.timestamp_opt(0, 0);
+    }
+}
+
+#[cfg(test)]
+mod breakdown_tz_tests {
+    use super::*;
+    use chrono_tz::Tz;
+
+    /// A one-local-day search must not produce a proof histogram spanning two dates. The proof layer
+    /// exists to rule out exactly this sort of quiet disagreement with the query it describes.
+    #[test]
+    fn day_buckets_are_keyed_in_the_querys_own_zone() {
+        let hits: Vec<SearchHit> = [
+            "2026-06-01T16:30:00Z", // 2026-06-02 00:30 +08
+            "2026-06-02T03:00:00Z", // 2026-06-02 11:00 +08
+            "2026-06-02T15:30:00Z", // 2026-06-02 23:30 +08
+        ]
+        .iter()
+        .map(|t| SearchHit {
+            source: "zone".into(),
+            id: t.to_string(),
+            timestamp: chrono::DateTime::parse_from_rfc3339(t)
+                .unwrap()
+                .with_timezone(&Utc),
+            camera_id: Some("cam_a".into()),
+            kind: "enter".into(),
+            plate: None,
+            subject: json!({}),
+            auth_status: None,
+            zone: None,
+            zone_kind: None,
+            evidence_path: None,
+            claim_level: "event".into(),
+        })
+        .collect();
+
+        let kl = breakdown_in(&hits, Tz::Asia__Kuala_Lumpur);
+        assert_eq!(
+            kl["by_day"],
+            json!({"2026-06-02": 3}),
+            "all three are the same calendar day in Kuala Lumpur"
+        );
+
+        let utc = breakdown_in(&hits, Tz::UTC);
+        assert_eq!(
+            utc["by_day"],
+            json!({"2026-06-01": 1, "2026-06-02": 2}),
+            "and genuinely two days in UTC — if these agree, the zone is not reaching the buckets"
+        );
     }
 }

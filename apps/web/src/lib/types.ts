@@ -762,7 +762,8 @@ export interface RecordingGap {
 
 /** A recurring per-camera recording window, applied when `record_mode` is `scheduled` or
  * `scheduled_event`. `days` are weekday ints 0=Mon..6=Sun; `time_start`/`time_end` are "HH:MM" 24h
- * in the SERVER's local timezone (start > end means an overnight window). */
+ * read in the CAMERA'S SITE timezone (#125), falling back to the server's local zone when no zone is
+ * configured anywhere (start > end means an overnight window). */
 export interface RecordSchedule {
   id: string;
   camera_id: string;

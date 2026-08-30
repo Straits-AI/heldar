@@ -77,7 +77,10 @@ pub const DEFAULT_TIMEZONE: &str = "default_timezone";
 /// from. `None` means nothing is configured — see the module docs for why there is no default here.
 pub async fn site_tz(pool: &SqlitePool, camera_id: Option<&str>) -> (Option<Tz>, TzSource) {
     if let Some(id) = camera_id {
-        let row: Option<(String,)> = sqlx::query_as(
+        // COALESCE is deliberately absent: a NULL timezone means the site has no zone
+        // configured, and must fall through to the box default rather than be read as UTC.
+        // Migration 0019 made that distinction possible — see its header.
+        let row: Option<(Option<String>,)> = sqlx::query_as(
             "SELECT s.timezone FROM cameras c
              JOIN sites s ON s.id = c.site_id
              WHERE c.id = ?",
@@ -86,7 +89,7 @@ pub async fn site_tz(pool: &SqlitePool, camera_id: Option<&str>) -> (Option<Tz>,
         .fetch_optional(pool)
         .await
         .unwrap_or(None);
-        if let Some(tz) = row.and_then(|r| parse(&r.0)) {
+        if let Some(tz) = row.and_then(|r| r.0).and_then(|t| parse(&t)) {
             return (Some(tz), TzSource::Site);
         }
     }
@@ -134,8 +137,15 @@ pub fn from_wall_clock(tz: Tz, naive: chrono::NaiveDateTime) -> DateTime<Utc> {
         LocalResult::Single(t) => t.with_timezone(&Utc),
         // Repeated: both are real instants; the earlier one is the start of the repeated hour.
         LocalResult::Ambiguous(earlier, _later) => earlier.with_timezone(&Utc),
-        // Skipped: no instant maps to this reading. Step forward a minute at a time until one does;
-        // the gap is at most an hour in every zone tzdb has ever carried.
+        // Skipped: no instant maps to this reading. Step forward a minute at a time until one does.
+        //
+        // Three hours covers every transition gap tzdb carries (Antarctica/Troll's is two), but NOT
+        // a date-line move: seven zones have skipped a whole calendar day — Pacific/Apia 2011-12-30,
+        // Pacific/Kiritimati 1994-12-31, Kwajalein 1993-08-21 and four siblings. For a local date
+        // that never occurred at all the loop exhausts and the fallback below is 10-14 hours out.
+        // Every one is historical and unreachable from "today"/"yesterday", and a wider scan would
+        // still have to invent an answer for a date that did not happen; the honest fix is an
+        // Option, which is worth doing the moment a caller can supply an arbitrary past date.
         LocalResult::None => {
             let mut probe = naive;
             for _ in 0..(60 * 3) {
@@ -223,6 +233,46 @@ mod tests {
 
     /// A hand-edited or corrupted value must degrade to the next level, never take the recorder
     /// down and never silently answer in a zone nobody chose.
+    /// A site row that never named a zone must NOT read as "the site says UTC".
+    ///
+    /// `sites.timezone` was `NOT NULL DEFAULT 'UTC'` until migration 0019, so an insert that omitted
+    /// it produced a row the resolver reported as `TzSource::Site` — for a zone no operator chose.
+    /// A camera would then read its schedules in UTC because a row it was attached to inherited a
+    /// column default, which is the silent shift this whole design exists to prevent.
+    #[tokio::test]
+    async fn a_site_that_never_named_a_zone_is_not_a_site_that_chose_utc() {
+        let p = pool().await;
+        let now = Utc::now();
+        sqlx::query("INSERT INTO sites (id, name, created_at) VALUES ('s1','KL',?)")
+            .bind(now)
+            .execute(&p)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO cameras (id, site_id, name, created_at, updated_at) VALUES ('c1','s1','C',?,?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&p)
+        .await
+        .unwrap();
+        assert_eq!(
+            site_tz(&p, Some("c1")).await,
+            (None, TzSource::Unset),
+            "an unset site timezone must fall through, not claim the site chose UTC"
+        );
+
+        // ...while a site that DID choose UTC is honoured as a choice.
+        sqlx::query("UPDATE sites SET timezone = 'UTC' WHERE id = 's1'")
+            .execute(&p)
+            .await
+            .unwrap();
+        assert_eq!(
+            site_tz(&p, Some("c1")).await,
+            (Some(Tz::UTC), TzSource::Site)
+        );
+    }
+
     #[tokio::test]
     async fn an_unparseable_stored_zone_falls_through_rather_than_panicking() {
         let p = pool().await;
