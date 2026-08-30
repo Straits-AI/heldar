@@ -52,6 +52,20 @@ narrower than the incident an investigator believes it covers.
 Requires `video:export`. Camera-scoped credentials can export only their own cameras — including
 through `incident_id`, where the scope check runs against the *derived* camera, not the id supplied.
 
+## Which clock the times are in
+
+Every timestamp in a bundle is UTC and stays UTC. The manifest also records the **site's** IANA
+timezone (`site.timezone`) so a reader can render a local wall clock without guessing — and so that
+"02:14" in a report is known to mean 02:14 *at the site*, not 02:14 wherever the reader happens to
+be.
+
+`null` means no zone is configured for that site, and the manifest says so rather than letting UTC
+be read as the operator's clock. Set one with `PUT /api/v1/system/timezone` (or on the site itself
+once sites are manageable) — see [#125](https://github.com/Straits-AI/heldar/issues/125).
+
+This field is inside the signature, which is the point: an unsigned zone beside a signed timestamp
+could be changed to relabel when the footage was taken.
+
 ## Verifying — offline
 
 ```bash
