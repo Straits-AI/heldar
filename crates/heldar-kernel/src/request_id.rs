@@ -32,6 +32,26 @@ const CORRELATION_ALIAS: HeaderName = HeaderName::from_static("x-heldar-correlat
 #[derive(Debug, Clone)]
 pub struct RequestId(pub String);
 
+tokio::task_local! {
+    /// The current request's correlation id, for code too deep to be handed one.
+    ///
+    /// `audit()` is called from over a hundred places. Threading a parameter through all of them
+    /// would be a large diff whose every line is an opportunity to pass the wrong thing, and the
+    /// next function that wants the id would need the same treatment again. A task-local is the same seam the tracing
+    /// span already uses: set once by the middleware, inherited by everything the handler awaits.
+    ///
+    /// It deliberately does NOT cross `tokio::spawn`. A background job does not inherit the id, and
+    /// its audit rows record NULL — which is correct, because no request caused them. Anything that
+    /// genuinely needs to carry the id into a detached task must pass it explicitly, and that being
+    /// visible at the call site is the point.
+    pub static CURRENT: String;
+}
+
+/// The correlation id of the request being served, or `None` outside one.
+pub fn current() -> Option<String> {
+    CURRENT.try_with(|v| v.clone()).ok()
+}
+
 /// Attach a correlation id, put it on the tracing span, and echo it on the response.
 pub async fn layer(mut req: Request, next: Next) -> Response {
     // A caller-supplied id is honoured so a trace can span the relay, the box and the caller's own
@@ -59,7 +79,8 @@ pub async fn layer(mut req: Request, next: Next) -> Response {
     // Instrumented rather than entered: the handler is a future that yields, and a plain span guard
     // would leak the id onto whatever task ran next on this thread.
     let span = tracing::info_span!("request", request_id = %id);
-    let mut resp = tracing::Instrument::instrument(next.run(req), span).await;
+    let fut = tracing::Instrument::instrument(next.run(req), span);
+    let mut resp = CURRENT.scope(id.clone(), fut).await;
 
     if let Ok(v) = HeaderValue::from_str(&id) {
         resp.headers_mut().insert(REQUEST_ID, v);

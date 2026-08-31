@@ -1335,9 +1335,13 @@ pub async fn audit(
     // because `detail` is free-form `Json<Value>` that no SQL predicate can be trusted to read.
     let subject = subject_camera(target_type, target_id, &detail);
     let audit_id = format!("aud_{}", uuid::Uuid::new_v4().simple());
+    // The correlation id of the request being served, or NULL when nothing is — a background sweep,
+    // a scheduled job, a test. Read from the task-local rather than threaded through every one of
+    // `audit()`'s hundred-plus call sites; see `request_id::CURRENT` for why that seam, not a parameter.
+    let request_id = crate::request_id::current();
     let res = sqlx::query(
-        "INSERT INTO audit_log (id, actor, actor_name, role, action, target_type, target_id, detail, subject_camera_id, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO audit_log (id, actor, actor_name, role, action, target_type, target_id, detail, subject_camera_id, request_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(&audit_id)
     .bind(&actor.id)
@@ -1348,6 +1352,7 @@ pub async fn audit(
     .bind(target_id)
     .bind(sqlx::types::Json(detail))
     .bind(subject)
+    .bind(request_id)
     .bind(Utc::now())
     .execute(pool)
     .await;

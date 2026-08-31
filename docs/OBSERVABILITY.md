@@ -206,6 +206,43 @@ groups:
 
 ---
 
+## 2b. Correlation ids — following one call across the box
+
+Every response carries `x-request-id`. The box generates one per request, or honours a caller-supplied
+`X-Request-ID` (`X-Heldar-Correlation-ID` is accepted as an inbound alias) so a trace can span the
+caller's system, the relay and the box. It is bounded to 64 characters and stripped to
+`[A-Za-z0-9_-]` before it reaches a log line — the value is caller-controlled, and an unbounded or
+separator-bearing one is how a log gets forged.
+
+The same id reaches three places:
+
+| Surface | How to read it |
+| --- | --- |
+| **Logs** | the id is on the request's tracing span, so every line the handler emits inherits it — `grep req_abc123` returns the whole story of one call |
+| **The audit log** | `audit_log.request_id`, served on `GET /api/v1/audit` and filterable: `?request_id=req_abc123` returns every act that call performed |
+| **Evidence manifests** | recorded beside `audit_id`, so an exported bundle names the call that produced it — and it is the *same* value, not a re-read of the inbound header, so a bundle exported by a client that sent no id is still joinable |
+
+```bash
+# A client reports a failure and quotes the id from its response headers.
+# Manager+ (`registry:manage`) — the audit log reveals operator activity. See docs/ACCESS-CONTROL.md.
+curl -s "$BOX/api/v1/audit?request_id=req_abc123" -H "X-API-Key: $KEY" | jq '.[].action'
+```
+
+`request_id` is **null** when no request carried an id into the row. On a box upgraded to this
+schema that is every row written before the migration — the column was added to a live table and an
+id that was never recorded cannot be backfilled. It would also be null for an act with no request
+behind it, though no background job audits today: the correlation id does not cross into background
+tasks, and inventing one there would make an unattributable act look attributed.
+
+The filter is ANDed with the caller's camera scope, so it narrows what a credential may already see
+and can never widen it. A correlation id names an act, not a permission.
+
+> **Not yet threaded**: background jobs and webhook deliveries carry no correlation id, so a delivered
+> event cannot be joined to the call that produced it. Tracked in
+> [#169](https://github.com/Straits-AI/heldar/issues/169).
+
+---
+
 ## 3. Alerting webhooks (subscriptions)
 
 `services/webhooks.rs` runs as a supervised background loop that delivers events to

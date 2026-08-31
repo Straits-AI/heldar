@@ -176,6 +176,12 @@ pub struct AuditLog {
     pub target_type: Option<String>,
     pub target_id: Option<String>,
     pub detail: Json<Value>,
+    /// The correlation id of the request that caused this act (#169).
+    ///
+    /// `None` for every row written before migration 0020 — the column was added to a live table and
+    /// cannot be backfilled — and for any act with no request behind it, though nothing background
+    /// audits today. It is a fact worth reading, not a missing value.
+    pub request_id: Option<String>,
     pub created_at: DateTime<Utc>,
 }
 

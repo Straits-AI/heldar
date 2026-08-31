@@ -230,6 +230,100 @@ async fn build(dir: &Path) -> (AppState, PathBuf, String) {
     (st, path, r.key_id)
 }
 
+/// The manifest records the id the CALLER was handed back, so a bundle can be joined to its call.
+///
+/// The route used to read the raw inbound `x-request-id` header. `request_id::layer` puts the id in
+/// a task-local and on the RESPONSE — it never writes it back onto the request — so for the normal
+/// case, a client that sends no header, the response and the audit row carried `req_...` while the
+/// signed manifest recorded NULL. Chain of custody pointed one way only, on the one route that
+/// already claimed to close that gap (#169).
+///
+/// Asserted as EQUALITY with the echoed header, because "some id was stored" was true before too.
+#[tokio::test]
+async fn the_manifest_records_the_id_the_caller_was_handed() {
+    require("ffmpeg");
+    let dir = scratch("correlation");
+    let st = state(&dir).await;
+    let (from, to) = seed(&st, "cam_a").await;
+
+    // This file's `state()` enables auth, and the route must be reached over HTTP for the middleware
+    // to run at all — which is the whole point of the test.
+    let token = format!("vok_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(
+        "INSERT INTO api_keys (id, name, key_hash, key_prefix, role, active, created_at,
+                               capabilities, scope_kind, scope_cameras, expires_at)
+         VALUES (?,?,?,?,'admin',1,?,NULL,'all',NULL,NULL)",
+    )
+    .bind(format!("key_{}", uuid::Uuid::new_v4().simple()))
+    .bind("bootstrap")
+    .bind(heldar_kernel::auth::token_hash(&token))
+    .bind(&token[..8])
+    .bind(Utc::now())
+    .execute(&st.pool)
+    .await
+    .unwrap();
+
+    let mut app = heldar_kernel::routes::api_router()
+        .with_state(st.clone())
+        .layer(axum::middleware::from_fn(heldar_kernel::request_id::layer));
+    let body = serde_json::json!({
+        "camera_id": "cam_a",
+        "from": from.to_rfc3339(),
+        "to": to.to_rfc3339(),
+        "dry_run": false,
+    });
+    let req = axum::http::Request::builder()
+        .method("POST")
+        .uri("/api/v1/evidence/exports")
+        .header("content-type", "application/json")
+        .header("X-API-Key", &token)
+        // No x-request-id: the normal case, and the one that was broken.
+        .body(axum::body::Body::from(body.to_string()))
+        .unwrap();
+    let resp = tower::Service::call(&mut app, req).await.unwrap();
+    let status = resp.status();
+    let echoed = resp
+        .headers()
+        .get("x-request-id")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string)
+        .expect("every response carries x-request-id");
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20)
+        .await
+        .unwrap();
+    assert!(
+        status.is_success(),
+        "export -> {status}: {}",
+        String::from_utf8_lossy(&bytes)
+    );
+    assert!(echoed.starts_with("req_"), "generated id shape: {echoed}");
+
+    let stored: Option<String> =
+        sqlx::query_scalar("SELECT request_id FROM evidence_bundles ORDER BY rowid DESC LIMIT 1")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        stored.as_deref(),
+        Some(echoed.as_str()),
+        "the bundle index recorded a different correlation id from the one the caller was given"
+    );
+
+    // ...and the same id is in the SIGNED manifest, which is the artefact that leaves the box.
+    let audited: Option<String> = sqlx::query_scalar(
+        "SELECT request_id FROM audit_log WHERE action = 'export_evidence_bundle' \
+         ORDER BY rowid DESC LIMIT 1",
+    )
+    .fetch_one(&st.pool)
+    .await
+    .unwrap();
+    assert_eq!(
+        audited.as_deref(),
+        Some(echoed.as_str()),
+        "the audit row and the bundle disagree about which call produced the export"
+    );
+}
+
 #[tokio::test]
 async fn a_freshly_exported_bundle_verifies_against_its_key() {
     require("ffmpeg");
