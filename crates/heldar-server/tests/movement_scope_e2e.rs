@@ -1014,6 +1014,66 @@ async fn a_both_ends_credential_sees_its_own_two_camera_acts() {
     );
 }
 
+/// A correlation-id filter must NARROW what a scoped credential sees, never widen it (#169).
+///
+/// `?request_id=` is a caller-supplied string that names an ACT, not a permission. It is ANDed into
+/// the same WHERE clause as the camera-scope predicate, so it can only ever remove rows — but
+/// "structurally cannot" is exactly the kind of claim that turns out to have an `OR` in it, so it is
+/// asserted rather than reasoned about.
+///
+/// The probe: the FLEET credential acts on a camera `one_end` does not hold, tagging the call with a
+/// known id. `one_end` then asks for precisely that id. It must get nothing — the filter must not
+/// become a lookup that reaches past scope for anyone who learns an id, and ids travel in response
+/// headers and bug reports.
+#[tokio::test]
+async fn a_correlation_id_filter_cannot_reach_past_camera_scope() {
+    let w = World::build().await;
+    let other = w.breach_on(OTHER).await;
+
+    // The composed router used elsewhere in this file has no correlation-id layer; without it every
+    // row would record NULL and the assertion below would pass for the wrong reason.
+    let mut app =
+        composed_router(&w.st).layer(axum::middleware::from_fn(heldar_kernel::request_id::layer));
+    let req = Request::builder()
+        .method("POST")
+        .uri(format!("/api/v1/movement/breaches/{other}/ack"))
+        .header("X-API-Key", &w.fleet)
+        .header("content-type", "application/json")
+        .header("x-request-id", "leak-probe")
+        .body(Body::from("{}"))
+        .unwrap();
+    let res = app.call(req).await.unwrap();
+    assert!(res.status().is_success(), "fleet ack -> {}", res.status());
+
+    // The row exists and carries the id, or the negative below proves nothing.
+    let stored: Vec<Option<String>> =
+        sqlx::query_scalar("SELECT request_id FROM audit_log WHERE request_id IS NOT NULL")
+            .fetch_all(&w.st.pool)
+            .await
+            .unwrap();
+    assert!(
+        stored.iter().any(|r| r.as_deref() == Some("leak-probe")),
+        "the act recorded no correlation id, so this test would pass whatever the filter did"
+    );
+
+    // ...and the holder of a DIFFERENT camera cannot pull it back by naming the id.
+    let (status, body) = get(
+        &w.st,
+        &w.one_end,
+        "/api/v1/audit?request_id=leak-probe&limit=5000",
+    )
+    .await;
+    assert!(
+        status.is_success(),
+        "one_end GET /audit -> {status}: {body}"
+    );
+    assert!(
+        !body.contains(&other) && !body.contains("leak-probe"),
+        "a correlation id let a camera-scoped credential read an act on a camera it does not hold: \
+         {body}"
+    );
+}
+
 /// The audit trail of movement's own actions, read back through `GET /api/v1/audit`.
 ///
 /// That route filters on `audit_log.subject_camera_id` and is FAIL-CLOSED: a NULL subject is hidden

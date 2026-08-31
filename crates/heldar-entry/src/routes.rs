@@ -1652,6 +1652,8 @@ pub struct AuditQuery {
     to: Option<String>,
     actor: Option<String>,
     action: Option<String>,
+    /// Everything one API call did (#169).
+    request_id: Option<String>,
     limit: Option<i64>,
 }
 
@@ -1660,6 +1662,11 @@ pub struct AuditQuery {
 /// Manager-gated because it reveals operator activity. A camera-scoped credential sees only rows
 /// whose derived subject camera it holds, plus multi-camera acts where it holds EVERY camera named;
 /// fleet-level rows naming no camera are hidden from it.
+///
+/// `?request_id=` answers "what did this call actually do". Every response carries its id on
+/// `x-request-id`, so an operator holding one from a client's bug report can ask the box directly
+/// instead of reading logs. The filter is ANDed with the camera scope, so it narrows what a
+/// credential may see and never widens it — a correlation id names an act, not a permission.
 #[utoipa::path(
     get, path = "/api/v1/audit", tag = "entry",
     operation_id = "listAuditLog",
@@ -1668,10 +1675,11 @@ pub struct AuditQuery {
         ("to" = Option<String>, Query, description = "RFC3339 upper bound (inclusive)"),
         ("actor" = Option<String>, Query, description = "Exact principal id"),
         ("action" = Option<String>, Query, description = "Exact action slug, e.g. `gate_manual_open`"),
+        ("request_id" = Option<String>, Query, description = "Exact correlation id — every act one API call performed. The id is on `x-request-id` of every response."),
         ("limit" = Option<i64>, Query, description = "1..=5000, default 200"),
     ),
     responses(
-        (status = 200, description = "Audit rows visible to this credential, newest first"),
+        (status = 200, description = "Audit rows visible to this credential, newest first. Each row carries `request_id`: the correlation id of the API call that caused it, or null for a background act (a retention sweep, a scheduled snapshot)."),
         (status = 400, description = "Invalid `from`/`to` timestamp", body = heldar_kernel::openapi::ErrorBody),
         (status = 403, description = "Missing `registry:manage`", body = heldar_kernel::openapi::ErrorBody),
     ),
@@ -1706,6 +1714,16 @@ pub async fn list_audit(
             AND (? IS NULL OR actor = ?)
             AND (? IS NULL OR action = ?)"
         .to_string();
+    // Appended ONLY when supplied, and before the scope block so the bind order below is unchanged.
+    //
+    // The obvious spelling — `AND (? IS NULL OR request_id = ?)`, matching the filters above — is
+    // not sargable: SQLite cannot turn that disjunction into an index seek, so `idx_audit_request`
+    // (migration 0020) would never be used and the one lookup this column exists to serve would walk
+    // the whole log. The other filters pay the same cost, but none of them has an index promising
+    // otherwise.
+    if q.request_id.is_some() {
+        sql.push_str(" AND request_id = ?");
+    }
     if let Some((pred, binds)) = &scope {
         // A row is visible when its derived subject is held, OR — for an act naming SEVERAL cameras,
         // where one column cannot say "both ends" and the subject is therefore NULL — when every
@@ -1738,6 +1756,7 @@ pub async fn list_audit(
         ));
     }
     sql.push_str(" ORDER BY created_at DESC LIMIT ?");
+    #[allow(unused_mut)]
     let mut query = sqlx::query_as::<_, AuditLog>(&sql)
         .bind(from)
         .bind(from)
@@ -1747,6 +1766,13 @@ pub async fn list_audit(
         .bind(&q.actor)
         .bind(&q.action)
         .bind(&q.action);
+    // ANDed with the scope predicate below, never instead of it: a correlation id is supplied by the
+    // caller and names an act, not a permission. Filtering by one must narrow what a credential can
+    // already see and can never widen it. Bound here, ahead of the scope binds, matching where the
+    // predicate was appended above.
+    if let Some(rid) = &q.request_id {
+        query = query.bind(rid);
+    }
     // Bound TWICE, in predicate order: once for the subject arm, once for the `camera_ids`
     // containment arm added alongside it.
     for id in scope
@@ -2336,6 +2362,7 @@ mod tests {
             to: None,
             actor: None,
             action: None,
+            request_id: None,
             limit: None,
         }
     }

@@ -70,7 +70,6 @@ pub enum ExportResponse {
 pub async fn create(
     State(st): State<AppState>,
     principal: Principal,
-    headers: axum::http::HeaderMap,
     Json(req): Json<ExportRequest>,
 ) -> AppResult<Json<ExportResponse>> {
     principal.require_cap(Cap::VideoExport, "export evidence bundles")?;
@@ -91,10 +90,18 @@ pub async fn create(
         )));
     }
 
-    let request_id = headers
-        .get("x-request-id")
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
+    // The id the caller was actually handed back, not the raw inbound header (#169).
+    //
+    // `request_id::layer` puts the correlation id in a task-local and on the RESPONSE; it does not
+    // write it back onto the request. So reading the header here recorded NULL for every export
+    // where the client sent no id — the normal case — while the response and the audit row carried
+    // `req_...`. A bundle whose manifest says `request_id: null` cannot be joined back to the call
+    // that produced it, which is exactly the asymmetry this work exists to close, and this route was
+    // the one place already claiming to have closed it.
+    //
+    // Reading the task-local also means the value is the SANITISED one: a caller-supplied id is
+    // bounded and stripped before it reaches a log line, and a signed manifest deserves the same.
+    let request_id = crate::request_id::current();
     // Audit BEFORE the export, so the bundle can carry the audit id it is recorded under. An audit
     // row written afterwards could not be referenced by the document it describes.
     let audit_id = auth::audit(
