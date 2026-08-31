@@ -83,5 +83,58 @@ echo "$AI_METRICS" | tee -a "$REPORT"
 assert_contains "$AI_METRICS" "heldar_ai_tasks_enabled" "the enabled AI task is visible in /metrics"
 assert_contains "$AI_METRICS" "heldar_detections_stored" "stored detections are visible in /metrics"
 
+# ---------------------------------------------------------------------------------------------
+# THE WHOLE CHAIN, in one pass: lease -> ticketed frame pull -> attributable ingest (#113).
+#
+# Everything above proves the pieces separately. This is the only place anything walks the path a
+# real worker walks, against the stream the stack is actually publishing — which is what criterion 3
+# asks for. It is deterministic on purpose: a fixed bbox and no model, so the assertion is about the
+# PROVENANCE CHAIN and not about whether a detector found something.
+# ---------------------------------------------------------------------------------------------
+log "## worker chain: lease -> ticketed frame -> attributable ingest"
+
+LEASE=$(curl -s -X POST "$API/api/v1/ai/leases" -H 'content-type: application/json' \
+  -d '{"worker_id":"validate-ai-mock","ttl_secs":60}')
+echo "$LEASE" | python3 -m json.tool 2>/dev/null | tee -a "$REPORT"
+LEASED_TASK=$(echo "$LEASE" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+t = [x for x in d.get("tasks", []) if x.get("camera_id") == sys.argv[1]]
+print(t[0]["id"] if t else "")' "$CAM" 2>/dev/null)
+FRAME_URL=$(echo "$LEASE" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+t = [x for x in d.get("tasks", []) if x.get("camera_id") == sys.argv[1]]
+print(t[0]["frame_url"] if t else "")' "$CAM" 2>/dev/null)
+assert_contains "$LEASED_TASK" "ai_" "the worker leased this camera's task"
+
+# `frame_url` is used AS ISSUED. The server already builds it with `?profile=…&task=…` (ai.rs) —
+# appending another `?task=` produced a second `?`, the server saw no valid task, minted no ticket,
+# and the chain assertion below failed against a perfectly healthy box. The contract hands a worker
+# the exact URL to pull for this reason; taking it apart is how a client reintroduces a bug the
+# server went out of its way to prevent.
+#
+# A pull WITHOUT the task parameter returns the same bytes and no ticket — that is how the dashboard
+# reads frames, and it is why the ticket proves a lease rather than mere access.
+HDRS=$(curl -s -D - -o "$DATA/ai_chain_frame.jpg" "$API$FRAME_URL")
+TICKET=$(echo "$HDRS" | tr -d '\r' | awk 'tolower($1)=="x-frame-ticket:"{print $2}')
+assert_ge "${#TICKET}" 16 "the leased frame pull returned an x-frame-ticket"
+
+# A ticket that does not travel is a ticket that proves nothing — post it back with the detections.
+INGEST=$(curl -s -X POST "$API/api/v1/ai/events" -H 'content-type: application/json' -d "{
+  \"camera_id\":\"$CAM\",\"task_type\":\"detection\",\"frame_ticket\":\"$TICKET\",
+  \"detections\":[{\"label\":\"person\",\"confidence\":0.95,\"bbox\":[0.4,0.4,0.1,0.2],\"track_id\":\"chain\"}]
+}")
+echo "$INGEST" | python3 -m json.tool 2>/dev/null | tee -a "$REPORT"
+TICKETED=$(echo "$INGEST" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("ticketed"))' 2>/dev/null)
+# `ticketed: true` is the server saying the batch was bound to a frame IT issued — the end of the
+# chain. Under the default `warn` tier an untricketed batch is still accepted, so asserting the
+# ingest merely succeeded would pass with no provenance at all.
+assert_eq "True" "$TICKETED" "the ingest was bound to a server-issued frame (ticketed)"
+
+CHAIN_DET=$(curl -s "$API/api/v1/cameras/$CAM/detections?limit=20" \
+  | python3 -c 'import sys,json; print(sum(1 for d in json.load(sys.stdin) if d.get("track_id")=="chain"))' 2>/dev/null || echo 0)
+assert_ge "$CHAIN_DET" 1 "the chain's detection is queryable afterwards"
+
 log "DONE"
 assert_summary

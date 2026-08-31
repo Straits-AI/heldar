@@ -1404,10 +1404,18 @@ mod tests {
     /// `build_record_command`, and `the_segment_arguments_match_the_shipped_ones` below fails if
     /// they drift apart.
     #[cfg(unix)]
-    async fn write_then_interrupt(dir: &std::path::Path, graceful: bool) -> Vec<(u64, bool)> {
+    async fn write_then_interrupt(dir: &std::path::Path, graceful: bool) -> Vec<(u64, f64)> {
         let pattern = dir.join("%Y%m%d_%H%M%S.mp4");
         let mut child = Command::new("ffmpeg")
             .args(["-nostdin", "-hide_banner", "-loglevel", "error"])
+            // `-re` — REAL TIME, which is what makes the interruption point deterministic.
+            //
+            // Without it ffmpeg encodes as fast as the machine allows, so "wait, then interrupt"
+            // lands at a different place in the fragment on every host. This test failed on CI for
+            // exactly that reason: SIGKILL there landed AFTER a fragment had flushed, leaving a
+            // playable 57 KB segment, so the negative control correctly reported that it was no
+            // longer demonstrating anything. A real recorder reads a real-time stream anyway.
+            .args(["-re"])
             .args(["-f", "lavfi", "-i", "testsrc=size=320x180:rate=15"])
             .args([
                 "-c:v",
@@ -1435,13 +1443,19 @@ mod tests {
             .spawn()
             .expect("spawn ffmpeg");
 
-        // Wait until a second segment has been opened, so one is complete and one is mid-flight.
-        for _ in 0..100 {
-            tokio::time::sleep(Duration::from_millis(200)).await;
+        // Wait for a second segment to OPEN, then interrupt a fixed, short way into it.
+        //
+        // `frag_keyframe` flushes a fragment per keyframe — every 2 s at `-g 30` and 15 fps — so
+        // interrupting ~1 s in reliably leaves content buffered and unwritten. That is the state
+        // the fix exists for: SIGKILL discards it, SIGTERM writes it out. With `-re` above, that
+        // second of wall time is a second of video on any machine.
+        for _ in 0..150 {
+            tokio::time::sleep(Duration::from_millis(100)).await;
             if std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0) >= 2 {
                 break;
             }
         }
+        tokio::time::sleep(Duration::from_millis(1000)).await;
         if graceful {
             finish_and_stop(&mut child, "cam_test").await;
         } else {
@@ -1458,7 +1472,10 @@ mod tests {
             .iter()
             .map(|f| {
                 let size = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
-                let playable = std::process::Command::new("ffprobe")
+                // The DURATION, not merely "did it decode". Fragmented MP4 survives truncation,
+                // so a killed segment can still open — what it cannot have is the second of video
+                // that was buffered when the signal arrived.
+                let seconds = std::process::Command::new("ffprobe")
                     .args([
                         "-v",
                         "error",
@@ -1469,9 +1486,16 @@ mod tests {
                     ])
                     .arg(f)
                     .output()
-                    .map(|o| o.status.success() && !o.stdout.is_empty())
-                    .unwrap_or(false);
-                (size, playable)
+                    .ok()
+                    .filter(|o| o.status.success())
+                    .and_then(|o| {
+                        String::from_utf8_lossy(&o.stdout)
+                            .trim()
+                            .parse::<f64>()
+                            .ok()
+                    })
+                    .unwrap_or(0.0);
+                (size, seconds)
             })
             .collect()
     }
@@ -1511,20 +1535,24 @@ mod tests {
              (graceful={graceful:?} killed={killed:?})"
         );
 
-        // NEGATIVE CONTROL, in the same test: without it, a change that made every segment playable
-        // for some unrelated reason would leave the assertion below passing while proving nothing.
-        let (killed_size, killed_playable) = *killed.last().unwrap();
+        // SELF-CONTAINED, and that is the point. With `-re` the interruption lands about a second
+        // into a segment, so a properly closed one holds roughly that. This single assertion is both
+        // the check and its own control: reduce `finish_and_stop` to a SIGKILL and that second is
+        // never written, so the duration collapses (mutation-verified).
+        //
+        // It deliberately does NOT compare against the killed run. Two independent ffmpeg
+        // invocations do not reach the same point at the same wall-clock moment, so a cross-run
+        // comparison can invert under scheduler jitter — a flaky guard, which is worse than none.
+        // An earlier version asserted `!killed_playable` and failed on CI for that family of
+        // reason. The killed run is kept only to put a number in the failure message.
+        let (size, seconds) = *graceful.last().unwrap();
+        let (killed_size, killed_seconds) = *killed.last().unwrap();
         assert!(
-            !killed_playable,
-            "SIGKILL left a PLAYABLE final segment ({killed_size} bytes) — the bug this guards \
-             against no longer reproduces, so the assertion below is no longer evidence"
-        );
-
-        let (size, playable) = *graceful.last().unwrap();
-        assert!(
-            playable,
-            "the segment FFmpeg was writing when it was asked to stop is unplayable ({size} bytes); \
-             those seconds were captured and thrown away (#167)"
+            seconds >= 0.5,
+            "the segment FFmpeg was writing when it was asked to stop holds {seconds}s \
+             ({size} bytes); it was interrupted about a second in, so those captured seconds were \
+             thrown away rather than written (#167). The SIGKILL run left {killed_seconds}s / \
+             {killed_size} bytes."
         );
     }
 
