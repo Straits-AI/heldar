@@ -21,6 +21,7 @@ import {
   Input,
   Panel,
   SectionLabel,
+  ViewerClockNote,
   Select,
   Spinner,
   Stat,
@@ -1275,6 +1276,7 @@ export function Movement() {
             <h1 className="mt-1 font-display text-2xl font-extrabold tracking-tight text-fg">
               Movement Intelligence
             </h1>
+            <ViewerClockNote />
           </div>
           <div className="flex items-center gap-3">
             <Button onClick={() => void recompute()} disabled={recomputing}>

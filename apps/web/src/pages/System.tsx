@@ -20,7 +20,7 @@ import type {
 } from "../lib/types";
 import { BulkConfigPanel } from "../components/CameraConfigPanel";
 import { WebhooksPanel } from "../components/WebhooksPanel";
-import {
+import { ViewerClockNote,
   Button,
   EmptyState,
   Panel,
@@ -1284,6 +1284,7 @@ export function System() {
             <h1 className="mt-1 font-display text-2xl font-extrabold tracking-tight text-fg">
               System Health
             </h1>
+            <ViewerClockNote />
           </div>
           <Button onClick={refresh} disabled={refreshing} aria-label="Refresh system">
             {refreshing ? (
