@@ -200,9 +200,11 @@ Recorded here because a benchmark that finds nothing has usually not looked.
   first. `footage_lost_per_restart_seconds` is still reported, and a future run on a fixed box should
   show it near one keyframe interval rather than half a segment — which is the number to check when
   re-qualifying.
-- **`GET /api/v1/cameras/{id}/snapshot` returns 500 for a camera whose stream is down**, where a
-  4xx/503 would be right — an upstream that is not there is not an internal error. See
-  [#168](https://github.com/Straits-AI/heldar/issues/168).
+- **`GET /api/v1/cameras/{id}/snapshot` used to return 500 for a camera whose stream was down —
+  fixed.** It is now `503` with `retryable: true`, because an upstream that is not there is not an
+  internal error ([#168](https://github.com/Straits-AI/heldar/issues/168)). The harness's
+  `api_5xx_rate` counts 5xx AND connection failures, so a fleet with flaky cameras no longer inflates
+  it; that also means a run measured before this fix is not comparable to one after on that metric.
 - **First live view of a camera can take the full 8-second ready-wait**
   (`services/mediamtx.rs`): the call returns URLs on timeout by design, so it is a latency
   characteristic rather than a failure, but any live-view bar below 8 s is unreachable when the
