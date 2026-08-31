@@ -13,9 +13,13 @@ inputs:
 outputs:
   asset:
     description: Path to the named heldar-core binary asset
+    value: ${{ steps.package.outputs.asset }}
   cli-asset:
     description: Path to the named heldarctl binary asset
-    value: ${{ steps.package.outputs.asset }}
+    value: ${{ steps.package.outputs.cli-asset }}
+  mcp-asset:
+    description: Path to the named heldar-mcp binary asset
+    value: ${{ steps.package.outputs.mcp-asset }}
 runs:
   using: composite
   steps:
@@ -54,5 +58,8 @@ runs:
           assets+=("$asset")
         done
         # `asset` stays the CORE binary so the SBOM/attestation steps downstream are unchanged.
+        # Every asset gets an output: the release workflow reconstructed the heldar-mcp name inline,
+        # which is the same string built twice and free to drift.
         echo "asset=heldar-core-$VERSION-$ARCH-linux-musl" >> "$GITHUB_OUTPUT"
         echo "cli-asset=heldarctl-$VERSION-$ARCH-linux-musl" >> "$GITHUB_OUTPUT"
+        echo "mcp-asset=heldar-mcp-$VERSION-$ARCH-linux-musl" >> "$GITHUB_OUTPUT"
