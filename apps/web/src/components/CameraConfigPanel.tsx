@@ -25,7 +25,6 @@ import type {
   VideoConfigPatch,
 } from "../lib/types";
 import { Button, Field, Input, Panel, Select, cx } from "./ui";
-import { formatClock } from "../lib/format";
 
 /* ------------------------------ shared bits ------------------------------ */
 
@@ -507,7 +506,13 @@ function TimeNtpSection({ cameraId, canManage }: { cameraId: string; canManage: 
         <div className="border-t border-line pt-1">
           <Meta label="Mode" value={t.time_mode} />
           <Meta label="Timezone" value={t.time_zone} />
-          <Meta label="Local time" value={formatClock(t.local_time)} />
+          {/* AS REPORTED, not reformatted (#148). This is the device's own `<localTime>` from
+              ISAPI — a wall clock in the camera's own zone, shown one row below, with no offset.
+              `formatClock` parsed it as the VIEWER's wall time and re-rendered it, which is a
+              silent reinterpretation of the one value on this panel whose whole purpose is to say
+              what the DEVICE thinks the time is. Converting it into the site's zone would compound
+              that rather than fix it. */}
+          <Meta label="Local time" value={t.local_time || "—"} />
         </div>
       ) : (
         <p className="font-mono text-xs text-fg-muted">
