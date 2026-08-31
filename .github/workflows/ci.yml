@@ -102,6 +102,11 @@ jobs:
       # ALLOWED on this pre-1.0 appliance — what is not allowed is shipping one by accident, because
       # it breaks a generated client at runtime in someone else's deployment. `continue-on-error`
       # while the baseline does not exist yet: a release has to publish one before this can enforce.
+      - name: the contract-diff classifier is correct in both directions
+        # A false "breaking" trains people to ignore the diff; a false "additive" is how a break
+        # ships. Both directions are pinned, including that response and request schemas are judged
+        # by opposite rules (#156).
+        run: python3 scripts/test_openapi_diff.py
       - name: api contract diff (against the last release)
         continue-on-error: true
         env:

@@ -100,21 +100,13 @@ export interface DeviceControlCapabilities {
   probed_at?: string;
 }
 
-export type SmartLine = Omit<Contract.SmartLine, "points"> & {
-  points: [number, number][];
-};
+export type SmartLine = Contract.SmartLine;
 
-export type LineCrossingConfig = Omit<Contract.LineCrossingConfig, "lines"> & {
-  lines: SmartLine[];
-};
+export type LineCrossingConfig = Contract.LineCrossingConfig;
 
-export type SmartRegion = Omit<Contract.SmartRegion, "points"> & {
-  points: [number, number][];
-};
+export type SmartRegion = Contract.SmartRegion;
 
-export type IntrusionConfig = Omit<Contract.IntrusionConfig, "regions"> & {
-  regions: SmartRegion[];
-};
+export type IntrusionConfig = Contract.IntrusionConfig;
 
 export type MotionConfig = Contract.MotionConfig;
 
@@ -346,10 +338,7 @@ export type RetentionLimits = Contract.RetentionLimits;
 export type RetentionUpdate = Contract.RetentionUpdate;
 
 /** Live-preview transcode engine (effective value + detected hardware encoders). */
-export type TimezoneSettings = Omit<Contract.TimezoneSettings, "configured"> & {
-  /** Always sent by the server; `Option<String>` makes utoipa mark it optional. */
-  configured: string | null;
-};
+export type TimezoneSettings = Contract.TimezoneSettings;
 export type TimezoneUpdate = Contract.TimezoneUpdate;
 
 /** A site, and the timezone its cameras' schedules are read in. */
@@ -736,9 +725,7 @@ export interface Zone {
   updated_at: string;
 }
 
-export type ZoneCreate = Omit<Contract.ZoneCreate, "polygon"> & {
-  polygon: [number, number][];
-};
+export type ZoneCreate = Contract.ZoneCreate;
 
 export type ZoneUpdate = Partial<ZoneCreate>;
 

@@ -30,6 +30,43 @@ use crate::state::AppState;
 /// of guessing per route. This mirrors what `AppError::into_response` actually emits today
 /// (`{"error": "...", "code": "...", "retryable": false}`) rather than an aspirational envelope — a spec that describes a body the
 /// server does not send is worse than no spec.
+/// An `[x, y]` pair, normalized 0..1 — the unit every geometry in this API speaks (#156).
+///
+/// # Why this is hand-written
+///
+/// The Rust types are already precise: `Vec<[f64; 2]>` cannot hold a triple. utoipa's DERIVE is what
+/// cannot say so — `min_items`/`max_items` are field attributes, so there is nowhere to put them on a
+/// newtype's own schema, and `[f64; 2]` reaches every generated client as a bare `number[][]`. A
+/// previous attempt hit exactly that and recorded the field as blocked.
+///
+/// Implementing `PartialSchema` by hand sidesteps the derive entirely and says it exactly. Fields
+/// keep their real Rust types and point at this one with `#[schema(value_type = Vec<Coordinate>)]`,
+/// so nothing about parsing or validation changes — only what the contract can express.
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Coordinate(pub [f64; 2]);
+
+impl utoipa::PartialSchema for Coordinate {
+    fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
+        utoipa::openapi::schema::ArrayBuilder::new()
+            .items(utoipa::openapi::schema::ObjectBuilder::new().schema_type(
+                utoipa::openapi::schema::SchemaType::Type(utoipa::openapi::schema::Type::Number),
+            ))
+            .min_items(Some(2))
+            .max_items(Some(2))
+            .description(Some(
+                "An [x, y] pair, normalized 0..1 against the frame's width and height.",
+            ))
+            .into()
+    }
+}
+
+impl utoipa::ToSchema for Coordinate {
+    fn name() -> std::borrow::Cow<'static, str> {
+        std::borrow::Cow::Borrowed("Coordinate")
+    }
+}
+
 #[derive(serde::Serialize, utoipa::ToSchema)]
 pub struct ErrorBody {
     /// Human-readable message. Not a stable identifier — do not match on it.
@@ -232,7 +269,7 @@ pub const API_VERSION: &str = "0.1.0";
         crate::routes::zones::zone_event_aggregates,
         crate::routes::zones::zone_occupancy,
     ),
-    components(schemas(ErrorBody, crate::models::CameraView)),
+    components(schemas(ErrorBody, Coordinate, crate::models::CameraView)),
     tags(
         (name = "cameras", description = "Camera registry. Every route here is camera-scoped."),
         (name = "system", description = "Box-wide operational settings. Fleet-wide by nature: a \
