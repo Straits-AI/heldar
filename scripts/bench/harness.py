@@ -28,6 +28,8 @@ Exit codes (a contract a release script branches on):
   1  FAIL — a threshold was missed, unmeasured, or the stack did not come up
   2  the run was REFUSED before measuring anything: unknown scenario, no release build, faults
      requested in field mode, or a fleet that did not fully register
+  1  ...and `verify` also returns 1 for a run that is INVALID — one whose generator failed, which
+     did not measure the product at all and is neither a pass nor a product failure
   4  `verify` was given a result from an unsupported schema
   5  `verify` was given a result whose recorded thresholds do not match their recorded hash
 """
@@ -478,6 +480,41 @@ class Stack:
             except subprocess.TimeoutExpired:
                 p.kill()
 
+    def respawn_all_publishers(self):
+        """Bring every publisher back after the stream server it publishes into was restarted."""
+        cams = list(self.publishers)
+        for cam in cams:
+            p = self.publishers.get(cam)
+            if p and p.poll() is None:
+                p.terminate()
+                try:
+                    p.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    p.kill()
+            self.publishers.pop(cam, None)
+            self.start_publisher(cam)
+        return cams
+
+    def supervise_publishers(self, deliberately_down):
+        """Restart any publisher that died on its own, and COUNT it.
+
+        A real camera does not stop existing because the host got busy. A publisher that has exited
+        makes the fleet silently smaller for the rest of the run, and the resulting coverage hole
+        reads as a recorder failure — the measurement then blames the product for the benchmark's
+        own generator falling over.
+
+        The count is deliberately surfaced rather than absorbed: repeated respawns mean the HOST
+        cannot sustain the encode load, which invalidates the run instead of failing the product.
+        """
+        respawned = []
+        for cam in list(self.publishers):
+            p = self.publishers.get(cam)
+            if cam not in deliberately_down and p is not None and p.poll() is not None:
+                self.publishers.pop(cam, None)
+                self.start_publisher(cam)
+                respawned.append(cam)
+        return respawned
+
     def stop(self):
         for cam in list(self.publishers):
             self.stop_publisher(cam)
@@ -502,6 +539,60 @@ OPS = {
     ">": lambda a, b: a > b,
     "==": lambda a, b: a == b,
 }
+
+
+def bars_hash(thresholds):
+    """Hash the BARS ONLY — the metric/op/value triples — not the whole thresholds file.
+
+    The capacity gate refuses a claim whose run was judged against different thresholds, which is
+    what stops a bar being loosened to rescue a red run. Hashing the entire file would make a
+    typo fix in a comment invalidate every published qualification, and a rule that fires on
+    editorial changes is a rule people start working around.
+
+    So: prose, versions and rationale can be edited freely; changing what a threshold ACTUALLY
+    REQUIRES invalidates the claims that rested on it, which is the whole point.
+    """
+    return sha256_of(
+        [
+            {"metric": t["metric"], "op": t["op"], "value": t["value"]}
+            for t in thresholds.get("thresholds", [])
+        ]
+    )
+
+
+def validity(result):
+    """Is this run a measurement at all?
+
+    Distinct from PASS/FAIL on purpose. A run whose GENERATOR fell over did not measure the
+    product, and reporting that as a product failure is as wrong as reporting it as a pass — the
+    honest answer is "this run does not count, run it on a bigger host".
+
+    Kept a pure function of the recorded result so `verify` and the capacity gate can recompute it,
+    exactly like the verdict.
+    """
+    n = len(result.get("cameras") or [])
+    respawns = len(result.get("publisher_respawns") or [])
+    # More than one generator failure per camera, on average, is a host that cannot sustain the
+    # encode load it was asked to produce. The streams then thin out over the run and the recorder
+    # is blamed for a coverage hole that had nothing to record.
+    if n and respawns > n:
+        return {
+            "status": "INVALID",
+            "reason": f"the synthetic publishers had to be restarted {respawns} times across {n} "
+            f"cameras — the host could not sustain the encode load, so this run measures the "
+            f"generator rather than the recorder. Generate the streams on a separate machine or "
+            f"reduce the camera count.",
+        }
+    declared = (result.get("scenario") or {}).get("duration_s")
+    actual = result.get("duration_s")
+    if declared and actual and actual < declared * 0.9:
+        return {
+            "status": "INVALID",
+            "reason": f"the run covered {actual:.0f}s of a declared {declared}s and was cut short",
+        }
+    if not result.get("measurements"):
+        return {"status": "INVALID", "reason": "no measurements were recorded"}
+    return {"status": "VALID"}
 
 
 def evaluate(measurements, thresholds):
@@ -684,6 +775,8 @@ def do_run(args):
     probe = {"liveview": [], "snapshot": [], "clip": []}
     reconnects = []          # seconds a camera spent not-recording after having recorded
     restart_recoveries = []  # one per core restart; the threshold is judged on the worst
+    publisher_respawns = []  # generator failures — a validity signal, not a product measurement
+    mediamtx_recoveries = []
 
     try:
         if mode == "synthetic":
@@ -786,6 +879,7 @@ def do_run(args):
         last_probe = 0.0
         probe_round = 0
         down_since = {}
+        deliberately_down = set()   # cameras the harness is holding off the air right now
         t_start = time.monotonic()
 
         while True:
@@ -812,6 +906,12 @@ def do_run(args):
                 }
             )
 
+            if stack:
+                # A publisher that died on its own is the generator failing, not the recorder. It is
+                # brought back and counted; enough of them invalidate the run.
+                for cam in stack.supervise_publishers(deliberately_down):
+                    publisher_respawns.append({"camera": cam, "t": round(elapsed, 1)})
+
             # Reconnect time, at sampling resolution: the span from a camera leaving `recording` to
             # its return. Stated as a resolution-bounded measurement in the report rather than
             # presented as if it were instrumented inside the recorder, which it is not.
@@ -831,8 +931,14 @@ def do_run(args):
                 f = faults[fi]
                 fi += 1
                 outcome = inject(f, stack, api, cams, restart_windows)
+                # Keep the supervisor from "helpfully" restarting a publisher the scenario just
+                # stopped, which would silently cancel the fault it was asked to inject.
+                deliberately_down |= set(outcome.get("stopped", []))
+                deliberately_down -= set(outcome.get("started", []))
                 if f["kind"] == "core_restart" and outcome.get("recovery_s") is not None:
                     restart_recoveries.append(outcome["recovery_s"])
+                if f["kind"] == "mediamtx_restart" and outcome.get("recovery_s") is not None:
+                    mediamtx_recoveries.append(outcome["recovery_s"])
                 faults_done.append({**f, "outcome": outcome})
 
             time.sleep(interval)
@@ -1087,6 +1193,16 @@ def do_run(args):
 
         # The WORST restart, not the last. `rc-24h-8cam` restarts twice and a soak more; keeping
         # only the most recent would let a bad first restart disappear behind a good second one.
+        # REPORTED, NOT GATED. This metric was added after watching a run, and thresholds.json is
+        # explicit that a bar chosen with a result already in view is not a bar. It is a candidate
+        # for the next thresholds version, to be set before the run that would be judged by it.
+        m["mediamtx_recovery_seconds"] = (
+            {"value": round(max(mediamtx_recoveries), 2), "unit": "s",
+             "n": len(mediamtx_recoveries)}
+            if mediamtx_recoveries
+            else {"unmeasured": "the scenario injected no MediaMTX restart"}
+        )
+
         m["restart_recovery_seconds"] = (
             {"value": round(max(restart_recoveries), 2), "unit": "s", "n": len(restart_recoveries)}
             if restart_recoveries
@@ -1159,7 +1275,10 @@ def do_run(args):
             "scenario": sc,
             "scenario_sha256": sha256_of(sc),
             "thresholds": thresholds,
+            # The exact file, for provenance...
             "thresholds_sha256": sha256_of(thresholds),
+            # ...and the bars alone, which is what a capacity claim is checked against.
+            "thresholds_bars_sha256": bars_hash(thresholds),
             "provenance": provenance(args.hardware_class or sc.get("hardware_class", "unstated")),
             "cameras": cams,
             "ports": ({"api": stack.port, "rtsp": stack.rtsp_port} if stack else None),
@@ -1169,6 +1288,7 @@ def do_run(args):
                 for who, a, b in (stack.outages if stack else [])
             ],
             "measurements": m,
+            "publisher_respawns": publisher_respawns,
             "api_by_path": by_path,
             "probes": {
                 kind: [
@@ -1190,9 +1310,16 @@ def do_run(args):
             "verdict": verdict,
             "samples": samples,
         }
+        result["validity"] = validity(result)
         path = os.path.join(out_dir, f"{run_id}.json")
         with open(path, "w") as f:
             json.dump(result, f, indent=2, sort_keys=True)
+        v = result["validity"]
+        if v["status"] != "VALID":
+            # Loud and FIRST: a threshold verdict computed over a run that did not measure the
+            # product is noise, and printing it above this line would invite someone to quote it.
+            print(f"INVALID  {path}\n  {v['reason']}")
+            return 1
         print(f"{verdict}  {path}")
         for c in checks:
             if c["status"] != "PASS":
@@ -1222,6 +1349,19 @@ def inject(f, stack, api, cams, restart_windows):
         return {"started": targets}
 
     if kind == "mediamtx_restart":
+        # TOPOLOGY. In production the recorder pulls from the CAMERA directly and MediaMTX serves
+        # live view, so restarting MediaMTX should cost live view and not recording. In this
+        # synthetic stack MediaMTX is also the camera's RTSP server, so restarting it kills every
+        # publisher with a broken pipe — and ffmpeg does not come back on its own.
+        #
+        # Without restarting them, the fault models something production cannot do: every camera
+        # ceasing to exist, permanently. The first qualification runs did exactly that and reported
+        # 1459 s/camera-hour of "unexplained gap", a 302 s restart recovery and a 63% snapshot
+        # failure rate — five threshold failures that were one harness bug wearing a product's
+        # clothes. A synthetic camera has to behave like a camera: it has to come back.
+        t0 = time.monotonic()
+        flat, _ = parse_prom(api.text("/metrics"))
+        before_segments = flat.get("heldar_segments_total", 0)
         stack.open_outage("ALL", backdate_s=stack.sc.get("segment_seconds", 10))
         stack.mtx.terminate()
         try:
@@ -1229,8 +1369,27 @@ def inject(f, stack, api, cams, restart_windows):
         except subprocess.TimeoutExpired:
             stack.mtx.kill()
         stack.start_mediamtx()
+        respawned = stack.respawn_all_publishers()
+        # The fault is not over when the process is back — it is over when footage is being written
+        # again. Closing the outage at `start_mediamtx()` charged the recorder for its own
+        # reconnect, which is how a 14-second recovery turned into 62 s/camera-hour of
+        # "unexplained" gap. Same signal as the core restart: one new segment per camera cannot
+        # happen unless every recorder is writing.
+        target = before_segments + len(cams)
+        deadline = time.monotonic() + 300
+        recovered = None
+        while time.monotonic() < deadline:
+            flat, _ = parse_prom(api.text("/metrics"))
+            if flat.get("heldar_segments_total", 0) >= target:
+                recovered = time.monotonic() - t0
+                break
+            time.sleep(2)
         stack.close_outage("ALL")
-        return {"restarted": "mediamtx"}
+        return {
+            "restarted": "mediamtx",
+            "publishers_restarted": respawned,
+            "recovery_s": recovered,
+        }
 
     if kind == "core_restart":
         t0 = time.monotonic()
@@ -1289,6 +1448,10 @@ def do_verify(args):
     if sha256_of(r["thresholds"]) != r.get("thresholds_sha256"):
         print("MALFORMED: the recorded thresholds do not match their recorded hash", file=sys.stderr)
         return 5
+    v = validity(r)
+    if v["status"] != "VALID":
+        print(f"INVALID  {r['run_id']}\n  {v['reason']}", file=sys.stderr)
+        return 1
     if verdict != r.get("verdict"):
         print(
             f"MISMATCH: the file claims {r.get('verdict')!r}; the measurements say {verdict!r}",

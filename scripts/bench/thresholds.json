@@ -13,7 +13,9 @@
     "passing quietly — so adding a bar here for something nothing measures breaks every run, which",
     "is the correct outcome and not a reason to soften the rule.",
     "",
-    "CHANGE LOG. 1.1.0: `api_5xx_rate` and `api_seconds_p95` were REDEFINED (not re-valued) to cover the control plane only, after the first smoke run showed the 2 s bar failing snapshots that the same file separately allows 10 s. A threshold set that grades one call against two contradictory bars is broken, so the definition was fixed and the version moved — which invalidates any claim citing 1.0.0, exactly as intended. No bar was loosened: every VALUE here is unchanged from the set declared before the first run."
+    "CHANGE LOG. 1.1.0: `api_5xx_rate` and `api_seconds_p95` were REDEFINED (not re-valued) to cover the control plane only, after the first smoke run showed the 2 s bar failing snapshots that the same file separately allows 10 s. A threshold set that grades one call against two contradictory bars is broken, so the definition was fixed and the version moved — which invalidates any claim citing 1.0.0, exactly as intended. No bar was loosened: every VALUE here is unchanged from the set declared before the first run.",
+    "",
+    "CANDIDATES for the next version, to be set BEFORE the run they would judge: `mediamtx_recovery_seconds` (how long until footage is written again after the stream server restarts) is measured and reported but deliberately ungated — it was added after watching a run, and a bar chosen with a result already in view is not a bar."
   ],
   "version": "1.1.0",
   "thresholds": [

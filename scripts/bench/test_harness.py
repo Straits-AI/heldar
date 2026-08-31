@@ -66,6 +66,27 @@ check(
     "an empty threshold set must not report PASS having checked nothing",
 )
 
+# --- run validity --------------------------------------------------------------------------------
+from harness import validity  # noqa: E402
+
+base = {"cameras": ["a", "b", "c", "d"], "measurements": {"x": 1}, "scenario": {"duration_s": 100},
+        "duration_s": 100.0, "publisher_respawns": []}
+check(validity(base)["status"] == "VALID", "a clean run is valid")
+check(
+    validity({**base, "publisher_respawns": [{}] * 5})["status"] == "INVALID",
+    "more respawns than cameras means the generator, not the recorder, was being measured",
+)
+check(
+    validity({**base, "publisher_respawns": [{}] * 4})["status"] == "VALID",
+    "one respawn per camera is the boundary and must not trip — a benchmark that refuses every "
+    "run is as useless as one that accepts every run",
+)
+check(validity({**base, "duration_s": 50.0})["status"] == "INVALID", "a run cut short is invalid")
+check(validity({**base, "duration_s": 95.0})["status"] == "VALID", "a 5% short run is tolerated")
+check(validity({**base, "measurements": {}})["status"] == "INVALID", "no measurements is invalid")
+# A result with no cameras key at all (the shape the gate's fixtures use) must not crash.
+check(validity({"measurements": {"x": 1}})["status"] == "VALID", "missing keys must not throw")
+
 # --- hashing ------------------------------------------------------------------------------------
 check(
     sha256_of({"a": 1, "b": 2}) == sha256_of({"b": 2, "a": 1}),

@@ -17,7 +17,7 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(ROOT, "scripts", "bench"))
-from harness import SCHEMA, evaluate, sha256_of  # noqa: E402
+from harness import SCHEMA, bars_hash, evaluate, sha256_of  # noqa: E402
 
 THRESHOLDS = json.load(open(os.path.join(ROOT, "scripts", "bench", "thresholds.json")))
 
@@ -45,6 +45,7 @@ def result(**over):
         "scenario": {"cameras": 8, "codec": "h264", "bitrate_kbps": 2000, "ai_profile": "off"},
         "thresholds": THRESHOLDS,
         "thresholds_sha256": sha256_of(THRESHOLDS),
+        "thresholds_bars_sha256": bars_hash(THRESHOLDS),
         "provenance": {"hardware_class": "appliance-n100", "git_sha": "deadbeef"},
         "measurements": dict(PASSING),
     }
@@ -152,7 +153,7 @@ def _():
     return HEADER + ROW.format(path="docs/benchmarks/results/t.json") + "\n", result(measurements=m)
 
 
-@case("thresholds loosened after the run", 1, "The bar moved after the run")
+@case("thresholds loosened after the run", 1, "bar moved after the run")
 def _():
     loosened = json.loads(json.dumps(THRESHOLDS))
     loosened["version"] = "9.9.9"
@@ -162,6 +163,7 @@ def _():
     r = result()
     r["thresholds"] = loosened
     r["thresholds_sha256"] = sha256_of(loosened)
+    r["thresholds_bars_sha256"] = bars_hash(loosened)
     r["verdict"] = evaluate(r["measurements"], loosened)[0]
     return HEADER + ROW.format(path="docs/benchmarks/results/t.json") + "\n", r
 
@@ -170,7 +172,21 @@ def _():
 def _():
     r = result()
     r["thresholds"] = json.loads(json.dumps(THRESHOLDS))
-    r["thresholds"]["version"] = "tampered"
+    r["thresholds"]["thresholds"][0]["value"] = 999999
+    return HEADER + ROW.format(path="docs/benchmarks/results/t.json") + "\n", r
+
+
+@case("an editorial edit does NOT invalidate a claim", 0, "RESULT: PASS")
+def _():
+    # The control that keeps the rule proportionate: rewording a rationale must not force every
+    # published profile to be re-run, or people route around the rule.
+    reworded = json.loads(json.dumps(THRESHOLDS))
+    reworded["thresholds"][0]["why"] = "reworded for clarity, same bar"
+    reworded["version"] = "1.1.1"
+    r = result()
+    r["thresholds"] = reworded
+    r["thresholds_sha256"] = sha256_of(reworded)
+    r["thresholds_bars_sha256"] = bars_hash(reworded)
     return HEADER + ROW.format(path="docs/benchmarks/results/t.json") + "\n", r
 
 
@@ -204,6 +220,35 @@ def _():
     r = result()
     r["provenance"]["hardware_class"] = "dev-laptop"
     return HEADER + row + "\n", r
+
+
+@case("a run whose generator kept dying is INVALID, not passing", 1, "is INVALID")
+def _():
+    # Nine respawns across eight cameras: the host could not sustain the encode load, so the run
+    # measured the generator. Every threshold below still reads green, which is exactly why this
+    # has to be checked separately from the verdict.
+    r = result()
+    r["cameras"] = [f"bench_{i:03d}" for i in range(1, 9)]
+    r["publisher_respawns"] = [{"camera": "bench_001", "t": float(i)} for i in range(9)]
+    return HEADER + ROW.format(path="docs/benchmarks/results/t.json") + "\n", r
+
+
+@case("a run cut short of its declared duration is INVALID", 1, "cut short")
+def _():
+    r = result()
+    r["scenario"] = dict(r["scenario"], duration_s=1800)
+    r["duration_s"] = 400.0
+    return HEADER + ROW.format(path="docs/benchmarks/results/t.json") + "\n", r
+
+
+@case("a few respawns on a large fleet is still a valid run", 0, "RESULT: PASS")
+def _():
+    # The control that stops the validity rule being a blanket refusal: two transient respawns
+    # across eight cameras is a benchmark, not a broken one.
+    r = result()
+    r["cameras"] = [f"bench_{i:03d}" for i in range(1, 9)]
+    r["publisher_respawns"] = [{"camera": "bench_001", "t": 1.0}, {"camera": "bench_002", "t": 2.0}]
+    return HEADER + ROW.format(path="docs/benchmarks/results/t.json") + "\n", r
 
 
 @case("a result from a future schema", 1, "expected 'heldar-benchmark/1'")

@@ -10,12 +10,17 @@ What it refuses, and why each one matters:
   * A row citing a result file that does not exist, or that a reader cannot open.
   * A row citing a run that FAILED. The issue's requirement is "a failed threshold blocks the
     production-capacity claim"; this is that requirement, enforced.
+  * A row citing a run that is INVALID — one whose synthetic publishers kept dying, so it measured
+    the generator rather than the recorder. Neither a pass nor a product failure; it does not count.
   * A row whose stated profile does not match the run it cites — 16 cameras qualified by an
     8-camera run, H.265 qualified by an H.264 run. The commonest way a table drifts from its
     evidence is not fabrication, it is a row edited and a citation left behind.
-  * A run judged against DIFFERENT THRESHOLDS from the ones in the tree today. Loosening a bar to
-    turn a red run green therefore invalidates the claim it was loosened for, and the profile has to
-    be re-run. This is the mechanical form of "avoid moving the threshold after seeing the result".
+  * A run judged against DIFFERENT BARS from the ones in the tree today. Loosening a bar to turn a
+    red run green therefore invalidates the claim it was loosened for, and the profile has to be
+    re-run. This is the mechanical form of "avoid moving the threshold after seeing the result".
+    The comparison is over the metric/op/value triples ALONE, so editing a rationale or bumping a
+    version does not invalidate anything — a rule that fired on comment edits is one people would
+    start working around.
   * A row with no status at all, and a table with no rows.
 
 The verdict is RECOMPUTED from the run's raw measurements rather than read from its `verdict` field,
@@ -35,7 +40,7 @@ sys.path.insert(0, os.path.join(ROOT, "scripts", "bench"))
 
 # The SAME evaluator the harness uses. Two implementations of "did this pass" is one implementation
 # too many: they drift, and the one that drifts is always the one nobody runs.
-from harness import SCHEMA, evaluate, sha256_of  # noqa: E402
+from harness import SCHEMA, bars_hash, evaluate, sha256_of, validity  # noqa: E402
 
 MARKER = "<!-- qualification-table -->"
 
@@ -118,13 +123,23 @@ def check_row(cells, thresholds_hash, lineno):
              f"recorded hash — the file has been edited since the run")
         return
 
-    if r["thresholds_sha256"] != thresholds_hash:
+    # BARS, not the whole file: a comment fix must not invalidate every published qualification,
+    # but a changed value must invalidate the claims that rested on it.
+    run_bars = r.get("thresholds_bars_sha256") or bars_hash(r["thresholds"])
+    if run_bars != thresholds_hash:
         fail(
             f"row {lineno} ({profile}): {rel} was judged against thresholds "
-            f"{r['thresholds'].get('version', '?')} ({r['thresholds_sha256'][:12]}), and the tree "
-            f"now holds {thresholds_hash[:12]}. The bar moved after the run, so this claim is not "
-            f"supported by it — re-run the profile."
+            f"{r['thresholds'].get('version', '?')} (bars {run_bars[:12]}), and the tree now holds "
+            f"{thresholds_hash[:12]}. A bar moved after the run, so this claim is not supported by "
+            f"it — re-run the profile."
         )
+        return
+
+    v = validity(r)
+    if v["status"] != "VALID":
+        # An invalid run is not a failed one, and it is certainly not a passing one: it did not
+        # measure the product. A capacity claim cannot rest on it either way.
+        fail(f"row {lineno} ({profile}): cites a run that is INVALID — {v['reason']}")
         return
 
     verdict, checks = evaluate(r["measurements"], r["thresholds"])
@@ -176,7 +191,7 @@ def main():
         return 1
 
     thresholds = json.load(open(os.path.join(ROOT, "scripts", "bench", "thresholds.json")))
-    thresholds_hash = sha256_of(thresholds)
+    thresholds_hash = bars_hash(thresholds)
 
     for i, cells in enumerate(rows, 1):
         check_row(cells, thresholds_hash, i)
@@ -186,7 +201,7 @@ def main():
         f"checked {len(rows)} capacity row(s): {qualified} qualified by a run, "
         f"{len(rows) - qualified} labelled extrapolated or unqualified"
     )
-    print(f"thresholds {thresholds.get('version')} ({thresholds_hash[:12]})")
+    print(f"thresholds {thresholds.get('version')} (bars {thresholds_hash[:12]})")
     if failures:
         print(f"\n{len(failures)} problem(s):")
         for f in failures:
