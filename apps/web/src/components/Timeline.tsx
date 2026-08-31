@@ -1,7 +1,7 @@
 import { useMemo, useRef, useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 import type { Timeline as TimelineData } from "../lib/types";
-import { formatClock, formatDuration } from "../lib/format";
+import { formatClockIn, formatDuration, formatTimeShortIn, viewerZone } from "../lib/format";
 import { StatusLed } from "./ui";
 
 interface Props {
@@ -12,6 +12,16 @@ interface Props {
   /** Currently selected instant (RFC3339), shown as a marker. */
   selected?: string | null;
   onPick?: (iso: string) => void;
+  /**
+   * IANA zone to render every clock in (#148). Defaults to the viewer's, which is what this
+   * component did unconditionally before — and which put a browser-zone timeline directly under a
+   * site-zone schedule label on the camera page.
+   *
+   * The CALLER resolves it, because only the caller knows which camera this is and therefore which
+   * site's zone applies. A component resolving its own would have to fetch, and could resolve it
+   * differently from the label rendered beside it.
+   */
+  zone?: string;
 }
 
 interface TickLabel {
@@ -19,7 +29,7 @@ interface TickLabel {
   label: string;
 }
 
-function buildTicks(start: number, end: number): TickLabel[] {
+function buildTicks(start: number, end: number, zone: string): TickLabel[] {
   const span = end - start;
   if (span <= 0) return [];
   const target = 6;
@@ -33,13 +43,16 @@ function buildTicks(start: number, end: number): TickLabel[] {
   const ticks: TickLabel[] = [];
   const first = Math.ceil(start / step) * step;
   for (let t = first; t <= end; t += step) {
-    const label = new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    // Ticks are the axis a reader scans; leaving them in the browser's zone while the endpoints
+    // below moved would put two different clocks on one strip.
+    const label = formatTimeShortIn(new Date(t).toISOString(), zone).replace(/:\d{2}(?=\s|$)/, "");
     ticks.push({ pct: ((t - start) / span) * 100, label });
   }
   return ticks;
 }
 
-export function Timeline({ timeline, from, to, selected, onPick }: Props) {
+export function Timeline({ timeline, from, to, selected, onPick, zone }: Props) {
+  const tz = zone ?? viewerZone();
   const trackRef = useRef<HTMLDivElement>(null);
   const [hoverIso, setHoverIso] = useState<string | null>(null);
   const [hoverPct, setHoverPct] = useState<number | null>(null);
@@ -62,7 +75,7 @@ export function Timeline({ timeline, from, to, selected, onPick }: Props) {
       .filter((b) => b.width > 0);
   }, [timeline.ranges, startMs, endMs, span, valid]);
 
-  const ticks = useMemo(() => (valid ? buildTicks(startMs, endMs) : []), [startMs, endMs, valid]);
+  const ticks = useMemo(() => (valid ? buildTicks(startMs, endMs, tz) : []), [startMs, endMs, valid, tz]);
 
   const selectedPct =
     selected && valid ? ((new Date(selected).getTime() - startMs) / span) * 100 : null;
@@ -102,7 +115,7 @@ export function Timeline({ timeline, from, to, selected, onPick }: Props) {
       {/* Header: window bounds + recorded summary */}
       <div className="mb-2 flex items-center justify-between gap-3 font-mono text-[10px]">
         <span className="uppercase tracking-micro text-fg-muted">
-          {formatClock(new Date(startMs).toISOString())}
+          {formatClockIn(new Date(startMs).toISOString(), tz)}
         </span>
         <span className="flex items-center gap-1.5 text-fg-secondary">
           <StatusLed state="recording" pulse={false} />
@@ -111,7 +124,7 @@ export function Timeline({ timeline, from, to, selected, onPick }: Props) {
           <span className="tabular-nums">{timeline.segment_count} seg</span>
         </span>
         <span className="uppercase tracking-micro text-fg-muted">
-          {formatClock(new Date(endMs).toISOString())}
+          {formatClockIn(new Date(endMs).toISOString(), tz)}
         </span>
       </div>
 
@@ -144,7 +157,7 @@ export function Timeline({ timeline, from, to, selected, onPick }: Props) {
               width: `${Math.max(b.width, 0.4)}%`,
               boxShadow: "inset 0 0 0 1px rgba(16,185,129,0.25)",
             }}
-            title={`${formatClock(b.range.start)} → ${formatClock(b.range.end)} (${formatDuration(b.range.seconds)})`}
+            title={`${formatClockIn(b.range.start, tz)} → ${formatClockIn(b.range.end, tz)} (${formatDuration(b.range.seconds)})`}
           >
             <span className="absolute inset-x-0 top-0 h-px bg-rec/70" />
           </div>
@@ -183,12 +196,12 @@ export function Timeline({ timeline, from, to, selected, onPick }: Props) {
         {hoverIso ? (
           <span className="text-fg-secondary">
             Click to seek ·{" "}
-            <span className="tabular-nums text-accent">{formatClock(hoverIso)}</span>
+            <span className="tabular-nums text-accent">{formatClockIn(hoverIso, tz)}</span>
           </span>
         ) : selected ? (
           <span className="text-fg-secondary">
             Selected ·{" "}
-            <span className="tabular-nums text-fg">{formatClock(selected)}</span>
+            <span className="tabular-nums text-fg">{formatClockIn(selected, tz)}</span>
           </span>
         ) : (
           <span className="uppercase tracking-micro text-fg-muted">

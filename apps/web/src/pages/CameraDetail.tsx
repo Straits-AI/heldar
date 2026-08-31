@@ -38,13 +38,16 @@ import {
   StatusPill,
 } from "../components/ui";
 import {
+  cameraSiteZone,
   formatBytes,
-  formatClock,
+  formatClockIn,
   formatDuration,
-  formatTimeShort,
+  formatTimeShortIn,
   isoToLocalInput,
   localInputToIso,
+  resolveCameraZone,
   timeAgo,
+  zoneLabel,
 } from "../lib/format";
 
 const RANGE_OPTIONS: { label: string; hours: number }[] = [
@@ -291,6 +294,11 @@ export function CameraDetail() {
   const [lockTarget, setLockTarget] = useState<SegmentView | null>(null);
   const [lockIncident, setLockIncident] = useState("");
   const incidents = usePoll(() => api.listIncidents(), 0);
+  // The zone this camera's clocks render in (#148), resolved on the SAME chain as `services/tz.rs`:
+  // the camera's site, then the box-wide setting, then the viewer's own. Polled slowly — a site's
+  // zone changes about as often as a site moves.
+  const tzSettings = usePoll(() => api.getTimezone(), 60000);
+  const siteList = usePoll(() => api.listSites(), 60000);
 
   async function toggleEvidence(seg: SegmentView) {
     setSegError(null);
@@ -341,6 +349,7 @@ export function CameraDetail() {
   }
 
   const cam = camera.data;
+  const camZone = resolveCameraZone(tzSettings.data, cameraSiteZone(cam?.site_id, siteList.data?.sites));
   const st = status.data;
   const headerState = st?.state ?? (cam?.enabled ? "unknown" : "disabled");
   const isEventMode =
@@ -493,9 +502,12 @@ export function CameraDetail() {
 
           <PlaybackSessionPanel key={id} cameraId={id} />
 
+          {/* The zone is stated, not assumed (#148). This panel sat directly above a Recording
+              Schedule labelled with the SITE's zone while rendering the same camera's segments in
+              the VIEWER's — two clocks on one page, one labelled and one not. */}
           <Panel
             title="Timeline"
-            subtitle="Recorded availability"
+            subtitle={`Recorded availability — ${zoneLabel(camZone)}`}
             actions={
               <div className="flex gap-1">
                 {RANGE_OPTIONS.map((opt) => (
@@ -518,6 +530,7 @@ export function CameraDetail() {
                 to={timeline.data.to}
                 selected={selected}
                 onPick={handlePick}
+                zone={camZone.zone}
               />
             ) : (
               <div className="flex items-center justify-center gap-2 py-8 font-mono text-xs text-fg-muted">
@@ -796,7 +809,7 @@ export function CameraDetail() {
           >
             {trigResult && (
               <div className="mb-3 rounded-md border border-rec/40 bg-rec/10 px-2.5 py-2 font-mono text-[11px] text-emerald-200">
-                Recording window extended to {formatClock(trigResult.window_end)} (post-roll{" "}
+                Recording window extended to {formatClockIn(trigResult.window_end, camZone.zone)} (post-roll{" "}
                 {trigResult.post_roll_seconds}s).
               </div>
             )}
@@ -811,8 +824,8 @@ export function CameraDetail() {
                 className="mb-3 space-y-2 rounded-md border border-line bg-canvas p-2.5"
               >
                 <div className="font-mono text-[10px] uppercase tracking-micro text-fg-muted">
-                  Lock {formatTimeShort(lockTarget.start_time)} →{" "}
-                  {formatTimeShort(lockTarget.end_time)} as evidence (never pruned by retention)
+                  Lock {formatTimeShortIn(lockTarget.start_time, camZone.zone)} →{" "}
+                  {formatTimeShortIn(lockTarget.end_time, camZone.zone)} as evidence (never pruned by retention)
                 </div>
                 <Field
                   label="Incident id — blank = none"
@@ -860,10 +873,11 @@ export function CameraDetail() {
                     onPlay={() =>
                       setPlayback({
                         src: seg.url,
-                        label: `Segment ${formatClock(seg.start_time)}`,
+                        label: `Segment ${formatClockIn(seg.start_time, camZone.zone)}`,
                       })
                     }
                     onToggleEvidence={() => void toggleEvidence(seg)}
+                    zone={camZone.zone}
                   />
                 ))}
               </ul>
@@ -885,7 +899,7 @@ export function CameraDetail() {
             ) : (
               <ul className="-mr-1 max-h-96 space-y-1.5 overflow-y-auto pr-1">
                 {(events.data ?? []).map((ev) => (
-                  <EventRow key={ev.id} ev={ev} />
+                  <EventRow key={ev.id} ev={ev} zone={camZone.zone} />
                 ))}
               </ul>
             )}
@@ -902,12 +916,15 @@ function SegmentRow({
   busy,
   onPlay,
   onToggleEvidence,
+  zone,
 }: {
   seg: SegmentView;
   canManage: boolean;
   busy: boolean;
   onPlay: () => void;
   onToggleEvidence: () => void;
+  /** Same zone as the timeline above (#148); a page that mixes two clocks is what this fixes. */
+  zone: string;
 }) {
   return (
     <li className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-line bg-canvas px-2.5 py-2 transition-colors duration-150 hover:border-[#34373e]">
@@ -915,7 +932,7 @@ function SegmentRow({
         <div className="flex items-center gap-1.5 font-mono text-xs text-fg-secondary">
           {seg.evidence_locked && <LockIcon className="h-3 w-3 text-accent" />}
           <span className="tabular-nums">
-            {formatTimeShort(seg.start_time)} → {formatTimeShort(seg.end_time)}
+            {formatTimeShortIn(seg.start_time, zone)} → {formatTimeShortIn(seg.end_time, zone)}
           </span>
         </div>
         <div className="mt-0.5 flex flex-wrap items-center gap-x-1.5 font-mono text-[10px] text-fg-muted">
@@ -948,7 +965,7 @@ function SegmentRow({
   );
 }
 
-function EventRow({ ev }: { ev: VisionEvent }) {
+function EventRow({ ev, zone }: { ev: VisionEvent; zone: string }) {
   const payloadKeys = Object.keys(ev.payload ?? {});
   const color = SEVERITY_COLOR[ev.severity] ?? SEVERITY_COLOR.info;
   return (
@@ -962,7 +979,7 @@ function EventRow({ ev }: { ev: VisionEvent }) {
           {ev.severity}
         </span>
       </div>
-      <div className="mt-0.5 font-mono text-[10px] text-fg-muted">{formatClock(ev.timestamp)}</div>
+      <div className="mt-0.5 font-mono text-[10px] text-fg-muted">{formatClockIn(ev.timestamp, zone)}</div>
       {payloadKeys.length > 0 && (
         <div
           className="mt-1 truncate font-mono text-[10px] text-fg-muted/80"
