@@ -138,16 +138,34 @@ pub async fn snapshot_live_raw(state: &AppState, camera_id: &str) -> AppResult<V
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
 
+    // A live snapshot depends on a device this box does not control, so the failures split in two
+    // and they are not the same answer (#168):
+    //
+    //   the CAMERA did not answer  -> 503, retryable. An offline camera is the most expected
+    //                                 operating condition an NVR has; 500 says "this box is broken"
+    //                                 when the box is fine.
+    //   we could not run FFMPEG    -> 500. That one really is ours.
+    //
+    // The distinction matters beyond tidiness. With both as 500, a monitor cannot separate "a camera
+    // is down" from "the recorder is failing", so the alert that matters is buried under camera
+    // churn — and any availability SLO computed from 5xx on a site with flaky cameras is measuring
+    // the cameras.
     let out = tokio::time::timeout(Duration::from_secs(20), cmd.output())
         .await
-        .map_err(|_| AppError::Other(anyhow::anyhow!("live snapshot timed out")))?
-        .map_err(|e| AppError::Other(e.into()))?;
+        .map_err(|_| {
+            AppError::Unavailable(format!(
+                "camera {camera_id} did not deliver a frame within 20s; it may be offline or \
+                 unreachable"
+            ))
+        })?
+        // Spawning failed — a missing or unexecutable ffmpeg is this box's problem, not the camera's.
+        .map_err(|e| AppError::Other(anyhow::anyhow!("running {}: {e}", state.cfg.ffmpeg_bin)))?;
 
     if !out.status.success() || out.stdout.is_empty() {
         // Mask credentials that ffmpeg echoes back in the RTSP URL on failure.
         let stderr = String::from_utf8_lossy(&out.stderr);
-        return Err(AppError::Other(anyhow::anyhow!(
-            "live snapshot failed: {}",
+        return Err(AppError::Unavailable(format!(
+            "camera {camera_id} did not deliver a frame: {}",
             camera_url::mask_url(stderr.trim())
         )));
     }

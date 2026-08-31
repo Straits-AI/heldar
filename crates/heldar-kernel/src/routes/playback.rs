@@ -91,6 +91,7 @@ pub struct SnapshotQuery {
         (status = 200, description = "JPEG frame", content_type = "image/jpeg"),
         (status = 403, description = "Missing `video:playback`", body = crate::openapi::ErrorBody),
         (status = 404, description = "Unknown camera, or no footage at that instant", body = crate::openapi::ErrorBody),
+        (status = 503, description = "The camera did not deliver a frame — offline or unreachable. Retryable; an offline camera is an expected operating condition and is deliberately NOT a 500 (#168).", body = crate::openapi::ErrorBody),
     ),
 )]
 pub async fn snapshot_handler(
