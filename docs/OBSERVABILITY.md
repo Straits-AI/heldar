@@ -109,14 +109,36 @@ metric** on `/metrics` (observed fps is available per-camera via the health API,
 | `heldar_cameras_recording` | gauge | — | Cameras whose status row is `state = 'recording'`. |
 | `heldar_segments_total` | gauge | — | Indexed recording segments. |
 | `heldar_recordings_bytes` | gauge | — | Total bytes of recorded segments (`SUM(size_bytes)`). |
+| `heldar_ai_tasks_enabled` | gauge | — | AI tasks with `enabled = 1`. |
+| `heldar_detections_stored` | gauge | — | Detections currently stored. A **gauge**, not a counter: the retention sweeper prunes old rows, so it can decrease. |
 | `heldar_disk_total_bytes` | gauge | — | Total bytes on the recordings filesystem. *Omitted if statvfs fails.* |
 | `heldar_disk_free_bytes` | gauge | — | Free bytes on the recordings filesystem (`f_bavail`). *Omitted if statvfs fails.* |
 | `heldar_disk_used_percent` | gauge | — | Used percent of the recordings filesystem. *Omitted if statvfs fails.* |
 | `heldar_camera_up` | gauge | `camera`, `state` | `1` when that camera's state is `recording`, else `0`. One series per camera. |
 | `heldar_camera_reconnects_total` | counter | `camera` | Recorder reconnect count (from `camera_status.reconnect_count`). |
-| `heldar_camera_segments_written` | counter | `camera` | Segments written by the recorder. |
+| `heldar_camera_segments_written_total` | counter | `camera` | Segments written by the recorder. |
 | `heldar_camera_bitrate_kbps` | gauge | `camera` | Observed bitrate of the last indexed segment. *Only emitted when known.* |
 | `heldar_camera_last_segment_age_seconds` | gauge | `camera` | Seconds since the last indexed segment. *Only emitted when a segment exists.* |
+
+`scripts/check_documented_metrics.py` compares this table against `services/metrics.rs` in CI, in
+both directions. A name that has drifted produces an alerting rule that matches nothing and
+therefore never fires, which is the worst way for an alert to fail — it looks like health. This
+table was wrong in four places before that check existed.
+
+### What qualification needs and this does not export
+
+The benchmark harness (`docs/benchmarks/README.md`) measures what it can from outside the process
+and reports the rest as `unmeasured` rather than guessing. These are the gaps it runs into, listed
+here because they are metric gaps, not harness gaps:
+
+- **sampler effective FPS.** `heldar_detections_stored` is not a substitute: a sampler running at
+  the requested rate that sees nothing stores nothing. Answering "is the AI keeping up" needs a
+  sampler-side frames-processed counter.
+- **retention sweep duration.** Bytes reclaimed is inferable from `heldar_recordings_bytes` falling;
+  how long a sweep took, and whether it stalled recording, is not visible at all.
+- **SQLite contention.** No busy/retry counter, so the externally visible proxy is the API 5xx rate,
+  which is a superset and cannot separate contention from anything else.
+- **request latency.** No histogram or summary, so P95 has to be measured by the client.
 
 The disk gauges are conditional on `statvfs` succeeding for
 `HELDAR_RECORDINGS_DIR`; the per-camera bitrate / last-segment-age gauges are
@@ -175,7 +197,7 @@ groups:
 
       # 4) Recording gap proxy — segment counter flat while the camera is up.
       - alert: HeldarNoSegmentProgress
-        expr: increase(heldar_camera_segments_written[10m]) == 0 and on(camera) heldar_camera_up == 1
+        expr: increase(heldar_camera_segments_written_total[10m]) == 0 and on(camera) heldar_camera_up == 1
         for: 10m
         labels: { severity: warning }
         annotations:

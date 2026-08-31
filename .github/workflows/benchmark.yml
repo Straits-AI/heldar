@@ -1,0 +1,62 @@
+name: qualification benchmark
+
+# The long runs (#119). Not on push: a 24-hour soak on every commit is not a benchmark, it is a
+# bill. Dispatched for a release candidate, and weekly so a regression has a bounded time to hide.
+#
+# The SHORT gate — that every capacity claim in docs/sizing.md cites a run that passed — runs on
+# every PR in ci.yml, because that one is fast and is the part that stops a wrong number shipping.
+on:
+  workflow_dispatch:
+    inputs:
+      scenario:
+        description: "scenario from scripts/bench/scenarios.json"
+        required: true
+        default: rc-24h-8cam
+        type: choice
+        options: [smoke-2cam, qual-4cam-h264, qual-8cam-h264, qual-8cam-motion-ai,
+                  qual-16cam-h265, qual-32cam-h265, rc-24h-8cam, soak-7d-8cam]
+      hardware_class:
+        description: "what this run qualifies (recorded in the result and checked against sizing.md)"
+        required: true
+        default: github-runner-2c
+        type: string
+  schedule:
+    # Sunday 02:00 UTC. Long enough after the week's merges to be about the week, not a commit.
+    - cron: "0 2 * * 0"
+
+permissions:
+  contents: read
+
+jobs:
+  benchmark:
+    name: ${{ inputs.scenario || 'smoke-2cam' }} on ${{ inputs.hardware_class || 'github-runner-2c' }}
+    runs-on: ubuntu-latest
+    # A 24-hour scenario needs more than the 6-hour job default; GitHub caps a job at 72 h in any
+    # case, so the seven-day soak CANNOT run here and must be run on a real appliance. Saying so
+    # here rather than letting someone discover it when a run is killed at hour 72.
+    timeout-minutes: 1440
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - name: install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: provision MediaMTX
+        run: ./scripts/setup_mediamtx.sh
+      - name: build the release core
+        # Release, always. A debug recorder is several times slower than the one an appliance
+        # ships, so a capacity number measured against it is wrong in the direction that makes the
+        # product look bad while telling you nothing about the product.
+        run: cargo build --release --locked -p heldar-server --bin heldar-core
+      - name: run
+        run: |
+          python3 scripts/bench/harness.py run "${{ inputs.scenario || 'smoke-2cam' }}" \
+            --hardware-class "${{ inputs.hardware_class || 'github-runner-2c' }}"
+      - name: upload the result
+        # `always()`: a FAILED run is the one worth keeping. The harness exits non-zero on a failed
+        # threshold, and losing the evidence because the gate did its job would be perverse.
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-${{ inputs.scenario || 'smoke-2cam' }}
+          path: docs/benchmarks/results/
+          retention-days: 90

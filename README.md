@@ -108,6 +108,14 @@ stable JSON, documented exit codes, and `heldarctl doctor` as the one command th
 what to fix: [`docs/HELDARCTL.md`](docs/HELDARCTL.md). It ships for the same architectures as the
 core binary.
 
+**Capacity claims are measured, not asserted.** `scripts/bench/harness.py` boots a declared camera
+workload — count, codec, bitrate, GOP, AI profile — against a real recorder, injects camera, MediaMTX
+and core faults, and writes a machine-readable result with full hardware and software provenance. CI
+then refuses any camera-count claim in [`docs/sizing.md`](docs/sizing.md) that does not cite a run
+that passed, and refuses one whose thresholds were changed after the run — so a bar cannot be
+loosened to rescue a number. What is *not* measured is reported as `unmeasured` rather than assumed,
+because an unmeasured threshold is not a met one: [`docs/benchmarks/README.md`](docs/benchmarks/README.md).
+
 Onboard a camera (you supply the address and credentials; the RTSP URL is built from the vendor
 template):
 

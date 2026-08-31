@@ -58,6 +58,22 @@ jobs:
           # half of the lint silently skips and the step reports success having checked less.
           cargo test -p heldar-server --test openapi_contract write_the_served_document --locked
           python3 scripts/validate_skills.py
+      - name: capacity claims are backed by a run that passed (#119)
+        run: |
+          set -euo pipefail
+          # docs/sizing.md tells people how many cameras a box will carry, and someone buys
+          # hardware against that sentence. Every row must cite a run that PASSED, or say
+          # EXTRAPOLATED. The verdict is recomputed from the run's raw measurements rather than
+          # read from its `verdict` field, and a run judged against different thresholds from the
+          # ones in the tree today does not count — so loosening a bar to turn a red run green
+          # invalidates the claim it was loosened for.
+          python3 scripts/bench/test_harness.py
+          python3 scripts/bench/test_capacity_gate.py
+          python3 scripts/verify_capacity_claims.py
+          # Documented metric names must match the exposition, both ways. An alerting rule copied
+          # from a drifted table matches nothing and never fires, which looks exactly like health.
+          python3 scripts/bench/test_doc_drift.py
+          python3 scripts/check_documented_metrics.py
       - name: read-seam lint (cross-app reads go through *_read views)
         run: ./scripts/check-read-seam.sh
       # A generated client that COMPILES is a stronger statement about the contract than any prose:
