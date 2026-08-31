@@ -500,7 +500,7 @@ export function CameraDetail() {
             </Panel>
           )}
 
-          <PlaybackSessionPanel key={id} cameraId={id} />
+          <PlaybackSessionPanel key={id} cameraId={id} zone={camZone.zone} />
 
           {/* The zone is stated, not assumed (#148). This panel sat directly above a Recording
               Schedule labelled with the SITE's zone while rendering the same camera's segments in
@@ -545,9 +545,9 @@ export function CameraDetail() {
             )}
           </Panel>
 
-          <AiPanel cameraId={id} canManage={canManage} />
+          <AiPanel cameraId={id} canManage={canManage} zone={camZone.zone} />
 
-          <ZonePanel cameraId={id} canManage={canManage} />
+          <ZonePanel cameraId={id} canManage={canManage} zone={camZone.zone} />
 
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
             <Panel title="Snapshot" subtitle="Frame grab">
@@ -633,7 +633,7 @@ export function CameraDetail() {
             </Panel>
           </div>
 
-          <SnapshotSchedulesPanel cameraId={id} canManage={canManage} />
+          <SnapshotSchedulesPanel cameraId={id} canManage={canManage} zone={camZone.zone} />
         </div>
 
         {/* Side column */}
@@ -884,7 +884,7 @@ export function CameraDetail() {
             )}
           </Panel>
 
-          <RecordingGapsPanel cameraId={id} canManage={canManage} />
+          <RecordingGapsPanel cameraId={id} canManage={canManage} zone={camZone.zone} />
 
           <Panel
             title="Recent Events"
