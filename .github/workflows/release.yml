@@ -238,11 +238,17 @@ jobs:
           TAG: ${{ github.ref_name }}
           ASSET: ${{ steps.build.outputs.asset }}
           CLI: ${{ steps.build.outputs.cli-asset }}
-          ARCH_LABEL: ${{ matrix.arch }}
+          MCP: ${{ steps.build.outputs.mcp-asset }}
         shell: bash
         run: |
+          set -euo pipefail
+          # An unset output is an EMPTY string, and `gh release upload "$TAG" ""` is a confusing
+          # failure a long way from its cause. `asset` had no `value:` at all for two merges; this
+          # says so at the point of use as well as in the guard.
+          for v in ASSET CLI MCP; do
+            test -n "${!v}" || { echo "::error::$v is empty — check the composite action's outputs"; exit 1; }
+          done
           gh release upload "$TAG" "$ASSET" "$ASSET.sha256" "$ASSET.spdx.json" --clobber
-          # heldarctl ships for every architecture the core does (#122).
+          # heldarctl and heldar-mcp ship for every architecture the core does (#122, #123).
           gh release upload "$TAG" "$CLI" "$CLI.sha256" --clobber
-          MCP="heldar-mcp-${TAG}-${ARCH_LABEL}-linux-musl"
           gh release upload "$TAG" "$MCP" "$MCP.sha256" --clobber

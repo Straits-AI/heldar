@@ -102,6 +102,13 @@ jobs:
       # ALLOWED on this pre-1.0 appliance — what is not allowed is shipping one by accident, because
       # it breaks a generated client at runtime in someone else's deployment. `continue-on-error`
       # while the baseline does not exist yet: a release has to publish one before this can enforce.
+      - name: composite-action outputs resolve to something real
+        # An `outputs:` entry with no `value` is valid syntax that always yields "". The release
+        # action shipped exactly that for two merges; nothing would have noticed until release day.
+        run: |
+          set -euo pipefail
+          python3 scripts/test_action_outputs.py
+          python3 scripts/check_action_outputs.py
       - name: the contract-diff classifier is correct in both directions
         # A false "breaking" trains people to ignore the diff; a false "additive" is how a break
         # ships. Both directions are pinned, including that response and request schemas are judged
