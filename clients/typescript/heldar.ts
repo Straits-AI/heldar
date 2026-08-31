@@ -232,6 +232,9 @@ export interface ContinuousMoveRequest {
   zoom?: number;
 }
 
+/** An [x, y] pair, normalized 0..1 against the frame's width and height. */
+export type Coordinate = [number, number];
+
 export interface CreateSessionRequest {
   from: string;
   to: string;
@@ -581,14 +584,14 @@ export interface SmartLine {
   direction: string;
   enabled: boolean;
   id: number;
-  points: number[][];
+  points: Coordinate[];
   sensitivity: number;
 }
 
 export interface SmartRegion {
   enabled: boolean;
   id: number;
-  points: number[][];
+  points: Coordinate[];
   sensitivity: number;
   time_threshold: number;
 }
@@ -620,7 +623,7 @@ export interface TimeConfig {
 }
 
 export interface TimezoneSettings {
-  configured?: string | null;
+  configured: string | null;
   server_local_offset: string;
   source: TzSource;
   unconfigured_behaviour: string;
@@ -878,7 +881,7 @@ export interface ZoneCreate {
   kind?: string | null;
   labels?: unknown;
   name: string;
-  polygon: unknown;
+  polygon: Coordinate[];
   severity?: string | null;
 }
 
@@ -889,7 +892,7 @@ export interface ZoneUpdate {
   kind?: string | null;
   labels?: unknown;
   name?: string | null;
-  polygon?: unknown;
+  polygon?: Coordinate[] | null;
   severity?: string | null;
 }
 

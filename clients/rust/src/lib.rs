@@ -288,6 +288,9 @@ pub struct ContinuousMoveRequest {
     pub zoom: Option<f64>,
 }
 
+/// An [x, y] pair, normalized 0..1 against the frame's width and height.
+pub type Coordinate = [f64; 2];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSessionRequest {
     pub from: String,
@@ -723,7 +726,7 @@ pub struct SmartLine {
     pub direction: String,
     pub enabled: bool,
     pub id: i64,
-    pub points: Vec<Vec<f64>>,
+    pub points: Vec<Coordinate>,
     pub sensitivity: i64,
 }
 
@@ -731,7 +734,7 @@ pub struct SmartLine {
 pub struct SmartRegion {
     pub enabled: bool,
     pub id: i64,
-    pub points: Vec<Vec<f64>>,
+    pub points: Vec<Coordinate>,
     pub sensitivity: i64,
     pub time_threshold: i64,
 }
@@ -1064,7 +1067,7 @@ pub struct ZoneCreate {
     pub kind: Option<String>,
     pub labels: Option<serde_json::Value>,
     pub name: String,
-    pub polygon: serde_json::Value,
+    pub polygon: Vec<Coordinate>,
     pub severity: Option<String>,
 }
 
@@ -1076,7 +1079,7 @@ pub struct ZoneUpdate {
     pub kind: Option<String>,
     pub labels: Option<serde_json::Value>,
     pub name: Option<String>,
-    pub polygon: Option<serde_json::Value>,
+    pub polygon: Option<Vec<Coordinate>>,
     pub severity: Option<String>,
 }
 

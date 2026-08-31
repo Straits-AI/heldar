@@ -11,8 +11,8 @@ runtime, in someone else's deployment, long after the commit that did it.
 WHAT COUNTS AS BREAKING, and why each one:
 
   * a route or method disappears            — a client's call 404s
-  * a required request field is ADDED       — every existing caller's payload becomes invalid
-  * an optional request field becomes required — same, with no signal
+  * a required REQUEST field is ADDED       — every existing caller's payload becomes invalid
+  * an optional REQUEST field becomes required — same, with no signal
   * a response field is REMOVED             — a client reading it gets undefined
   * a declared capability CHANGES           — a working credential stops working
   * an enum loses a value a client may send
@@ -50,6 +50,54 @@ def operations(doc):
             if method in METHODS and isinstance(op, dict):
                 out[(path, method)] = op
     return out
+
+
+def refs_in(node, out):
+    """Every `#/components/schemas/X` name reachable from `node`, transitively."""
+    if isinstance(node, dict):
+        r = node.get("$ref")
+        if isinstance(r, str) and r.startswith("#/components/schemas/"):
+            out.add(r.rsplit("/", 1)[-1])
+        for v in node.values():
+            refs_in(v, out)
+    elif isinstance(node, list):
+        for v in node:
+            refs_in(v, out)
+    return out
+
+
+def schema_roles(doc):
+    """`(request_schemas, response_schemas)` — which side of the wire each named schema is used on.
+
+    A REQUEST schema and a RESPONSE schema break in OPPOSITE directions: tightening a request breaks
+    callers, loosening a response breaks readers. This module's own docstring said so from the start
+    and the code applied one rule to both, so a response schema gaining a `required` field — which is
+    the server PROMISING MORE, and is what a reader wants — was reported as BREAKING.
+
+    That matters because a diff tool that cries wolf is one people stop reading. Found when
+    `TimezoneSettings.configured` was marked required to say the server always sends it (#156).
+
+    A schema used on BOTH sides is treated as a request schema: the request rule is the stricter one,
+    and guessing wrong in that direction only over-reports.
+    """
+    schemas = (doc.get("components") or {}).get("schemas") or {}
+    req, resp = set(), set()
+    for op in operations(doc).values():
+        refs_in(op.get("requestBody") or {}, req)
+        refs_in(op.get("responses") or {}, resp)
+
+    # Follow references BETWEEN schemas: a schema is on whichever side the schema naming it is on.
+    def close(seed):
+        seen, queue = set(seed), list(seed)
+        while queue:
+            name = queue.pop()
+            for child in refs_in(schemas.get(name) or {}, set()):
+                if child not in seen:
+                    seen.add(child)
+                    queue.append(child)
+        return seen
+
+    return close(req), close(resp)
 
 
 def required_of(schema):
@@ -91,11 +139,22 @@ def main():
     # request breaks callers, loosening a response breaks readers — so they cannot share a rule.
     old_s = (old.get("components") or {}).get("schemas") or {}
     new_s = (new.get("components") or {}).get("schemas") or {}
+    req_schemas, resp_schemas = schema_roles(new)
     for name in sorted(set(old_s) & set(new_s)):
         o, n = old_s[name], new_s[name]
         gained_required = required_of(n) - required_of(o)
         if gained_required:
-            breaking.append(f"{name} now requires {sorted(gained_required)}")
+            if name in req_schemas or name not in resp_schemas:
+                # A caller's existing payload becomes invalid. (Unreferenced schemas are treated as
+                # requests: unknown role, stricter rule.)
+                breaking.append(f"{name} now requires {sorted(gained_required)}")
+            else:
+                # Response-only: the server now PROMISES the field is always there. A reader that
+                # handled it as optional still works; one written against the new contract can stop
+                # handling an absence that cannot happen.
+                additive.append(
+                    f"{name} now always sends {sorted(gained_required)} (response-only)"
+                )
         lost_props = properties_of(o) - properties_of(n)
         if lost_props:
             breaking.append(f"{name} no longer has {sorted(lost_props)}")

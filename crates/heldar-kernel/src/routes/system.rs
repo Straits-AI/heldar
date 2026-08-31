@@ -87,7 +87,15 @@ pub async fn get_posture(
 /// operator see "the site says Asia/Kuala_Lumpur but this container is running on +00:00".
 #[derive(Debug, Serialize, utoipa::ToSchema)]
 pub struct TimezoneSettings {
-    /// The IANA identifier configured box-wide, if any.
+    /// The IANA identifier configured box-wide, or `null` when none is.
+    ///
+    /// Always present in the response.
+    //
+    // `required = true` overrides what the derive infers from `Option` (#156). Without it the
+    // schema said "may be absent" for a field the server never omits, so every generated client had
+    // to handle a case that cannot happen — and a client that handles absent and null differently
+    // would be handling a phantom.
+    #[schema(required = true)]
     configured: Option<String>,
     source: crate::services::tz::TzSource,
     /// The server's own local offset (`%:z`), for spotting a container whose `TZ` disagrees.

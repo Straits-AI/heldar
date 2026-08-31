@@ -122,6 +122,20 @@ def type_of(schema, lang, schemas):
 
     if t == "array":
         item = type_of(schema.get("items") or {}, lang, schemas)
+        # A FIXED-LENGTH array is not a list. `minItems == maxItems` says the length is part of the
+        # type, and flattening it to a growable list throws away the one thing a client can check at
+        # compile time — a caller sending three numbers where the server demands a pair finds out at
+        # runtime, which is what a published contract exists to prevent. (Same shape of loss as
+        # `additionalProperties` above: the schema was precise and the generator was not.)
+        #
+        # Bounded at 8: past that a tuple stops being readable and is not what these schemas mean.
+        lo, hi = schema.get("minItems"), schema.get("maxItems")
+        if isinstance(lo, int) and lo == hi and 1 <= lo <= 8:
+            return {
+                "ts": "[" + ", ".join([item] * lo) + "]",
+                "py": "tuple[" + ", ".join([item] * lo) + "]",
+                "rs": f"[{item}; {lo}]",
+            }[lang]
         return {"ts": f"{item}[]", "py": f"list[{item}]", "rs": f"Vec<{item}>"}[lang]
     if t == "object" or t is None:
         # A MAP is not a free-form object. `additionalProperties` with a schema says every value has
@@ -200,6 +214,14 @@ def emit_typescript(doc, ops, schemas, out):
         if schema.get("type") == "string" and "enum" in schema:
             variants = " | ".join(json.dumps(v) for v in schema["enum"])
             lines.append(f"export type {name} = {variants};\n")
+            continue
+        # A named schema that is NOT an object is an alias, not an empty struct. Emitting a
+        # bodyless type for an array schema does not merely lose the pairing — it types a
+        # coordinate as an object, which is worse than the `number[][]` it replaced.
+        if schema.get("type") and schema.get("type") != "object":
+            if desc := schema.get("description"):
+                lines.append(f"/** {desc} */")
+            lines.append(f"export type {name} = {type_of(schema, 'ts', schemas)};\n")
             continue
         req = set(schema.get("required") or [])
         lines.append(f"export interface {name} {{")
@@ -284,6 +306,14 @@ def emit_dashboard_types(doc, schemas, path="apps/web/src/lib/contract.ts"):
             variants = " | ".join(json.dumps(v) for v in schema["enum"])
             lines.append(f"export type {name} = {variants};\n")
             continue
+        # A named schema that is NOT an object is an alias, not an empty struct. Emitting a
+        # bodyless type for an array schema does not merely lose the pairing — it types a
+        # coordinate as an object, which is worse than the `number[][]` it replaced.
+        if schema.get("type") and schema.get("type") != "object":
+            if desc := schema.get("description"):
+                lines.append(f"/** {desc} */")
+            lines.append(f"export type {name} = {type_of(schema, 'ts', schemas)};\n")
+            continue
         req = set(schema.get("required") or [])
         lines.append(f"export interface {name} {{")
         for prop, ps in (schema.get("properties") or {}).items():
@@ -330,6 +360,15 @@ def emit_python(doc, ops, schemas, out):
     for name, schema in sorted(schemas.items()):
         if schema.get("type") == "string" and "enum" in schema:
             lines.append(f"{name} = str  # one of: {', '.join(map(str, schema['enum']))}")
+            lines.append("")
+            continue
+        # A named schema that is NOT an object is an alias, not an empty struct. Emitting a
+        # bodyless type for an array schema does not merely lose the pairing — it types a
+        # coordinate as an object, which is worse than the `number[][]` it replaced.
+        if schema.get("type") and schema.get("type") != "object":
+            lines.append(f"{name} = {type_of(schema, 'py', schemas)}")
+            if desc := schema.get("description"):
+                lines.append(f'"""{desc}"""')
             lines.append("")
             continue
         req = set(schema.get("required") or [])
@@ -418,6 +457,14 @@ def emit_rust(doc, ops, schemas, out):
                 lines.append(f'    #[serde(rename = "{v}")]')
                 lines.append(f"    {variant},")
             lines.append("}\n")
+            continue
+        # A named schema that is NOT an object is an alias, not an empty struct. Emitting a
+        # bodyless type for an array schema does not merely lose the pairing — it types a
+        # coordinate as an object, which is worse than the `number[][]` it replaced.
+        if schema.get("type") and schema.get("type") != "object":
+            if desc := schema.get("description"):
+                lines.append(f"/// {desc}")
+            lines.append(f"pub type {name} = {type_of(schema, 'rs', schemas)};\n")
             continue
         req = set(schema.get("required") or [])
         lines.append("#[derive(Debug, Clone, Serialize, Deserialize)]")

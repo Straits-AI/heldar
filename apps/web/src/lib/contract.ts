@@ -256,6 +256,9 @@ export interface ContinuousMoveRequest {
   zoom?: number;
 }
 
+/** An [x, y] pair, normalized 0..1 against the frame's width and height. */
+export type Coordinate = [number, number];
+
 export interface CreateSessionRequest {
   from: string;
   to: string;
@@ -675,7 +678,7 @@ export interface SmartLine {
   enabled: boolean;
   id: number;
   /** Exactly two endpoints, normalized 0..1. */
-  points: number[][];
+  points: Coordinate[];
   /** 1–100. */
   sensitivity: number;
 }
@@ -684,7 +687,7 @@ export interface SmartRegion {
   enabled: boolean;
   id: number;
   /** Polygon vertices, normalized 0..1 (empty = slot unconfigured). */
-  points: number[][];
+  points: Coordinate[];
   /** 1–100. */
   sensitivity: number;
   /** Seconds a target must stay inside before the alarm fires (device `timeThreshold`). */
@@ -721,8 +724,8 @@ export interface TimeConfig {
 }
 
 export interface TimezoneSettings {
-  /** The IANA identifier configured box-wide, if any. */
-  configured?: string | null;
+  /** The IANA identifier configured box-wide, or `null` when none is.  Always present in the response. */
+  configured: string | null;
   /** The server's own local offset (`%:z`), for spotting a container whose `TZ` disagrees. */
   server_local_offset: string;
   source: TzSource;
@@ -997,7 +1000,8 @@ export interface ZoneCreate {
   kind?: string | null;
   labels?: unknown;
   name: string;
-  polygon: unknown;
+  /** Vertices, normalized 0..1. At least 3 for a polygon, exactly 2 for a `line` zone. */
+  polygon: Coordinate[];
   severity?: string | null;
 }
 
@@ -1008,6 +1012,7 @@ export interface ZoneUpdate {
   kind?: string | null;
   labels?: unknown;
   name?: string | null;
-  polygon?: unknown;
+  /** Vertices, normalized 0..1. Omit to leave the geometry unchanged. */
+  polygon?: Coordinate[] | null;
   severity?: string | null;
 }

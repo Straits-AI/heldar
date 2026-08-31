@@ -277,6 +277,9 @@ class ContinuousMoveRequest:
     zoom: float = None
 
 
+Coordinate = tuple[float, float]
+"""An [x, y] pair, normalized 0..1 against the frame's width and height."""
+
 @dataclass
 class CreateSessionRequest:
     from_: str  # wire name: "from"
@@ -678,7 +681,7 @@ class SmartLine:
     direction: str
     enabled: bool
     id: int
-    points: list[list[float]]
+    points: list[Coordinate]
     sensitivity: int
 
 
@@ -686,7 +689,7 @@ class SmartLine:
 class SmartRegion:
     enabled: bool
     id: int
-    points: list[list[float]]
+    points: list[Coordinate]
     sensitivity: int
     time_threshold: int
 
@@ -723,10 +726,10 @@ class TimeConfig:
 
 @dataclass
 class TimezoneSettings:
+    configured: str | None
     server_local_offset: str
     source: TzSource
     unconfigured_behaviour: str
-    configured: str | None = None
 
 
 @dataclass
@@ -999,7 +1002,7 @@ class WebhookTestResult:
 @dataclass
 class ZoneCreate:
     name: str
-    polygon: object
+    polygon: list[Coordinate]
     config: object = None
     dwell_seconds: float | None = None
     enabled: bool | None = None
@@ -1016,7 +1019,7 @@ class ZoneUpdate:
     kind: str | None = None
     labels: object = None
     name: str | None = None
-    polygon: object = None
+    polygon: list[Coordinate] | None = None
     severity: str | None = None
 
 

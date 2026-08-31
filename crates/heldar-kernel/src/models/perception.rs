@@ -244,6 +244,17 @@ pub struct Zone {
 pub struct ZoneCreate {
     pub name: String,
     pub kind: Option<String>,
+    /// Vertices, normalized 0..1. At least 3 for a polygon, exactly 2 for a `line` zone.
+    //
+    // `///` above is CONTRACT TEXT — utoipa publishes it as the schema description, so it says what
+    // an integrator needs and nothing about our internals. The rest belongs here:
+    //
+    // This stays a `Value` at the Rust boundary on purpose (#156). `routes::zones::validate_polygon`
+    // checks vertex count, pairing and the 0..1 range, and answers with the point that is wrong —
+    // "polygon point 3 is not numeric", "coordinates must be normalized 0..1 (point 5)". Typing the
+    // field as `Vec<Coordinate>` would hand that to serde and replace those with a generic
+    // deserialize error, which is a worse answer for an operator. Only the SCHEMA is tightened.
+    #[schema(value_type = Vec<crate::openapi::Coordinate>)]
     pub polygon: Value,
     pub dwell_seconds: Option<f64>,
     pub labels: Option<Value>,
@@ -256,6 +267,9 @@ pub struct ZoneCreate {
 pub struct ZoneUpdate {
     pub name: Option<String>,
     pub kind: Option<String>,
+    /// Vertices, normalized 0..1. Omit to leave the geometry unchanged.
+    // Stays a `Value` for the same reason as `ZoneCreate::polygon`.
+    #[schema(value_type = Option<Vec<crate::openapi::Coordinate>>)]
     pub polygon: Option<Value>,
     pub dwell_seconds: Option<f64>,
     pub labels: Option<Value>,
