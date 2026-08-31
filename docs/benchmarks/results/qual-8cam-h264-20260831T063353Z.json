@@ -1,0 +1,5458 @@
+{
+  "api_by_path": [
+    {
+      "bad": 0,
+      "max_s": 0.367,
+      "n": 64,
+      "path": "/metrics"
+    },
+    {
+      "bad": 0,
+      "max_s": 0.072,
+      "n": 8,
+      "path": "/api/v1/cameras/{id}/gaps?from=2026-08-31T06:34:18Z&to=2026-08-31T07:05:20Z"
+    }
+  ],
+  "cameras": [
+    "bench_001",
+    "bench_002",
+    "bench_003",
+    "bench_004",
+    "bench_005",
+    "bench_006",
+    "bench_007",
+    "bench_008"
+  ],
+  "checks": [
+    {
+      "limit": 30,
+      "metric": "unexplained_gap_seconds_per_camera_hour",
+      "observed": 37.723,
+      "op": "<=",
+      "status": "FAIL",
+      "why": "30 s/camera-hour is 99.2% coverage. Gaps the harness itself caused by unplugging a publisher are subtracted; what remains is coverage the recorder lost on its own, which is the number a retention or evidence claim rests on."
+    },
+    {
+      "limit": 0,
+      "metric": "unplayable_segment_count",
+      "observed": 0,
+      "op": "<=",
+      "status": "PASS",
+      "why": "A segment that indexes but will not decode is worse than a missing one: the timeline says the footage exists. Zero, not a rate \u2014 one unplayable segment is one piece of evidence that is not there."
+    },
+    {
+      "limit": 60,
+      "metric": "recorder_reconnect_seconds_p95",
+      "observed": 230.5,
+      "op": "<=",
+      "status": "FAIL",
+      "why": "A camera that drops must be back within a minute at P95, or a fleet with ordinary network churn accumulates gaps faster than the coverage bar allows."
+    },
+    {
+      "limit": 120,
+      "metric": "restart_recovery_seconds",
+      "observed": 9.29,
+      "op": "<=",
+      "status": "PASS",
+      "why": "Recovery is every camera recording again, not the API answering. Two minutes is an upgrade window an operator can accept; longer and a routine restart becomes a scheduled outage."
+    },
+    {
+      "limit": 0.01,
+      "metric": "liveview_failure_rate",
+      "observed": 0.0,
+      "op": "<=",
+      "status": "PASS",
+      "why": "Live view is the most-used operator path. One failure in a hundred is already noticeable at a video wall refreshing every few seconds."
+    },
+    {
+      "limit": 5.0,
+      "metric": "liveview_seconds_p95",
+      "observed": 6.838,
+      "op": "<=",
+      "status": "FAIL",
+      "why": "Beyond five seconds to hand back a live URL, an operator assumes the camera is down and starts investigating a system that is working."
+    },
+    {
+      "limit": 0.02,
+      "metric": "snapshot_failure_rate",
+      "observed": 0.0,
+      "op": "<=",
+      "status": "PASS",
+      "why": "Snapshots contend with the recorder for the same stream, so a slightly looser bar than live view \u2014 but a failing snapshot is a failing thumbnail everywhere in the dashboard."
+    },
+    {
+      "limit": 10.0,
+      "metric": "snapshot_seconds_p95",
+      "observed": 7.807,
+      "op": "<=",
+      "status": "PASS",
+      "why": "A snapshot must wait for a keyframe; ten seconds covers a two-second GOP with contention and still fails a box that is genuinely saturated."
+    },
+    {
+      "limit": 0.99,
+      "metric": "clip_success_rate",
+      "observed": 1.0,
+      "op": ">=",
+      "status": "PASS",
+      "why": "Clip export is the evidence path. Windows with no footage are excluded from the rate (a 404 is a fact about the window); what is graded is whether existing footage could be exported."
+    },
+    {
+      "limit": 30.0,
+      "metric": "clip_seconds_p95",
+      "observed": 3.035,
+      "op": "<=",
+      "status": "PASS",
+      "why": "A 30-second clip is `-c copy`, so it is a concat and a trim. If P95 exceeds 30 s the disk, not the encoder, is the limit \u2014 and that is a capacity finding."
+    },
+    {
+      "limit": 0.005,
+      "metric": "api_5xx_rate",
+      "observed": 0.0,
+      "op": "<=",
+      "status": "PASS",
+      "why": "Counts connection failures as well as 5xx, over CONTROL-PLANE calls: snapshot, live view and clip have their own bars below. Calls to a camera the harness has deliberately unplugged are excluded; calls to any other camera are not. This is the externally visible superset of SQLite contention, which the kernel exposes no counter for."
+    },
+    {
+      "limit": 2.0,
+      "metric": "api_seconds_p95",
+      "observed": 0.252,
+      "op": "<=",
+      "status": "PASS",
+      "why": "Control-plane calls only \u2014 the dashboard makes several per view, and a two-second P95 is already a sluggish page. Media paths are measured separately because a snapshot must wait for a keyframe and cannot be held to a control-plane bar."
+    }
+  ],
+  "duration_s": 2002.0,
+  "ended_at": "2026-08-31T07:07:40Z",
+  "faults": [
+    {
+      "at_s": 300,
+      "count": 2,
+      "kind": "publisher_stop",
+      "outcome": {
+        "stopped": [
+          "bench_001",
+          "bench_002"
+        ]
+      }
+    },
+    {
+      "at_s": 420,
+      "count": 2,
+      "kind": "publisher_start",
+      "outcome": {
+        "started": [
+          "bench_001",
+          "bench_002"
+        ]
+      }
+    },
+    {
+      "at_s": 720,
+      "kind": "mediamtx_restart",
+      "outcome": {
+        "publishers_restarted": [
+          "bench_003",
+          "bench_004",
+          "bench_005",
+          "bench_006",
+          "bench_007",
+          "bench_008",
+          "bench_001",
+          "bench_002"
+        ],
+        "recovery_s": 29.11746779200621,
+        "restarted": "mediamtx"
+      }
+    },
+    {
+      "at_s": 1200,
+      "kind": "core_restart",
+      "outcome": {
+        "recovery_s": 9.285795375006273,
+        "restarted": "core"
+      }
+    }
+  ],
+  "injected_outages": [
+    [
+      "bench_001",
+      "2026-08-31T06:40:25Z",
+      "2026-08-31T06:42:19Z"
+    ],
+    [
+      "bench_002",
+      "2026-08-31T06:40:26Z",
+      "2026-08-31T06:42:19Z"
+    ],
+    [
+      "ALL",
+      "2026-08-31T06:46:16Z",
+      "2026-08-31T06:46:56Z"
+    ],
+    [
+      "ALL",
+      "2026-08-31T06:54:29Z",
+      "2026-08-31T06:54:48Z"
+    ]
+  ],
+  "measurements": {
+    "ai_fps_effective_ratio": {
+      "unmeasured": "this scenario runs with AI off"
+    },
+    "api_5xx_rate": {
+      "excluded_as_setup_or_media": 380,
+      "excluded_during_injected_outage": 25,
+      "n": 72,
+      "unit": "ratio",
+      "value": 0.0
+    },
+    "api_seconds_p95": {
+      "excluded_as_setup_or_media": 380,
+      "excluded_during_injected_outage": 25,
+      "n": 72,
+      "unit": "s",
+      "value": 0.252
+    },
+    "clip_seconds_p95": {
+      "n": 90,
+      "unit": "s",
+      "value": 3.035
+    },
+    "clip_success_rate": {
+      "n": 90,
+      "unit": "ratio",
+      "value": 1.0
+    },
+    "core_cpu_percent_mean": {
+      "n": 66,
+      "unit": "percent-of-one-core",
+      "value": 1.66
+    },
+    "core_rss_bytes_max": {
+      "n": 66,
+      "unit": "bytes",
+      "value": 34193408
+    },
+    "disk_iops": {
+      "unmeasured": "not portably measurable without a platform-specific dependency"
+    },
+    "disk_used_percent_max": {
+      "n": 66,
+      "unit": "percent",
+      "value": 97.5393421968584
+    },
+    "event_ingest_latency_seconds_p95": {
+      "unmeasured": "no event producer is driven by this harness; the kernel exposes no ingest histogram"
+    },
+    "footage_lost_per_restart_seconds": {
+      "n": 8,
+      "unit": "s/camera/restart",
+      "value": 4.38
+    },
+    "gpu_utilisation_percent": {
+      "unmeasured": "no GPU is used by this profile"
+    },
+    "liveview_failure_rate": {
+      "excluded_during_injected_outage": 2,
+      "n": 118,
+      "unit": "ratio",
+      "value": 0.0
+    },
+    "liveview_seconds_p95": {
+      "excluded_during_injected_outage": 2,
+      "n": 118,
+      "unit": "s",
+      "value": 6.838
+    },
+    "mediamtx_recovery_seconds": {
+      "n": 1,
+      "unit": "s",
+      "value": 29.12
+    },
+    "network_throughput_bytes": {
+      "unmeasured": "not portably measurable without a platform-specific dependency"
+    },
+    "recorder_reconnect_seconds_p50": {
+      "n": 25,
+      "unit": "s",
+      "value": 85.03
+    },
+    "recorder_reconnect_seconds_p95": {
+      "n": 25,
+      "unit": "s",
+      "value": 230.5
+    },
+    "recording_gap_seconds_per_camera_hour": {
+      "n": 8,
+      "unit": "s/camera-hour",
+      "value": 249.009,
+      "window": {
+        "clamped_to_retention": false,
+        "from": "2026-08-31T06:34:18Z",
+        "to": "2026-08-31T07:05:20Z"
+      }
+    },
+    "restart_recovery_seconds": {
+      "n": 1,
+      "unit": "s",
+      "value": 9.29
+    },
+    "retention_bytes_reclaimed": {
+      "n": 66,
+      "unit": "bytes",
+      "value": 0
+    },
+    "retention_sweep_seconds": {
+      "unmeasured": "the sweeper emits no duration metric; only bytes reclaimed is externally visible"
+    },
+    "snapshot_failure_rate": {
+      "excluded_during_injected_outage": 2,
+      "n": 118,
+      "unit": "ratio",
+      "value": 0.0
+    },
+    "snapshot_seconds_p95": {
+      "excluded_during_injected_outage": 2,
+      "n": 118,
+      "unit": "s",
+      "value": 7.807
+    },
+    "sqlite_busy_rate": {
+      "unmeasured": "the kernel exposes no busy counter; API 5xx is measured instead and is a superset"
+    },
+    "time_to_first_segment_seconds": {
+      "n": 8,
+      "unit": "s",
+      "value": 18.37
+    },
+    "unexplained_gap_seconds_per_camera_hour": {
+      "n": 8,
+      "unit": "s/camera-hour",
+      "value": 37.723,
+      "window": {
+        "clamped_to_retention": false,
+        "from": "2026-08-31T06:34:18Z",
+        "to": "2026-08-31T07:05:20Z"
+      }
+    },
+    "unindexed_segment_files": {
+      "n": 1,
+      "unit": "files",
+      "value": 10
+    },
+    "unplayable_segment_count": {
+      "indexed_total": 1441,
+      "n": 76,
+      "unit": "segments",
+      "value": 0
+    },
+    "worker_lease_churn": {
+      "unmeasured": "requires AI workers holding leases; not driven by this harness"
+    }
+  },
+  "ports": {
+    "api": 64335,
+    "rtsp": 8654
+  },
+  "probes": {
+    "clip": [
+      {
+        "at": "2026-08-31T06:36:27Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.798,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:36:55Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 7.575,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:37:21Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.052,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:37:36Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.035,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:37:45Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.032,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:37:56Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.039,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:38:06Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.079,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:38:18Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.146,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:38:45Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.129,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:38:57Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.088,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:39:10Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.062,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:39:24Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.041,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:39:35Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.002,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:39:48Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.037,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:40:02Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.085,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:40:15Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.017,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:40:47Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": true,
+        "ok": false,
+        "seconds": 0.034,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:40:58Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": true,
+        "ok": false,
+        "seconds": 0.005,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:41:05Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.045,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:41:13Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.023,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:41:27Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.006,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:41:33Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.004,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:41:52Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.913,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:42:09Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.479,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:42:48Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.052,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:42:59Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.23,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:43:08Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.055,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:43:22Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.229,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:43:36Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.072,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:43:49Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.024,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:44:00Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.105,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:44:11Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.006,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:44:52Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.01,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:45:00Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.033,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T06:45:10Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.731,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:45:22Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.447,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:45:31Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.818,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:45:38Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.247,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:45:48Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.025,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:45:56Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.226,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:47:12Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.184,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:47:21Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.063,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:47:29Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.697,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:47:37Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.551,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:47:47Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.939,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:47:58Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.035,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:48:14Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.211,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:48:24Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.488,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:49:24Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.462,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:49:31Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.19,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:49:38Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.142,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:49:45Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.163,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:49:57Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.824,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:50:05Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.56,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:50:13Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.307,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:50:25Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.077,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:51:26Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.82,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:51:34Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.224,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:51:41Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.286,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:51:51Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.418,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:51:59Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.519,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:52:08Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.982,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:52:18Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.334,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:52:29Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.535,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:53:28Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.733,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:53:36Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.455,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:53:42Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.272,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:53:50Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.358,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:54:01Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.724,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:54:16Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.787,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:54:22Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.481,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:54:29Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.245,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:55:38Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.301,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:55:47Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.406,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:55:55Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.563,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:56:02Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.255,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:56:11Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.503,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:56:19Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.829,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:56:26Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.339,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:56:34Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.228,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:57:41Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.51,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:57:50Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.603,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:57:58Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.296,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:58:05Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.434,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:58:18Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.204,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:58:32Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.419,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:58:42Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.222,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:58:51Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.432,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T06:59:51Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.698,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:00:00Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.225,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:00:10Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.465,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:00:25Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.002,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:00:35Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.052,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:00:45Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.004,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T07:00:57Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.005,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T07:01:10Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": false,
+        "seconds": 0.016,
+        "status": 404
+      },
+      {
+        "at": "2026-08-31T07:01:59Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.746,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:02:06Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.561,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:02:14Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.39,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:02:23Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.752,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:02:31Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.338,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:02:42Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.027,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:02:52Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.458,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:03:04Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.374,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:04:02Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.408,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:04:11Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.538,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:04:18Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.356,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:04:26Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.367,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:04:33Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.885,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:04:43Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.208,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:04:57Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.686,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:05:10Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.171,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:05:23Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.212,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:05:31Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.406,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:05:34Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.256,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:05:39Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.554,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:05:47Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.782,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:05:54Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.224,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:05:57Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.83,
+        "status": 200
+      },
+      {
+        "at": "2026-08-31T07:06:03Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 1.649,
+        "status": 200
+      }
+    ],
+    "liveview": [
+      {
+        "at": "2026-08-31T06:36:22Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.125,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:36:33Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.926,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:37:04Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 8.882,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:37:29Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 8.156,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:37:41Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.051,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:37:51Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.734,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:38:01Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.101,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:38:13Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.922,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:38:35Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.299,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:38:52Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.618,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:39:02Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.874,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:39:16Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.426,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:39:30Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.332,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:39:40Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.308,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:39:55Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.838,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:40:07Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.669,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:40:44Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": true,
+        "ok": true,
+        "seconds": 8.312,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:40:55Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": true,
+        "ok": true,
+        "seconds": 8.074,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:41:01Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.425,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:41:09Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.739,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:41:19Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.246,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:41:30Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.458,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:41:42Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 8.142,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:42:00Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 8.835,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:42:44Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.616,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:42:54Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.919,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:43:02Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.452,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:43:13Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.456,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:43:29Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.512,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:43:42Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.262,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:43:55Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.308,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:44:05Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.153,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:44:45Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.145,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:44:56Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.974,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:45:04Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.386,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:45:14Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.697,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:45:26Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.008,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:45:35Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.966,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:45:41Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.072,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:45:52Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.282,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:47:08Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.772,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:47:16Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.933,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:47:24Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.081,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:47:33Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.718,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:47:41Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.767,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:47:51Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.663,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:48:05Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.58,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:48:19Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.642,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:49:20Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.046,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:49:27Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.032,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:49:34Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.646,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:49:41Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.427,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:49:52Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.136,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:50:01Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.693,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:50:09Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.755,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:50:16Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.743,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:51:22Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.505,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:51:30Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.975,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:51:37Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.342,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:51:45Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.758,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:51:54Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.986,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:52:02Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.431,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:52:13Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.502,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:52:24Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.671,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:53:23Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.792,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:53:32Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.051,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:53:39Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.703,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:53:46Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.045,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:53:53Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.36,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:54:07Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.925,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:54:18Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.136,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:54:25Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.737,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:55:34Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.805,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:55:43Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.149,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:55:50Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.65,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:55:58Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.651,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:56:06Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.971,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:56:14Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.656,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:56:22Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.423,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:56:30Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.678,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:57:38Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.784,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:57:45Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.081,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:57:54Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.311,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:58:01Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.793,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:58:10Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.734,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:58:23Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.367,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:58:36Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.749,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:58:46Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.327,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:59:46Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.909,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:59:54Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.094,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:00:04Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.045,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:00:17Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.169,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:00:29Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.013,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:00:41Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.951,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:00:49Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.475,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:01:03Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.063,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:01:54Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.681,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:02:01Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.765,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:02:09Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.001,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:02:18Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.773,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:02:27Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.014,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:02:35Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.665,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:02:46Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.437,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:02:57Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.231,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:03:58Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.053,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:04:06Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.324,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:04:14Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.082,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:04:21Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.373,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:04:28Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.749,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:04:36Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.394,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:04:47Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.39,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:05:03Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.224,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:05:20Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.021,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:05:26Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.459,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:05:31Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.019,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:05:34Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.01,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:05:39Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.039,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:05:47Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.138,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:05:54Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.005,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:05:57Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 0.051,
+        "status": null
+      }
+    ],
+    "snapshot": [
+      {
+        "at": "2026-08-31T06:36:26Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.908,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:36:48Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 15.081,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:37:21Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 16.513,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:37:36Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 7.218,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:37:45Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.213,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:37:56Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.77,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:38:06Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.017,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:38:18Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.887,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:38:45Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 10.559,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:38:57Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.821,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:39:10Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 7.79,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:39:24Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 8.267,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:39:35Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.448,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:39:48Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 7.291,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:40:02Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 7.111,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:40:15Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 7.183,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:40:47Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": true,
+        "ok": false,
+        "seconds": 2.864,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:40:58Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": true,
+        "ok": false,
+        "seconds": 2.223,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:41:05Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.757,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:41:13Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.235,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:41:27Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 8.379,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:41:33Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.543,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:41:45Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.034,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:42:08Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 7.807,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:42:48Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.215,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:42:59Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.074,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:43:06Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.445,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:43:19Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.271,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:43:34Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.246,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:43:49Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.28,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:44:00Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.878,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:44:11Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.667,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:44:52Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.998,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:45:00Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.782,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:45:08Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.308,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:45:20Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.077,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:45:30Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.93,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:45:38Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.622,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:45:46Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.547,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:45:56Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.618,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:47:12Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.644,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:47:20Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.152,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:47:28Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.685,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:47:36Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.679,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:47:45Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.8,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:47:55Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.442,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:48:13Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 7.78,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:48:22Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.712,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:49:23Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.075,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:49:30Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.557,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:49:38Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.845,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:49:44Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.679,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:49:55Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.634,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:50:05Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.791,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:50:12Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.609,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:50:23Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.469,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:51:25Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.781,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:51:33Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.682,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:51:41Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.743,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:51:50Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.405,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:51:58Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.899,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:52:06Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.954,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:52:17Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.81,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:52:29Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.324,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:53:27Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.391,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:53:35Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.696,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:53:42Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.679,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:53:49Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.717,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:53:57Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.211,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:54:14Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 7.282,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:54:22Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.84,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:54:29Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.675,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:55:38Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.793,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:55:46Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.636,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:55:54Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.839,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:56:02Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.746,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:56:10Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.911,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:56:18Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.773,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:56:26Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.753,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:56:34Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.965,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:57:41Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.444,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:57:48Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.941,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:57:58Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.588,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:58:05Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.75,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:58:16Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.692,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:58:30Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.469,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:58:41Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.934,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:58:50Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.849,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:59:50Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.575,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T06:59:58Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.915,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:00:08Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.001,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:00:23Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 6.435,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:00:33Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.304,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:00:45Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.445,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:00:57Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 7.36,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:01:10Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 7.52,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:01:58Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.516,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:02:05Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.572,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:02:14Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.125,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:02:21Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.607,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:02:31Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.834,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:02:39Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.671,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:02:51Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.545,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:03:03Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.428,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:04:02Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.671,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:04:10Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.845,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:04:18Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.69,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:04:25Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.864,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:04:32Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.868,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:04:40Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 4.02,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:04:54Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 7.145,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:05:09Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.884,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:05:23Z",
+        "camera": "bench_001",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.651,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:05:30Z",
+        "camera": "bench_002",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.675,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:05:34Z",
+        "camera": "bench_003",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.492,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:05:38Z",
+        "camera": "bench_004",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.825,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:05:44Z",
+        "camera": "bench_005",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.67,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:05:53Z",
+        "camera": "bench_006",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 5.163,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:05:57Z",
+        "camera": "bench_007",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 2.815,
+        "status": null
+      },
+      {
+        "at": "2026-08-31T07:06:01Z",
+        "camera": "bench_008",
+        "excluded_during_injected_outage": false,
+        "ok": true,
+        "seconds": 3.492,
+        "status": null
+      }
+    ]
+  },
+  "provenance": {
+    "arch": "arm64",
+    "cpu": "Apple M2",
+    "cpu_cores": "8",
+    "ffmpeg": "ffmpeg version 8.0.1 Copyright (c) 2000-2025 the FFmpeg developers",
+    "git_dirty": true,
+    "git_sha": "0c1136a67223c36c8d4d83958099fed64216cbcf",
+    "gpu": "Apple integrated (not used for AI in this run unless stated)",
+    "hardware_class": "dev-laptop-m2-8core",
+    "harness_sha256": "52f32c1ecc84c4832f8448b73a54b6c5a2c1b54f778ba156d185b592b9f7d392",
+    "harness_version": "1.0.0",
+    "host": "Sohs-MacBook-Air.local",
+    "kernel": "Darwin Kernel Version 25.2.0: Tue Nov 18 21:09:34 PST 2025; root:xnu-12377.61.12~1/RELEASE_ARM64_T8112",
+    "mediamtx": "v1.20.0",
+    "os": "Darwin 25.2.0",
+    "python": "3.14.4",
+    "ram_bytes": "17179869184"
+  },
+  "publisher_respawns": [],
+  "run_id": "qual-8cam-h264-20260831T063353Z",
+  "samples": [
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.948,
+        "bench_002": 2002.8333333333333,
+        "bench_003": 2002.8333333333333,
+        "bench_004": 2002.948,
+        "bench_005": 2002.8333333333333,
+        "bench_006": 2002.8333333333333,
+        "bench_007": 2002.8333333333333,
+        "bench_008": 2002.8333333333333
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.0,
+      "core_rss_bytes": 28016640,
+      "detections_stored": 0.0,
+      "disk_used_percent": 96.93249616734512,
+      "load_avg_1m": 48.9892578125,
+      "recordings_bytes": 23032870.0,
+      "segments_total": 8.0,
+      "t": 0.0
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.948,
+        "bench_002": 2002.948,
+        "bench_003": 2002.948,
+        "bench_004": 2002.948,
+        "bench_005": 2002.948,
+        "bench_006": 2002.948,
+        "bench_007": 2002.948,
+        "bench_008": 2002.948
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.0,
+      "core_rss_bytes": 28344320,
+      "detections_stored": 0.0,
+      "disk_used_percent": 96.93556982714514,
+      "load_avg_1m": 42.58740234375,
+      "recordings_bytes": 43062350.0,
+      "segments_total": 16.0,
+      "t": 10.0
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9488000000001,
+        "bench_002": 2002.9496000000001,
+        "bench_003": 2002.9496000000001,
+        "bench_004": 2002.9488000000001,
+        "bench_005": 2002.9496000000001,
+        "bench_006": 2002.9496000000001,
+        "bench_007": 2002.9496000000001,
+        "bench_008": 2002.9496000000001
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.0,
+      "core_rss_bytes": 24477696,
+      "detections_stored": 0.0,
+      "disk_used_percent": 96.93875426059014,
+      "load_avg_1m": 42.94482421875,
+      "recordings_bytes": 63091844.0,
+      "segments_total": 24.0,
+      "t": 20.0
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9496000000001,
+        "bench_002": 2002.9488000000001,
+        "bench_003": 2002.9496000000001,
+        "bench_004": 2002.9488000000001,
+        "bench_005": 2002.9488000000001,
+        "bench_006": 2002.9488000000001,
+        "bench_007": 2002.9488000000001,
+        "bench_008": 2002.9488000000001
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.1,
+      "core_rss_bytes": 24526848,
+      "detections_stored": 0.0,
+      "disk_used_percent": 96.94168214392053,
+      "load_avg_1m": 43.60986328125,
+      "recordings_bytes": 80617647.0,
+      "segments_total": 31.0,
+      "t": 30.1
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.948,
+        "bench_002": 2002.948,
+        "bench_003": 2002.948,
+        "bench_004": 2002.948,
+        "bench_005": 2002.948,
+        "bench_006": 2002.948,
+        "bench_007": 2002.948,
+        "bench_008": 2002.948
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.0,
+      "core_rss_bytes": 24788992,
+      "detections_stored": 0.0,
+      "disk_used_percent": 96.94462691096635,
+      "load_avg_1m": 38.35546875,
+      "recordings_bytes": 103150813.0,
+      "segments_total": 40.0,
+      "t": 40.2
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9496000000001,
+        "bench_002": 2002.9504,
+        "bench_003": 2002.9504,
+        "bench_004": 2002.9496000000001,
+        "bench_005": 2002.9504,
+        "bench_006": 2002.9504,
+        "bench_007": 2002.9504,
+        "bench_008": 2002.9504
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.0,
+      "core_rss_bytes": 25083904,
+      "detections_stored": 0.0,
+      "disk_used_percent": 96.94732542284596,
+      "load_avg_1m": 36.25048828125,
+      "recordings_bytes": 123180315.0,
+      "segments_total": 48.0,
+      "t": 50.2
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9496000000001,
+        "bench_002": 2002.9488000000001,
+        "bench_003": 2002.9488000000001,
+        "bench_004": 2002.9496000000001,
+        "bench_005": 2002.9488000000001,
+        "bench_006": 2002.9488000000001,
+        "bench_007": 2002.9488000000001,
+        "bench_008": 2002.9488000000001
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.0,
+      "core_rss_bytes": 24313856,
+      "detections_stored": 0.0,
+      "disk_used_percent": 96.94817907996888,
+      "load_avg_1m": 33.8955078125,
+      "recordings_bytes": 143209805.0,
+      "segments_total": 56.0,
+      "t": 60.2
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9496000000001,
+        "bench_002": 2002.9504,
+        "bench_003": 2002.9504,
+        "bench_004": 2002.9496000000001,
+        "bench_005": 2002.9504,
+        "bench_006": 2002.9504,
+        "bench_007": 2002.9504,
+        "bench_008": 2002.9504
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.0,
+      "core_rss_bytes": 24494080,
+      "detections_stored": 0.0,
+      "disk_used_percent": 96.94980527002116,
+      "load_avg_1m": 29.84033203125,
+      "recordings_bytes": 163239307.0,
+      "segments_total": 64.0,
+      "t": 70.2
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9504,
+        "bench_002": 2002.9496000000001,
+        "bench_003": 2002.9496000000001,
+        "bench_004": 2002.9504,
+        "bench_005": 2002.9496000000001,
+        "bench_006": 2002.9496000000001,
+        "bench_007": 2002.9496000000001,
+        "bench_008": 2002.9496000000001
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.0,
+      "core_rss_bytes": 24051712,
+      "detections_stored": 0.0,
+      "disk_used_percent": 96.96126148862196,
+      "load_avg_1m": 27.04931640625,
+      "recordings_bytes": 183268805.0,
+      "segments_total": 72.0,
+      "t": 80.3
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9504,
+        "bench_002": 2002.9512,
+        "bench_003": 2002.9512,
+        "bench_004": 2002.9504,
+        "bench_005": 2002.9512,
+        "bench_006": 2002.9512,
+        "bench_007": 2002.9512,
+        "bench_008": 2002.9512
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.0,
+      "core_rss_bytes": 24363008,
+      "detections_stored": 0.0,
+      "disk_used_percent": 96.96432567706943,
+      "load_avg_1m": 33.52685546875,
+      "recordings_bytes": 203298315.0,
+      "segments_total": 80.0,
+      "t": 90.3
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9496000000001,
+        "bench_002": 2002.9488000000001,
+        "bench_003": 2002.9488000000001,
+        "bench_004": 2002.9496000000001,
+        "bench_005": 2002.9512,
+        "bench_006": 2002.9512,
+        "bench_007": 2002.9512,
+        "bench_008": 2002.9512
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.5,
+      "core_rss_bytes": 23379968,
+      "detections_stored": 0.0,
+      "disk_used_percent": 96.96716296485373,
+      "load_avg_1m": 36.6904296875,
+      "recordings_bytes": 213313061.0,
+      "segments_total": 84.0,
+      "t": 100.4
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9496000000001,
+        "bench_002": 2002.9496000000001,
+        "bench_003": 2002.9496000000001,
+        "bench_004": 2002.9496000000001,
+        "bench_005": 2002.9496000000001,
+        "bench_006": 2002.9496000000001,
+        "bench_007": 2002.9496000000001,
+        "bench_008": 2002.9496000000001
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.0,
+      "core_rss_bytes": 24248320,
+      "detections_stored": 0.0,
+      "disk_used_percent": 96.97043717024894,
+      "load_avg_1m": 43.78369140625,
+      "recordings_bytes": 243357301.0,
+      "segments_total": 96.0,
+      "t": 110.8
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9496000000001,
+        "bench_002": 2002.9504,
+        "bench_003": 2002.9504,
+        "bench_004": 2002.9496000000001,
+        "bench_005": 2002.9504,
+        "bench_006": 2002.9504,
+        "bench_007": 2002.9504,
+        "bench_008": 2002.9504
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.5,
+      "core_rss_bytes": 22708224,
+      "detections_stored": 0.0,
+      "disk_used_percent": 96.97481705310437,
+      "load_avg_1m": 48.65673828125,
+      "recordings_bytes": 263386803.0,
+      "segments_total": 104.0,
+      "t": 120.8
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9496000000001,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.9504,
+        "bench_005": 2002.9504,
+        "bench_006": 2002.952,
+        "bench_007": 2002.9504,
+        "bench_008": 2002.9488000000001
+      },
+      "camera_up": {
+        "bench_001": 0.0,
+        "bench_002": 0.0,
+        "bench_003": 0.0,
+        "bench_004": 0.0,
+        "bench_005": 0.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 0.0
+      },
+      "cameras_recording": 2.0,
+      "core_cpu_percent": 1.8,
+      "core_rss_bytes": 23068672,
+      "detections_stored": 0.0,
+      "disk_used_percent": 96.87047775087662,
+      "load_avg_1m": 259.4736328125,
+      "recordings_bytes": 376052746.0,
+      "segments_total": 149.0,
+      "t": 250.1
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.9512,
+        "bench_004": 2002.9504,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.9512
+      },
+      "camera_up": {
+        "bench_001": 0.0,
+        "bench_002": 0.0,
+        "bench_003": 0.0,
+        "bench_004": 0.0,
+        "bench_005": 0.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 0.0
+      },
+      "cameras_recording": 2.0,
+      "core_cpu_percent": 1.1,
+      "core_rss_bytes": 22413312,
+      "detections_stored": 0.0,
+      "disk_used_percent": 96.89457534254021,
+      "load_avg_1m": 235.64306640625,
+      "recordings_bytes": 506244592.0,
+      "segments_total": 201.0,
+      "t": 366.6
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.9512,
+        "bench_004": 2002.9504,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.9512
+      },
+      "camera_up": {
+        "bench_001": 0.0,
+        "bench_002": 0.0,
+        "bench_003": 0.0,
+        "bench_004": 0.0,
+        "bench_005": 0.0,
+        "bench_006": 0.0,
+        "bench_007": 1.0,
+        "bench_008": 0.0
+      },
+      "cameras_recording": 1.0,
+      "core_cpu_percent": 0.9,
+      "core_rss_bytes": 22806528,
+      "detections_stored": 0.0,
+      "disk_used_percent": 96.8962797742005,
+      "load_avg_1m": 231.11083984375,
+      "recordings_bytes": 521266730.0,
+      "segments_total": 207.0,
+      "t": 377.9
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2485.3862134655337,
+        "bench_002": 2003.2508108108107,
+        "bench_003": 2002.952,
+        "bench_004": 2002.9512,
+        "bench_005": 2002.9512,
+        "bench_006": 2002.9512,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 0.0,
+        "bench_002": 0.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 0.0,
+        "bench_008": 0.0
+      },
+      "cameras_recording": 4.0,
+      "core_cpu_percent": 0.9,
+      "core_rss_bytes": 23330816,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.02052085891414,
+      "load_avg_1m": 240.7021484375,
+      "recordings_bytes": 750996918.0,
+      "segments_total": 300.0,
+      "t": 480.6
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2485.3862134655337,
+        "bench_002": 2003.2508108108107,
+        "bench_003": 2002.952,
+        "bench_004": 2002.9512,
+        "bench_005": 2002.9488000000001,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 0.0,
+        "bench_002": 0.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 6.0,
+      "core_cpu_percent": 9.0,
+      "core_rss_bytes": 25034752,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.02257325983096,
+      "load_avg_1m": 232.5986328125,
+      "recordings_bytes": 791055931.0,
+      "segments_total": 316.0,
+      "t": 491.0
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2485.3862134655337,
+        "bench_002": 2003.2508108108107,
+        "bench_003": 2002.9512,
+        "bench_004": 2002.9512,
+        "bench_005": 2002.952,
+        "bench_006": 2002.9512,
+        "bench_007": 2002.9512,
+        "bench_008": 2002.9512
+      },
+      "camera_up": {
+        "bench_001": 0.0,
+        "bench_002": 0.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 6.0,
+      "core_cpu_percent": 3.2,
+      "core_rss_bytes": 23576576,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.02521453179737,
+      "load_avg_1m": 221.96826171875,
+      "recordings_bytes": 803574377.0,
+      "segments_total": 321.0,
+      "t": 501.2
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9496000000001,
+        "bench_002": 2002.9496000000001,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.9512,
+        "bench_007": 2002.9512,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 0.0,
+        "bench_002": 0.0,
+        "bench_003": 0.0,
+        "bench_004": 0.0,
+        "bench_005": 0.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 0.0
+      },
+      "cameras_recording": 2.0,
+      "core_cpu_percent": 0.8,
+      "core_rss_bytes": 22593536,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.09237918708163,
+      "load_avg_1m": 217.22509765625,
+      "recordings_bytes": 938773569.0,
+      "segments_total": 375.0,
+      "t": 602.8
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9496000000001,
+        "bench_002": 2002.9496000000001,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.9512,
+        "bench_007": 2002.9512,
+        "bench_008": 2002.9512
+      },
+      "camera_up": {
+        "bench_001": 0.0,
+        "bench_002": 0.0,
+        "bench_003": 0.0,
+        "bench_004": 0.0,
+        "bench_005": 0.0,
+        "bench_006": 0.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 2.0,
+      "core_cpu_percent": 0.7,
+      "core_rss_bytes": 23412736,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.10063120593647,
+      "load_avg_1m": 223.1572265625,
+      "recordings_bytes": 948788320.0,
+      "segments_total": 379.0,
+      "t": 613.0
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9496000000001,
+        "bench_002": 2002.9504,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.9512,
+        "bench_007": 2002.9512,
+        "bench_008": 2002.9512
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 0.0,
+        "bench_003": 0.0,
+        "bench_004": 0.0,
+        "bench_005": 0.0,
+        "bench_006": 0.0,
+        "bench_007": 0.0,
+        "bench_008": 0.0
+      },
+      "cameras_recording": 1.0,
+      "core_cpu_percent": 0.0,
+      "core_rss_bytes": 23904256,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.12796347039334,
+      "load_avg_1m": 219.71826171875,
+      "recordings_bytes": 963810445.0,
+      "segments_total": 385.0,
+      "t": 623.1
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9512,
+        "bench_002": 2002.9512,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.9512,
+        "bench_006": 2002.9512,
+        "bench_007": 2002.9512,
+        "bench_008": 2002.9512
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 34.1,
+      "core_rss_bytes": 27262976,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.21342595519981,
+      "load_avg_1m": 167.623046875,
+      "recordings_bytes": 1219186753.0,
+      "segments_total": 487.0,
+      "t": 708.2
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9512,
+        "bench_002": 2002.9512,
+        "bench_003": 2002.9512,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.9512
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 1.1,
+      "core_rss_bytes": 25821184,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.21638225258783,
+      "load_avg_1m": 162.50732421875,
+      "recordings_bytes": 1236712580.0,
+      "segments_total": 494.0,
+      "t": 718.2
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.3,
+      "core_rss_bytes": 26951680,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.21917012461974,
+      "load_avg_1m": 143.0185546875,
+      "recordings_bytes": 1261749480.0,
+      "segments_total": 504.0,
+      "t": 728.4
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9488000000001,
+        "bench_002": 2002.9488000000001,
+        "bench_003": 2002.9488000000001,
+        "bench_004": 2002.9488000000001,
+        "bench_005": 2002.9488000000001,
+        "bench_006": 2002.9488000000001,
+        "bench_007": 2002.9488000000001,
+        "bench_008": 2002.9488000000001
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 4.9,
+      "core_rss_bytes": 28180480,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.22744685135076,
+      "load_avg_1m": 116.95458984375,
+      "recordings_bytes": 1336129093.0,
+      "segments_total": 537.0,
+      "t": 767.5
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9504,
+        "bench_002": 2002.9504,
+        "bench_003": 2002.9504,
+        "bench_004": 2002.9496000000001,
+        "bench_005": 2002.9496000000001,
+        "bench_006": 2002.9496000000001,
+        "bench_007": 2002.9496000000001,
+        "bench_008": 2002.9504
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.0,
+      "core_rss_bytes": 30425088,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.25350007141606,
+      "load_avg_1m": 100.16943359375,
+      "recordings_bytes": 1496365060.0,
+      "segments_total": 601.0,
+      "t": 855.8
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9488000000001,
+        "bench_002": 2002.9488000000001,
+        "bench_003": 2002.9488000000001,
+        "bench_004": 2002.9496000000001,
+        "bench_005": 2002.9496000000001,
+        "bench_006": 2002.9496000000001,
+        "bench_007": 2002.9496000000001,
+        "bench_008": 2002.9488000000001
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 1.8,
+      "core_rss_bytes": 28852224,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.25614175518041,
+      "load_avg_1m": 91.7802734375,
+      "recordings_bytes": 1516394552.0,
+      "segments_total": 609.0,
+      "t": 865.8
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9504,
+        "bench_002": 2002.9504,
+        "bench_003": 2002.9504,
+        "bench_004": 2002.9496000000001,
+        "bench_005": 2002.9496000000001,
+        "bench_006": 2002.9496000000001,
+        "bench_007": 2002.9496000000001,
+        "bench_008": 2002.9504
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.0,
+      "core_rss_bytes": 26656768,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.25888968281244,
+      "load_avg_1m": 86.70849609375,
+      "recordings_bytes": 1536424052.0,
+      "segments_total": 617.0,
+      "t": 875.9
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9496000000001,
+        "bench_002": 2002.9496000000001,
+        "bench_003": 2002.9496000000001,
+        "bench_004": 2002.9496000000001,
+        "bench_005": 2002.9496000000001,
+        "bench_006": 2002.9496000000001,
+        "bench_007": 2002.9496000000001,
+        "bench_008": 2002.9496000000001
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.0,
+      "core_rss_bytes": 28590080,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.26132917378982,
+      "load_avg_1m": 89.119140625,
+      "recordings_bytes": 1556453548.0,
+      "segments_total": 625.0,
+      "t": 886.0
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9504,
+        "bench_002": 2002.9504,
+        "bench_003": 2002.9504,
+        "bench_004": 2002.9504,
+        "bench_005": 2002.9504,
+        "bench_006": 2002.9504,
+        "bench_007": 2002.9496000000001,
+        "bench_008": 2002.9504
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 2.7,
+      "core_rss_bytes": 28950528,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.26437400773426,
+      "load_avg_1m": 85.884765625,
+      "recordings_bytes": 1589001487.0,
+      "segments_total": 638.0,
+      "t": 896.0
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9512,
+        "bench_002": 2002.9512,
+        "bench_003": 2002.9512,
+        "bench_004": 2002.9512,
+        "bench_005": 2002.9512,
+        "bench_006": 2002.9512,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 1.9,
+      "core_rss_bytes": 23691264,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.29371255173906,
+      "load_avg_1m": 85.97802734375,
+      "recordings_bytes": 1741726492.0,
+      "segments_total": 699.0,
+      "t": 977.0
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 1.2,
+      "core_rss_bytes": 25952256,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.29517978778776,
+      "load_avg_1m": 79.1005859375,
+      "recordings_bytes": 1769267082.0,
+      "segments_total": 710.0,
+      "t": 987.1
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9512,
+        "bench_002": 2002.9512,
+        "bench_003": 2002.9512,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.9512
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 1.3,
+      "core_rss_bytes": 27279360,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.29752209445208,
+      "load_avg_1m": 74.0302734375,
+      "recordings_bytes": 1786792908.0,
+      "segments_total": 717.0,
+      "t": 997.2
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.9512,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 3.3,
+      "core_rss_bytes": 28721152,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.30041579855371,
+      "load_avg_1m": 70.75830078125,
+      "recordings_bytes": 1814333494.0,
+      "segments_total": 728.0,
+      "t": 1007.3
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9512,
+        "bench_002": 2002.9512,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 1.8,
+      "core_rss_bytes": 23527424,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.30197115936087,
+      "load_avg_1m": 82.1533203125,
+      "recordings_bytes": 1821844562.0,
+      "segments_total": 731.0,
+      "t": 1017.4
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 1.4,
+      "core_rss_bytes": 27426816,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.33060923507524,
+      "load_avg_1m": 127.3876953125,
+      "recordings_bytes": 1997102837.0,
+      "segments_total": 801.0,
+      "t": 1101.4
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 1.4,
+      "core_rss_bytes": 22151168,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.33248209209165,
+      "load_avg_1m": 137.51953125,
+      "recordings_bytes": 2002110217.0,
+      "segments_total": 803.0,
+      "t": 1111.8
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.9,
+      "core_rss_bytes": 23691264,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.33383073033455,
+      "load_avg_1m": 150.49462890625,
+      "recordings_bytes": 2007117597.0,
+      "segments_total": 805.0,
+      "t": 1122.2
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.9512,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.9512,
+        "bench_007": 2002.9512,
+        "bench_008": 2002.9512
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.7,
+      "core_rss_bytes": 23101440,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.33714529192757,
+      "load_avg_1m": 157.4775390625,
+      "recordings_bytes": 2037161871.0,
+      "segments_total": 817.0,
+      "t": 1132.4
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 1.1,
+      "core_rss_bytes": 29081600,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.34035978662196,
+      "load_avg_1m": 149.45361328125,
+      "recordings_bytes": 2077220909.0,
+      "segments_total": 833.0,
+      "t": 1142.6
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9496000000001,
+        "bench_002": 2002.9496000000001,
+        "bench_003": 2002.9496000000001,
+        "bench_004": 2002.9504,
+        "bench_005": 2002.9504,
+        "bench_006": 2002.9504,
+        "bench_007": 2002.9504,
+        "bench_008": 2002.9496000000001
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.3,
+      "core_rss_bytes": 30343168,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.37104202729442,
+      "load_avg_1m": 114.58837890625,
+      "recordings_bytes": 2237456979.0,
+      "segments_total": 897.0,
+      "t": 1220.9
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 1747.664,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 1747.664,
+        "bench_006": 1572.92,
+        "bench_007": 1747.664,
+        "bench_008": 1835.036
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.7,
+      "core_rss_bytes": 29081600,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.37770038813397,
+      "load_avg_1m": 101.31689453125,
+      "recordings_bytes": 2255454033.0,
+      "segments_total": 908.0,
+      "t": 1240.3
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 1747.664,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.8373333333332,
+        "bench_008": 1835.036
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 1.5,
+      "core_rss_bytes": 22167552,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.3804829067927,
+      "load_avg_1m": 108.38818359375,
+      "recordings_bytes": 2263465669.0,
+      "segments_total": 911.0,
+      "t": 1250.5
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.9512,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.8373333333332,
+        "bench_008": 2002.9512
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 1.6,
+      "core_rss_bytes": 24117248,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.38768237012114,
+      "load_avg_1m": 114.01025390625,
+      "recordings_bytes": 2279488939.0,
+      "segments_total": 917.0,
+      "t": 1260.7
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.9512,
+        "bench_003": 2002.9512,
+        "bench_004": 2002.9512,
+        "bench_005": 2002.9512,
+        "bench_006": 2002.952,
+        "bench_007": 2002.8373333333332,
+        "bench_008": 2002.9512
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 0.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 7.0,
+      "core_cpu_percent": 0.1,
+      "core_rss_bytes": 23822336,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.39407017971624,
+      "load_avg_1m": 121.7275390625,
+      "recordings_bytes": 2297014764.0,
+      "segments_total": 924.0,
+      "t": 1270.8
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.8,
+      "core_rss_bytes": 31211520,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.41586005574221,
+      "load_avg_1m": 67.38037109375,
+      "recordings_bytes": 2487295178.0,
+      "segments_total": 1000.0,
+      "t": 1346.3
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.0,
+      "core_rss_bytes": 30654464,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.41791451564872,
+      "load_avg_1m": 58.0361328125,
+      "recordings_bytes": 2502317318.0,
+      "segments_total": 1006.0,
+      "t": 1356.3
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 4.3,
+      "core_rss_bytes": 30261248,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.41796434319907,
+      "load_avg_1m": 50.544921875,
+      "recordings_bytes": 2527354218.0,
+      "segments_total": 1016.0,
+      "t": 1366.3
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.0,
+      "core_rss_bytes": 25968640,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.4248500164997,
+      "load_avg_1m": 61.0498046875,
+      "recordings_bytes": 2527354218.0,
+      "segments_total": 1016.0,
+      "t": 1376.4
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.7,
+      "core_rss_bytes": 22921216,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.43102410296562,
+      "load_avg_1m": 65.40087890625,
+      "recordings_bytes": 2537368978.0,
+      "segments_total": 1020.0,
+      "t": 1386.5
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9512,
+        "bench_002": 2002.952,
+        "bench_003": 2002.9512,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.9512,
+        "bench_007": 2002.9512,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 6.6,
+      "core_rss_bytes": 24641536,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.43758116151272,
+      "load_avg_1m": 70.38330078125,
+      "recordings_bytes": 2577428010.0,
+      "segments_total": 1036.0,
+      "t": 1396.6
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9504,
+        "bench_002": 2002.9504,
+        "bench_003": 2002.9504,
+        "bench_004": 2002.9496000000001,
+        "bench_005": 2002.9504,
+        "bench_006": 2002.9504,
+        "bench_007": 2002.9504,
+        "bench_008": 2002.9504
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.9,
+      "core_rss_bytes": 32440320,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.46613605404387,
+      "load_avg_1m": 85.14013671875,
+      "recordings_bytes": 2750182556.0,
+      "segments_total": 1105.0,
+      "t": 1482.6
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9504,
+        "bench_002": 2002.9496000000001,
+        "bench_003": 2002.9496000000001,
+        "bench_004": 2002.9496000000001,
+        "bench_005": 2002.9496000000001,
+        "bench_006": 2002.9504,
+        "bench_007": 2002.9504,
+        "bench_008": 2002.9504
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 1.0,
+      "core_rss_bytes": 23609344,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.46834205559112,
+      "load_avg_1m": 90.94482421875,
+      "recordings_bytes": 2760197304.0,
+      "segments_total": 1109.0,
+      "t": 1492.7
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9504,
+        "bench_002": 2002.9496000000001,
+        "bench_003": 2002.9496000000001,
+        "bench_004": 2002.9496000000001,
+        "bench_005": 2002.9496000000001,
+        "bench_006": 2002.9496000000001,
+        "bench_007": 2002.9504,
+        "bench_008": 2002.9504
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.6,
+      "core_rss_bytes": 24920064,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.4694069650556,
+      "load_avg_1m": 94.16259765625,
+      "recordings_bytes": 2767708367.0,
+      "segments_total": 1112.0,
+      "t": 1502.9
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9512,
+        "bench_002": 2002.9512,
+        "bench_003": 2002.9512,
+        "bench_004": 2002.9512,
+        "bench_005": 2002.9496000000001,
+        "bench_006": 2002.9496000000001,
+        "bench_007": 2002.9504,
+        "bench_008": 2002.9504
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.9,
+      "core_rss_bytes": 24543232,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.47252180464928,
+      "load_avg_1m": 101.54248046875,
+      "recordings_bytes": 2780226811.0,
+      "segments_total": 1117.0,
+      "t": 1513.3
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9512,
+        "bench_002": 2002.9512,
+        "bench_003": 2002.9512,
+        "bench_004": 2002.9504,
+        "bench_005": 2002.9504,
+        "bench_006": 2002.9504,
+        "bench_007": 2002.9512,
+        "bench_008": 2002.9504
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 0.0
+      },
+      "cameras_recording": 7.0,
+      "core_cpu_percent": 0.3,
+      "core_rss_bytes": 26148864,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.47522566990207,
+      "load_avg_1m": 102.55126953125,
+      "recordings_bytes": 2795248942.0,
+      "segments_total": 1123.0,
+      "t": 1523.4
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 0.0,
+        "bench_003": 0.0,
+        "bench_004": 0.0,
+        "bench_005": 0.0,
+        "bench_006": 0.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 3.0,
+      "core_cpu_percent": 0.1,
+      "core_rss_bytes": 26476544,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.48804370427975,
+      "load_avg_1m": 124.4775390625,
+      "recordings_bytes": 2973010890.0,
+      "segments_total": 1194.0,
+      "t": 1622.2
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 0.0,
+        "bench_006": 0.0,
+        "bench_007": 0.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 5.0,
+      "core_cpu_percent": 0.5,
+      "core_rss_bytes": 26312704,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.49274355413205,
+      "load_avg_1m": 119.85205078125,
+      "recordings_bytes": 2998047790.0,
+      "segments_total": 1204.0,
+      "t": 1632.2
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 0.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 0.0,
+        "bench_007": 0.0,
+        "bench_008": 0.0
+      },
+      "cameras_recording": 4.0,
+      "core_cpu_percent": 2.2,
+      "core_rss_bytes": 25067520,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.49446775209327,
+      "load_avg_1m": 120.8515625,
+      "recordings_bytes": 3010566240.0,
+      "segments_total": 1209.0,
+      "t": 1642.4
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 1.9,
+      "core_rss_bytes": 26132480,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.49551948402377,
+      "load_avg_1m": 118.22802734375,
+      "recordings_bytes": 3063143730.0,
+      "segments_total": 1230.0,
+      "t": 1652.6
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.9512,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.9512,
+        "bench_007": 2002.9512,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.4,
+      "core_rss_bytes": 25608192,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.52187578737053,
+      "load_avg_1m": 101.416015625,
+      "recordings_bytes": 3243409378.0,
+      "segments_total": 1302.0,
+      "t": 1736.2
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.8,
+      "core_rss_bytes": 23658496,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.51925716429064,
+      "load_avg_1m": 101.3486328125,
+      "recordings_bytes": 3263438898.0,
+      "segments_total": 1310.0,
+      "t": 1746.3
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.6,
+      "core_rss_bytes": 24330240,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.52923955807576,
+      "load_avg_1m": 107.29052734375,
+      "recordings_bytes": 3273453658.0,
+      "segments_total": 1314.0,
+      "t": 1756.5
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 0.9,
+      "core_rss_bytes": 25624576,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.53699865480027,
+      "load_avg_1m": 113.31494140625,
+      "recordings_bytes": 3288475798.0,
+      "segments_total": 1320.0,
+      "t": 1766.8
+    },
+    {
+      "camera_bitrate_kbps": {
+        "bench_001": 2002.952,
+        "bench_002": 2002.952,
+        "bench_003": 2002.952,
+        "bench_004": 2002.952,
+        "bench_005": 2002.952,
+        "bench_006": 2002.952,
+        "bench_007": 2002.952,
+        "bench_008": 2002.952
+      },
+      "camera_up": {
+        "bench_001": 1.0,
+        "bench_002": 1.0,
+        "bench_003": 1.0,
+        "bench_004": 1.0,
+        "bench_005": 1.0,
+        "bench_006": 1.0,
+        "bench_007": 1.0,
+        "bench_008": 1.0
+      },
+      "cameras_recording": 8.0,
+      "core_cpu_percent": 2.5,
+      "core_rss_bytes": 34193408,
+      "detections_stored": 0.0,
+      "disk_used_percent": 97.5393421968584,
+      "load_avg_1m": 110.73876953125,
+      "recordings_bytes": 3343556978.0,
+      "segments_total": 1342.0,
+      "t": 1776.8
+    }
+  ],
+  "scenario": {
+    "ai_profile": "off",
+    "api_port": 8021,
+    "bitrate_kbps": 2000,
+    "cameras": 8,
+    "codec": "h264",
+    "description": "8 x 720p H.264 @ 2 Mbps, 30 min, AI off.",
+    "duration_s": 1800,
+    "faults": [
+      {
+        "at_s": 300,
+        "count": 2,
+        "kind": "publisher_stop"
+      },
+      {
+        "at_s": 420,
+        "count": 2,
+        "kind": "publisher_start"
+      },
+      {
+        "at_s": 720,
+        "kind": "mediamtx_restart"
+      },
+      {
+        "at_s": 1200,
+        "kind": "core_restart"
+      }
+    ],
+    "fps": 15,
+    "gop": 30,
+    "max_recordings_gb": 10,
+    "mode": "synthetic",
+    "probe_interval_s": 120,
+    "resolution": "1280x720",
+    "retention_hours": 2,
+    "rtsp_port": 8654,
+    "sample_interval_s": 10,
+    "segment_seconds": 10
+  },
+  "scenario_name": "qual-8cam-h264",
+  "scenario_sha256": "5ff7a4b4f16d10e513cefc705de596e0c0d7d0e7e57496dbd15b8becb648096f",
+  "schema": "heldar-benchmark/1",
+  "started_at": "2026-08-31T06:33:53Z",
+  "thresholds": {
+    "_comment": [
+      "Pass/fail bars for a qualification run (#119). DECLARED BEFORE RUNNING, on purpose.",
+      "",
+      "The issue's sharpest instruction is 'avoid moving the threshold after seeing the result'. That",
+      "is unenforceable as advice, so it is enforced instead: every result records the sha256 of this",
+      "file, and scripts/verify_capacity_claims.py refuses a capacity claim whose cited run was judged",
+      "against a different version of it. Loosening a bar to turn a red run green therefore",
+      "invalidates the claim it was loosened for, and the profile has to be re-run.",
+      "",
+      "Only metrics that EVERY qualification scenario measures are gated. A metric the harness cannot",
+      "observe is reported as unmeasured, and a threshold over an unmeasured metric fails rather than",
+      "passing quietly \u2014 so adding a bar here for something nothing measures breaks every run, which",
+      "is the correct outcome and not a reason to soften the rule.",
+      "",
+      "CHANGE LOG. 1.1.0: `api_5xx_rate` and `api_seconds_p95` were REDEFINED (not re-valued) to cover the control plane only, after the first smoke run showed the 2 s bar failing snapshots that the same file separately allows 10 s. A threshold set that grades one call against two contradictory bars is broken, so the definition was fixed and the version moved \u2014 which invalidates any claim citing 1.0.0, exactly as intended. No bar was loosened: every VALUE here is unchanged from the set declared before the first run.",
+      "",
+      "CANDIDATES for the next version, to be set BEFORE the run they would judge: `mediamtx_recovery_seconds` (how long until footage is written again after the stream server restarts) is measured and reported but deliberately ungated \u2014 it was added after watching a run, and a bar chosen with a result already in view is not a bar."
+    ],
+    "thresholds": [
+      {
+        "metric": "unexplained_gap_seconds_per_camera_hour",
+        "op": "<=",
+        "value": 30,
+        "why": "30 s/camera-hour is 99.2% coverage. Gaps the harness itself caused by unplugging a publisher are subtracted; what remains is coverage the recorder lost on its own, which is the number a retention or evidence claim rests on."
+      },
+      {
+        "metric": "unplayable_segment_count",
+        "op": "<=",
+        "value": 0,
+        "why": "A segment that indexes but will not decode is worse than a missing one: the timeline says the footage exists. Zero, not a rate \u2014 one unplayable segment is one piece of evidence that is not there."
+      },
+      {
+        "metric": "recorder_reconnect_seconds_p95",
+        "op": "<=",
+        "value": 60,
+        "why": "A camera that drops must be back within a minute at P95, or a fleet with ordinary network churn accumulates gaps faster than the coverage bar allows."
+      },
+      {
+        "metric": "restart_recovery_seconds",
+        "op": "<=",
+        "value": 120,
+        "why": "Recovery is every camera recording again, not the API answering. Two minutes is an upgrade window an operator can accept; longer and a routine restart becomes a scheduled outage."
+      },
+      {
+        "metric": "liveview_failure_rate",
+        "op": "<=",
+        "value": 0.01,
+        "why": "Live view is the most-used operator path. One failure in a hundred is already noticeable at a video wall refreshing every few seconds."
+      },
+      {
+        "metric": "liveview_seconds_p95",
+        "op": "<=",
+        "value": 5.0,
+        "why": "Beyond five seconds to hand back a live URL, an operator assumes the camera is down and starts investigating a system that is working."
+      },
+      {
+        "metric": "snapshot_failure_rate",
+        "op": "<=",
+        "value": 0.02,
+        "why": "Snapshots contend with the recorder for the same stream, so a slightly looser bar than live view \u2014 but a failing snapshot is a failing thumbnail everywhere in the dashboard."
+      },
+      {
+        "metric": "snapshot_seconds_p95",
+        "op": "<=",
+        "value": 10.0,
+        "why": "A snapshot must wait for a keyframe; ten seconds covers a two-second GOP with contention and still fails a box that is genuinely saturated."
+      },
+      {
+        "metric": "clip_success_rate",
+        "op": ">=",
+        "value": 0.99,
+        "why": "Clip export is the evidence path. Windows with no footage are excluded from the rate (a 404 is a fact about the window); what is graded is whether existing footage could be exported."
+      },
+      {
+        "metric": "clip_seconds_p95",
+        "op": "<=",
+        "value": 30.0,
+        "why": "A 30-second clip is `-c copy`, so it is a concat and a trim. If P95 exceeds 30 s the disk, not the encoder, is the limit \u2014 and that is a capacity finding."
+      },
+      {
+        "metric": "api_5xx_rate",
+        "op": "<=",
+        "value": 0.005,
+        "why": "Counts connection failures as well as 5xx, over CONTROL-PLANE calls: snapshot, live view and clip have their own bars below. Calls to a camera the harness has deliberately unplugged are excluded; calls to any other camera are not. This is the externally visible superset of SQLite contention, which the kernel exposes no counter for."
+      },
+      {
+        "metric": "api_seconds_p95",
+        "op": "<=",
+        "value": 2.0,
+        "why": "Control-plane calls only \u2014 the dashboard makes several per view, and a two-second P95 is already a sluggish page. Media paths are measured separately because a snapshot must wait for a keyframe and cannot be held to a control-plane bar."
+      }
+    ],
+    "version": "1.1.0"
+  },
+  "thresholds_bars_sha256": "f6a773eeacc2bf8413841defa28843311872958eb33fa4cf2ddbdea3c3642af5",
+  "thresholds_sha256": "aced792c9fb299d19fad90b70c954deff2a272b830ba96e94a34f97877b022a3",
+  "validity": {
+    "status": "VALID"
+  },
+  "verdict": "FAIL",
+  "warmup_s": 120
+}

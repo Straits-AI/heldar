@@ -183,6 +183,12 @@ probe interval and the loop would spend the whole run probing.
 
 ---
 
+## Runs
+
+| Date | Host | Outcome |
+| --- | --- | --- |
+| [2026-08-31](2026-08-31-dev-laptop.md) | Apple M2, 8 cores | 4-cam and 8-cam FAIL, 16-cam INVALID. **Nothing qualified.** The generator shared the host with the box, which contaminates every latency metric. |
+
 ## Known findings
 
 Recorded here because a benchmark that finds nothing has usually not looked.

@@ -303,6 +303,13 @@ a weaker qualification; it is not a qualification.
 | Medium site + AI | 32 | H.265 | 4 Mbps | motion | appliance-x86 | EXTRAPOLATED |
 | Large site | 64 | H.265 | 4 Mbps | off | appliance-x86 | EXTRAPOLATED |
 
+> **An attempt has been made, and it qualified nothing.** Three profiles were run on a developer
+> laptop on 2026-08-31: 4-camera and 8-camera H.264 failed thresholds, and 16-camera H.265 was
+> INVALID because the host could not generate the workload. The binding constraint at 4 cameras was
+> live-view latency, which on a single host is contaminated by the generator sharing the machine.
+> Written up in [`docs/benchmarks/2026-08-31-dev-laptop.md`](benchmarks/2026-08-31-dev-laptop.md),
+> including what a real qualification would need. Every row above is still an extrapolation.
+
 ### What the qualified rows do and do not establish
 
 - They are **synthetic**: `testsrc` through a real encoder, a real MediaMTX and the real recorder.
