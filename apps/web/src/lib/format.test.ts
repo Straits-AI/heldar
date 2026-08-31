@@ -201,7 +201,17 @@ describe("isRenderableZone (#148)", () => {
     expect(isRenderableZone(label as string)).toBe(false);
   });
 
-  it("rejects a bare offset, which is not an IANA identifier", () => {
-    expect(isRenderableZone("+08:00")).toBe(false);
+  it("rejects text that no engine will take as a zone", () => {
+    expect(isRenderableZone("Not/AZone")).toBe(false);
+    expect(isRenderableZone("")).toBe(false);
   });
+
+  // NOT asserted: whether a bare offset like "+08:00" is accepted. It is engine-dependent — ES2024
+  // added offset time zones, so Node 18 rejects it and Node 22 accepts it, and the first version of
+  // this file asserted `false` and passed locally while failing CI.
+  //
+  // It is also not a case the product can reach: `routes/sites.rs` refuses a fixed offset on the way
+  // in ("`GMT+8` and `+08:00` cannot express daylight saving"), so a site zone arriving here is an
+  // IANA name or nothing. Pinning engine behaviour we neither rely on nor can encounter would be a
+  // test that breaks on a Node upgrade for no reason.
 });

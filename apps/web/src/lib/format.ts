@@ -234,7 +234,17 @@ export function formatTimeShortIn(
   }
 }
 
-/** Whether `Intl` will accept this as a `timeZone`. A site row carries operator-typed text. */
+/**
+ * Whether THIS ENGINE will accept the value as a `timeZone` — not whether it is an IANA name.
+ *
+ * The distinction is real: ES2024 added offset time zones, so `"+08:00"` is refused by Node 18 and
+ * accepted by Node 22. Callers must not read this as a validity check. What it reliably rejects is
+ * text no engine takes, which is the case that matters here — `scheduleClockLabel` returns
+ * `server clock (+08:00)` for an unconfigured box, and passing that to `Intl` throws inside a render.
+ *
+ * Zone VALIDITY is the kernel's job and it does it: `routes/sites.rs` refuses abbreviations and
+ * fixed offsets on the way in, because neither can express daylight saving.
+ */
 export function isRenderableZone(zone: string): boolean {
   try {
     new Intl.DateTimeFormat([], { timeZone: zone });
