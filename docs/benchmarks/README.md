@@ -85,16 +85,17 @@ Measured from outside the box, by doing the work an operator does:
 
 | Metric | How |
 | --- | --- |
-| `unexplained_gap_seconds_per_camera_hour` | `/gaps` over the run window, minus intervals the harness itself took the camera off the air |
+| `unexplained_gap_seconds_per_camera_hour` | `/gaps` over the measurement window, minus intervals the harness itself took the camera off the air |
 | `recording_gap_seconds_per_camera_hour` | the same, raw — what a dashboard would show |
-| `unplayable_segment_count` | ffprobe over the segments **the index claims exist** |
+| `unplayable_segment_count` | ffprobe over a sample of the segments **the index claims exist**, spread across the whole run, plus every segment overlapping a restart |
 | `unindexed_segment_files` | files on disk the indexer rejected (diagnostic, no bar) |
 | `recorder_reconnect_seconds_p50/p95` | `heldar_camera_up` transitions, at sampling resolution |
-| `restart_recovery_seconds` | until every camera has written a **new** segment |
+| `restart_recovery_seconds` | until **every** camera has written a new segment (per-camera counter); a timeout is `unmeasured`, never the deadline |
+| `mediamtx_recovery_seconds` | the same, for a stream-server restart. Reported, **not gated** |
 | `footage_lost_per_restart_seconds` | `/gaps` across the restart window |
 | `time_to_first_segment_seconds` | warm-up, reported rather than charged as a gap |
 | `liveview_*`, `snapshot_*`, `clip_*` | real requests, timed |
-| `api_5xx_rate`, `api_seconds_p95` | every control-plane call the harness made |
+| `api_5xx_rate`, `api_seconds_p95` | control-plane calls made inside the measurement window — setup traffic and the three media paths are excluded and counted separately |
 | `core_cpu_percent_mean`, `core_rss_bytes_max` | `ps` on the core process |
 | `disk_used_percent_max` | the peak of the exposition's disk gauge over the run |
 | `retention_bytes_reclaimed` | decreases in `heldar_recordings_bytes` |
@@ -121,6 +122,14 @@ every run loudly instead of passing quietly.
 
 ## Reading a result honestly
 
+**The gap window is not the run window.** `/gaps` derives coverage from the segment index at query
+time, and the retention sweeper has already deleted rows older than the camera's retention. Asking
+for gaps over a 24-hour run with 6-hour retention returns roughly 18 hours of "gap" — the retention
+policy working exactly as configured, reported as lost coverage. The harness therefore clamps the
+gap query to 80% of the retention horizon and records the window it actually used alongside the
+number (`measurements.*.window`). A run whose in-retention window is under two minutes reports the
+gap metrics as `unmeasured` rather than computing a ratio from almost nothing.
+
 **A percentile over ten samples is not a percentile.** Every measurement carries its `n`; the short
 scenarios produce single-digit `n` for the media probes and their P95 is simply the worst of a few.
 Check `n` before quoting a number. The raw probe rows are in the result under `probes`.
@@ -144,13 +153,14 @@ cannot silently qualify an appliance profile.
 
 ## The scenario matrix
 
-`scripts/bench/scenarios.json`. Every qualification scenario injects faults — a camera disconnect
-and reconnect, a MediaMTX restart, a core restart — because a threshold over reconnect or restart
-recovery is `unmeasured`, and therefore failing, in a scenario that never breaks anything.
+`scripts/bench/scenarios.json`. Every scenario except `field-1h` injects the same four faults — a
+camera disconnect and reconnect, a MediaMTX restart and a core restart — because a threshold over
+reconnect or restart recovery is `unmeasured`, and therefore failing, in a scenario that never
+breaks anything. The two long profiles add a retention squeeze.
 
 | Scenario | Shape |
 | --- | --- |
-| `smoke-2cam` | 2 × 360p, 5 min. Shape check for CI. **Not a capacity claim** |
+| `smoke-2cam` | 2 × 360p, 7 min, all four process faults. Shape check for CI. **Not a capacity claim** |
 | `qual-4cam-h264` | 4 × 720p H.264 @ 2 Mbps, 30 min |
 | `qual-8cam-h264` | 8 × 720p H.264 @ 2 Mbps, 30 min |
 | `qual-8cam-motion-ai` | as above with the motion sampler at 2 FPS |

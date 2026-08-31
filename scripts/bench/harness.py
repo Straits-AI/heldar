@@ -683,7 +683,7 @@ def probe_media(api, cams, results, window_from, limit=8, offset=0):
             results["clip"].append((status == 200, time.monotonic() - t0, status, cam, now()))
 
 
-def unplayable_segments(data_dir, segment_seconds, limit=60):
+def unplayable_segments(data_dir, segment_seconds, restart_windows=None, limit=60):
     """ffprobe the segments THE INDEX CLAIMS EXIST.
 
     The obvious version of this walks the recordings directory, and it is wrong. A file on disk the
@@ -698,25 +698,34 @@ def unplayable_segments(data_dir, segment_seconds, limit=60):
     worse than unplayable, not better.
     """
     if not shutil.which("ffprobe"):
-        return None, None, "ffprobe is not installed"
+        return None, None, "ffprobe is not installed", 0, 0
     db = os.path.join(data_dir, "heldar.db")
     if not os.path.exists(db):
-        return None, None, "no database at the expected path"
+        return None, None, "no database at the expected path", 0, 0
     import sqlite3
 
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
     try:
-        rows = [
-            r[0]
-            for r in con.execute(
-                "SELECT path FROM segments ORDER BY start_time DESC LIMIT ?", (limit,)
-            )
-        ]
-        indexed_total = con.execute("SELECT COUNT(*) FROM segments").fetchone()[0]
+        every = con.execute("SELECT path, start_time FROM segments ORDER BY start_time").fetchall()
+        indexed_total = len(every)
     finally:
         con.close()
-    if not rows:
-        return None, None, "the index holds no segments"
+    if not every:
+        return None, None, "the index holds no segments", 0, 0
+
+    # SPREAD ACROSS THE RUN, not the newest N. `ORDER BY start_time DESC LIMIT 60` covered roughly
+    # the last minute of a 30-minute run and systematically excluded the segments around the
+    # injected restart — the one event most likely to leave a bad file. A recorder that mis-muxed a
+    # segment on every SIGTERM would have scored a clean zero.
+    stride = max(1, len(every) // max(1, limit))
+    sample = {row[0] for row in every[::stride]}
+
+    # ...and every segment overlapping a restart window, unconditionally. That is where a truncated
+    # file comes from, so it is not left to a stride to happen to land there.
+    for w_from, w_to in restart_windows or []:
+        lo, hi = rfc3339(w_from), rfc3339(w_to or w_from)
+        sample |= {path for path, st in every if st and lo <= st <= hi}
+    rows = sorted(sample)
 
     on_disk = sum(
         1
@@ -737,7 +746,7 @@ def unplayable_segments(data_dir, segment_seconds, limit=60):
         )
         if r.returncode != 0 or not r.stdout.strip():
             bad += 1
-    return bad, max(0, on_disk - indexed_total), None
+    return bad, max(0, on_disk - indexed_total), None, len(rows), indexed_total
 
 
 def do_run(args):
@@ -768,6 +777,7 @@ def do_run(args):
     os.makedirs(log_dir, exist_ok=True)
 
     stack = None
+    keep_data_dir = True   # flipped to False only once a result has been written successfully
     started = now()
     faults_done = []
     restart_windows = []
@@ -826,6 +836,23 @@ def do_run(args):
                             "config": {"threshold": 0.0008, "pixel_delta": 6},
                         },
                     )
+            # THE FLEET HAS TO EXIST. A run against a short fleet measures a box with less to do
+            # and reports green — no gaps, no failures, every threshold met.
+            #
+            # This check was written for synthetic mode and first landed, by a bad splice, inside
+            # the FIELD branch — where `registered` is never assigned. It was therefore dead for the
+            # mode it guards and an UnboundLocalError for the mode it was in, which made field mode
+            # unrunnable. Asserting that an edit APPLIED is not the same as asserting it is
+            # REACHABLE; `test_harness.py` now checks this one is.
+            if registered != len(cams):
+                print(
+                    f"refusing: {registered} of {len(cams)} cameras were registered. A run against "
+                    f"a short fleet measures a box with less to do and reports green — no gaps, no "
+                    f"failures, every threshold met — which is the most dangerous result this "
+                    f"harness could produce.",
+                    file=sys.stderr,
+                )
+                return 2
         else:
             base = os.environ.get("HELDAR_URL", "http://127.0.0.1:8000")
             token = os.environ.get("HELDAR_TOKEN")
@@ -838,16 +865,6 @@ def do_run(args):
             cams = [c["id"] for c in listing]
             if not cams:
                 print("field mode: the box has no cameras this credential can see", file=sys.stderr)
-                return 2
-
-            if registered != len(cams):
-                print(
-                    f"refusing: {registered} of {len(cams)} cameras were registered. A run against "
-                    f"a short fleet measures a box with less to do and reports green — no gaps, no "
-                    f"failures, every threshold met — which is the most dangerous result this "
-                    f"harness could produce.",
-                    file=sys.stderr,
-                )
                 return 2
 
         # WARM-UP. A camera that has not yet connected is not a recorder that lost coverage, and
@@ -915,8 +932,16 @@ def do_run(args):
             # Reconnect time, at sampling resolution: the span from a camera leaving `recording` to
             # its return. Stated as a resolution-bounded measurement in the report rather than
             # presented as if it were instrumented inside the recorder, which it is not.
+            #
+            # THE CLOCK IS HELD while the harness is deliberately holding the publisher down. This
+            # was the one place the injected-outage subtraction was missing, and it made the metric
+            # measure the SCENARIO: a publisher stopped for 120 s produced a 120 s "reconnect", so
+            # the 60 s bar could not be met by any product change. What is wanted is the span from
+            # the camera being available again to the recorder having noticed.
             for cam, up in keyed.get("heldar_camera_up", {}).items():
-                if up < 1 and cam not in down_since:
+                if cam in deliberately_down:
+                    down_since[cam] = elapsed
+                elif up < 1 and cam not in down_since:
                     down_since[cam] = elapsed
                 elif up >= 1 and cam in down_since:
                     reconnects.append(elapsed - down_since.pop(cam))
@@ -975,7 +1000,7 @@ def do_run(args):
                     return True
             return False
 
-        def deliberate_seconds(cam):
+        def deliberate_seconds(cam, since=None):
             """Seconds inside the measurement window that this camera was off the air because the
             harness put it there, plus a grace for the recorder to notice and resume.
 
@@ -989,45 +1014,74 @@ def do_run(args):
             for who, start, end in stack.outages:
                 if who not in (cam, "ALL"):
                     continue
-                lo = max(start, window_from)
+                lo = max(start, since or window_from)
                 hi = min(end + grace, window_to)
                 if hi > lo:
                     total += (hi - lo).total_seconds()
             return total
 
+        # THE GAP WINDOW IS NOT THE RUN WINDOW. `/gaps` derives coverage from the segment index at
+        # query time, and the retention sweeper has already deleted every row older than the
+        # camera's retention. Asking for gaps over a 24-hour run with 6-hour retention returns ~18
+        # hours of "gap" — the retention policy working exactly as configured, reported as lost
+        # coverage. rc-24h-8cam and soak-7d-8cam could never have qualified.
+        #
+        # So the window is clamped to the retention horizon, less a margin for the sweeper running
+        # on its own schedule, and the window actually used is recorded beside the number.
+        retention_s = float(sc.get("retention_hours", 2)) * 3600.0
+        gap_from = max(window_from, window_to - timedelta(seconds=retention_s * 0.8))
+        gap_hours = (window_to - gap_from).total_seconds() / 3600.0
+        gap_window = {"from": rfc3339(gap_from), "to": rfc3339(window_to),
+                      "clamped_to_retention": gap_from > window_from}
+
         total_gap = 0.0
         total_unexplained = 0.0
-        gap_ok = True
+        gap_ok = gap_hours * 3600 >= 120   # under two minutes of window, coverage means nothing
         for cam in cams:
+            if not gap_ok:
+                break
             status, body = api.get(
                 f"/api/v1/cameras/{cam}/gaps"
-                f"?from={rfc3339(window_from)}&to={rfc3339(window_to)}"
+                f"?from={rfc3339(gap_from)}&to={rfc3339(window_to)}"
             )
             if status != 200 or not isinstance(body, dict):
                 gap_ok = False
                 continue
             g = body.get("total_gap_seconds", 0.0)
             total_gap += g
-            total_unexplained += max(0.0, g - deliberate_seconds(cam))
-        per_hour = len(cams) * hours
+            total_unexplained += max(0.0, g - deliberate_seconds(cam, since=gap_from))
+        per_hour = len(cams) * max(gap_hours, 1e-9)
+        gap_unmeasured = {
+            "unmeasured": "the gaps endpoint did not answer for every camera"
+            if gap_hours * 3600 >= 120
+            else f"the window inside the retention horizon was only "
+            f"{gap_hours * 3600:.0f}s — too short for coverage to mean anything"
+        }
         m["recording_gap_seconds_per_camera_hour"] = (
-            {"value": round(total_gap / per_hour, 3), "unit": "s/camera-hour", "n": len(cams)}
+            {"value": round(total_gap / per_hour, 3), "unit": "s/camera-hour", "n": len(cams),
+             "window": gap_window}
             if gap_ok
-            else {"unmeasured": "the gaps endpoint did not answer for every camera"}
+            else gap_unmeasured
         )
         # THE ONE THE GATE USES. Raw coverage is what a dashboard shows; this is what the recorder
         # is answerable for, with the harness's own injected outages subtracted.
         m["unexplained_gap_seconds_per_camera_hour"] = (
             {"value": round(total_unexplained / per_hour, 3), "unit": "s/camera-hour",
-             "n": len(cams)}
+             "n": len(cams), "window": gap_window}
             if gap_ok
-            else {"unmeasured": "the gaps endpoint did not answer for every camera"}
+            else gap_unmeasured
         )
 
         if stack:
-            bad, orphans, why = unplayable_segments(data_dir, sc.get("segment_seconds", 10))
+            bad, orphans, why, probed, indexed = unplayable_segments(
+                data_dir, sc.get("segment_seconds", 10), restart_windows
+            )
             m["unplayable_segment_count"] = (
-                {"value": bad, "unit": "segments", "n": 1} if why is None else {"unmeasured": why}
+                # `n` is the number of segments actually ffprobed, and `indexed_total` how many
+                # existed. A sampled count published with n=1 hid that it was sampled at all.
+                {"value": bad, "unit": "segments", "n": probed, "indexed_total": indexed}
+                if why is None
+                else {"unmeasured": why}
             )
             # Diagnostic, deliberately NOT a threshold: a file the indexer rejected is litter, and
             # a hard restart leaves one behind. Worth seeing on a soak (it accumulates), not worth
@@ -1136,18 +1190,29 @@ def do_run(args):
             and not in_injected_outage(outage_key(pth), when)
             and not any(pth.endswith(x) for x in MEDIA)
         ]
-        excluded = len(api.statuses) - len(kept)
+        # Two different exclusions, reported separately. Lumping them made the field read as
+        # "calls dropped because of an injected outage" when most of them were setup traffic or
+        # media paths that have their own thresholds.
+        in_window = [
+            (c, d, pth)
+            for c, d, when, pth in zip(api.statuses, api.durations, api.times, api.paths)
+            if when >= window_from and not any(pth.endswith(x) for x in MEDIA)
+        ]
+        excluded_outage = len(in_window) - len(kept)
+        excluded_setup_or_media = len(api.statuses) - len(in_window)
         m["api_5xx_rate"] = {
             "value": round(sum(1 for c, _, _ in kept if c == 0 or c >= 500) / max(len(kept), 1), 4),
             "unit": "ratio",
             "n": len(kept),
-            "excluded_during_injected_outage": excluded,
+            "excluded_during_injected_outage": excluded_outage,
+            "excluded_as_setup_or_media": excluded_setup_or_media,
         }
         m["api_seconds_p95"] = {
             "value": round(pct([d for _, d, _ in kept], 95), 3),
             "unit": "s",
             "n": len(kept),
-            "excluded_during_injected_outage": excluded,
+            "excluded_during_injected_outage": excluded_outage,
+            "excluded_as_setup_or_media": excluded_setup_or_media,
         }
 
         byts = [s["recordings_bytes"] for s in samples if s["recordings_bytes"] is not None]
@@ -1314,6 +1379,7 @@ def do_run(args):
         path = os.path.join(out_dir, f"{run_id}.json")
         with open(path, "w") as f:
             json.dump(result, f, indent=2, sort_keys=True)
+        keep_data_dir = False
         v = result["validity"]
         if v["status"] != "VALID":
             # Loud and FIRST: a threshold verdict computed over a run that did not measure the
@@ -1329,6 +1395,44 @@ def do_run(args):
     finally:
         if stack:
             stack.stop()
+        # Keep the tree on a failed or refused run — the logs are the only way to find out why.
+        # Remove it on success, or a soak leaves tens of gigabytes of synthetic footage in /tmp.
+        if stack and os.path.isdir(data_dir) and keep_data_dir is False:
+            shutil.rmtree(data_dir, ignore_errors=True)
+
+
+RECOVERY_TIMEOUT_NOTE = (
+    "not every camera had written a new segment within 300 s; recovery is reported as unmeasured "
+    "rather than as 300 s, because the deadline is the harness's number and not the box's"
+)
+
+
+def wait_for_every_camera_to_write(api, cams, before_written, t0, deadline_s=300):
+    """Seconds until EVERY camera has written a new segment, or None if it did not happen.
+
+    Recovery is not "the port answers", and not "the status table says recording" either:
+    camera_status is PERSISTED, so straight after a restart it holds the pre-restart state and
+    `cameras_recording` reads full while nothing is being recorded. An early version measured 1.0 s
+    for a restart that had plainly not finished.
+
+    PER CAMERA, via `heldar_camera_segments_written_total`. The fleet-wide `heldar_segments_total`
+    is wrong twice over: it is `COUNT(*) FROM segments`, so one camera writing N segments satisfies
+    a target of N while the other cameras stay dead — and it is a GAUGE the retention sweeper drives
+    back down, so at retention steady state the target is never crossed however healthy the
+    recovery.
+
+    On timeout this returns None rather than the deadline. Reporting 300 s would publish the
+    harness's own patience as though it were the box's recovery time, and would fail a 120 s bar for
+    a box that had recovered in five seconds.
+    """
+    deadline = time.monotonic() + deadline_s
+    while time.monotonic() < deadline:
+        _, keyed = parse_prom(api.text("/metrics"))
+        w = keyed.get("heldar_camera_segments_written_total", {})
+        if cams and all(w.get(c, 0) > before_written.get(c, 0) for c in cams):
+            return time.monotonic() - t0
+        time.sleep(2)
+    return None
 
 
 def inject(f, stack, api, cams, restart_windows):
@@ -1360,8 +1464,8 @@ def inject(f, stack, api, cams, restart_windows):
         # failure rate — five threshold failures that were one harness bug wearing a product's
         # clothes. A synthetic camera has to behave like a camera: it has to come back.
         t0 = time.monotonic()
-        flat, _ = parse_prom(api.text("/metrics"))
-        before_segments = flat.get("heldar_segments_total", 0)
+        _, keyed = parse_prom(api.text("/metrics"))
+        before_written = keyed.get("heldar_camera_segments_written_total", {})
         stack.open_outage("ALL", backdate_s=stack.sc.get("segment_seconds", 10))
         stack.mtx.terminate()
         try:
@@ -1375,26 +1479,19 @@ def inject(f, stack, api, cams, restart_windows):
         # reconnect, which is how a 14-second recovery turned into 62 s/camera-hour of
         # "unexplained" gap. Same signal as the core restart: one new segment per camera cannot
         # happen unless every recorder is writing.
-        target = before_segments + len(cams)
-        deadline = time.monotonic() + 300
-        recovered = None
-        while time.monotonic() < deadline:
-            flat, _ = parse_prom(api.text("/metrics"))
-            if flat.get("heldar_segments_total", 0) >= target:
-                recovered = time.monotonic() - t0
-                break
-            time.sleep(2)
+        recovered = wait_for_every_camera_to_write(api, cams, before_written, t0)
         stack.close_outage("ALL")
         return {
             "restarted": "mediamtx",
             "publishers_restarted": respawned,
             "recovery_s": recovered,
+            **({} if recovered is not None else {"note": RECOVERY_TIMEOUT_NOTE}),
         }
 
     if kind == "core_restart":
         t0 = time.monotonic()
-        flat, _ = parse_prom(api.text("/metrics"))
-        before_segments = flat.get("heldar_segments_total", 0)
+        _, keyed = parse_prom(api.text("/metrics"))
+        before_written = keyed.get("heldar_camera_segments_written_total", {})
         stack.open_outage("ALL", backdate_s=stack.sc.get("segment_seconds", 10))
         restart_windows.append([now() - timedelta(seconds=stack.sc.get("segment_seconds", 10)), None])
         stack.core.send_signal(signal.SIGTERM)
@@ -1404,24 +1501,19 @@ def inject(f, stack, api, cams, restart_windows):
             stack.core.kill()
         stack.start_core()
         if not stack.wait_api(api, timeout_s=90):
+            # Close what was opened. Leaving the outage and the restart window open would have the
+            # rest of the run silently attributed to this fault, hiding every later failure.
+            stack.close_outage("ALL")
+            restart_windows[-1][1] = now()
             return {"restarted": "core", "recovery_s": None, "note": "the API did not return"}
-        # Recovery is not "the port answers", and it is not "the status table says recording"
-        # either: camera_status is PERSISTED, so immediately after a restart it still holds the
-        # pre-restart state and `cameras_recording` reads full while nothing is being recorded. The
-        # first version of this measured 1.0 s for a restart that had plainly not finished.
-        #
-        # The unfakeable signal is new FOOTAGE: wait until the segment count has grown by one per
-        # camera, which cannot happen unless every recorder is writing again.
-        target = before_segments + len(cams)
-        deadline = time.monotonic() + 300
-        while time.monotonic() < deadline:
-            flat, _ = parse_prom(api.text("/metrics"))
-            if flat.get("heldar_segments_total", 0) >= target:
-                break
-            time.sleep(2)
+        recovered = wait_for_every_camera_to_write(api, cams, before_written, t0)
         stack.close_outage("ALL")
         restart_windows[-1][1] = now()
-        return {"restarted": "core", "recovery_s": time.monotonic() - t0}
+        return {
+            "restarted": "core",
+            "recovery_s": recovered,
+            **({} if recovered is not None else {"note": RECOVERY_TIMEOUT_NOTE}),
+        }
 
     if kind == "disk_pressure":
         # Shrink the recordings cap so the sweeper must evict, rather than filling the host's disk

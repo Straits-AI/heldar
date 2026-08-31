@@ -197,7 +197,7 @@ groups:
 
       # 4) Recording gap proxy — segment counter flat while the camera is up.
       - alert: HeldarNoSegmentProgress
-        expr: increase(heldar_camera_segments_written[10m]) == 0 and on(camera) heldar_camera_up == 1
+        expr: increase(heldar_camera_segments_written_total[10m]) == 0 and on(camera) heldar_camera_up == 1
         for: 10m
         labels: { severity: warning }
         annotations:

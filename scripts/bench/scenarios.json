@@ -148,6 +148,10 @@
         "count": 2
       },
       {
+        "at_s": 720,
+        "kind": "mediamtx_restart"
+      },
+      {
         "at_s": 1200,
         "kind": "core_restart"
       }

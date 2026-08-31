@@ -251,6 +251,89 @@ def _():
     return HEADER + ROW.format(path="docs/benchmarks/results/t.json") + "\n", r
 
 
+@case("a second table under the same marker is NOT silently skipped", 1, "does not exist")
+def _():
+    # The parser used to stop at the first blank line, so a second table — the obvious way someone
+    # adds "long-run profiles" — was published unverified while the gate reported PASS.
+    doc = (HEADER + ROW.format(path="docs/benchmarks/results/t.json") + "\n\n"
+           + "Some prose about long runs.\n\n"
+           + "| Profile | Cameras | Codec | Bitrate | AI | Hardware class | Status |\n"
+           + "| --- | --- | --- | --- | --- | --- | --- |\n"
+           + "| Long run | 32 | H.265 | 4 Mbps | off | rk3588 | qualified: `docs/benchmarks/results/nope.json` |\n")
+    return doc, result()
+
+
+@case("two qualification markers are refused rather than resolved", 1, "more than one")
+def _():
+    return (HEADER + ROW.format(path="docs/benchmarks/results/t.json") + "\n\n"
+            + "<!-- qualification-table -->\n\n"
+            + "| Decoy | 99 | H.265 | 9 Mbps | off | nowhere | EXTRAPOLATED |\n"), result()
+
+
+@case("a real row whose first cell says Profile is still checked", 1, "does not exist")
+def _():
+    # Skipping any row whose first cell was "profile" let a real claim hide behind that word.
+    row = "| Profile | 8 | H.264 | 2 Mbps | off | appliance-n100 | qualified: `docs/benchmarks/results/nope.json` |"
+    return HEADER + row + "\n", result()
+
+
+@case("a bitrate cell with no number is refused, not skipped", 1, "not a number with a unit")
+def _():
+    row = "| 8-camera | 8 | H.264 | see below | off | appliance-n100 | qualified: `docs/benchmarks/results/t.json` |"
+    return HEADER + row + "\n", result()
+
+
+@case("a bitrate in the wrong unit is caught", 1, "the row says 2 kbps")
+def _():
+    # The old parser stripped non-digits, so "2 kbps" and "2 Mbps" were the same claim.
+    row = "| 8-camera | 8 | H.264 | 2 kbps | off | appliance-n100 | qualified: `docs/benchmarks/results/t.json` |"
+    return HEADER + row + "\n", result()
+
+
+@case("kbps and Mbps are both accepted when they agree", 0, "RESULT: PASS")
+def _():
+    row = "| 8-camera | 8 | H.264 | 2000 kbps | off | appliance-n100 | qualified: `docs/benchmarks/results/t.json` |"
+    return HEADER + row + "\n", result()
+
+
+@case("an empty codec cell no longer matches every run", 1, "the row says codec")
+def _():
+    # `in` made "" a substring of every codec, so a blank cell qualified against anything.
+    row = "| 8-camera | 8 |  | 2 Mbps | off | appliance-n100 | qualified: `docs/benchmarks/results/t.json` |"
+    return HEADER + row + "\n", result()
+
+
+@case("a truncated codec no longer matches by substring", 1, "the row says codec")
+def _():
+    row = "| 8-camera | 8 | h26 | 2 Mbps | off | appliance-n100 | qualified: `docs/benchmarks/results/t.json` |"
+    return HEADER + row + "\n", result()
+
+
+@case("a non-numeric cameras cell is refused", 1, "not a plain number")
+def _():
+    row = "| 8-camera | eight | H.264 | 2 Mbps | off | appliance-n100 | qualified: `docs/benchmarks/results/t.json` |"
+    return HEADER + row + "\n", result()
+
+
+@case("a lying thresholds_bars_sha256 cannot launder loosened bars", 1, "has been edited")
+def _():
+    # THE HOLE THE REVIEW FOUND: the gate preferred the file's own bars hash, so loosening a bar
+    # inside the result and leaving the field showing the tree's hash passed the drift check while
+    # evaluate() graded against the loosened bar.
+    loosened = json.loads(json.dumps(THRESHOLDS))
+    for t in loosened["thresholds"]:
+        if t["metric"] == "unexplained_gap_seconds_per_camera_hour":
+            t["value"] = 100000
+    m = dict(PASSING)
+    m["unexplained_gap_seconds_per_camera_hour"] = {"value": 900.0, "unit": "s/camera-hour", "n": 8}
+    r = result(measurements=m)
+    r["thresholds"] = loosened
+    r["thresholds_sha256"] = sha256_of(loosened)
+    r["thresholds_bars_sha256"] = bars_hash(THRESHOLDS)   # the lie
+    r["verdict"] = evaluate(m, loosened)[0]               # PASS, against the loosened bar
+    return HEADER + ROW.format(path="docs/benchmarks/results/t.json") + "\n", r
+
+
 @case("a result from a future schema", 1, "expected 'heldar-benchmark/1'")
 def _():
     return (HEADER + ROW.format(path="docs/benchmarks/results/t.json") + "\n",

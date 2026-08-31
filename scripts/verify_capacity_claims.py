@@ -43,6 +43,7 @@ sys.path.insert(0, os.path.join(ROOT, "scripts", "bench"))
 from harness import SCHEMA, bars_hash, evaluate, sha256_of, validity  # noqa: E402
 
 MARKER = "<!-- qualification-table -->"
+HEADER_CELLS = ["profile", "cameras", "codec", "bitrate", "ai", "hardware class", "status"]
 
 failures = []
 
@@ -56,23 +57,37 @@ def norm(s):
 
 
 def parse_table(text):
-    """The rows under the qualification marker. A markdown table, because the primary reader is a
-    person deciding what hardware to buy, not a program."""
+    """Every table row under the qualification marker, to the end of the section.
+
+    A markdown table, because the primary reader is a person deciding what hardware to buy, not a
+    program. But a lenient parser here is a hole: anything it silently skips is a published capacity
+    claim nobody checked.
+
+      * It reads to the next MARKDOWN HEADING, not to the first blank line. Stopping at a blank line
+        meant a second table under the same marker — the obvious way someone would add "long-run
+        profiles" — was never examined, and the gate reported PASS having checked the first table.
+      * More than one marker is REFUSED rather than resolved: an earlier decoy would otherwise hide
+        the real table.
+      * A header row is recognised only by matching the WHOLE expected header. Skipping any row
+        whose first cell said "Profile" let a real row be hidden by naming it that.
+    """
+    if text.count(MARKER) > 1:
+        return "MULTIPLE"
     if MARKER not in text:
         return None
     after = text.split(MARKER, 1)[1]
     rows = []
     for line in after.splitlines():
-        line = line.strip()
-        if not line.startswith("|"):
-            if rows:
-                break          # the table has ended
-            continue
-        cells = [c.strip() for c in line.strip("|").split("|")]
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            break              # the section has ended
+        if not stripped.startswith("|"):
+            continue           # prose between tables is fine; keep scanning
+        cells = [c.strip() for c in stripped.strip("|").split("|")]
         if not cells or set("".join(cells)) <= set("-: "):
             continue           # separator row
-        if norm(cells[0]) in ("profile", "workload"):
-            continue           # header
+        if [norm(c) for c in cells[:7]] == HEADER_CELLS:
+            continue           # the header itself, matched in full
         rows.append(cells)
     return rows
 
@@ -125,7 +140,17 @@ def check_row(cells, thresholds_hash, lineno):
 
     # BARS, not the whole file: a comment fix must not invalidate every published qualification,
     # but a changed value must invalidate the claims that rested on it.
-    run_bars = r.get("thresholds_bars_sha256") or bars_hash(r["thresholds"])
+    #
+    # RECOMPUTED from the recorded thresholds, never read from the result's own
+    # `thresholds_bars_sha256`. Preferring the file's field made the module's loudest guarantee
+    # opt-out: loosen a bar inside the result, leave the field showing the tree's hash, and the
+    # drift check passes while `evaluate()` grades against the loosened bar.
+    run_bars = bars_hash(r["thresholds"])
+    claimed = r.get("thresholds_bars_sha256")
+    if claimed and claimed != run_bars:
+        fail(f"row {lineno} ({profile}): {rel} carries a thresholds_bars_sha256 that does not match "
+             f"its own recorded bars — the file has been edited")
+        return
     if run_bars != thresholds_hash:
         fail(
             f"row {lineno} ({profile}): {rel} was judged against thresholds "
@@ -156,17 +181,33 @@ def check_row(cells, thresholds_hash, lineno):
     # The row and the run must describe the same thing.
     sc = r["scenario"]
     prov = r["provenance"]
-    if str(sc.get("cameras")) != re.sub(r"[^\d]", "", cameras):
+    if not re.fullmatch(r"\s*\d+\s*", cameras):
+        fail(f"row {lineno} ({profile}): the cameras cell {cameras!r} is not a plain number")
+    elif str(sc.get("cameras")) != cameras.strip():
         fail(f"row {lineno} ({profile}): the row says {cameras} cameras, the run used "
              f"{sc.get('cameras')}")
-    if norm(codec).replace("h.", "h") not in norm(str(sc.get("codec", ""))).replace("h.", "h"):
-        fail(f"row {lineno} ({profile}): the row says codec {codec}, the run used "
+    # EQUALITY, not a substring test. `in` let an empty or truncated codec cell match any run —
+    # "" is a substring of everything, and "h26" of both h264 and h265.
+    def codec_key(v):
+        return norm(v).replace("h.", "h").replace("hevc", "h265").replace(" ", "")
+
+    if codec_key(codec) != codec_key(str(sc.get("codec", ""))):
+        fail(f"row {lineno} ({profile}): the row says codec {codec!r}, the run used "
              f"{sc.get('codec')!r}")
-    want_kbps = re.sub(r"[^\d.]", "", bitrate)
-    if want_kbps:
-        got = float(sc.get("bitrate_kbps", 0)) / 1000.0
-        if abs(got - float(want_kbps)) > 0.001:
-            fail(f"row {lineno} ({profile}): the row says {bitrate}, the run used {got} Mbps")
+
+    # The bitrate cell must be a NUMBER WITH A UNIT and must be checked. Previously a cell with no
+    # digits skipped the comparison entirely, so "see below" passed against any bitrate; and the
+    # unit was ignored, so "2000 kbps" was read as 2000 Mbps.
+    bm = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(mbps|kbps)\s*", norm(bitrate))
+    if not bm:
+        fail(f"row {lineno} ({profile}): bitrate {bitrate!r} is not a number with a unit "
+             f"(e.g. `4 Mbps` or `2000 kbps`) — an uncheckable cell is an unchecked claim")
+    else:
+        want_kbps = float(bm.group(1)) * (1000.0 if bm.group(2) == "mbps" else 1.0)
+        got_kbps = float(sc.get("bitrate_kbps", 0))
+        if abs(got_kbps - want_kbps) > 0.001:
+            fail(f"row {lineno} ({profile}): the row says {bitrate}, the run used "
+                 f"{got_kbps:g} kbps")
     row_ai = norm(ai)
     run_ai = norm(str(sc.get("ai_profile", "off")))
     if row_ai != run_ai:
@@ -181,6 +222,10 @@ def main():
     text = open(doc).read()
 
     rows = parse_table(text)
+    if rows == "MULTIPLE":
+        print(f"{doc} contains more than one {MARKER}. Refusing rather than guessing which table "
+              f"is the real one — an earlier decoy would hide the rows that matter.")
+        return 1
     if rows is None:
         print(f"{doc} has no {MARKER} — the qualification table is how a capacity claim is "
               f"connected to evidence, and its absence is a failure, not a pass.")
