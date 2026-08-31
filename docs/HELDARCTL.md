@@ -1,6 +1,6 @@
 # heldarctl
 
-*Issue [#122](https://github.com/Straits-AI/heldar/issues/122). Read-only and diagnostic commands.*
+*Issue [#122](https://github.com/Straits-AI/heldar/issues/122).*
 
 The supported operator and automation interface. The dashboard is for watching; `heldarctl` is for
 installing, supporting, and scripting — including on a box with no browser.
@@ -30,6 +30,9 @@ it holds no secret, but it holds the shape of your fleet.
 heldarctl version                # this CLI, and the API contract it speaks
 heldarctl status                 # what the box is, and whether it is recording
 heldarctl doctor                 # what is wrong with it
+heldarctl retention              # the recording disk limits
+heldarctl retention set --max-gb 40          # PLANS the change, applies nothing
+heldarctl retention set --max-gb 40 --yes    # applies exactly the plan it printed
 ```
 
 Every command takes `--context <name>` and `--output=json`.
@@ -92,7 +95,45 @@ heldarctl doctor --json > findings.json || {
 A token, a camera password, a signed media URL, or an RTSP URL with credentials in it. CLI output
 gets pasted into tickets and chat far more readily than a server log does.
 
+## A mutation is a dry run until you say otherwise
+
+`retention set` without `--yes` prints what would happen and **changes nothing**. That is the same
+way round as the evidence export's `dry_run` default: the destructive direction is the one you have
+to ask for.
+
+```console
+$ heldarctl retention set --max-gb 3
+plan eba495dadeb888b2957ce53c76bff96dfa9eab276b6df987f550b2f0209e6efd
+  cap becomes 3.0 GB, 0.0 GB recorded now
+  would evict 0.0 GB (0.0 GB is evidence-locked and cannot be freed)
+  Committing this evicts nothing now.
+
+Nothing changed. Re-run with --yes to apply exactly this plan.
+```
+
+With `--yes` it still plans first, prints the same effect, and then commits **carrying the plan hash
+it just received**. That is what makes the printed effect meaningful rather than decorative: if
+anything the plan depended on moved in between — another operator changed the cap, the recorded
+footprint grew past it — the box refuses the commit rather than applying a change to a state nobody
+looked at. You get exit `6` and the server's own explanation of what to do.
+
+Shrinking the cap below what is already recorded **deletes the oldest footage fleet-wide** on the next
+sweep, so the effect prints on the `--yes` path too. An operator who typed the wrong number should
+read it in the terminal, not learn it from a retention sweep.
+
+### The idempotency key is derived from the plan, not random
+
+A `Idempotency-Key` generated per invocation would protect against almost nothing. The case that
+matters is an operator whose command timed out and who runs it again — and a fresh key makes that a
+second distinct request.
+
+The key is derived from the plan hash instead. A re-run against an unchanged box produces the same
+hash, so the same key, and the box replays its original answer rather than applying the change twice.
+If the box *did* change, the hash differs and so does the key — and the plan check refuses the commit
+anyway. The two guards agree by construction rather than by coincidence.
+
 ## Not here yet
 
-Mutating commands. The issue is explicit that a mutation needs its idempotency and dry-run behaviour
-defined before it ships — shipping one without that is how an automation replays a destructive call.
+The rest of the mutating surface: camera, event, incident, search, ai, backup, evidence and auth.
+`retention` is first because the server already implements dry-run and plan hashes for it (#121), so
+the safety pattern above could be demonstrated end to end before being copied.

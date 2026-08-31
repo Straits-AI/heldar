@@ -48,6 +48,11 @@ jobs:
           ./target/debug/heldarctl version --json | grep -q '"contract"'
           # An unknown command is a usage error, not a crash.
           set +e; ./target/debug/heldarctl nonsense >/dev/null 2>&1; test $? -eq 1
+          set -e
+          # The dry-run default is the CLI's entire safety story for a mutation (#122). If the help
+          # stops saying so, an operator reading --help learns that running it applies the change.
+          ./target/debug/heldarctl help | grep -q "A MUTATION IS A DRY RUN UNTIL YOU SAY OTHERWISE"
+          ./target/debug/heldarctl help | grep -q "heldarctl retention set"
       - name: skill bundle lints (#124)
         run: |
           set -euo pipefail
