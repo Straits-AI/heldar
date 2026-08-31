@@ -193,9 +193,13 @@ probe interval and the loop would spend the whole run probing.
 
 Recorded here because a benchmark that finds nothing has usually not looked.
 
-- **A core restart costs footage.** `SIGTERM` leaves the in-progress segment truncated; the indexer
-  correctly rejects it, so the timeline does not lie — but the captured seconds are gone. Measured
-  as `footage_lost_per_restart_seconds`. See [#167](https://github.com/Straits-AI/heldar/issues/167).
+- **A core restart used to cost footage — fixed.** The recorder killed FFmpeg with SIGKILL, which
+  left the in-progress segment truncated; the indexer correctly rejected it, so the timeline never
+  lied, but the captured seconds were gone. Measured here at 3.0–4.4 s per camera per restart
+  ([#167](https://github.com/Straits-AI/heldar/issues/167)). FFmpeg is now asked to close the segment
+  first. `footage_lost_per_restart_seconds` is still reported, and a future run on a fixed box should
+  show it near one keyframe interval rather than half a segment — which is the number to check when
+  re-qualifying.
 - **`GET /api/v1/cameras/{id}/snapshot` returns 500 for a camera whose stream is down**, where a
   4xx/503 would be right — an upstream that is not there is not an internal error. See
   [#168](https://github.com/Straits-AI/heldar/issues/168).

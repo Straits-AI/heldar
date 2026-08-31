@@ -415,7 +415,7 @@ impl RecorderManager {
                 }
                 _ = stop.changed() => {
                     tracing::info!(%camera_id, "recorder: stop requested");
-                    let _ = child.kill().await;
+                    finish_and_stop(&mut child, &camera_id).await;
                     let _ = repo::set_state(&self.pool, &camera_id, "offline", None).await;
                     return;
                 }
@@ -594,12 +594,15 @@ impl RecorderManager {
             match end {
                 End::Stop => {
                     tracing::info!(%camera_id, "recorder(event): stop requested");
-                    let _ = child.kill().await;
+                    finish_and_stop(&mut child, &camera_id).await;
                     let _ = repo::set_state(&self.pool, &camera_id, "offline", None).await;
                     return;
                 }
                 End::WindowClosed => {
-                    let _ = child.kill().await;
+                    // The END of an event window is the worst place to truncate: the last seconds of
+                    // a triggered recording are its post-roll, which is the part someone triggered
+                    // the recording to see.
+                    finish_and_stop(&mut child, &camera_id).await;
                     let _ = repo::set_state(&self.pool, &camera_id, "disabled", None).await;
                     tracing::info!(%camera_id, "recorder(event): trigger window elapsed; stopping ffmpeg");
                     backoff = 1;
@@ -712,6 +715,45 @@ pub(crate) fn build_record_command(
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
     cmd
+}
+
+/// How long FFmpeg gets to close the segment it is writing before we insist (#167).
+///
+/// Must stay comfortably under [`RecorderManager::stop`]'s 8-second budget: when that timeout
+/// expires it ABORTS the task, which drops the `Child`, and `kill_on_drop` then SIGKILLs — undoing
+/// the graceful shutdown this exists to perform. Three seconds of headroom.
+const FINALIZE_GRACE: Duration = Duration::from_secs(5);
+
+/// Ask FFmpeg to finish the segment it is writing, then insist.
+///
+/// `Child::kill` is SIGKILL, which takes the process out between fragments and leaves the
+/// in-progress segment truncated — the recorder had already captured those seconds and threw them
+/// away. Measured on the qualification harness at 3.0–4.4 s of footage per camera per restart
+/// (#167), and reproduced directly against these exact muxer arguments: interrupting mid-segment
+/// leaves a 28-byte unplayable file under SIGKILL and a valid 8-second segment under SIGTERM.
+///
+/// SIGTERM rather than `q` on stdin because the command is built with `-nostdin`; ffmpeg handles
+/// both and writes out what it has either way.
+///
+/// Falls back to SIGKILL on timeout and on non-Unix, so a wedged encoder cannot hold shutdown open.
+async fn finish_and_stop(child: &mut tokio::process::Child, camera_id: &str) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        // SAFETY: `pid` comes from a child this process spawned and has not yet reaped, so it names
+        // that child or nothing. SIGTERM to a stale pid is the same risk every process supervisor
+        // carries; the window is bounded by us awaiting the same child immediately below.
+        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM) };
+        match tokio::time::timeout(FINALIZE_GRACE, child.wait()).await {
+            Ok(_) => return,
+            Err(_) => tracing::warn!(
+                %camera_id,
+                grace_s = FINALIZE_GRACE.as_secs(),
+                "recorder: ffmpeg did not finish its segment in time; killing (the in-progress \
+                 segment will be truncated and the indexer will reject it)"
+            ),
+        }
+    }
+    let _ = child.kill().await;
 }
 
 /// Reconnect backoff after an ffmpeg child exits. Resets to 1s if the child ran a healthy while
@@ -1352,5 +1394,163 @@ mod tests {
             offline_events >= 1,
             "a crash must log a camera_offline event"
         );
+    }
+
+    /// Spawn a real FFmpeg writing the SHIPPED segment arguments, and interrupt it mid-segment.
+    ///
+    /// `lavfi` rather than RTSP: the muxer behaviour under interruption is what is being tested, and
+    /// standing up MediaMTX would add a second thing that can fail without testing anything more.
+    /// The `-f segment` / `-segment_format mp4` / `movflags` triple is copied from
+    /// `build_record_command`, and `the_segment_arguments_match_the_shipped_ones` below fails if
+    /// they drift apart.
+    #[cfg(unix)]
+    async fn write_then_interrupt(dir: &std::path::Path, graceful: bool) -> Vec<(u64, bool)> {
+        let pattern = dir.join("%Y%m%d_%H%M%S.mp4");
+        let mut child = Command::new("ffmpeg")
+            .args(["-nostdin", "-hide_banner", "-loglevel", "error"])
+            .args(["-f", "lavfi", "-i", "testsrc=size=320x180:rate=15"])
+            .args([
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-g",
+                "30",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .args(["-f", "segment"])
+            .args(["-segment_time", "4"])
+            .args(["-segment_format", "mp4"])
+            .args([
+                "-segment_format_options",
+                "movflags=+frag_keyframe+empty_moov+default_base_moof",
+            ])
+            .args(["-reset_timestamps", "1", "-strftime", "1"])
+            .arg(&pattern)
+            .kill_on_drop(true)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn ffmpeg");
+
+        // Wait until a second segment has been opened, so one is complete and one is mid-flight.
+        for _ in 0..100 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0) >= 2 {
+                break;
+            }
+        }
+        if graceful {
+            finish_and_stop(&mut child, "cam_test").await;
+        } else {
+            let _ = child.kill().await;
+        }
+
+        let mut files: Vec<_> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .collect();
+        files.sort();
+        files
+            .iter()
+            .map(|f| {
+                let size = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
+                let playable = std::process::Command::new("ffprobe")
+                    .args([
+                        "-v",
+                        "error",
+                        "-show_entries",
+                        "format=duration",
+                        "-of",
+                        "csv=p=0",
+                    ])
+                    .arg(f)
+                    .output()
+                    .map(|o| o.status.success() && !o.stdout.is_empty())
+                    .unwrap_or(false);
+                (size, playable)
+            })
+            .collect()
+    }
+
+    /// THE BUG (#167): SIGKILL leaves the segment being written truncated and unplayable, so the
+    /// seconds already captured in it are lost. `finish_and_stop` asks FFmpeg to close it first.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn a_graceful_stop_keeps_the_segment_being_written() {
+        // Skipped rather than failed where ffmpeg is absent — CI installs it, a laptop may not.
+        let have = |bin: &str| {
+            std::process::Command::new(bin)
+                .arg("-version")
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        };
+        if !have("ffmpeg") || !have("ffprobe") {
+            eprintln!("skipping a_graceful_stop_keeps_the_segment_being_written: ffmpeg absent");
+            return;
+        }
+        let base =
+            std::env::temp_dir().join(format!("heldar_sig_{}", uuid::Uuid::new_v4().simple()));
+        let (graceful_dir, killed_dir) = (base.join("graceful"), base.join("killed"));
+        std::fs::create_dir_all(&graceful_dir).unwrap();
+        std::fs::create_dir_all(&killed_dir).unwrap();
+
+        let graceful = write_then_interrupt(&graceful_dir, true).await;
+        let killed = write_then_interrupt(&killed_dir, false).await;
+        let _ = std::fs::remove_dir_all(&base);
+
+        assert!(
+            graceful.len() >= 2 && killed.len() >= 2,
+            "the probe did not produce a complete segment plus one in flight \
+             (graceful={graceful:?} killed={killed:?})"
+        );
+
+        // NEGATIVE CONTROL, in the same test: without it, a change that made every segment playable
+        // for some unrelated reason would leave the assertion below passing while proving nothing.
+        let (killed_size, killed_playable) = *killed.last().unwrap();
+        assert!(
+            !killed_playable,
+            "SIGKILL left a PLAYABLE final segment ({killed_size} bytes) — the bug this guards \
+             against no longer reproduces, so the assertion below is no longer evidence"
+        );
+
+        let (size, playable) = *graceful.last().unwrap();
+        assert!(
+            playable,
+            "the segment FFmpeg was writing when it was asked to stop is unplayable ({size} bytes); \
+             those seconds were captured and thrown away (#167)"
+        );
+    }
+
+    /// The probe above copies the muxer arguments; this fails if the shipped ones move.
+    #[test]
+    fn the_segment_arguments_match_the_shipped_ones() {
+        let cfg = Config::from_env();
+        let mut cam = test_camera();
+        cam.segment_seconds = 4;
+        let cmd =
+            build_record_command(&cfg, &cam, "rtsp://example/x", std::path::Path::new("/tmp"));
+        let args: Vec<String> = cmd
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        for needed in [
+            "segment",
+            "mp4",
+            "movflags=+frag_keyframe+empty_moov+default_base_moof",
+        ] {
+            assert!(
+                args.iter().any(|a| a == needed),
+                "the shipped recorder no longer passes {needed:?}; the interruption probe in this \
+                 file is testing a muxer configuration the product does not use: {args:?}"
+            );
+        }
     }
 }
