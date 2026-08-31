@@ -135,6 +135,115 @@ export function scheduleClockLabel(
   return tz.configured ?? `server clock (${tz.server_local_offset})`;
 }
 
+/**
+ * The zone a camera's timestamps should be RENDERED in, and where that zone came from (#148).
+ *
+ * `scheduleClockLabel` above answers "what do we call the clock"; this answers "what do we format
+ * in", and the two are not the same question. That function can return `server clock (+08:00)`,
+ * which is a true and useful sentence and NOT something `Intl.DateTimeFormat` will accept as a
+ * `timeZone` — offset strings are not IANA identifiers. Passing one through would throw a
+ * RangeError inside a render.
+ *
+ * So when no IANA zone is known, this resolves to the VIEWER's zone and says so. Rendering a
+ * Malaysian camera's footage in London time is defensible; rendering it in London time while
+ * claiming it is the site's clock is not, and an unlabelled clock is what #148 exists to fix.
+ */
+export type ResolvedZone =
+  /** The camera's own site names a zone. It overrides the box-wide setting, as in `services/tz.rs`. */
+  | { kind: "site"; zone: string }
+  /** No site zone; the box has one configured. */
+  | { kind: "box"; zone: string }
+  /**
+   * Neither names an IANA zone, so there is nothing to convert INTO. The box reads schedules in the
+   * server's own clock, of which the API gives us only an offset — not enough for `Intl`.
+   */
+  | { kind: "viewer"; zone: string };
+
+export function resolveCameraZone(
+  tz:
+    | { configured: string | null; server_local_offset: string }
+    | null
+    | undefined,
+  siteZone?: string | null,
+): ResolvedZone {
+  // Same order as `services/tz.rs`: the camera's site, then the box-wide setting. A camera on a site
+  // with its own zone must not be rendered in the box's — that is the 8-hour lie #147 fixed for
+  // schedule labels, reached here through a different door.
+  if (siteZone) return { kind: "site", zone: siteZone };
+  if (tz?.configured) return { kind: "box", zone: tz.configured };
+  return { kind: "viewer", zone: viewerZone() };
+}
+
+/** The browser's IANA zone, or `UTC` where the runtime will not say. */
+export function viewerZone(): string {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  } catch {
+    return "UTC";
+  }
+}
+
+/** What to put next to a converted clock. Short, because it sits in a panel header. */
+export function zoneLabel(r: ResolvedZone): string {
+  return r.kind === "viewer" ? `${r.zone} (your zone)` : r.zone;
+}
+
+/**
+ * Render an instant in a named zone.
+ *
+ * Falls back to the viewer's zone rather than throwing: an unknown or malformed IANA name reaches
+ * this from a site row an operator typed, and one bad row must not blank out every timestamp on the
+ * page. The caller's LABEL is derived from `ResolvedZone`, so a fallback here would silently
+ * mislabel — which is why `isRenderableZone` exists and callers resolve the label from the same
+ * value they format with.
+ */
+export function formatClockIn(
+  iso: string | null | undefined,
+  zone: string,
+): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  try {
+    return d.toLocaleString([], { timeZone: zone });
+  } catch {
+    return d.toLocaleString();
+  }
+}
+
+export function formatTimeShortIn(
+  iso: string | null | undefined,
+  zone: string,
+): string {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  try {
+    return d.toLocaleTimeString([], {
+      timeZone: zone,
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  } catch {
+    return d.toLocaleTimeString([], {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  }
+}
+
+/** Whether `Intl` will accept this as a `timeZone`. A site row carries operator-typed text. */
+export function isRenderableZone(zone: string): boolean {
+  try {
+    new Intl.DateTimeFormat([], { timeZone: zone });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** The zone a camera's schedule is actually read in, or `null` when its site names none. */
 export function cameraSiteZone(
   siteId: string | null | undefined,
