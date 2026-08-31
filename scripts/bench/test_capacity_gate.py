@@ -334,6 +334,30 @@ def _():
     return HEADER + ROW.format(path="docs/benchmarks/results/t.json") + "\n", r
 
 
+@case("a run whose generator starved is INVALID, not a product failure", 1, "is INVALID")
+def _():
+    # The mirror of the respawn case: publishers that fall behind without dying. A 16-camera H.265
+    # run on an 8-core laptop failed three thresholds this way while the recorder's own CPU never
+    # went above 3% — the benchmark host, not the box.
+    r = result()
+    r["scenario"] = dict(r["scenario"], bitrate_kbps=4000, duration_s=100)
+    r["duration_s"] = 100.0
+    r["samples"] = [{"camera_bitrate_kbps": {"a": 1500}} for _ in range(20)]
+    return HEADER + ROW.format(path="docs/benchmarks/results/t.json") + "\n", r
+
+
+@case("a run whose fleet never came up is INVALID", 1, "never reached its declared fleet size")
+def _():
+    r = result()
+    r["measurements"] = dict(
+        r["measurements"],
+        time_to_first_segment_seconds={
+            "unmeasured": "not every camera had written a segment within the 128s warm-up"
+        },
+    )
+    return HEADER + ROW.format(path="docs/benchmarks/results/t.json") + "\n", r
+
+
 @case("a result from a future schema", 1, "expected 'heldar-benchmark/1'")
 def _():
     return (HEADER + ROW.format(path="docs/benchmarks/results/t.json") + "\n",

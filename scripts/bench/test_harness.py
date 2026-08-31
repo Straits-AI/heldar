@@ -88,6 +88,44 @@ check(
     "run is as useless as one that accepts every run",
 )
 check(validity({**base, "duration_s": 50.0})["status"] == "INVALID", "a run cut short is invalid")
+
+# --- generator starvation: the declared workload must actually have been produced ----------------
+from harness import delivered_bitrate_ratio  # noqa: E402
+
+def _run(kbps_seen, want=4000, n=20):
+    return {**base, "scenario": {"duration_s": 100, "bitrate_kbps": want},
+            "samples": [{"camera_bitrate_kbps": {"a": k}} for k in kbps_seen * n]}
+
+check(abs(delivered_bitrate_ratio(_run([4000])) - 1.0) < 1e-9, "a delivering generator reads 1.0")
+check(abs(delivered_bitrate_ratio(_run([2000])) - 0.5) < 1e-9, "half the bitrate reads 0.5")
+check(delivered_bitrate_ratio({**base, "scenario": {"duration_s": 1}}) is None,
+      "no declared bitrate means no ratio, not a division by zero")
+check(delivered_bitrate_ratio(_run([4000], n=1)) is None,
+      "too few samples must be None rather than a confident ratio from three readings")
+check(validity(_run([4000]))["status"] == "VALID", "a generator that keeps up is valid")
+check(validity(_run([2000]))["status"] == "INVALID",
+      "a generator delivering half the requested bitrate did not run the declared test")
+check(validity(_run([2700]))["status"] == "INVALID", "67.5% is below the 70% floor")
+check(validity(_run([2900]))["status"] == "VALID",
+      "72.5% is above the floor — the rule must not refuse a run for ordinary encoder jitter, or "
+      "every result becomes INVALID and the distinction stops meaning anything")
+
+# A fleet that never fully came up was never the declared fleet. This is the second, independent
+# signal for the same failure: it caught a 16-camera H.265 run on an 8-core laptop where the
+# publishers starved without dying and the recorder's own CPU never went above 3%.
+check(
+    validity({**base, "measurements": {
+        "time_to_first_segment_seconds": {"unmeasured": "not every camera had written a segment "
+                                                        "within the 128s warm-up"}}})["status"]
+    == "INVALID",
+    "a fleet that never came up is not a measurement of that fleet",
+)
+check(
+    validity({**base, "measurements": {
+        "time_to_first_segment_seconds": {"unmeasured": "field mode does not start the cameras"}}}
+    )["status"] == "VALID",
+    "field mode not starting cameras is not a starved generator",
+)
 check(validity({**base, "duration_s": 95.0})["status"] == "VALID", "a 5% short run is tolerated")
 check(validity({**base, "measurements": {}})["status"] == "INVALID", "no measurements is invalid")
 # A result with no cameras key at all (the shape the gate's fixtures use) must not crash.

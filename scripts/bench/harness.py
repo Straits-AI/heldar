@@ -560,6 +560,25 @@ def bars_hash(thresholds):
     )
 
 
+def delivered_bitrate_ratio(result):
+    """Median observed camera bitrate over the run, as a fraction of what the scenario asked for.
+
+    `None` when the scenario declares no bitrate or the exposition never carried the gauge.
+    """
+    want = (result.get("scenario") or {}).get("bitrate_kbps")
+    if not want:
+        return None
+    seen = []
+    for s in result.get("samples") or []:
+        for _, kbps in (s.get("camera_bitrate_kbps") or {}).items():
+            if kbps:
+                seen.append(kbps)
+    if len(seen) < 10:
+        return None
+    seen.sort()
+    return (seen[len(seen) // 2]) / float(want)
+
+
 def validity(result):
     """Is this run a measurement at all?
 
@@ -583,6 +602,35 @@ def validity(result):
             f"generator rather than the recorder. Generate the streams on a separate machine or "
             f"reduce the camera count.",
         }
+    # THE DECLARED WORKLOAD MUST ACTUALLY HAVE BEEN PRODUCED. A publisher that DIES is caught
+    # above; one that merely STARVES is not — ffmpeg with `-re` on a saturated host does not exit,
+    # it falls behind, and the streams thin out. The recorder then flaps between cameras that keep
+    # appearing and vanishing, and the run reports catastrophic coverage loss for a box whose CPU
+    # never went above 3%.
+    #
+    # This is the mirror of the MediaMTX-restart bug: there the harness destroyed the fleet and
+    # blamed the recorder; here the host cannot build the fleet and would blame the recorder again.
+    # If the generator delivered a fraction of the requested bitrate, you did not run the declared
+    # test — whatever the thresholds say.
+    ratio = delivered_bitrate_ratio(result)
+    if ratio is not None and ratio < 0.7:
+        return {
+            "status": "INVALID",
+            "reason": f"the synthetic cameras delivered a median {ratio:.0%} of the requested "
+            f"{(result['scenario'] or {}).get('bitrate_kbps')} kbps — the host could not encode the "
+            f"declared workload in real time, so this run measures the generator. Generate the "
+            f"streams on a separate machine, use a hardware encoder, or reduce the camera count.",
+        }
+
+    # A fleet that never fully came up was never the declared fleet.
+    ttfs = (result.get("measurements") or {}).get("time_to_first_segment_seconds") or {}
+    if "unmeasured" in ttfs and "warm-up" in str(ttfs.get("unmeasured", "")):
+        return {
+            "status": "INVALID",
+            "reason": "not every camera had written a segment by the end of the warm-up, so the "
+            "run never reached its declared fleet size",
+        }
+
     declared = (result.get("scenario") or {}).get("duration_s")
     actual = result.get("duration_s")
     if declared and actual and actual < declared * 0.9:
@@ -871,7 +919,10 @@ def do_run(args):
         # counting the first segment's worth of start-up as a gap would fail every scenario for a
         # reason that has nothing to do with capacity. Time-to-first-segment is reported separately,
         # because it IS interesting — just not as a coverage failure.
-        warmup_s = sc.get("warmup_s", 120)
+        # Scaled to the fleet: cameras come up roughly in sequence, so a fixed 120 s that is
+        # generous for 4 cameras is too short for 32 — and a warm-up that expires marks the run
+        # INVALID, which would be a false accusation against a healthy box.
+        warmup_s = sc.get("warmup_s") or max(120, len(cams) * 8)
         first_segment_s = None
         if mode == "synthetic":
             t_warm = time.monotonic()
@@ -920,6 +971,10 @@ def do_run(args):
                     "core_cpu_percent": cpu,
                     "core_rss_bytes": rss,
                     "camera_up": keyed.get("heldar_camera_up", {}),
+                    # What the GENERATOR actually delivered, and how loaded the host was. Without
+                    # these a saturated benchmark host is indistinguishable from a failing recorder.
+                    "camera_bitrate_kbps": keyed.get("heldar_camera_bitrate_kbps", {}),
+                    "load_avg_1m": (os.getloadavg()[0] if hasattr(os, "getloadavg") else None),
                 }
             )
 
