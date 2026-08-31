@@ -77,7 +77,15 @@ curl -fsS -X POST "$API/api/v1/cameras" -H 'content-type: application/json' -d "
 # Each script owns its own assertions; this only reports which subsystem failed and keeps going, so
 # one broken subsystem does not hide the state of the other three.
 rc=0
-for s in zones entry movement search; do
+# `ai` is in the loop as of #113: it was excluded on the grounds that it needed a real camera, and
+# this stack publishes a live RTSP stream for the whole run — which is precisely what its frame check
+# needs.
+#
+# LAST, not first. These validators share one camera, and validate_ai.sh ingests detections with a
+# track id; running it ahead of validate_zones.sh left a track already established, and the zone
+# debounce assertion ("one inside frame does not enter") saw 3 events instead of 0. The sampler needs
+# no head start — it has been running since the stack came up.
+for s in zones entry movement search ai; do
   hr "validate_$s.sh (CAM=$CAM)"
   if CAM="$CAM" "$ROOT/scripts/validate_$s.sh" >>"$REPORT" 2>&1; then
     log "OK   validate_$s.sh"

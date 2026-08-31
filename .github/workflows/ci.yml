@@ -353,9 +353,11 @@ jobs:
           name: subsystem-report
           path: data/validate_subsystems.txt
           retention-days: 7
-      # Still NOT run in CI:
-      #   - validate_ai.sh: needs a REAL camera actively streaming so the sampler produces frames —
-      #     real hardware, cannot be satisfied synthetically here.
+      # validate_ai.sh now runs in the subsystem gate above (#113). It was excluded for years on the
+      # grounds that it "needs a REAL camera actively streaming"; that stopped being true when the
+      # subsystem stack started publishing a synthetic RTSP stream for the whole run. Its frame check
+      # is the only assertion anywhere that the SAMPLER turns a stream into a frame, rather than a
+      # test hand-posting the events a sampler would have produced.
       - name: upload validation reports
         if: failure()
         uses: actions/upload-artifact@v4
