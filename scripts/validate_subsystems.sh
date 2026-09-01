@@ -34,6 +34,13 @@ cleanup(){
 }
 trap cleanup EXIT
 
+# `HELDAR_DATA_DIR` alone does NOT move the database — that is `HELDAR_DATABASE_URL`, set above.
+# Without it a run with a data-dir override wrote recordings to the override and kept using
+# `./data/heldar.db`, so this `rm` deleted a file nothing was using and every run inherited the last
+# one's rows. Locally that made validate_zones' debounce assertion ("one inside frame does not
+# enter") count 9, then 30, then 42 zone events left over from previous runs — a gate failing for a
+# reason that had nothing to do with the code, and only when someone used the override this script
+# documents. In CI the override is unset, the two paths coincide, and it passed throughout.
 rm -rf "$DATA/recordings/$CAM" "$DATA/heldar.db"* 2>/dev/null
 
 hr "start MediaMTX"
@@ -44,6 +51,7 @@ sleep 2
 hr "start Heldar Core"
 HELDAR_DEFAULT_SEGMENT_SECONDS=5 \
 HELDAR_DATA_DIR="$DATA" \
+HELDAR_DATABASE_URL="sqlite://$DATA/heldar.db" \
 HELDAR_INDEXER_INTERVAL_S=3 \
 HELDAR_HEALTH_INTERVAL_S=10 \
 HELDAR_RETENTION_INTERVAL_S=60 \
