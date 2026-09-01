@@ -922,10 +922,40 @@ class _OcrBackend:
         self.log = log
         self.kind: Optional[str] = None
         self._engine = None
+        # Which PaddleOCR major is installed: 3 or 2. The constructor call, the inference call AND
+        # the result shape all differ between them, so this is resolved once rather than guessed at
+        # each frame.
+        self._paddle_api: Optional[int] = None
         self._init(preferred)
+
+    @staticmethod
+    def _build_paddle(PaddleOCR) -> tuple:
+        """`(engine, api_major)`, trying 3.x first.
+
+        The two majors reject each other's arguments, which is what makes this detectable without
+        importing a version string:
+
+          * 3.x renamed `use_angle_cls` to `use_textline_orientation` and REMOVED `show_log` — an
+            unknown argument there raises rather than being ignored.
+          * 2.x has never heard of `use_textline_orientation`.
+
+        Before this, the constructor passed `show_log=False` unconditionally. On 3.x that raises
+        `Unknown argument: show_log`, the caller swallowed it, and ANPR ran forever emitting vehicles
+        with no plate — see #188. `paddleocr>=2.7` resolves to 3.x today, so that was every fresh
+        install.
+        """
+        try:
+            return PaddleOCR(lang="en", use_textline_orientation=False), 3
+        except (TypeError, ValueError):
+            return PaddleOCR(lang="en", use_angle_cls=False, show_log=False), 2
 
     def _init(self, preferred: Optional[str]) -> None:
         order = [preferred] if preferred else ["paddleocr", "easyocr"]
+        # Distinguish "not installed" from "installed but would not start". The old message said
+        # `install paddleocr or easyocr` for both, so an operator whose paddleocr was installed AND
+        # broken was told to do the one thing that could not help.
+        missing: List[str] = []
+        broken: List[str] = []
         for kind in order:
             if not kind:
                 continue
@@ -933,9 +963,9 @@ class _OcrBackend:
                 if kind == "paddleocr":
                     from paddleocr import PaddleOCR  # type: ignore
 
-                    self._engine = PaddleOCR(use_angle_cls=False, lang="en", show_log=False)
+                    self._engine, self._paddle_api = self._build_paddle(PaddleOCR)
                     self.kind = "paddleocr"
-                    self.log.info("ANPR OCR backend: PaddleOCR")
+                    self.log.info("ANPR OCR backend: PaddleOCR (%d.x API)", self._paddle_api)
                     return
                 if kind == "easyocr":
                     import easyocr  # type: ignore
@@ -944,16 +974,58 @@ class _OcrBackend:
                     self.kind = "easyocr"
                     self.log.info("ANPR OCR backend: EasyOCR")
                     return
+            except ImportError:
+                missing.append(kind)
             except Exception as exc:  # noqa: BLE001
-                self.log.warning("OCR backend %s unavailable (%s)", kind, exc)
+                broken.append(f"{kind} ({type(exc).__name__}: {exc})")
+                self.log.warning("OCR backend %s is installed but failed to start: %s", kind, exc)
+        detail = []
+        if broken:
+            detail.append("installed but failed to start: " + ", ".join(broken))
+        if missing:
+            detail.append("not installed: " + ", ".join(missing))
         self.log.warning(
-            "ANPR: no OCR backend available (install paddleocr or easyocr); emitting vehicle "
-            "attributes WITHOUT plate reads. The engine will still log unreadable-plate events."
+            "ANPR: no OCR backend available (%s); emitting vehicle attributes WITHOUT plate reads. "
+            "The engine will still log unreadable-plate events.",
+            "; ".join(detail) or "none tried",
         )
 
     @property
     def enabled(self) -> bool:
         return self._engine is not None
+
+    def _read_paddle(self, arr) -> List[tuple]:
+        """`(text, confidence)` pairs, from whichever PaddleOCR major is loaded.
+
+        3.x: `predict()` returns result objects exposing parallel `rec_texts` / `rec_scores`. `ocr()`
+        still exists but is deprecated and forwards to a keyword-only `predict()` that has no `cls`,
+        so calling it the 2.x way is a TypeError.
+
+        2.x: `ocr(cls=False)` returns `[[ [box, (text, score)], ... ]]`.
+        """
+        out: List[tuple] = []
+        if self._paddle_api == 3:
+            for res in self._engine.predict(arr) or []:
+                # A result object is mapping-like in some builds and attribute-like in others; take
+                # whichever answers rather than pinning one and breaking on a point release.
+                texts = res.get("rec_texts") if hasattr(res, "get") else None
+                scores = res.get("rec_scores") if hasattr(res, "get") else None
+                if texts is None:
+                    texts = getattr(res, "rec_texts", None)
+                    scores = getattr(res, "rec_scores", None)
+                for text, conf in zip(texts or [], scores or []):
+                    try:
+                        out.append((text, float(conf)))
+                    except (TypeError, ValueError):
+                        continue
+            return out
+        for block in self._engine.ocr(arr, cls=False) or []:
+            for line in block or []:
+                try:
+                    out.append((line[1][0], float(line[1][1])))
+                except (IndexError, TypeError, ValueError):
+                    continue
+        return out
 
     def read_plate(self, crop: "Image.Image") -> Optional[tuple]:
         if self._engine is None:
@@ -962,14 +1034,7 @@ class _OcrBackend:
             arr = np.asarray(crop.convert("RGB"))
             candidates: List[tuple] = []  # (text, conf)
             if self.kind == "paddleocr":
-                result = self._engine.ocr(arr, cls=False)
-                for block in result or []:
-                    for line in block or []:
-                        try:
-                            text, conf = line[1][0], float(line[1][1])
-                            candidates.append((text, conf))
-                        except (IndexError, TypeError, ValueError):
-                            continue
+                candidates.extend(self._read_paddle(arr))
             elif self.kind == "easyocr":
                 for item in self._engine.readtext(arr):
                     try:
