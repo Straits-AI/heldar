@@ -4,9 +4,16 @@
 # does not need the migrations directory.
 
 # Pinned base: concrete minor.patch tag + multi-arch index @sha256 digest for a reproducible build.
-# MSRV is 1.85 (see crates/*/Cargo.toml rust-version). To bump: pick the new tag, then resolve its
-# index digest with `docker buildx imagetools inspect rust:<tag>` (see docs/SUPPLY-CHAIN.md).
-FROM rust:1.85.1-bookworm@sha256:e51d0265072d2d9d5d320f6a44dde6b9ef13653b035098febd68cce8fa7c0bc4 AS builder
+# To bump: pick the new tag, then resolve its index digest with
+# `docker buildx imagetools inspect rust:<tag>` (see docs/SUPPLY-CHAIN.md).
+#
+# This tracks the toolchain the build actually needs, NOT the workspace MSRV. It was pinned to 1.85.1
+# to match MSRV, and the v0.4.0 image build then failed: transitive deps (icu_* 2.2) require rustc
+# 1.86. CI builds with `stable`, so the two disagreed and nothing noticed until a tag ran the image
+# build — the one job that uses this base. Keep it at or above what the locked dependency tree
+# demands; MSRV is a promise to LIBRARY consumers (declared per-crate via `rust-version`) and is
+# checked by `cargo` at build time, not by this pin.
+FROM rust:1.97.1-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS builder
 # Optional cargo features to compile in (space-separated), e.g. FEATURES="smtp". Empty = default build.
 ARG FEATURES=""
 WORKDIR /app

@@ -18,7 +18,7 @@ import type {
   ZonePoint,
 } from "../lib/types";
 import { Button, Field, Input, Panel, Select, Spinner, cx } from "./ui";
-import { formatClock, formatDuration, timeAgo } from "../lib/format";
+import { formatClockIn, formatDuration, timeAgo } from "../lib/format";
 
 /* ------------------------------- helpers ------------------------------- */
 
@@ -309,7 +309,16 @@ function ZoneCanvas({
 
 // Reads are open to any principal; zone mutations are manager+ (the API enforces this — the
 // controls mirror it by gating on `canManage`, same as the other CameraDetail panels).
-export function ZonePanel({ cameraId, canManage }: { cameraId: string; canManage: boolean }) {
+export function ZonePanel({
+  cameraId,
+  canManage,
+  zone,
+}: {
+  cameraId: string;
+  canManage: boolean;
+  /** The camera page's resolved zone (#148); one clock per page. */
+  zone: string;
+}) {
   const zones = usePoll(() => api.listZones(cameraId), 10000, [cameraId]);
   const detections = usePoll(
     () => api.cameraDetections(cameraId, { limit: 50 }),
@@ -608,6 +617,7 @@ export function ZonePanel({ cameraId, canManage }: { cameraId: string; canManage
                   key={ev.id}
                   ev={ev}
                   severity={severityByZone.get(ev.zone_id) ?? "info"}
+                  zone={zone}
                 />
               ))}
             </ul>
@@ -688,7 +698,7 @@ function ZoneRow({
   );
 }
 
-function ZoneEventRow({ ev, severity }: { ev: ZoneEvent; severity: Severity }) {
+function ZoneEventRow({ ev, severity, zone }: { ev: ZoneEvent; severity: Severity; zone: string }) {
   const color = SEVERITY_COLOR[severity] ?? SEVERITY_COLOR.info;
   return (
     <li
@@ -706,7 +716,7 @@ function ZoneEventRow({ ev, severity }: { ev: ZoneEvent; severity: Severity }) {
           <span className="truncate text-xs font-semibold text-fg">{ev.zone_name}</span>
         </div>
         <div className="mt-0.5 flex flex-wrap items-center gap-x-2 font-mono text-[10px] text-fg-muted">
-          <span title={formatClock(ev.timestamp)}>{timeAgo(ev.timestamp)}</span>
+          <span title={formatClockIn(ev.timestamp, zone)}>{timeAgo(ev.timestamp)}</span>
           {ev.label && (
             <>
               <span className="text-fg-muted/60">·</span>

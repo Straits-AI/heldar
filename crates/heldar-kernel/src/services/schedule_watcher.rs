@@ -4,7 +4,8 @@
 //! waiting for an external API call. Continuous cameras are untouched (their reconcile is event-driven
 //! on config change), and a camera already in the correct state is never restarted mid-window.
 //!
-//! Schedule windows are evaluated against the SERVER's LOCAL timezone (chrono::Local); there is no
+//! Schedule windows are evaluated against the camera's SITE timezone (#125), falling back to the
+//! SERVER's local zone (chrono::Local) when nothing is configured; there is no
 //! per-camera timezone. Spawned (supervised) from `main` only when the recorder is enabled.
 
 use std::time::Duration;

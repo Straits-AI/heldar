@@ -11,6 +11,7 @@ These are **history, not documentation**. For how the system works today, read
 |---|---|---|
 | [0003](0003-webrtc-remote-access.md) | Remote camera viewing over WebRTC; retire the mobile app and kernel-managed WireGuard | Accepted (2026-06-21) |
 | [0004](0004-store-abstraction-postgres.md) | Edge nodes stay on SQLite; scale horizontally rather than porting to Postgres | Accepted — no port (2026-07-16) |
+| [0005](0005-task-lease-bound-ai-ingest.md) | AI ingest is bound to a server-issued task lease + frame ticket; detection provenance is server-authored, not client-asserted | Accepted (2026-08-09) |
 
 Numbers are not contiguous here. Decisions that are wholly about the commercial tier — fleet
 control-plane topology, repository and licensing strategy — are recorded in a private tracker, since

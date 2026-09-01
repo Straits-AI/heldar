@@ -134,6 +134,9 @@ curl http://localhost:8000/api/v1/events \
   (container, network policy, a non-loopback `base_url` only when you trust the path).
 - The console **never forwards your session cookie** to a sidecar; the sidecar authenticates to the
   kernel only with its own minted key.
-- The plugin UI iframe is sandboxed (`allow-scripts allow-same-origin allow-forms allow-popups`); it
-  cannot navigate or act on the top console frame.
+- The plugin UI iframe is sandboxed **without `allow-same-origin`** (`allow-scripts allow-forms`), so
+  it runs in an opaque origin: it cannot reach the console's DOM or storage, and its requests carry no
+  session cookie. To call its own backend it goes through the host bridge, which confines every request
+  to that plugin's own `/m/{id}/` root — see
+  [Sidecar isolation and the host bridge](./module-system.md#sidecar-isolation-and-the-host-bridge).
 - Uninstalling fully revokes the key + subscription, so a removed plugin keeps no standing access.

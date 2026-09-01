@@ -38,6 +38,29 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Stop the kernel migrations at `version` — the hook that makes an UPGRADE testable.
+///
+/// A migration that backfills existing rows can only be exercised from a database that predates it,
+/// and [`run_migrations`] always lands on head, so a backfill would otherwise be asserted against a
+/// table it just created empty. Tests migrate to `version`, seed the legacy rows a shipped box would
+/// already hold, then call [`run_migrations`] and check what the backfill made of them.
+///
+/// Test-only on purpose: nothing on a real box may ever choose to stop half-way, and a running kernel
+/// against a partially-migrated schema is a class of failure worth making unrepresentable.
+#[cfg(test)]
+pub(crate) async fn run_migrations_up_to(pool: &SqlitePool, version: i64) -> anyhow::Result<()> {
+    let mut m = sqlx::migrate!("./migrations");
+    m.migrations = m
+        .migrations
+        .iter()
+        .filter(|mig| mig.version <= version)
+        .cloned()
+        .collect::<Vec<_>>()
+        .into();
+    m.run(pool).await?;
+    Ok(())
+}
+
 /// One embedded, versioned migration for a composed app crate. `version` is the numeric filename prefix
 /// (`0001_init.sql` → 1); keep them dense and ascending. Ship a schema change as a NEW migration —
 /// never edit an applied one (the checksum guard in [`run_app_migrations`] rejects that).

@@ -17,7 +17,7 @@ use chrono::{TimeDelta, Utc};
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use heldar_kernel::auth::Principal;
+use heldar_kernel::auth::{Cap, Principal};
 use heldar_kernel::error::{AppError, AppResult};
 use heldar_kernel::services::embeddings::{self, SimilarFilters, SimilarHit};
 use heldar_kernel::state::AppState;
@@ -34,7 +34,7 @@ pub const MAX_IMAGE_B64_CHARS: usize = 10_000_000;
 const MAX_K: usize = 100;
 const DEFAULT_K: usize = 24;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SemanticBody {
     pub text: Option<String>,
     /// Base64 image (JPEG/PNG). A `data:` URL prefix is tolerated and stripped.
@@ -57,7 +57,7 @@ pub async fn search_semantic(
     Extension(cfg): Extension<Arc<SearchConfig>>,
     Json(body): Json<SemanticBody>,
 ) -> AppResult<Json<Value>> {
-    principal.require(principal.can_view(), "semantic search")?;
+    principal.require_cap(Cap::EventsRead, "semantic search")?;
 
     let text = body
         .text

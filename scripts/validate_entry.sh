@@ -11,6 +11,7 @@ mkdir -p "$DATA"
 REPORT="$DATA/validate_entry.txt"
 : > "$REPORT"
 log(){ echo "$@" | tee -a "$REPORT"; }
+. "$ROOT/scripts/lib/assert.sh"
 jqget(){ python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
 
 # Post one ANPR read for a track (plate/color/type via attributes). $1=track $2=plate $3=color $4=vtype
@@ -91,4 +92,11 @@ fi
 log ""
 log "## audit log (recent actions):"
 curl -s "$API/audit?limit=8" | python3 /tmp/_ve_show.py audit | tee -a "$REPORT"
+# The entry pipeline's guarantee: an ANPR read becomes an auditable entry event. A transcript with
+# zero events read identically to one with the right events.
+EV_COUNT=$(curl -s "$API/entry-events?limit=20" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)
+assert_ge "$EV_COUNT" 1 "ANPR reads produced entry events"
+AUDIT=$(curl -s "$API/audit?limit=8" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)
+assert_ge "$AUDIT" 1 "entry actions are audited"
 log "DONE"
+assert_summary

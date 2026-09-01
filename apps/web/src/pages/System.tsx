@@ -20,7 +20,7 @@ import type {
 } from "../lib/types";
 import { BulkConfigPanel } from "../components/CameraConfigPanel";
 import { WebhooksPanel } from "../components/WebhooksPanel";
-import {
+import { ViewerClockNote,
   Button,
   EmptyState,
   Panel,
@@ -484,6 +484,261 @@ function DatabasePanel({ canAdmin }: { canAdmin: boolean }) {
         </div>
       )}
     </Panel>
+  );
+}
+
+/* --------------------------- timezone panel --------------------------- */
+
+/* The clock this box reads schedules and relative searches in (#125).
+ *
+ * This panel exists because the setting is otherwise reachable only by curl, and this is the surface
+ * where an operator forms the belief that they scheduled 6pm LOCAL. Two things it must never do:
+ * imply that "UTC" and "nobody has chosen" are the same state, and let someone change the zone
+ * without seeing that recording windows move with it. */
+function TimezonePanel({ canAdmin }: { canAdmin: boolean }) {
+  const settings = usePoll(() => api.getTimezone(), 30000);
+  const sites = usePoll(() => api.listSites(), 60000);
+  const [editing, setEditing] = useState(false);
+  const [tz, setTz] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const data = settings.data;
+
+  /* The browser's own zone, offered as the likely answer — but never applied silently, because the
+   * operator's laptop is not the site. A head-office viewer in London reading a Malaysian site is
+   * exactly the case this must not guess at. */
+  const browserZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+
+  function startEdit() {
+    setTz(data?.configured ?? browserZone ?? "UTC");
+    setError(null);
+    setEditing(true);
+  }
+  async function save() {
+    setSaving(true);
+    setError(null);
+    try {
+      await api.setTimezone({ timezone: tz.trim() });
+      await settings.refresh();
+      setEditing(false);
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  const siteRows = sites.data?.sites ?? [];
+  const overridingSites = siteRows.filter((s) => s.timezone);
+
+  return (
+    <Panel
+      title="Timezone"
+      subtitle="The clock recording schedules and relative searches are read in"
+      actions={
+        canAdmin && !editing && data ? (
+          <Button size="sm" onClick={startEdit}>
+            Edit
+          </Button>
+        ) : undefined
+      }
+    >
+      {!data ? (
+        <PanelStatus loading={settings.loading} error={settings.error} label="timezone" />
+      ) : editing ? (
+        <div className="space-y-3">
+          <label className="block">
+            <SectionLabel>IANA timezone</SectionLabel>
+            <input
+              value={tz}
+              onChange={(e) => setTz(e.target.value)}
+              placeholder="Asia/Kuala_Lumpur"
+              className="mt-1.5 w-full rounded-md border border-line bg-canvas px-3 py-2 font-mono text-sm text-fg outline-none focus:border-accent"
+              autoFocus
+            />
+          </label>
+          {browserZone && browserZone !== tz ? (
+            <button
+              type="button"
+              onClick={() => setTz(browserZone)}
+              className="font-mono text-[11px] text-accent-soft underline-offset-2 hover:underline"
+            >
+              use this browser&apos;s zone ({browserZone})
+            </button>
+          ) : null}
+          <p className="font-mono text-[11px] leading-relaxed text-warn">
+            Changing this moves the hours every scheduled camera records. A window set to 18:00 will
+            follow the new clock on the next check.
+          </p>
+          <p className="font-mono text-[11px] leading-relaxed text-fg-muted">
+            Must be an IANA identifier such as <span className="text-fg-secondary">Europe/London</span>.
+            Abbreviations and fixed offsets ({"GMT+8"}, {"+08:00"}) are refused — they cannot express
+            daylight saving, and a recorder an hour out twice a year returns the wrong footage for a
+            valid search.
+          </p>
+          {error ? <p className="font-mono text-[11px] text-danger">{error}</p> : null}
+          <div className="flex gap-2">
+            <Button size="sm" variant="primary" disabled={saving} onClick={() => void save()}>
+              {saving ? <Spinner size={13} /> : "Save"}
+            </Button>
+            <Button size="sm" disabled={saving} onClick={() => setEditing(false)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <div className="flex items-end justify-between gap-4">
+            <div className="min-w-0">
+              <SectionLabel>Box-wide</SectionLabel>
+              <div className="mt-1 truncate font-mono text-2xl font-semibold text-fg">
+                {data.configured ?? "not set"}
+              </div>
+            </div>
+            <div className="text-right font-mono text-[11px] leading-relaxed text-fg-muted">
+              <div>{data.source === "unset" ? "no zone chosen" : `from ${data.source}`}</div>
+              <div className="mt-0.5">server clock {data.server_local_offset}</div>
+            </div>
+          </div>
+
+          {/* "UTC" and "nobody has chosen" look identical in a timestamp and are not the same
+              state — an unset box follows the SERVER's clock for schedules and UTC for search. */}
+          {data.configured === null ? (
+            <p className="font-mono text-[11px] leading-relaxed text-fg-muted">
+              {data.unconfigured_behaviour}
+            </p>
+          ) : null}
+
+          {/* Sites, and the clock each one overrides the box-wide setting with. Rendered even when
+              the list is EMPTY, and the error is surfaced rather than swallowed: a 403 and "this
+              box has no sites" are otherwise pixel-identical, so a failed fetch reads as a fact. */}
+          <div>
+            <SectionLabel>Sites</SectionLabel>
+            {sites.error ? (
+              <p className="mt-1.5 font-mono text-[11px] text-danger">
+                Could not load sites: {sites.error}
+              </p>
+            ) : siteRows.length === 0 ? (
+              <p className="mt-1.5 font-mono text-[11px] leading-relaxed text-fg-muted">
+                No sites. Every camera follows the box-wide clock above. Add one if parts of this
+                installation keep different hours.
+              </p>
+            ) : (
+              <ul className="mt-1.5 space-y-1">
+                {siteRows.map((s) => (
+                  <li
+                    key={s.id}
+                    className="flex items-baseline justify-between gap-3 font-mono text-[11px]"
+                  >
+                    <span className="truncate text-fg-secondary">{s.name}</span>
+                    <span className={cx("shrink-0", s.timezone ? "text-fg" : "text-fg-muted")}>
+                      {s.timezone ?? "box-wide"}
+                    </span>
+                  </li>
+                ))}
+              </ul>
+            )}
+            {overridingSites.length > 0 ? (
+              <p className="mt-1.5 font-mono text-[11px] leading-relaxed text-fg-muted">
+                A camera on a site with its own clock follows that, not the box-wide one.
+              </p>
+            ) : null}
+            {canAdmin ? (
+              <SiteAdder
+                onAdded={() => {
+                  void sites.refresh();
+                }}
+              />
+            ) : null}
+          </div>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+
+/* A minimal site creator. The picker this PR added to AddCamera is useless without one — the
+ * dashboard had no site-creation surface at all, so on every box the dropdown would offer exactly
+ * one option ("No site") forever, and swapping a free-text field that could reference a curl-created
+ * site for a dropdown that cannot is a loss of capability, not a gain. */
+function SiteAdder({ onAdded }: { onAdded: () => void }) {
+  const [open, setOpen] = useState(false);
+  const [id, setId] = useState("");
+  const [name, setName] = useState("");
+  const [tz, setTz] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function add() {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.createSite({
+        id: id.trim(),
+        name: name.trim() || id.trim(),
+        timezone: tz.trim() || null,
+      });
+      setId("");
+      setName("");
+      setTz("");
+      setOpen(false);
+      onAdded();
+    } catch (e) {
+      setError(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  if (!open) {
+    return (
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="mt-2 font-mono text-[11px] text-accent-soft underline-offset-2 hover:underline"
+      >
+        + add a site
+      </button>
+    );
+  }
+  return (
+    <div className="mt-2 space-y-2 rounded-md border border-line bg-canvas/50 p-2.5">
+      <div className="grid grid-cols-2 gap-2">
+        <input
+          value={id}
+          onChange={(e) => setId(e.target.value)}
+          placeholder="id (kl-hq)"
+          className="rounded-md border border-line bg-canvas px-2 py-1.5 font-mono text-[11px] text-fg outline-none focus:border-accent"
+          autoFocus
+        />
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="name"
+          className="rounded-md border border-line bg-canvas px-2 py-1.5 font-mono text-[11px] text-fg outline-none focus:border-accent"
+        />
+      </div>
+      <input
+        value={tz}
+        onChange={(e) => setTz(e.target.value)}
+        placeholder="timezone (optional, e.g. Asia/Kuala_Lumpur)"
+        className="w-full rounded-md border border-line bg-canvas px-2 py-1.5 font-mono text-[11px] text-fg outline-none focus:border-accent"
+      />
+      <p className="font-mono text-[10px] leading-relaxed text-fg-muted">
+        Leave the timezone blank and this site follows the box-wide clock. It is not the same as
+        setting UTC.
+      </p>
+      {error ? <p className="font-mono text-[11px] text-danger">{error}</p> : null}
+      <div className="flex gap-2">
+        <Button size="sm" variant="primary" disabled={busy || !id.trim()} onClick={() => void add()}>
+          {busy ? <Spinner size={13} /> : "Add"}
+        </Button>
+        <Button size="sm" disabled={busy} onClick={() => setOpen(false)}>
+          Cancel
+        </Button>
+      </div>
+    </div>
   );
 }
 
@@ -1029,6 +1284,7 @@ export function System() {
             <h1 className="mt-1 font-display text-2xl font-extrabold tracking-tight text-fg">
               System Health
             </h1>
+            <ViewerClockNote />
           </div>
           <Button onClick={refresh} disabled={refreshing} aria-label="Refresh system">
             {refreshing ? (
@@ -1068,6 +1324,7 @@ export function System() {
             recordingsBytes={system.data?.recordings_bytes ?? null}
           />
           <DatabasePanel canAdmin={principal?.role === "admin"} />
+          <TimezonePanel canAdmin={principal?.role === "admin"} />
           <LiveTranscodePanel canAdmin={principal?.role === "admin"} />
           <HealthPanel
             statuses={health.data}

@@ -4,10 +4,9 @@ use axum::{Json, Router};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::Principal;
+use crate::auth::{Cap, Principal};
 use crate::error::{AppError, AppResult};
 use crate::models::Segment;
-use crate::routes::cameras::load_camera;
 use crate::state::AppState;
 use crate::util;
 
@@ -19,7 +18,7 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Debug, Deserialize)]
-struct RangeQuery {
+pub struct RangeQuery {
     from: Option<String>,
     to: Option<String>,
     limit: Option<i64>,
@@ -72,14 +71,32 @@ fn parse_range(q: &RangeQuery) -> AppResult<OptTimeRange> {
     Ok((from, to))
 }
 
-async fn list_segments(
+/// The recorded segments overlapping a time range.
+///
+/// Each segment is one continuous file on disk. Gaps between them are real gaps in the recording —
+/// see `/gaps` for them stated explicitly rather than inferred from what is missing here.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/segments", tag = "recordings",
+    operation_id = "listSegments",
+    params(
+        ("id" = String, Path, description = "Camera id"),
+        ("from" = Option<String>, Query, description = "RFC3339 lower bound"),
+        ("to" = Option<String>, Query, description = "RFC3339 upper bound"),
+    ),
+    responses(
+        (status = 200, description = "Segments overlapping the range, newest first"),
+        (status = 403, description = "Missing `video:playback`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera, or one this credential does not hold", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_segments(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
     Query(q): Query<RangeQuery>,
 ) -> AppResult<Json<Vec<SegmentView>>> {
-    principal.require(principal.can_view(), "list recording segments")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    principal.require_cap(Cap::VideoPlayback, "list recording segments")?;
+    let _ = st.camera_for(&principal, &id).await?;
     let (from, to) = parse_range(&q)?;
     let limit = q.limit.unwrap_or(500).clamp(1, 5000);
 
@@ -125,7 +142,7 @@ struct TimelineRange {
 }
 
 #[derive(Debug, Serialize)]
-struct Timeline {
+pub struct Timeline {
     camera_id: String,
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
@@ -210,14 +227,29 @@ fn coalesce(segments: &[Segment]) -> Vec<TimelineRange> {
     ranges
 }
 
-async fn timeline(
+/// Recorded coverage for a camera, as contiguous ranges.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/timeline", tag = "recordings",
+    operation_id = "getTimeline",
+    params(
+        ("id" = String, Path, description = "Camera id"),
+        ("from" = Option<String>, Query, description = "RFC3339 lower bound"),
+        ("to" = Option<String>, Query, description = "RFC3339 upper bound"),
+    ),
+    responses(
+        (status = 200, description = "Contiguous recorded ranges"),
+        (status = 403, description = "Missing `video:playback`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera, or one this credential does not hold", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn timeline(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
     Query(q): Query<RangeQuery>,
 ) -> AppResult<Json<Timeline>> {
-    principal.require(principal.can_view(), "view recording timeline")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    principal.require_cap(Cap::VideoPlayback, "view recording timeline")?;
+    let _ = st.camera_for(&principal, &id).await?;
     let (from, to) = parse_range(&q)?;
     let segments = fetch_segments_in_range(&st.pool, &id, from, to).await?;
     let segment_count = segments.len();
@@ -234,7 +266,7 @@ async fn timeline(
 }
 
 #[derive(Debug, Serialize)]
-struct Gaps {
+pub struct Gaps {
     camera_id: String,
     from: Option<DateTime<Utc>>,
     to: Option<DateTime<Utc>>,
@@ -244,14 +276,32 @@ struct Gaps {
 }
 
 /// Report holes in recording coverage (the spans between coalesced availability ranges).
-async fn gaps(
+/// Intervals in the requested window with NO recorded footage.
+///
+/// Stated rather than left to be inferred from the absence of segments: an operator asking "was this
+/// camera recording last night" needs the gaps named, not a list they have to diff against a clock.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/gaps", tag = "recordings",
+    operation_id = "listGaps",
+    params(
+        ("id" = String, Path, description = "Camera id"),
+        ("from" = Option<String>, Query, description = "RFC3339 lower bound"),
+        ("to" = Option<String>, Query, description = "RFC3339 upper bound"),
+    ),
+    responses(
+        (status = 200, description = "Gaps within the range"),
+        (status = 403, description = "Missing `video:playback`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera, or one this credential does not hold", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn gaps(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
     Query(q): Query<RangeQuery>,
 ) -> AppResult<Json<Gaps>> {
-    principal.require(principal.can_view(), "view recording gaps")?;
-    let _ = load_camera(&st.pool, &id).await?;
+    principal.require_cap(Cap::VideoPlayback, "view recording gaps")?;
+    let _ = st.camera_for(&principal, &id).await?;
     let (from, to) = parse_range(&q)?;
     let segments = fetch_segments_in_range(&st.pool, &id, from, to).await?;
     let ranges = coalesce(&segments);

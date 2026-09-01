@@ -12,6 +12,7 @@ mkdir -p "$DATA"
 REPORT="$DATA/validate_movement.txt"
 : > "$REPORT"
 log(){ echo "$@" | tee -a "$REPORT"; }
+. "$ROOT/scripts/lib/assert.sh"
 jqget(){ python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
 
 anpr(){ # cam track plate color type  -> post one ANPR read
@@ -73,4 +74,11 @@ import sys,json;d=json.load(sys.stdin)
 print("  appearances:",len(d["appearances"]),"candidates:",len(d["candidates"]))
 for a in d["appearances"]: print("   -",a["camera_id"],a["timestamp"],a["event_type"])'
 log "## audit log shows the search? -> $(curl -s "$API/audit?action=movement_search_plate&limit=3" | jqget 'len(d)') entries"
+# Movement's guarantee: a plate seen on two cameras is retrievable as a trail, and the search itself
+# is audited (it is an identity query).
+TRAIL=$(curl -s "$API/movement/search/plate/TRAIL123" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)["appearances"]))' 2>/dev/null || echo 0)
+assert_ge "$TRAIL" 1 "plate trail returns appearances"
+SEARCH_AUDIT=$(curl -s "$API/audit?action=movement_search_plate&limit=3" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)
+assert_ge "$SEARCH_AUDIT" 1 "identity search is audited"
 log "DONE"
+assert_summary

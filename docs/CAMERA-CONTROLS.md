@@ -137,6 +137,16 @@ How it works (`services/native_anpr.rs`):
 - Reads carry `attributes.source = "camera_native"`, which the entry engine weights as
   **authoritative**: the device already consolidated multiple frames itself, so one read satisfies
   the vote threshold (worker OCR reads still need `HELDAR_ANPR_MIN_VOTES`, default 3).
+
+  **That value is written by the kernel, not by the producer's payload, and cannot be asserted
+  over the ingest API.** Provenance is a *parameter* of the shared ingest path
+  (`perception_ingest::ingest_batch`), and every detection's `attributes` blob is rewritten from it
+  before the INSERT — any client-supplied `source`/`_prov` is discarded. The HTTP handler can only
+  construct `Provenance::Worker` (→ `"worker"`); `services/native_anpr.rs` is the only caller able
+  to name the closed-set `Provenance::Kernel { NativeAnpr }` (→ `"camera_native"`). Before this,
+  `source` arrived inside client attributes, so anything holding an integration key could claim to
+  be the camera's on-board engine and have a single forged plate read weighted straight to the
+  barrier. See [`docs/AI-WORKERS.md`](AI-WORKERS.md) §5.0 and §12.4.
 - The device picture name is the idempotency key, so a crash between ingest and cursor advance can
   never double-count a vehicle.
 
@@ -167,7 +177,21 @@ automatic and manual.
   the barrier relay latched open. There is deliberately **no retry queue**: a late gate pulse is
   worse than no pulse; failures surface as `gate_open_failed` warning events.
 - Every actuation writes a `gate_opened` / `gate_open_failed` event to the kernel event log —
-  subscribable by webhooks and the email notifier.
+  subscribable by webhooks and the email notifier. The payload now carries a `provenance` block
+  (`votes`, `min_votes`, `source`, `produced_by`), so an incident responder asking "who opened lane 1
+  at 03:14?" gets the credential or kernel producer whose reads voted it open, rather than
+  `{"mode":"auto"}` and nothing else. The actuation policy checks themselves are unchanged —
+  provenance is recorded, never consulted.
+- **A below-threshold track never actuates.** When a vehicle's track ages out (`STATE_TTL_SECS`,
+  30 s) without reaching `HELDAR_ANPR_MIN_VOTES`, the entry event is still written — the audit
+  record is the point of commit-on-prune — but it is marked `workflow_status = "review"`, a
+  `gate_review_not_actuated` event is raised, and the barrier is left alone. Previously that path
+  opened the boom about 30 seconds after a single accepted read, which meant hardening the vote path
+  alone would have left the gate reachable from one plate read.
+- **One vote per frame.** A detection batch is one frame and contributes at most one vote per
+  `(track, plate)`, so repeating a read inside a single POST cannot reach the threshold; that now
+  requires `min_votes` distinct server-issued frame tickets, i.e. `min_votes` distinct sampled
+  frames off the physical camera.
 
 **External gate controllers (no camera relay):** subscribe a webhook to the entry events
 (`entry_matched` etc. in the kernel event log carry plate, auth status, camera, direction) and

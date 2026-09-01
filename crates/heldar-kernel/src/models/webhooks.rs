@@ -54,7 +54,7 @@ pub struct WebhookSubscription {
 }
 
 /// Client-facing subscription view: the `secret` is replaced by a `has_secret` flag and never echoed.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct WebhookSubscriptionView {
     pub id: String,
     pub name: String,
@@ -86,7 +86,7 @@ impl From<WebhookSubscription> for WebhookSubscriptionView {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct WebhookSubscriptionCreate {
     pub name: String,
     pub url: String,
@@ -102,19 +102,22 @@ pub struct WebhookSubscriptionCreate {
 /// Partial update; an ABSENT field is left unchanged. `secret` is three-state: omitted = unchanged,
 /// null = clear the secret, a value = set it (the outer `Option` distinguishes "field omitted" from
 /// an explicit null — see [`de_field_present`]).
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct WebhookSubscriptionUpdate {
     pub name: Option<String>,
     pub url: Option<String>,
     pub event_types: Option<Vec<String>>,
     pub min_severity: Option<String>,
+    /// Three-state on the wire: omitted = unchanged, `null` = clear, a string = set. OpenAPI has
+    /// no way to say "omitted differs from null", so it types as a nullable string.
     #[serde(default, deserialize_with = "de_field_present")]
+    #[schema(value_type = Option<String>)]
     pub secret: Option<Option<String>>,
     pub enabled: Option<bool>,
 }
 
 /// One webhook delivery attempt (the at-least-once retry ledger). `status` is `delivered` | `failed`.
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, FromRow, utoipa::ToSchema)]
 pub struct WebhookDelivery {
     pub id: String,
     pub subscription_id: String,

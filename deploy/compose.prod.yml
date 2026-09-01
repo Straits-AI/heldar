@@ -20,4 +20,38 @@ services:
       HELDAR_STRICT_PROD: "true"
       HELDAR_SESSION_TTL_HOURS: "4"
       HELDAR_SESSION_IDLE_TIMEOUT_MIN: "30"
+      # Declare the deployment tier. Turns the production guardrails that are still warnings into
+      # hard boot refusals (auth-off on a non-loopback bind, notably) and promotes HELDAR_MACHINE_AUTH
+      # to `enforce`. Use `production-remote` instead if this box is reachable from the internet.
+      HELDAR_DEPLOYMENT_MODE: "production-lan"
+      # Capability enforcement for machine credentials with no explicit grant. Set explicitly rather
+      # than left to the deployment-mode promotion, so this file states the posture it runs at.
+      # SERVER-SIDE ONLY — `enforce` narrows the legacy `integration` role to the capability set a
+      # real AI worker calls, and deliberately keeps every endpoint one of them uses. Safe to enable
+      # on an existing deployment. Run the box at the default `warn` for a day first if you want the
+      # once-per-hour log naming exactly which keys would be narrowed.
+      HELDAR_MACHINE_AUTH: "enforce"
+      #
+      # ---- HELDAR_INGEST_PROVENANCE — deliberately NOT set here. Read this before setting it. ----
+      #
+      # This one is a CLIENT PROTOCOL requirement, not a server-side tightening. `enforce` rejects
+      # (401 frame_ticket_required) every AI worker that does not yet mint a server-issued frame
+      # ticket — including third-party workers and any of your own that have not been upgraded. On a
+      # deployment that layers this file, turning it on blind means detection stops on a box whose
+      # health, recording and dashboard all still look perfectly fine. That is why the kernel does
+      # NOT promote it from HELDAR_DEPLOYMENT_MODE the way it promotes HELDAR_MACHINE_AUTH, and why
+      # it is commented out here instead of shipped on.
+      #
+      # The rollout, in order:
+      #   1. Leave it unset. The default is `warn`: ticketless ingest is still ACCEPTED, and every
+      #      credential posting without a ticket is logged once an hour (target `heldar::security`)
+      #      alongside one `ingest_unleased` event. That log IS the list of clients that would break.
+      #        docker compose logs core | grep ingest_unleased
+      #   2. Upgrade every worker on that list until a full hour passes with the log empty. The
+      #      reference worker (apps/ai/worker.py) already leases and mints tickets — see
+      #      docs/AI-WORKERS.md §5.0.
+      #   3. Only then uncomment the line below and redeploy.
+      # Verify at any time without reading logs — GET /api/v1/system reports the effective tier under
+      # `enforcement`, and the boot banner prints it as ENFORCED / NOT ENFORCED.
+      # HELDAR_INGEST_PROVENANCE: "enforce"
       # HELDAR_SECRET_KEY + HELDAR_CORS_ORIGINS come from .env (secrets never live in a committed file).

@@ -1,0 +1,11 @@
+[package]
+name = "heldar-testkit"
+version = "0.5.0"
+edition = "2021"
+rust-version = "1.85"
+description = "Heldar test harness for composed deployments — the route census that makes camera-scope coverage default-closed, reusable by any workspace that merges routers over the `Verticals` seam."
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/Straits-AI/heldar"
+
+[dependencies]

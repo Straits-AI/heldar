@@ -3,7 +3,7 @@ use axum::http::{header::HOST, HeaderMap};
 use axum::routing::get;
 use axum::{Json, Router};
 
-use crate::auth::Principal;
+use crate::auth::{Cap, Principal};
 use crate::error::AppResult;
 use crate::services::mediamtx::{self, LiveUrls};
 use crate::state::AppState;
@@ -16,15 +16,45 @@ pub fn router() -> Router<AppState> {
 }
 
 /// Ensure a MediaMTX path exists for the camera and return live playback URLs.
-async fn liveview(
+/// Stream URLs for a camera's live view.
+///
+/// Registered for both GET and POST on the same handler, so the contract documents GET and the
+/// operation covers both.
+#[utoipa::path(
+    get, path = "/api/v1/cameras/{id}/liveview", tag = "video",
+    operation_id = "getLiveView",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "HLS/WebRTC/RTSP URLs, and a signed read token MediaMTX honours"),
+        (status = 403, description = "Missing `video:live`, or a camera this credential does not hold", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera", body = crate::openapi::ErrorBody),
+        (status = 503, description = "MediaMTX is unreachable", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn liveview(
     State(st): State<AppState>,
     principal: Principal,
     headers: HeaderMap,
     Path(id): Path<String>,
 ) -> AppResult<Json<LiveUrls>> {
     // Operational action (viewer+); the extractor enforces auth when it is enabled.
-    principal.require(principal.can_view(), "view live streams")?;
+    principal.require_cap(Cap::VideoLive, "view live streams")?;
+    // Camera scope BEFORE the MediaMTX path is ensured: `ensure_live` mints a signed read token for
+    // `cam_<id>` that MediaMTX's external-auth callback honours, so a capability-only check here
+    // handed a camera-scoped credential a working live stream of any camera on the box. This one
+    // insert covers GET and POST — the router registers both methods on this handler.
+    st.camera_scope_check(&principal, &id)?;
     // The Host the client used lets us hand back stream URLs reachable over the tunnel / LAN.
     let host = headers.get(HOST).and_then(|v| v.to_str().ok());
-    Ok(Json(mediamtx::ensure_live(&st, &id, host).await?))
+    // The token is minted FOR this caller: revoking or re-scoping the credential that opened the
+    // stream now stops it, instead of it running to the TTL.
+    Ok(Json(
+        mediamtx::ensure_live(
+            &st,
+            &id,
+            host,
+            crate::services::live_token::Subject::of(&principal),
+        )
+        .await?,
+    ))
 }
