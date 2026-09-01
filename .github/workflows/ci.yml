@@ -346,12 +346,27 @@ jobs:
       # not "it passed".
       - name: subsystem gate (zones · entry · movement · search)
         run: ./scripts/validate_subsystems.sh
+      # This job BLOCKS a merge as of #113, so its artifact is what someone debugs from at the moment
+      # they are most stuck. It used to carry `validate_subsystems.txt` alone — the summary, without
+      # the per-validator detail beneath it or a single line from the three processes the stack runs,
+      # all of which were being written the whole time and thrown away.
+      #
+      # The frames are here because an AI failure is usually "what did the sampler actually see", and
+      # that question is unanswerable from a log. They are synthetic `testsrc` output, so there is no
+      # footage-handling concern in uploading them.
       - name: upload subsystem report
         if: failure()
         uses: actions/upload-artifact@v4
         with:
           name: subsystem-report
-          path: data/validate_subsystems.txt
+          path: |
+            data/validate_*.txt
+            data/subsys-core.log
+            data/subsys-mediamtx.log
+            data/subsys-synth.log
+            data/ai_frame.jpg
+            data/ai_chain_frame.jpg
+          if-no-files-found: warn
           retention-days: 7
       # validate_ai.sh now runs in the subsystem gate above (#113). It was excluded for years on the
       # grounds that it "needs a REAL camera actively streaming"; that stopped being true when the
