@@ -5,7 +5,7 @@
 # front of the stack so the secure live-view path is exercised the way an operator deploys it. The
 # production deployment uses the pinned `caddy` container instead (deploy/compose.tls.yml).
 #
-# Detects OS/arch (linux + darwin; amd64/arm64). Override the release with CADDY_VERSION=2.10.2.
+# Detects OS/arch (linux + darwin; amd64/arm64). Override the release with CADDY_VERSION=2.11.4.
 set -euo pipefail
 DEST="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/infra/caddy"
 mkdir -p "$DEST"
@@ -25,7 +25,7 @@ esac
 
 # Keep the default in step with the pinned image in deploy/compose.tls.yml so the suite tests the
 # version that actually ships.
-VERSION="${CADDY_VERSION:-2.10.2}"
+VERSION="${CADDY_VERSION:-2.11.4}"
 
 if [ -x ./caddy ] && ./caddy version 2>/dev/null | grep -q "v${VERSION}"; then
   echo "Caddy v${VERSION} already present -> ${DEST}/caddy"
