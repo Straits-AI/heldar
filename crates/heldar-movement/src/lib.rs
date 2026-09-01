@@ -23,6 +23,7 @@
 pub mod breach;
 pub mod config;
 pub mod models;
+pub mod openapi;
 pub mod reid;
 pub mod routes;
 pub mod schema;

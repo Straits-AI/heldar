@@ -15,6 +15,7 @@ pub mod anpr;
 pub mod config;
 pub mod gate;
 pub mod models;
+pub mod openapi;
 pub mod retention;
 pub mod routes;
 pub mod schema;

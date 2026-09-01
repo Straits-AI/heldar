@@ -8,7 +8,7 @@ import { api, ApiError } from "../lib/api";
 import { usePoll } from "../lib/usePoll";
 import type { AiTask, Detection, StreamProfile, ZonePoint } from "../lib/types";
 import { Button, Field, Input, Panel, Select, Spinner, cx } from "./ui";
-import { formatClock, timeAgo } from "../lib/format";
+import { formatClockIn, timeAgo } from "../lib/format";
 
 /* ------------------------------- helpers ------------------------------- */
 
@@ -200,7 +200,16 @@ function TaskRow({
 
 // Reads are open to any principal; task/zone mutations are manager+ (the API enforces this — the
 // controls mirror it by gating on `canManage`, same as the other CameraDetail panels).
-export function AiPanel({ cameraId, canManage }: { cameraId: string; canManage: boolean }) {
+export function AiPanel({
+  cameraId,
+  canManage,
+  zone,
+}: {
+  cameraId: string;
+  canManage: boolean;
+  /** The camera page's resolved zone (#148); one clock per page. */
+  zone: string;
+}) {
   const tasks = usePoll(() => api.listAiTasks(cameraId), 8000, [cameraId]);
   const detections = usePoll(
     () => api.cameraDetections(cameraId, { limit: 50 }),
@@ -500,7 +509,7 @@ export function AiPanel({ cameraId, canManage }: { cameraId: string; canManage: 
           ) : (
             <ul className="-mr-1 max-h-[420px] space-y-1.5 overflow-y-auto pr-1">
               {detList.map((d) => (
-                <DetectionRow key={d.id} det={d} />
+                <DetectionRow key={d.id} det={d} zone={zone} />
               ))}
             </ul>
           )}
@@ -510,7 +519,7 @@ export function AiPanel({ cameraId, canManage }: { cameraId: string; canManage: 
   );
 }
 
-function DetectionRow({ det }: { det: Detection }) {
+function DetectionRow({ det, zone }: { det: Detection; zone: string }) {
   return (
     <li className="flex items-center justify-between gap-2 rounded-md border border-line bg-canvas px-2.5 py-2">
       <div className="min-w-0">
@@ -520,7 +529,7 @@ function DetectionRow({ det }: { det: Detection }) {
             {det.task_type}
           </span>
         </div>
-        <div className="mt-0.5 font-mono text-[10px] text-fg-muted" title={formatClock(det.timestamp)}>
+        <div className="mt-0.5 font-mono text-[10px] text-fg-muted" title={formatClockIn(det.timestamp, zone)}>
           {timeAgo(det.timestamp)}
           {det.track_id && (
             <>

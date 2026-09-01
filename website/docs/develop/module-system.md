@@ -97,6 +97,53 @@ as `healthy` / `unreachable` / `unknown`. The [registry](./registry.md) computes
 with the live registrations — so the store reflects what this binary actually links plus what's
 installed right now.
 
+## Sidecar isolation and the host bridge
+
+A sidecar's UI runs in an iframe whose sandbox **omits `allow-same-origin`**, so the frame has an
+**opaque origin**. It cannot read the parent DOM, cannot touch storage, and — the part that matters —
+its requests carry **no console session cookie**, because a sandboxed frame has a null
+site-for-cookies. A hostile or compromised plugin therefore cannot act with the operator's authority
+merely by being served from the console's origin.
+
+That isolation means a plugin cannot call anything directly, so the host mediates. The plugin posts a
+message; the host validates it, performs the request with the session, and posts the result back:
+
+```js
+// inside a sidecar UI
+function call(path, opts = {}) {
+  const id = crypto.randomUUID();
+  return new Promise((resolve, reject) => {
+    function onReply(e) {
+      if (e.data?.heldar !== "response" || e.data.id !== id) return;
+      window.removeEventListener("message", onReply);
+      e.data.ok ? resolve(e.data) : reject(new Error(e.data.error));
+    }
+    window.addEventListener("message", onReply);
+    parent.postMessage({ heldar: "request", id, method: opts.method ?? "GET", path, body: opts.body,
+                         headers: opts.headers }, "*");
+  });
+}
+
+const res = await call("api/status");        // -> GET /m/<your-id>/api/status
+```
+
+**What the bridge will and will not do:**
+
+| | |
+| --- | --- |
+| Paths | Resolved against **your own** `/m/{id}/` root. `../`, a leading `/`, an absolute or protocol-relative URL, or another plugin's root are all refused. |
+| Methods | `GET`, `POST`, `PUT`, `PATCH`, `DELETE`. |
+| Headers | Only `content-type` is forwarded. A plugin cannot set authorization or identity headers on a request the host makes with the operator's session. |
+| Timeout | 20s, then the request is aborted. |
+
+So a plugin's reach is exactly its own sidecar — not the kernel API. If your plugin needs kernel data,
+have your **sidecar** fetch it server-side with its own minted key (which carries its own capabilities),
+and expose it under your own path.
+
+**This is a breaking change for plugin UIs** that previously called `/api/v1/*` directly or reached
+into the parent document. Both were only ever possible because the plugin shared the console's origin,
+which is exactly the property that made an imported plugin equivalent to first-party code.
+
 ## Modules over remote access
 
 The [remote dashboard](../getting-started/remote-access.md) runs the full SPA over the relay, so modules

@@ -62,13 +62,13 @@ const DEFAULT_CREDS: &[(&str, &str)] = &[
     ("admin", "9999"),
 ];
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, utoipa::ToSchema)]
 pub struct Credential {
     pub username: String,
     pub password: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct DiscoverOptions {
     /// CIDR ("192.168.0.0/24"), range ("192.168.0.2-192.168.0.12"), single IP, or comma list.
     pub targets: String,

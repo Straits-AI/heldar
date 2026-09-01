@@ -341,7 +341,7 @@ and is `merge`d into the server.
 | POST | `/api/v1/movement/run` | manage (admin/manager) | Run the ReID proposer **+** breach sweep once (ops/test); both also run on the timer. `{ok:true}` |
 | GET | `/api/v1/movement/links` | view (all) | List the camera-topology graph |
 | POST | `/api/v1/movement/links` | manage | Create a topology link → `201`. **Audited** (`movement_link_create`) |
-| DELETE | `/api/v1/movement/links/{id}` | manage | Delete a link → `204` (`404` if unknown) |
+| DELETE | `/api/v1/movement/links/{id}` | manage | Delete a link → `204` (`404` if unknown). **Audited** (`movement_link_delete`) |
 | GET | `/api/v1/movement/candidates` | view | List candidates (`status`, `anchor`=plate, `limit≤5000`); score DESC, newest-first |
 | POST | `/api/v1/movement/candidates/{id}/confirm` | operate_gate (admin/manager/guard) | **Human** confirm (sets `reviewed_by`/`reviewed_at`). **Audited** (`movement_candidate_confirmed`) |
 | POST | `/api/v1/movement/candidates/{id}/reject` | operate_gate | **Human** reject. **Audited** (`movement_candidate_rejected`) |
@@ -358,8 +358,32 @@ requires human judgement, not legal identity. The plate input is normalized
 > **Privacy gate:** the two `search/*` endpoints are the identity-adjacent surface, and
 > both call `auth::audit(...)` **before** querying — there is no way to run an identity
 > search without leaving an audit trail. The review mutations (`confirm`/`reject`/`ack`/
-> `resolve`) and `links` create are also audited; link **delete** is capability-gated but
-> not currently audit-logged.
+> `resolve`) and both `links` create **and** delete are audited too.
+
+### 8.1 Camera scope — a credential must hold BOTH ends
+
+An API key can be issued with a camera allowlist (`scope_kind: cameras`). Movement's subject
+matter is the relationship *between* cameras, so the containment rule is stricter than
+elsewhere: **a resource naming two cameras — a `camera_links` row, a `movement_candidates`
+row — is visible and actionable only to a credential holding both of them.** A credential
+holding one end would otherwise learn that the other camera exists, is adjacent, and how far
+away it is. A breach names one camera and follows the ordinary rule.
+
+Practical consequences for an integrator holding a scoped key:
+
+* You may create a link only between cameras you hold, and delete one only when you hold both
+  ends. Refusals for "you hold one end", "you hold neither" and "no such link" are byte-identical,
+  so the link id space cannot be probed.
+* `POST /movement/run` is refused outright: it sweeps every link and zone event on the box and
+  has no camera to scope by.
+* **Every movement READ needs `events:read`, which cannot be combined with a camera scope**
+  (`UNSCOPABLE_CAPS` — it reads cross-camera tables the scope cannot filter). The API refuses
+  to mint that combination and refuses a stored key carrying it, so a camera-scoped key gets
+  `403 … missing capability` on the `GET` routes rather than a filtered answer. Use a
+  fleet-scoped key for reads, or read through the dashboard as a user.
+* In `GET /api/v1/audit`, a scoped reader sees movement acts about a camera it holds
+  (breach ack/resolve, person search). Link and candidate acts name two cameras, so they carry
+  no audit subject and stay visible to fleet-scoped auditors only.
 
 ---
 

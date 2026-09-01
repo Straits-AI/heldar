@@ -2,6 +2,7 @@
 // Phase 2 page clusters import from here; keep these names + signatures stable.
 
 import { useEffect, useId, useRef } from "react";
+import { viewerZone } from "../lib/format";
 import type {
   ButtonHTMLAttributes,
   InputHTMLAttributes,
@@ -430,6 +431,25 @@ export function EmptyState({
 /* ---------------------------------------------------------------- */
 /* SectionLabel — small UPPERCASE mono label                        */
 /* ---------------------------------------------------------------- */
+/**
+ * Says which clock a fleet-wide page's timestamps are in (#148).
+ *
+ * Camera-scoped surfaces convert to the camera's site zone and label themselves. Fleet-wide lists
+ * deliberately do NOT convert: a cross-site list whose rows each carried a different zone would be
+ * unreadable, and comparing four sites needs one reference clock. The viewer's own is that clock —
+ * this is what stops it being an UNLABELLED one, which is the whole of #148.
+ *
+ * One line per page rather than per panel: the clocks sit inside extracted row components, and a
+ * "(your zone)" suffix repeated on every panel is chrome that stops being read.
+ */
+export function ViewerClockNote() {
+  return (
+    <p className="mt-1 font-mono text-[11px] text-fg-muted">
+      Times in {viewerZone()} (your zone)
+    </p>
+  );
+}
+
 export function SectionLabel({ children }: { children: ReactNode }) {
   return (
     <span className="font-mono text-[10px] font-medium uppercase tracking-micro text-fg-muted">

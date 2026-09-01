@@ -1,5 +1,5 @@
-name: Build static musl heldar-core
-description: Cross-compile heldar-core for a musl target, then name it and checksum it.
+name: Build static musl heldar binaries
+description: Cross-compile heldar-core and heldarctl for a musl target, then name and checksum them.
 inputs:
   target:
     description: Rust target triple (e.g. x86_64-unknown-linux-musl)
@@ -12,8 +12,14 @@ inputs:
     required: true
 outputs:
   asset:
-    description: Path to the named binary asset
+    description: Path to the named heldar-core binary asset
     value: ${{ steps.package.outputs.asset }}
+  cli-asset:
+    description: Path to the named heldarctl binary asset
+    value: ${{ steps.package.outputs.cli-asset }}
+  mcp-asset:
+    description: Path to the named heldar-mcp binary asset
+    value: ${{ steps.package.outputs.mcp-asset }}
 runs:
   using: composite
   steps:
@@ -29,7 +35,7 @@ runs:
       shell: bash
       env:
         TARGET: ${{ inputs.target }}
-      run: cross build --release --locked --target "$TARGET" -p heldar-server
+      run: cross build --release --locked --target "$TARGET" -p heldar-server -p heldarctl -p heldar-mcp
     - name: Package + checksum
       id: package
       shell: bash
@@ -39,9 +45,21 @@ runs:
         ARCH: ${{ inputs.arch-label }}
       run: |
         set -euo pipefail
-        bin="target/$TARGET/release/heldar-core"
-        test -f "$bin" || { echo "::error::binary not found: $bin"; exit 1; }
-        asset="heldar-core-$VERSION-$ARCH-linux-musl"
-        cp "$bin" "$asset"
-        sha256sum "$asset" > "$asset.sha256"
-        echo "asset=$asset" >> "$GITHUB_OUTPUT"
+        # heldarctl ships for the SAME architectures as the core binary (#122). A CLI that is not
+        # on the box an installer is standing in front of is not the supported interface, whatever
+        # the docs say.
+        assets=()
+        for name in heldar-core heldarctl heldar-mcp; do
+          bin="target/$TARGET/release/$name"
+          test -f "$bin" || { echo "::error::binary not found: $bin"; exit 1; }
+          asset="$name-$VERSION-$ARCH-linux-musl"
+          cp "$bin" "$asset"
+          sha256sum "$asset" > "$asset.sha256"
+          assets+=("$asset")
+        done
+        # `asset` stays the CORE binary so the SBOM/attestation steps downstream are unchanged.
+        # Every asset gets an output: the release workflow reconstructed the heldar-mcp name inline,
+        # which is the same string built twice and free to drift.
+        echo "asset=heldar-core-$VERSION-$ARCH-linux-musl" >> "$GITHUB_OUTPUT"
+        echo "cli-asset=heldarctl-$VERSION-$ARCH-linux-musl" >> "$GITHUB_OUTPUT"
+        echo "mcp-asset=heldar-mcp-$VERSION-$ARCH-linux-musl" >> "$GITHUB_OUTPUT"

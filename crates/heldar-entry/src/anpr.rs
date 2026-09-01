@@ -12,7 +12,7 @@
 //! a registered plate raises an *exception for guard review*, never an automatic rejection
 //! (by policy: no hard access decision on make/model without local benchmarking).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
@@ -85,6 +85,12 @@ struct TrackVoteState {
     last_seen: DateTime<Utc>,
     committed: bool,
     model_versions: Value,
+    /// Server-authored `attributes.source` of the most recent read (`camera_native` / `worker`).
+    source: String,
+    /// Server-authored producer identity from `attributes._prov` — the credential (or kernel
+    /// producer) answerable for these reads. Written into the entry event's audit blob, replacing the
+    /// old hard-coded `"system"`.
+    produced_by: String,
     /// Unique per instance (see [`AnprEngine::next_uid`]); distinguishes a track from a successor
     /// that reused the same map key.
     uid: u64,
@@ -109,6 +115,17 @@ struct CommitJob {
     make: Option<String>,
     model: Option<String>,
     model_versions: Value,
+    /// Votes the winning plate actually accumulated.
+    votes: u32,
+    /// Whether this commit may ACTUATE the barrier.
+    ///
+    /// False for a commit-on-prune below the vote threshold. The entry event is still written — the
+    /// audit record is the entire point of commit-on-prune — but it is marked for review and the gate
+    /// is not touched. Without this, a single accepted plate read still opened the barrier ~30 s later
+    /// when the track was pruned, so hardening the vote path alone left the gate capability intact.
+    actuate: bool,
+    source: String,
+    produced_by: String,
 }
 
 pub struct AnprEngine {
@@ -177,6 +194,13 @@ impl AnprEngine {
         let mut jobs: Vec<CommitJob> = Vec::new();
         {
             let mut state = self.state.lock().await;
+            // ONE VOTE PER FRAME. A batch is ONE frame, so it may contribute at most one vote per
+            // (track, plate) — otherwise a caller reaching `min_votes` needed only to repeat the same
+            // detection N times in a single body, which the vote loop below happily counted because it
+            // runs over every element before the commit scan. Combined with server-derived frame ids,
+            // reaching the threshold now requires `min_votes` distinct tickets, i.e. `min_votes`
+            // distinct sampled frames off that physical camera.
+            let mut voted_this_frame: HashSet<(String, String)> = HashSet::new();
             for d in detections {
                 let attrs = match d.attributes.as_ref() {
                     Some(a) if a.is_object() => a,
@@ -203,6 +227,8 @@ impl AnprEngine {
                     continue; // nothing to key on
                 }
                 let key = format!("{camera_id}|{sub}");
+                let already_voted = !plate_norm.is_empty()
+                    && !voted_this_frame.insert((key.clone(), plate_norm.clone()));
                 let entry = state.entry(key).or_insert_with(|| TrackVoteState {
                     camera_id: camera_id.to_string(),
                     site_id: site_id.map(|s| s.to_string()),
@@ -214,13 +240,23 @@ impl AnprEngine {
                     last_seen: now,
                     committed: false,
                     model_versions: json!({}),
+                    source: "worker".into(),
+                    produced_by: "system".into(),
                     uid: self
                         .next_uid
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
                 });
                 entry.last_seen = now;
+                // `source` and `_prov` are written by the kernel's ingest path from the batch's
+                // Provenance — a client cannot set either, so what is read here is trustworthy.
+                if let Some(src) = attr_str(attrs, "source") {
+                    entry.source = src.to_string();
+                }
+                if let Some(p) = attrs.get("_prov") {
+                    entry.produced_by = producer_label(p);
+                }
 
-                if !plate_norm.is_empty() {
+                if !plate_norm.is_empty() && !already_voted {
                     // Weighted voting: a read from a camera's ON-BOARD ANPR engine
                     // (`source = "camera_native"`, see the kernel's native_anpr poller) is
                     // authoritative — the device already consolidated multiple frames itself —
@@ -267,7 +303,8 @@ impl AnprEngine {
                 }
                 if let Some((_, count, _)) = winning_plate(&st.votes) {
                     if count >= min_votes {
-                        if let Some(job) = build_job(key, st) {
+                        // Threshold reached: this commit MAY actuate.
+                        if let Some(job) = build_job(key, st, true) {
                             jobs.push(job);
                         }
                         st.committed = true;
@@ -285,7 +322,13 @@ impl AnprEngine {
                 if st.last_seen >= cutoff {
                     survivors.insert(k, st);
                 } else if !st.committed && winning_plate(&st.votes).is_some() {
-                    if let Some(job) = build_job(&k, &st) {
+                    // Commit-on-prune: record the event, but only ACTUATE if the plate actually
+                    // reached the threshold. A vehicle that passed too fast to be voted through is a
+                    // guard-review item, not a barrier open.
+                    let reached = winning_plate(&st.votes)
+                        .map(|(_, c, _)| c >= min_votes)
+                        .unwrap_or(false);
+                    if let Some(job) = build_job(&k, &st, reached) {
                         jobs.push(job);
                     }
                 }
@@ -312,7 +355,12 @@ impl AnprEngine {
 
     /// Returns true on a successful entry-event insert.
     async fn commit(&self, job: CommitJob, now: DateTime<Utc>) -> bool {
-        let resolution = self.resolve(&job).await;
+        let mut resolution = self.resolve(&job).await;
+        // A commit that may not actuate is, by definition, a guard-review item: force the workflow
+        // status regardless of how the identity resolved, so the dashboard surfaces it as one.
+        if !job.actuate {
+            resolution.workflow_status = "review".into();
+        }
         let id = format!("evt_{}", Uuid::new_v4().simple());
         let evidence_path = self.copy_evidence(&job.camera_id, &id).await;
 
@@ -339,7 +387,20 @@ impl AnprEngine {
         });
         let evidence = json!({ "snapshot_path": evidence_path });
         let workflow = json!({ "status": resolution.workflow_status });
-        let audit = json!({ "created_by": "system", "model_versions": job.model_versions });
+        // `created_by` was hard-coded "system", which was true of nothing: the reads came from a
+        // worker credential or the camera's own engine. It is now the server-authored producer, and
+        // the evidence block records what actually carried the decision.
+        let audit = json!({
+            "created_by": job.produced_by,
+            "model_versions": job.model_versions,
+            "evidence": {
+                "votes": job.votes,
+                "min_votes": self.ecfg.anpr_min_votes,
+                "source": job.source,
+                "key": job.produced_by,
+                "actuated": job.actuate,
+            },
+        });
         let plate_db = (!job.plate_norm.is_empty()).then(|| job.plate_norm.clone());
 
         let res = sqlx::query(
@@ -398,6 +459,31 @@ impl AnprEngine {
             "entry event"
         );
 
+        // A below-threshold commit-on-prune NEVER actuates. The audit row above is written (that is
+        // the whole point of commit-on-prune), and an operator-visible event says so, but the barrier
+        // is not touched — the vote threshold is the gate's authorization, and 30 seconds later is
+        // not a second chance at it.
+        if !job.actuate {
+            let _ = repo::log_event(
+                &self.pool,
+                Some(&job.camera_id),
+                "gate_review_not_actuated",
+                "warning",
+                json!({
+                    "entry_event_id": id,
+                    "plate": plate_db,
+                    "votes": job.votes,
+                    "min_votes": self.ecfg.anpr_min_votes,
+                    "source": job.source,
+                    "produced_by": job.produced_by,
+                    "auth_status": resolution.auth_status,
+                    "reason": "below_vote_threshold_on_track_prune",
+                }),
+            )
+            .await;
+            return true;
+        }
+
         // Barrier actuation (issue #44): fire-and-forget AFTER the event is durably recorded, so a
         // slow or unreachable relay never blocks the consumer or fails the entry event. The
         // actuator itself re-checks policy/kill-switch and logs the outcome.
@@ -406,8 +492,15 @@ impl AnprEngine {
             let camera_id = job.camera_id.clone();
             let auth_status = resolution.auth_status.clone();
             let event_id = id.clone();
+            let provenance = json!({
+                "votes": job.votes,
+                "min_votes": self.ecfg.anpr_min_votes,
+                "source": job.source,
+                "produced_by": job.produced_by,
+            });
             tokio::spawn(async move {
-                gate.auto_open(&camera_id, &event_id, &auth_status).await;
+                gate.auto_open_with(&camera_id, &event_id, &auth_status, provenance)
+                    .await;
             });
         }
         true
@@ -669,6 +762,18 @@ impl AnprEngine {
         for profile in ["main", "sub"] {
             let src = dir.join(format!("latest_{profile}.jpg"));
             if tokio::fs::copy(&src, &dst).await.is_ok() {
+                // Attribute it: the snapshots dir is flat, so without this row the media guard cannot
+                // tell whose evidence frame this is and refuses it to the credential scoped to THIS
+                // camera — a false deny on its own entry evidence.
+                heldar_kernel::services::media_scope::attribute(
+                    &self.pool,
+                    // MUST match `media_scope::artifact_key` (`snapshots/<file>`); the bare filename
+                    // is a row the guard never finds.
+                    &format!("snapshots/{filename}"),
+                    std::slice::from_ref(&camera_id.to_string()),
+                    heldar_kernel::services::media_scope::KIND_ENTRY_EVIDENCE,
+                )
+                .await;
                 return Some(format!("/media/snapshots/{filename}"));
             }
         }
@@ -745,8 +850,19 @@ fn winning_plate(votes: &HashMap<String, PlateVote>) -> Option<(String, u32, f64
     Some((norm.clone(), vote.count, avg))
 }
 
-fn build_job(key: &str, st: &TrackVoteState) -> Option<CommitJob> {
-    let (plate_norm, _count, plate_conf) = winning_plate(&st.votes)?;
+/// Flatten the server-authored `_prov` object into a single attributable label.
+fn producer_label(prov: &Value) -> String {
+    if let Some(p) = prov.get("producer").and_then(|v| v.as_str()) {
+        return format!("kernel:{p}");
+    }
+    if let Some(k) = prov.get("key").and_then(|v| v.as_str()) {
+        return format!("apikey:{k}");
+    }
+    "system".to_string()
+}
+
+fn build_job(key: &str, st: &TrackVoteState, actuate: bool) -> Option<CommitJob> {
+    let (plate_norm, count, plate_conf) = winning_plate(&st.votes)?;
     let plate_raw = st
         .raw_by_norm
         .get(&plate_norm)
@@ -767,6 +883,10 @@ fn build_job(key: &str, st: &TrackVoteState) -> Option<CommitJob> {
         make: st.attrs.make.as_ref().map(|(v, _)| v.clone()),
         model: st.attrs.model.as_ref().map(|(v, _)| v.clone()),
         model_versions: st.model_versions.clone(),
+        votes: count,
+        actuate,
+        source: st.source.clone(),
+        produced_by: st.produced_by.clone(),
     })
 }
 
@@ -873,14 +993,183 @@ mod tests {
         }
     }
 
-    /// A single CAMERA-NATIVE read (attributes.source = "camera_native") is authoritative: it
-    /// commits an entry event immediately, while a single worker-OCR read stays below the
-    /// 3-vote threshold.
-    #[tokio::test]
-    async fn native_read_commits_immediately_worker_read_does_not() {
-        let (engine, pool) = test_engine().await;
+    /// Build the kernel state the ingest path needs, with THIS engine registered as the perception
+    /// consumer — so a test can drive the real `ingest_batch` and get the real fan-out.
+    async fn state_with_engine(
+        pool: &SqlitePool,
+        engine: Arc<AnprEngine>,
+    ) -> heldar_kernel::state::AppState {
+        use heldar_kernel::services::consumer::DetectionConsumer;
+        let cfg = Arc::new(heldar_kernel::config::Config::from_env());
+        let consumers: Vec<Arc<dyn DetectionConsumer>> = vec![engine];
+        heldar_kernel::state::AppState {
+            recorder: heldar_kernel::services::recorder::RecorderManager::new(
+                pool.clone(),
+                cfg.clone(),
+            ),
+            sampler: heldar_kernel::services::sampler::SamplerManager::new(
+                pool.clone(),
+                cfg.clone(),
+            ),
+            live: heldar_kernel::services::live_publisher::LivePublisherManager::new(
+                pool.clone(),
+                cfg.clone(),
+                heldar_kernel::reqwest::Client::new(),
+            ),
+            mirror: None,
+            consumers: Arc::new(consumers),
+            modules: Arc::new(Vec::new()),
+            catalog: Arc::new(heldar_kernel::services::registry::CatalogService::new(&cfg)),
+            http: heldar_kernel::reqwest::Client::new(),
+            media_jobs: heldar_kernel::services::media_jobs::MediaJobGovernor::new(2),
+            started_at: Utc::now(),
+            pool: pool.clone(),
+            cfg,
+        }
+    }
 
-        // One worker-OCR read: below min_votes — no event.
+    fn ingest_body(frame: &str, attrs: Value) -> heldar_kernel::models::AiIngest {
+        heldar_kernel::models::AiIngest {
+            camera_id: "gate-cam".into(),
+            task_type: "anpr".into(),
+            timestamp: None,
+            frame_id: Some(frame.into()),
+            detections: vec![detection(attrs)],
+            event: None,
+            frame_ticket: None,
+        }
+    }
+
+    async fn entry_event_count(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM entry_events")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// THE NEGATIVE CONTROL, end to end. This test used to assert the vulnerability: it hand-built
+    /// `attributes.source = "camera_native"` and expected a single read to commit. Now it drives the
+    /// REAL ingest path, so the attribute is whatever the kernel authored — and a worker-provenance
+    /// batch that FORGES `camera_native` gets no weight at all.
+    #[tokio::test]
+    async fn a_forged_camera_native_read_does_not_commit_but_the_real_one_does() {
+        use heldar_kernel::models::{KernelProducer, Provenance};
+
+        let (engine, pool) = test_engine().await;
+        let st = state_with_engine(&pool, engine.clone()).await;
+
+        // A credential posting `source: camera_native` over the API. One read, min_votes = 3.
+        heldar_kernel::services::perception_ingest::ingest_batch(
+            &st,
+            &ingest_body(
+                "f_forged",
+                json!({
+                    "plate": "ABC1234",
+                    "plate_confidence": 0.8,
+                    "source": "camera_native",
+                    "_prov": { "producer": "native_anpr" },
+                }),
+            ),
+            &Provenance::Worker {
+                api_key_id: "key_attacker".into(),
+                task_id: Some("ai_1".into()),
+                worker_id: Some("w1".into()),
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            entry_event_count(&pool).await,
+            0,
+            "a forged camera_native read must carry NO extra weight — one worker read stays below \
+             min_votes=3"
+        );
+
+        // ...and the persisted attribute says `worker`, not what the client asked for.
+        let attrs: sqlx::types::Json<Value> =
+            // `w:` prefix: the ingest path namespaces the idempotency key by provenance, so a client
+            // cannot claim a kernel producer's `(camera_id, frame_id)` and suppress the genuine read.
+            sqlx::query_scalar("SELECT attributes FROM detections WHERE frame_id = 'w:f_forged'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(attrs.0["source"], "worker");
+
+        // THE POSITIVE CONTROL: the kernel's own native-ANPR producer is still authoritative, so a
+        // single on-board read still commits immediately. Over-correcting breaks this.
+        heldar_kernel::services::perception_ingest::ingest_batch(
+            &st,
+            &ingest_body(
+                "f_native",
+                json!({ "plate": "WXY8888", "direction": "inbound" }),
+            ),
+            &Provenance::Kernel {
+                producer: KernelProducer::NativeAnpr,
+            },
+        )
+        .await
+        .unwrap();
+        let rows: Vec<(Option<String>, String)> =
+            sqlx::query_as("SELECT plate, auth_status FROM entry_events")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(rows.len(), 1, "one genuine native read commits immediately");
+        assert_eq!(rows[0].0.as_deref(), Some("WXY8888"));
+        assert_eq!(rows[0].1, "unmatched", "unknown plate resolves unmatched");
+    }
+
+    /// ONE VOTE PER FRAME. A batch is one frame, so repeating the same plate inside it must not add
+    /// up to the threshold. This passes trivially before the per-call dedupe is added — the vote loop
+    /// runs over every element before the commit scan — which is exactly why it is worth pinning.
+    #[tokio::test]
+    async fn repeating_a_plate_within_one_batch_is_a_single_vote() {
+        let (engine, pool) = test_engine().await;
+        let same = || DetectionIngest {
+            label: Some("vehicle".into()),
+            confidence: Some(0.9),
+            bbox: None,
+            track_id: Some("trk-1".into()),
+            attributes: Some(json!({ "plate": "ABC1234", "plate_confidence": 0.9 })),
+        };
+        engine
+            .process("gate-cam", None, &[same(), same(), same()])
+            .await;
+        assert_eq!(
+            entry_event_count(&pool).await,
+            0,
+            "three copies of one read in ONE batch must not reach min_votes=3"
+        );
+
+        // Three SEPARATE frames do reach it — the threshold still means what it says.
+        for _ in 0..3 {
+            engine.process("gate-cam", None, &[same()]).await;
+        }
+        assert_eq!(
+            entry_event_count(&pool).await,
+            1,
+            "three distinct frames reach min_votes=3"
+        );
+    }
+
+    /// PRUNE-COMMIT NEVER ACTUATES. A track that never reached the threshold is still RECORDED when
+    /// it is pruned (the audit row is the point), but it is marked for review and the barrier is not
+    /// touched. Without this, a single accepted read still opened the gate ~30 s later.
+    #[tokio::test]
+    async fn a_below_threshold_prune_records_for_review_and_never_actuates() {
+        let (engine, pool) = test_engine().await;
+        // Give the camera an ENABLED gate policy, so "no actuation" cannot be an artefact of there
+        // being nothing to actuate.
+        sqlx::query(
+            "INSERT INTO gate_policies (camera_id, enabled, output_port, pulse_ms, updated_at)
+             VALUES ('gate-cam', 1, 1, 500, ?)",
+        )
+        .bind(Utc::now())
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        // One read (below min_votes = 3), then age the track past STATE_TTL_SECS and poke the engine.
         engine
             .process(
                 "gate-cam",
@@ -890,32 +1179,82 @@ mod tests {
                 )],
             )
             .await;
-        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM entry_events")
+        {
+            let mut state = engine.state.lock().await;
+            for st in state.values_mut() {
+                st.last_seen = Utc::now() - Duration::seconds(STATE_TTL_SECS + 5);
+            }
+        }
+        engine.process("gate-cam", None, &[]).await;
+
+        let (workflow_status, audit): (String, sqlx::types::Json<Value>) =
+            sqlx::query_as("SELECT workflow_status, audit FROM entry_events")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            workflow_status, "review",
+            "a below-threshold prune commit is a guard-review item"
+        );
+        assert_eq!(audit.0["evidence"]["actuated"], false);
+
+        let reviewed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events WHERE event_type = 'gate_review_not_actuated'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            reviewed, 1,
+            "the operator gets an explicit not-actuated event"
+        );
+
+        let opened: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM events WHERE event_type = 'gate_opened'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(opened, 0, "commit-on-prune must NEVER open the barrier");
+    }
+
+    /// The entry event names the producer that actually drove it, replacing the hard-coded "system".
+    #[tokio::test]
+    async fn the_audit_trail_names_the_producer_and_the_vote_count() {
+        use heldar_kernel::models::{KernelProducer, Provenance};
+        let (engine, pool) = test_engine().await;
+        let st = state_with_engine(&pool, engine.clone()).await;
+
+        heldar_kernel::services::perception_ingest::ingest_batch(
+            &st,
+            &ingest_body("f_a", json!({ "plate": "WXY8888" })),
+            &Provenance::Kernel {
+                producer: KernelProducer::NativeAnpr,
+            },
+        )
+        .await
+        .unwrap();
+
+        let audit: sqlx::types::Json<Value> = sqlx::query_scalar("SELECT audit FROM entry_events")
             .fetch_one(&pool)
             .await
             .unwrap();
-        assert_eq!(count, 0, "one worker read must not commit at min_votes=3");
+        assert_eq!(audit.0["created_by"], "kernel:native_anpr");
+        assert_eq!(audit.0["evidence"]["source"], "camera_native");
+        assert_eq!(audit.0["evidence"]["votes"], 3);
+        assert_eq!(audit.0["evidence"]["actuated"], true);
+    }
 
-        // One camera-native read: weighted to the threshold — commits.
-        engine
-            .process(
-                "gate-cam",
-                None,
-                &[detection(json!({
-                    "plate": "WXY8888",
-                    "source": "camera_native",
-                    "direction": "inbound",
-                }))],
-            )
-            .await;
-        let rows: Vec<(Option<String>, String)> =
-            sqlx::query_as("SELECT plate, auth_status FROM entry_events")
-                .fetch_all(&pool)
-                .await
-                .unwrap();
-        assert_eq!(rows.len(), 1, "one native read commits immediately");
-        assert_eq!(rows[0].0.as_deref(), Some("WXY8888"));
-        assert_eq!(rows[0].1, "unmatched", "unknown plate resolves unmatched");
+    #[test]
+    fn producer_label_flattens_the_server_authored_prov_block() {
+        assert_eq!(
+            producer_label(&json!({ "producer": "native_anpr" })),
+            "kernel:native_anpr"
+        );
+        assert_eq!(
+            producer_label(&json!({ "key": "ak_1", "task": "ai_1" })),
+            "apikey:ak_1"
+        );
+        assert_eq!(producer_label(&json!({})), "system");
     }
 
     #[test]

@@ -87,6 +87,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      # Keyless Sigstore signing: a short-lived OIDC identity instead of a private key living in
+      # repository secrets, which is the thing #115 asks us not to have.
+      id-token: write
+      attestations: write
     strategy:
       fail-fast: false
       matrix:
@@ -104,10 +108,147 @@ jobs:
           target: ${{ matrix.target }}
           arch-label: ${{ matrix.arch }}
           version: ${{ github.ref_name }}
+      # An SBOM answers "what is actually in this binary" without trusting our word for it. SPDX
+      # because that is what `gh attestation` and most consumers ingest.
+      - name: SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          file: ${{ steps.build.outputs.asset }}
+          format: spdx-json
+          output-file: ${{ steps.build.outputs.asset }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      # Binds this exact byte-for-byte artifact to the repository, commit, workflow and tag that
+      # produced it. A sha256 sidecar only detects corruption when you already trust where the
+      # checksum came from; this authenticates the publisher.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.build.outputs.asset }}
+      - name: Attest heldarctl
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: ${{ steps.build.outputs.cli-asset }}
+
+      - name: Attest the SBOM
+        uses: actions/attest-sbom@v2
+        with:
+          subject-path: ${{ steps.build.outputs.asset }}
+          sbom-path: ${{ steps.build.outputs.asset }}.spdx.json
+
+      # The manifest is generated once, on the x86_64 leg, and pinned+attested like any other asset.
+      #
+      # It has to WAIT for the images first. docker-open.yml builds and pushes them on the same
+      # `push: tags: ["v*"]` event as this workflow, and GitHub gives no ordering between two
+      # workflows triggered by one push — so without this the generator asks ghcr for a digest that
+      # has not been pushed yet, gets nothing, and REQUIRE_DIGESTS turns that into a failed job.
+      # An unpinned manifest for a perfectly good release would be worse: it would ship, attested,
+      # promising a pinning it does not carry.
+      - name: Wait for the release images to be pushed
+        if: matrix.arch == 'x86_64'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          for i in $(seq 1 60); do
+            missing=""
+            for n in core web ai; do
+              docker buildx imagetools inspect "ghcr.io/straits-ai/heldar-$n:$TAG" \
+                --format '{{json .Manifest.Digest}}' >/dev/null 2>&1 || missing="$missing $n"
+            done
+            [ -z "$missing" ] && { echo "all images present"; exit 0; }
+            echo "waiting for:$missing (attempt $i/60)"
+            sleep 30
+          done
+          echo "images never appeared — docker-open.yml likely failed for this tag" >&2
+          exit 1
+
+      - name: Release manifest
+        if: matrix.arch == 'x86_64'
+        env:
+          # A release manifest whose whole purpose is pinning must not ship unpinned.
+          REQUIRE_DIGESTS: "1"
+        run: ./scripts/gen_release_manifest.sh "${{ github.ref_name }}" > heldar-release-manifest.json
+      - name: Attest the manifest
+        if: matrix.arch == 'x86_64'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: heldar-release-manifest.json
+      # The contract this release publishes, so the next release's diff has a baseline and an
+      # integrator can generate a client without booting a box.
+      - name: API contract
+        if: matrix.arch == 'x86_64'
+        run: |
+          cargo test -p heldar-server --test openapi_contract write_the_served_document -- --exact
+          cp target/openapi.json openapi.json
+      - name: Upload the API contract
+        if: matrix.arch == 'x86_64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" openapi.json --clobber
+
+      - name: Upload the manifest
+        if: matrix.arch == 'x86_64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release upload "$TAG" heldar-release-manifest.json --clobber
+
+      # A release must not ship a sizing document whose camera counts no run supports (#119). The
+      # gate recomputes each cited run's verdict from its raw measurements and refuses a claim whose
+      # thresholds have moved since the run — so this cannot be satisfied by editing a number.
+      - name: Capacity claims are backed by a run that passed
+        if: matrix.arch == 'x86_64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/bench/test_capacity_gate.py
+          python3 scripts/verify_capacity_claims.py
+
+      # The skill bundle ships as a release asset (#124), pinned to the contract this tag serves.
+      # A skill is only meaningful against an API it was written for, and its frontmatter says which.
+      - name: Package the skill bundle
+        if: matrix.arch == 'x86_64'
+        env:
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 scripts/validate_skills.py
+          tar -czf "heldar-skills-$TAG.tar.gz" skills
+          sha256sum "heldar-skills-$TAG.tar.gz" > "heldar-skills-$TAG.tar.gz.sha256"
+      - name: Attest the skill bundle
+        if: matrix.arch == 'x86_64'
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: heldar-skills-${{ github.ref_name }}.tar.gz
+      - name: Upload the skill bundle
+        if: matrix.arch == 'x86_64'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        shell: bash
+        run: gh release upload "$TAG" "heldar-skills-$TAG.tar.gz" "heldar-skills-$TAG.tar.gz.sha256" --clobber
+
       - name: Upload to the Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
           ASSET: ${{ steps.build.outputs.asset }}
+          CLI: ${{ steps.build.outputs.cli-asset }}
+          MCP: ${{ steps.build.outputs.mcp-asset }}
         shell: bash
-        run: gh release upload "$TAG" "$ASSET" "$ASSET.sha256" --clobber
+        run: |
+          set -euo pipefail
+          # An unset output is an EMPTY string, and `gh release upload "$TAG" ""` is a confusing
+          # failure a long way from its cause. `asset` had no `value:` at all for two merges; this
+          # says so at the point of use as well as in the guard.
+          for v in ASSET CLI MCP; do
+            test -n "${!v}" || { echo "::error::$v is empty — check the composite action's outputs"; exit 1; }
+          done
+          gh release upload "$TAG" "$ASSET" "$ASSET.sha256" "$ASSET.spdx.json" --clobber
+          # heldarctl and heldar-mcp ship for every architecture the core does (#122, #123).
+          gh release upload "$TAG" "$CLI" "$CLI.sha256" --clobber
+          gh release upload "$TAG" "$MCP" "$MCP.sha256" --clobber

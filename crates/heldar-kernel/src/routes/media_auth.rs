@@ -50,6 +50,13 @@ struct AuthRequest {
     query: String,
     #[serde(default)]
     token: String,
+    /// MediaMTX's own session id — the SAME value its `/v3/*/list` and `/kick/{id}` endpoints use.
+    /// Verified against a live box; it is present on every callback, for reads and publishes alike.
+    #[serde(default)]
+    id: String,
+    /// `webrtc` | `rtsp` | `hls` | `srt` | … — decides which kick endpoint can reach this session.
+    #[serde(default)]
+    protocol: String,
 }
 
 fn client_ip(req: &AuthRequest) -> Option<IpAddr> {
@@ -109,17 +116,37 @@ async fn authorize(State(st): State<AppState>, Json(req): Json<AuthRequest>) -> 
         // Publishing + the control/metrics surfaces stay loopback-only.
         "publish" | "api" | "metrics" | "pprof" => is_loopback(&req),
         // Reads/playback: token-gated when auth is on; LAN-IP-gated when auth is off (LAN default).
+        //
+        // Two questions, not one: is the token authentic, and does its subject STILL stand? The
+        // signature alone used to be the whole answer, which is why a revoked key kept streaming to
+        // the TTL. `verify` returns the subject precisely so this arm cannot forget to ask the
+        // second question.
+        //
+        // What this bounds: a transport is re-authorized as often as it re-presents the token. HLS
+        // does that per segment, so withdrawal bites in seconds; an ESTABLISHED WebRTC session is
+        // negotiated once and keeps flowing regardless. See `services::live_token`.
         "read" | "playback" => {
             if st.cfg.auth_enabled {
-                token_of(&req)
-                    .map(|t| {
-                        crate::services::live_token::verify(
-                            &req.path,
-                            &t,
-                            chrono::Utc::now().timestamp(),
-                        )
-                    })
-                    .unwrap_or(false)
+                match token_of(&req).and_then(|t| {
+                    crate::services::live_token::verify(
+                        &req.path,
+                        &t,
+                        chrono::Utc::now().timestamp(),
+                    )
+                }) {
+                    Some(subject) => {
+                        let ok = subject_still_stands(&st, &subject, &req.path).await;
+                        if ok {
+                            // Remember WHO is watching, so the sweeper can withdraw a transport that
+                            // will never come back to ask again. Only for reads — a publish is a
+                            // camera feeding the box, and recording it here would put the recorder's
+                            // own sessions in reach of the kicker.
+                            record_live_session(&st, &req, &subject).await;
+                        }
+                        ok
+                    }
+                    None => false,
+                }
             } else {
                 is_lan_client(&req)
             }
@@ -130,6 +157,99 @@ async fn authorize(State(st): State<AppState>, Json(req): Json<AuthRequest>) -> 
         StatusCode::OK
     } else {
         StatusCode::UNAUTHORIZED
+    }
+}
+
+/// Note that `subject` is currently watching `req.path` over session `req.id`.
+///
+/// Best-effort: a failure here must never refuse a read that authorization just allowed. The cost of
+/// a dropped row is that this one session cannot be withdrawn early — it still expires with its token
+/// — which is strictly better than a black video wall.
+async fn record_live_session(
+    st: &AppState,
+    req: &AuthRequest,
+    subject: &crate::services::live_token::Subject,
+) {
+    use crate::services::live_token::Subject;
+    if req.id.is_empty() {
+        return;
+    }
+    let (kind, id) = match subject {
+        Subject::ApiKey(id) => ("api_key", Some(id.as_str())),
+        Subject::User(id) => ("user", Some(id.as_str())),
+        // Nothing to withdraw, so nothing worth recording.
+        Subject::Site => return,
+    };
+    let now = chrono::Utc::now();
+    // `last_seen_at` is refreshed on re-auth (HLS re-presents constantly), which is how the sweeper
+    // tells a live session from one that ended without a teardown we saw.
+    let res = sqlx::query(
+        "INSERT INTO live_sessions (id, protocol, path, subject_kind, subject_id, created_at, last_seen_at)
+         VALUES (?,?,?,?,?,?,?)
+         ON CONFLICT(id) DO UPDATE SET last_seen_at = excluded.last_seen_at",
+    )
+    .bind(&req.id)
+    .bind(&req.protocol)
+    .bind(&req.path)
+    .bind(kind)
+    .bind(id)
+    .bind(now)
+    .bind(now)
+    .execute(&st.pool)
+    .await;
+    if let Err(e) = res {
+        tracing::warn!(session = %req.id, error = %e, "media_auth: could not record the live session; it will not be withdrawable early");
+    }
+}
+
+/// Does the credential that opened this stream still stand, and still hold this camera?
+///
+/// Fail-OPEN on a database read failure, deliberately and loudly: the recorder shares this SQLite and
+/// a busy timeout under write load is routine. Turning routine contention into a black video wall
+/// across the whole site is a worse failure than the exposure it would prevent — the same trade the
+/// backup creator re-check makes, for the same reason.
+pub(crate) async fn subject_still_stands(
+    st: &AppState,
+    subject: &crate::services::live_token::Subject,
+    path: &str,
+) -> bool {
+    use crate::services::live_token::Subject;
+    match subject {
+        // No withdrawable credential behind it: auth-disabled boxes and the site-token rendezvous.
+        Subject::Site => true,
+        Subject::User(id) => {
+            match sqlx::query_scalar::<_, bool>("SELECT active FROM users WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&st.pool)
+                .await
+            {
+                Ok(Some(active)) => active,
+                // Deleted: withdrawn.
+                Ok(None) => false,
+                Err(e) => {
+                    tracing::warn!(user = %id, error = %e, "media_auth: could not re-check the streaming user; allowing");
+                    true
+                }
+            }
+        }
+        Subject::ApiKey(id) => {
+            match crate::auth::api_key_principal_now(&st.pool, id, st.cfg.machine_auth).await {
+                // Still a valid credential — but it must ALSO still hold this camera, or narrowing
+                // `scope_cameras` would leave the stream running. `path` is the MediaMTX path
+                // (`cam_<camera_id>`), which is what the token is scoped to.
+                Ok(Some(principal)) => match path.strip_prefix("cam_") {
+                    Some(camera_id) => principal.camera_allowed(camera_id),
+                    // A path shape this kernel did not mint a camera token for.
+                    None => false,
+                },
+                // Revoked, deactivated, expired or deleted.
+                Ok(None) => false,
+                Err(e) => {
+                    tracing::warn!(api_key = %id, error = %e, "media_auth: could not re-check the streaming key; allowing");
+                    true
+                }
+            }
+        }
     }
 }
 
@@ -144,6 +264,8 @@ mod tests {
             path: "cam_1".into(),
             query: query.into(),
             token: String::new(),
+            id: String::new(),
+            protocol: String::new(),
         }
     }
 

@@ -1,6 +1,6 @@
 [package]
 name = "heldar-kernel"
-version = "0.3.1"
+version = "0.5.0"
 edition = "2021"
 rust-version = "1.85"
 description = "Heldar kernel — media/DVR control plane, perception ingest + sampler, zone engine, auth, and the worker SDK contract. The open, domain-agnostic platform that domain apps build on."
@@ -42,6 +42,7 @@ sqlx = { version = "0.8", default-features = false, features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+chrono-tz = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 # `stream` powers the on-camera event alertStream consumer (services/camera_events).
@@ -72,3 +73,5 @@ hmac = "0.12"
 # already resolved in Cargo.lock (the rustls TLS backend under reqwest), so declaring it directly adds
 # zero new compiled crates while giving asymmetric verify with a PUBLIC key (no forgeable secret).
 ring = "0.17"
+utoipa = { version = "5.5.0", features = ["axum_extras", "chrono"] }
+http-body = "1.1.0"
