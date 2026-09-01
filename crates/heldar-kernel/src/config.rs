@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use crate::env::{parse_bool, parse_or, var, var_or};
 
 /// Runtime configuration, loaded from environment (see `.env.example`).
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Config {
     pub database_url: String,
     pub data_dir: PathBuf,
@@ -13,6 +13,10 @@ pub struct Config {
     pub frames_dir: PathBuf,
     /// Directory where segment-spanning HLS playback sessions are generated (one subdir per session).
     pub playback_dir: PathBuf,
+    /// Signed evidence bundles (#118). Separate from `clips_dir` because a bundle is a different
+    /// artifact with a different retention and a different meaning: a clip is convenience, a bundle
+    /// is a chain-of-custody claim.
+    pub evidence_dir: PathBuf,
     pub ffmpeg_bin: String,
     pub ffprobe_bin: String,
     pub mediamtx_api_url: String,
@@ -32,6 +36,13 @@ pub struct Config {
     /// Must comfortably outlast a viewing session's reconnects; the dashboard re-fetches `/liveview`
     /// (re-minting) whenever it reopens a stream. Only enforced when kernel auth is enabled.
     pub live_token_ttl_secs: i64,
+    /// How often to re-check the credentials behind LIVE MediaMTX sessions and kick the withdrawn.
+    ///
+    /// This is the revocation latency for transports that never re-present their token — WebRTC
+    /// authorizes once at negotiation, RTSP readers once at connect. HLS is unaffected: it
+    /// re-presents per segment, so the auth callback already stops it. Trades that latency against
+    /// MediaMTX API chatter; 0 disables the reaper entirely.
+    pub live_reaper_interval_s: u64,
     /// Max concurrent interactive media jobs — playback session builds, clip exports, snapshots
     /// (`HELDAR_MEDIA_JOB_CONCURRENCY`). Each forks ffmpeg/ffprobe and does heavy disk I/O; unbounded,
     /// they starve the RECORDER, which is the one process that must never miss. Clamped to >= 1.
@@ -150,7 +161,12 @@ pub struct Config {
     pub machine_auth: EnforcementTier,
     /// Frame-ticket requirement on the AI ingest path (`HELDAR_INGEST_PROVENANCE`). `warn` (DEFAULT)
     /// accepts a ticketless batch exactly as today; `enforce` requires a server-issued frame ticket.
-    /// Promoted to `enforce` by `HELDAR_DEPLOYMENT_MODE=production*`. Consumed by Stage B.
+    ///
+    /// **NOT auto-promoted by `HELDAR_DEPLOYMENT_MODE`**, unlike [`Self::machine_auth`] — this is the
+    /// one tier a deployment label must never move, because it is a CLIENT protocol requirement and
+    /// promoting it silently stops all AI ingest on a box that otherwise looks healthy. Only an
+    /// explicit `HELDAR_INGEST_PROVENANCE=enforce` turns it on; see the rationale at the
+    /// `tier_from_env` call site in [`Config::from_env`], and docs/AI-WORKERS.md §5.0.
     pub ingest_provenance: EnforcementTier,
     /// TTL (seconds) of a minted per-frame ingest ticket (`HELDAR_FRAME_TICKET_TTL_SECS`). Long enough
     /// to survive a slow inference pass, short enough that a leaked ticket is worthless. Consumed by
@@ -167,6 +183,12 @@ pub struct Config {
     /// Turn the production guardrails (see `enforce_production_guardrails`) into hard boot failures
     /// instead of warnings, for an internet-exposed deployment.
     pub strict_prod: bool,
+    /// Refuse to boot unless no untrusted local user can read this process's command line (#126).
+    ///
+    /// Camera credentials reach ffmpeg in its argv; see ADR 0006. Off by default — a sealed
+    /// appliance does not need it, and a box that refuses to record is worse than one with a
+    /// documented exposure.
+    pub require_credential_isolation: bool,
     /// Operator's explicit declaration that this box is reachable from outside the trusted LAN
     /// (`HELDAR_INTERNET_EXPOSED=true`). The automatic detection ([`Config::internet_exposed`]) only
     /// knows about the opt-in remote paths (rendezvous / overlay / control-plane) — it CANNOT see a
@@ -408,6 +430,12 @@ pub struct CpTlsCfg {
 fn cp_tls_from_env() -> Option<CpTlsCfg> {
     match (
         var("HELDAR_CP_TLS_CLIENT_CERT"),
+        // NOT `secret()`. This holds a PATH, not a secret — `_FILE` resolution would substitute the
+        // key's CONTENTS where a filename is expected, and `fleet_register` interpolates that
+        // filename into an error it logs at ERROR level. Wiring it to the chain would have made
+        // the branch whose purpose is keeping secrets out of logs print a PEM private key.
+        // A systemd credential already IS a path ($CREDENTIALS_DIRECTORY/NAME), which `var()`
+        // handles unchanged.
         var("HELDAR_CP_TLS_CLIENT_KEY"),
         var("HELDAR_CP_TLS_CA"),
     ) {
@@ -426,7 +454,96 @@ fn cp_tls_from_env() -> Option<CpTlsCfg> {
     }
 }
 
+/// A deployment SECRET, resolved through the secret-source chain (#126) rather than read straight
+/// from the environment.
+///
+/// `NAME` still wins, so nothing moves on upgrade; `NAME_FILE` and a systemd credential are the
+/// hardened alternatives. A named-but-unusable source is fatal at boot rather than a silent
+/// fall-through to "no secret" — an operator who pointed at a file asked for it to be used.
+fn secret(name: &str) -> Option<String> {
+    match crate::services::secret_source::resolve_and_report(name) {
+        Ok(r) => r.map(|r| r.expose().to_string()),
+        Err(e) => {
+            // NOT a panic. `Config::from_env()` is the repo's test-config idiom, called from ~60
+            // helpers, so panicking here meant one stale `_FILE` variable in a developer's shell
+            // detonated 144 tests. The refusal belongs at boot, where it is actionable: the error is
+            // recorded and `heldar_server::run` refuses to start. Fail-closed either way, without
+            // the blast radius.
+            SECRET_ERRORS
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .push(format!("{e:#}"));
+            None
+        }
+    }
+}
+
+/// Secret sources that were NAMED but could not be read, collected during `from_env`.
+///
+/// Read by [`Config::secret_source_errors`] so the server can refuse to boot. An operator who set
+/// `HELDAR_SECRET_KEY_FILE` asked for encryption at rest; starting anyway would store every camera
+/// credential in plaintext while the deployment believed they were sealed.
+static SECRET_ERRORS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Hand-written so a secret cannot reach a log through `{:?}`.
+///
+/// `#[derive(Debug)]` printed `secret_key_b64: Some("yQw+C67...")` in full, and `?cfg` is the
+/// idiomatic `tracing` shape used throughout this codebase — so the careful redaction in
+/// `secret_source::Resolved` protected a value for the three statements before it was copied into a
+/// struct that prints it. The long-lived copy is the one that matters: it lives in an `Arc<Config>`
+/// for the process lifetime and is handed to every service.
+///
+/// Secrets report whether they are SET, which is the operationally useful half and discloses
+/// nothing — not even a length, since a length is a meaningful hint about a key.
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("data_dir", &self.data_dir)
+            .field("deployment_mode", &self.deployment_mode)
+            .field("auth_enabled", &self.auth_enabled)
+            .field("strict_prod", &self.strict_prod)
+            .field("secret_key_b64", &redacted(&self.secret_key_b64))
+            .field(
+                "bootstrap_admin_password",
+                &redacted(&self.bootstrap_admin_password),
+            )
+            .field("smtp_password", &redacted(&self.smtp_password))
+            .finish_non_exhaustive()
+    }
+}
+
+/// `"<set>"` or `"<unset>"` — never the value, never its length.
+fn redacted(v: &Option<String>) -> &'static str {
+    if v.is_some() {
+        "<set>"
+    } else {
+        "<unset>"
+    }
+}
+
 impl Config {
+    /// Secret sources that were NAMED but could not be read (#126).
+    ///
+    /// Non-empty means an operator asked for a secret to come from somewhere and it did not. The
+    /// server refuses to boot on this: continuing would store camera credentials in plaintext while
+    /// the deployment believed they were sealed, and the failure would stay invisible until someone
+    /// read the database.
+    pub fn secret_source_errors() -> Vec<String> {
+        SECRET_ERRORS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+    }
+
+    /// Forget any recorded secret-source errors. For tests that deliberately misconfigure one.
+    #[doc(hidden)]
+    pub fn clear_secret_source_errors() {
+        SECRET_ERRORS
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clear();
+    }
+
     /// Whether per-account brute-force lockout is active (both knobs must be > 0).
     pub fn login_lockout_enabled(&self) -> bool {
         self.login_max_failures > 0 && self.login_lockout_min > 0
@@ -571,15 +688,28 @@ impl Config {
              HELDAR_MACHINE_AUTH      = {machine_auth}\n\
                  {effect}\n\
              HELDAR_INGEST_PROVENANCE = {ingest_provenance}\n\
-                 frame tickets are {ticket_state} on the AI ingest path\n\
+                 {ticket_state}\n\
              deployment mode          = {mode}\n\
              keys with no explicit capability grant: {legacy}",
             machine_auth = self.machine_auth.as_str(),
             ingest_provenance = self.ingest_provenance.as_str(),
             effect = effect,
+            // State the NON-enforced posture as plainly as the enforced one. An operator who set
+            // HELDAR_DEPLOYMENT_MODE=production reasonably assumes both tiers moved; only
+            // `machine_auth` did, and reading that from the absence of a line is exactly how a box
+            // ends up accepting ticketless ingest while its operator believes otherwise.
             ticket_state = match self.ingest_provenance {
-                EnforcementTier::Enforce => "REQUIRED",
-                _ => "optional (a ticketless batch is accepted, as today)",
+                EnforcementTier::Enforce =>
+                    "ENFORCED — a ticketless ingest batch is rejected (401 frame_ticket_required)",
+                EnforcementTier::Warn =>
+                    "NOT ENFORCED — a ticketless ingest batch is ACCEPTED. Each such credential is \
+                     logged once an hour with what `enforce` would deny. This tier is never \
+                     promoted by HELDAR_DEPLOYMENT_MODE: set HELDAR_INGEST_PROVENANCE=enforce \
+                     explicitly, once that hourly log is empty.",
+                EnforcementTier::Off =>
+                    "NOT ENFORCED and NOT REPORTED — a ticketless ingest batch is ACCEPTED silently. \
+                     This tier is never promoted by HELDAR_DEPLOYMENT_MODE; `warn` at minimum is \
+                     recommended so you can see which credentials are ticketless.",
             },
             mode = if self.deployment_mode.is_empty() {
                 "(unset)"
@@ -610,6 +740,9 @@ impl Config {
         let archive_dir = var("HELDAR_ARCHIVE_DIR")
             .map(PathBuf::from)
             .unwrap_or_else(|| data_dir.join("archives"));
+        let evidence_dir = var("HELDAR_EVIDENCE_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| data_dir.join("evidence"));
 
         let cors_origins = var_or("HELDAR_CORS_ORIGINS", "http://localhost:5173")
             .split(',')
@@ -645,6 +778,7 @@ impl Config {
             data_dir,
             recordings_dir,
             clips_dir,
+            evidence_dir,
             snapshots_dir,
             frames_dir,
             playback_dir,
@@ -656,6 +790,7 @@ impl Config {
             mediamtx_webrtc_base: var_or("HELDAR_MEDIAMTX_WEBRTC_BASE", "http://127.0.0.1:8889"),
             media_same_origin: parse_bool("HELDAR_MEDIA_SAME_ORIGIN", false),
             live_token_ttl_secs: parse_or("HELDAR_LIVEVIEW_TOKEN_TTL_SECS", 3600),
+            live_reaper_interval_s: parse_or("HELDAR_LIVE_REAPER_INTERVAL_S", 15),
             db_max_connections: parse_or::<u32>("HELDAR_DB_MAX_CONNECTIONS", 16).clamp(2, 256),
             media_job_concurrency: parse_or::<usize>("HELDAR_MEDIA_JOB_CONCURRENCY", 3)
                 .clamp(1, 64),
@@ -713,12 +848,13 @@ impl Config {
                 .clamp(10, 900),
             login_max_failures: parse_or("HELDAR_LOGIN_MAX_FAILURES", 5),
             login_lockout_min: parse_or("HELDAR_LOGIN_LOCKOUT_MIN", 15),
-            secret_key_b64: var("HELDAR_SECRET_KEY"),
+            secret_key_b64: secret("HELDAR_SECRET_KEY"),
             strict_prod: parse_bool("HELDAR_STRICT_PROD", false),
+            require_credential_isolation: parse_bool("HELDAR_REQUIRE_CREDENTIAL_ISOLATION", false),
             exposed_declared: parse_bool("HELDAR_INTERNET_EXPOSED", false),
             deployment_mode,
             bootstrap_admin_user: var("HELDAR_BOOTSTRAP_ADMIN_USER"),
-            bootstrap_admin_password: var("HELDAR_BOOTSTRAP_ADMIN_PASSWORD"),
+            bootstrap_admin_password: secret("HELDAR_BOOTSTRAP_ADMIN_PASSWORD"),
             audit_retention_days: parse_or("HELDAR_AUDIT_RETENTION_DAYS", 365),
             overlay_enabled: parse_bool("HELDAR_OVERLAY_ENABLED", false),
             overlay_kind: var_or("HELDAR_OVERLAY_KIND", "none"),
@@ -786,7 +922,7 @@ impl Config {
             smtp_host: var("HELDAR_SMTP_HOST"),
             smtp_port: parse_or("HELDAR_SMTP_PORT", 587u16),
             smtp_username: var("HELDAR_SMTP_USERNAME"),
-            smtp_password: var("HELDAR_SMTP_PASSWORD"),
+            smtp_password: secret("HELDAR_SMTP_PASSWORD"),
             smtp_from: var("HELDAR_SMTP_FROM"),
             smtp_tls: var_or("HELDAR_SMTP_TLS", "starttls"),
             smtp_recipients: var_or("HELDAR_SMTP_RECIPIENTS", "")

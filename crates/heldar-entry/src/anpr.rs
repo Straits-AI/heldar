@@ -762,6 +762,18 @@ impl AnprEngine {
         for profile in ["main", "sub"] {
             let src = dir.join(format!("latest_{profile}.jpg"));
             if tokio::fs::copy(&src, &dst).await.is_ok() {
+                // Attribute it: the snapshots dir is flat, so without this row the media guard cannot
+                // tell whose evidence frame this is and refuses it to the credential scoped to THIS
+                // camera — a false deny on its own entry evidence.
+                heldar_kernel::services::media_scope::attribute(
+                    &self.pool,
+                    // MUST match `media_scope::artifact_key` (`snapshots/<file>`); the bare filename
+                    // is a row the guard never finds.
+                    &format!("snapshots/{filename}"),
+                    std::slice::from_ref(&camera_id.to_string()),
+                    heldar_kernel::services::media_scope::KIND_ENTRY_EVIDENCE,
+                )
+                .await;
                 return Some(format!("/media/snapshots/{filename}"));
             }
         }

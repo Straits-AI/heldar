@@ -17,7 +17,7 @@ pub struct CameraLink {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CameraLinkCreate {
     pub from_camera: String,
     pub to_camera: String,

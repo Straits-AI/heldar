@@ -213,6 +213,19 @@ pub async fn ffprobe_stream(ffprobe_bin: &str, url: &str) -> anyhow::Result<Prob
     })
 }
 
+/// Distinguish "field absent" from "field present and null" in a PATCH body.
+///
+/// `Option<T>` cannot tell them apart — both deserialize to `None` — so a field that can be
+/// meaningfully CLEARED needs `Option<Option<T>>` and this deserializer. Without it, "leave it
+/// alone" and "unset it" are the same request, and the API silently picks one.
+pub fn double_option<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::Deserialize<'de>,
+{
+    serde::Deserialize::deserialize(d).map(Some)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

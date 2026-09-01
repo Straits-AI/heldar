@@ -24,6 +24,12 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # The evidence-bundle tests (#118) build a REAL bundle: a synthetic segment via ffmpeg, a
+      # remux, a zip and an openssl signature check. They deliberately fail rather than skip when a
+      # tool is missing — a test that quietly skips in CI is indistinguishable from one that passes,
+      # and this suite is the only thing standing between a tampered bundle and a "VALID" verdict.
+      - name: install ffmpeg (evidence bundle tests remux real media)
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg zip unzip
       - name: rustfmt
         run: cargo fmt --all -- --check
       - name: clippy (deny warnings)
@@ -32,8 +38,98 @@ jobs:
         run: cargo build --workspace --locked
       - name: test
         run: cargo test --workspace --locked
+      - name: heldarctl builds and its help is honest about exit codes
+        run: |
+          set -euo pipefail
+          cargo build --locked --bin heldarctl
+          # The documented exit codes are a contract a script branches on; a help text that has
+          # drifted from them is worse than none.
+          ./target/debug/heldarctl help | grep -q "5 blocking findings"
+          ./target/debug/heldarctl version --json | grep -q '"contract"'
+          # An unknown command is a usage error, not a crash.
+          set +e; ./target/debug/heldarctl nonsense >/dev/null 2>&1; test $? -eq 1
+          set -e
+          # The dry-run default is the CLI's entire safety story for a mutation (#122). If the help
+          # stops saying so, an operator reading --help learns that running it applies the change.
+          ./target/debug/heldarctl help | grep -q "A MUTATION IS A DRY RUN UNTIL YOU SAY OTHERWISE"
+          ./target/debug/heldarctl help | grep -q "heldarctl retention set"
+      - name: skill bundle lints (#124)
+        run: |
+          set -euo pipefail
+          # Every skill's permitted tools are checked against heldar-mcp's ACTUAL tool table, so a
+          # skill cannot name a tool that does not exist — an invented tool becomes an invented
+          # RESULT the moment a model decides to be helpful.
+          # The API-path check needs the served document, so write it first — otherwise that
+          # half of the lint silently skips and the step reports success having checked less.
+          cargo test -p heldar-server --test openapi_contract write_the_served_document --locked
+          python3 scripts/validate_skills.py
+      - name: capacity claims are backed by a run that passed (#119)
+        run: |
+          set -euo pipefail
+          # docs/sizing.md tells people how many cameras a box will carry, and someone buys
+          # hardware against that sentence. Every row must cite a run that PASSED, or say
+          # EXTRAPOLATED. The verdict is recomputed from the run's raw measurements rather than
+          # read from its `verdict` field, and a run judged against different thresholds from the
+          # ones in the tree today does not count — so loosening a bar to turn a red run green
+          # invalidates the claim it was loosened for.
+          python3 scripts/bench/test_harness.py
+          python3 scripts/bench/test_capacity_gate.py
+          python3 scripts/verify_capacity_claims.py
+          # Documented metric names must match the exposition, both ways. An alerting rule copied
+          # from a drifted table matches nothing and never fires, which looks exactly like health.
+          python3 scripts/bench/test_doc_drift.py
+          python3 scripts/check_documented_metrics.py
       - name: read-seam lint (cross-app reads go through *_read views)
         run: ./scripts/check-read-seam.sh
+      # A generated client that COMPILES is a stronger statement about the contract than any prose:
+      # a $ref to a missing schema, an operation with no id, or a duplicate operationId all become
+      # build failures here instead of a surprise for whoever generates a client later. The first
+      # run of this found two real defects — a field named `from` (a keyword in two of the three
+      # languages) and three duplicated operationIds that silently collapsed a method.
+      - name: generate API clients
+        run: python3 scripts/gen_clients.py target/openapi.json clients
+      - name: rust client compiles
+        run: cargo build --quiet --manifest-path clients/rust/Cargo.toml
+      - name: python client imports
+        run: python3 -c "import sys; sys.path.insert(0,'clients/python'); import heldar_client"
+      - name: generated clients are in sync with the contract
+        run: |
+          set -euo pipefail
+          if ! git diff --quiet -- clients; then
+            echo "The committed clients differ from what the contract generates:"
+            git --no-pager diff --stat -- clients
+            echo
+            echo "Regenerate and commit:  python3 scripts/gen_clients.py target/openapi.json clients"
+            exit 1
+          fi
+
+      # The API contract, compared against the one the last release published. Breaking changes are
+      # ALLOWED on this pre-1.0 appliance — what is not allowed is shipping one by accident, because
+      # it breaks a generated client at runtime in someone else's deployment. `continue-on-error`
+      # while the baseline does not exist yet: a release has to publish one before this can enforce.
+      - name: composite-action outputs resolve to something real
+        # An `outputs:` entry with no `value` is valid syntax that always yields "". The release
+        # action shipped exactly that for two merges; nothing would have noticed until release day.
+        run: |
+          set -euo pipefail
+          python3 scripts/test_action_outputs.py
+          python3 scripts/check_action_outputs.py
+      - name: the contract-diff classifier is correct in both directions
+        # A false "breaking" trains people to ignore the diff; a false "additive" is how a break
+        # ships. Both directions are pinned, including that response and request schemas are judged
+        # by opposite rules (#156).
+        run: python3 scripts/test_openapi_diff.py
+      - name: api contract diff (against the last release)
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          if gh release download --pattern openapi.json --dir /tmp/baseline 2>/dev/null; then
+            python3 scripts/openapi_diff.py /tmp/baseline/openapi.json target/openapi.json
+          else
+            echo "no published openapi.json to compare against yet — the next release creates one"
+          fi
       - name: open build (no proprietary verticals) compiles
         run: cargo build -p heldar-server --no-default-features --locked
       - name: open build stays lean (no wasm runtime linked by default)
@@ -78,6 +174,9 @@ jobs:
       # decides what a sandboxed plugin may ask the host to fetch with the operator's session.
       - run: npm run test:unit
         working-directory: apps/web
+      # The generated TypeScript client must typecheck under the same strictness as the dashboard.
+      - name: typescript client compiles
+        run: npx --yes -p typescript@5 tsc --noEmit --strict --target es2022 --lib es2022,dom --moduleResolution bundler --module esnext clients/typescript/heldar.ts
       - run: npm run build
         working-directory: apps/web
 
@@ -100,6 +199,9 @@ jobs:
       # ($ROOT/infra/mediamtx/mediamtx), auto-detecting the runner's OS/arch.
       - name: provision MediaMTX
         run: ./scripts/setup_mediamtx.sh
+        env:
+          # Raises the GitHub API rate limit from 60/hour per shared runner IP to 1000/hour.
+          GITHUB_TOKEN: ${{ github.token }}
       # scripts/e2e_stack.sh runs the debug binary at target/debug/heldar-core.
       - name: build heldar-core (debug)
         run: cargo build --locked --bin heldar-core
@@ -145,6 +247,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y ffmpeg
       - name: provision MediaMTX
         run: ./scripts/setup_mediamtx.sh
+        env:
+          # Raises the GitHub API rate limit from 60/hour per shared runner IP to 1000/hour.
+          GITHUB_TOKEN: ${{ github.token }}
       # Caddy terminates the TLS the suite is about. The pinned version tracks deploy/compose.tls.yml.
       - name: provision Caddy
         run: ./scripts/setup_caddy.sh
@@ -182,6 +287,9 @@ jobs:
       # Same provisioning as the e2e stack: MediaMTX binary + the debug core the scripts invoke.
       - name: provision MediaMTX
         run: ./scripts/setup_mediamtx.sh
+        env:
+          # Raises the GitHub API rate limit from 60/hour per shared runner IP to 1000/hour.
+          GITHUB_TOKEN: ${{ github.token }}
       - name: build heldar-core (debug)
         run: cargo build --locked --bin heldar-core
       # Full media validation: boots MediaMTX + a synthetic RTSP camera + the core, records, and
@@ -227,14 +335,44 @@ jobs:
           name: upgrade-restore-report
           path: data/validate_upgrade_restore.txt
           retention-days: 7
-      # Deliberately NOT run in CI (they are not self-contained for a clean runner):
-      #   - validate_ai.sh: needs a REAL camera (cam_192_168_0_2) actively streaming so the sampler
-      #     produces frames — real hardware, cannot be satisfied synthetically here.
-      #   - validate_search.sh / validate_zones.sh / validate_entry.sh / validate_movement.sh: assume a
-      #     pre-running shared stack on :8000 with the dev box's camera cam_192_168_0_2 already
-      #     registered; they don't boot their own core, so they'd need extra orchestration to run in CI.
-      #     (Their event data is synthetic, but the harness assumption isn't — revisit if a headless
-      #     seed-core fixture is added.)
+      # The subsystem gate (#113): boots ONE synthetic stack and runs the zone, entry, movement and
+      # search validations against it. Those four used to be skipped here for a harness reason — they
+      # assumed a running dev box and a real camera — which was true, and also hid that they asserted
+      # NOTHING. They logged HTTP codes for a human and exited 0 regardless, so running them would
+      # have produced a gate that could not fail. validate_zones had been sending a `kind` the API
+      # stopped accepting, creating no zone at all, and "passing" throughout.
+      #
+      # They assert now, and the gate refuses a script that produces no RESULT marker — "it ran" is
+      # not "it passed".
+      - name: subsystem gate (zones · entry · movement · search)
+        run: ./scripts/validate_subsystems.sh
+      # This job BLOCKS a merge as of #113, so its artifact is what someone debugs from at the moment
+      # they are most stuck. It used to carry `validate_subsystems.txt` alone — the summary, without
+      # the per-validator detail beneath it or a single line from the three processes the stack runs,
+      # all of which were being written the whole time and thrown away.
+      #
+      # The frames are here because an AI failure is usually "what did the sampler actually see", and
+      # that question is unanswerable from a log. They are synthetic `testsrc` output, so there is no
+      # footage-handling concern in uploading them.
+      - name: upload subsystem report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: subsystem-report
+          path: |
+            data/validate_*.txt
+            data/subsys-core.log
+            data/subsys-mediamtx.log
+            data/subsys-synth.log
+            data/ai_frame.jpg
+            data/ai_chain_frame.jpg
+          if-no-files-found: warn
+          retention-days: 7
+      # validate_ai.sh now runs in the subsystem gate above (#113). It was excluded for years on the
+      # grounds that it "needs a REAL camera actively streaming"; that stopped being true when the
+      # subsystem stack started publishing a synthetic RTSP stream for the whole run. Its frame check
+      # is the only assertion anywhere that the SAMPLER turns a stream into a frame, rather than a
+      # test hand-posting the events a sampler would have produced.
       - name: upload validation reports
         if: failure()
         uses: actions/upload-artifact@v4

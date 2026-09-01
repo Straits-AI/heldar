@@ -1,0 +1,109 @@
+# Heldar — OS-level container hardening. Layer AFTER compose.prod.yml:
+#
+#   docker compose -f compose.yml -f compose.prod.yml -f compose.hardened.yml up -d
+#
+# compose.prod.yml hardens the APPLICATION posture (auth, cookies, session limits). This file hardens
+# the CONTAINER: what a process can still do if it is compromised. They are separate because they fail
+# differently — a wrong auth setting refuses logins loudly, a wrong capability drop breaks recording in
+# a way that only shows up under load.
+#
+# The stack runs `network_mode: host` for camera discovery, multicast and WebRTC. That removes the
+# network namespace as a boundary, which makes these process-level boundaries matter MORE, not less.
+#
+# The mediamtx, core and web settings were booted and checked, not copied from a hardening checklist:
+# `read_only` is absent where a service genuinely needs to write, and each exception quotes the error
+# that proved it. The `ai` service is the exception to that too — see its note.
+name: heldar
+
+services:
+  mediamtx:
+    # NO `read_only`. MediaMTX generates a self-signed TLS keypair into its working directory at
+    # startup, and with a read-only rootfs it dies on boot with
+    #   ERR unable to load TLS keypair for native MoQ QUIC listener: open auto.crt: no such file
+    # Observed, not predicted — which is the reason this overlay was booted rather than assembled
+    # from a checklist. Everything else below still applies to it.
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m
+    # Unbounded container logs fill the same disk the recordings need. A camera flapping at 3am is
+    # exactly when you want the footage kept and the log rotated, not the other way round.
+    logging: &bounded_logs
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+    deploy:
+      resources:
+        limits: { cpus: "2.0", memory: 1g, pids: 512 }
+
+  core:
+    # The rootfs is read-only; everything the kernel writes goes to the named /data volume, which is a
+    # mount and therefore still writable.
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    # The image already runs as uid 10001. Dropping ALL means a compromised process cannot regain
+    # anything the image happened to leave available — it binds :8000 (>1024), so it needs none.
+    cap_drop: ["ALL"]
+    tmpfs:
+      # The recorder's ffmpeg children write temporaries here. noexec/nosuid/nodev because nothing
+      # legitimate execs out of a scratch dir, and it is the first place a dropper writes.
+      - /tmp:rw,noexec,nosuid,nodev,size=256m
+    logging: *bounded_logs
+    deploy:
+      resources:
+        # Recording is the workload; the ceiling is meant to stop a runaway from taking the host with
+        # it, not to size the box. Raise for a large fleet.
+        limits: { cpus: "4.0", memory: 4g, pids: 1024 }
+
+  web:
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    # nginx's entrypoint starts as root, chowns its cache dirs, then drops to the worker user. With
+    # ALL dropped it dies at that first step:
+    #   [emerg] chown("/var/cache/nginx/client_temp", 101) failed (1: Operation not permitted)
+    # These three are what that sequence needs and nothing more — notably NOT NET_BIND_SERVICE, since
+    # it listens on :8080. Adding back the minimum beats reverting the drop.
+    cap_add: ["CHOWN", "SETUID", "SETGID"]
+    tmpfs:
+      # nginx writes its pid and proxy buffers at runtime. Without these three a read-only rootfs
+      # makes it exit immediately — the reason `read_only` needs booting rather than assuming.
+      - /tmp:rw,noexec,nosuid,nodev,size=32m
+      - /var/cache/nginx:rw,noexec,nosuid,nodev,size=64m
+      - /var/run:rw,noexec,nosuid,nodev,size=8m
+      # The nginx entrypoint renders /etc/nginx/templates/default.conf.template into conf.d on every
+      # boot, so a read-only rootfs kills it before it serves anything:
+      #   20-envsubst-on-templates.sh: can't create /etc/nginx/conf.d/default.conf: Read-only file system
+      # Masking conf.d costs nothing — the only file in it is the one being regenerated.
+      - /etc/nginx/conf.d:rw,nosuid,nodev,size=8m
+    logging: *bounded_logs
+    deploy:
+      resources:
+        limits: { cpus: "1.0", memory: 512m, pids: 256 }
+
+  ai:
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=512m
+    logging: *bounded_logs
+    # NO `read_only` here, deliberately. The worker downloads model weights at first use (torch/YOLO
+    # /OCR caches under the home dir), and a read-only rootfs turns that into a crash loop on the
+    # first run of an optional profile most operators enable later.
+    #
+    # NOT verified by a full model download, unlike the other three services — the cache volume is
+    # placed from how the image resolves HOME, and the first real run of an optional profile is what
+    # would confirm it. Said plainly because "booted and checked" was claimed for all four and was
+    # only true for three.
+    volumes:
+      # /home/worker, not /home/heldar: this image creates `worker` (apps/ai/Dockerfile:26); `heldar`
+      # is the CORE image's user. Mounted at the wrong path the volume is inert — caches land on the
+      # ephemeral rootfs and are re-downloaded every restart, and nothing errors, because this service
+      # is not read-only. A silent failure is exactly what booting the other services caught and what
+      # reasoning about this one missed.
+      - heldar-ai-cache:/home/worker/.cache
+    deploy:
+      resources:
+        limits: { cpus: "4.0", memory: 8g, pids: 512 }
+
+volumes:
+  heldar-ai-cache:

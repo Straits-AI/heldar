@@ -26,9 +26,13 @@ sqlx = { version = "0.8", default-features = false, features = [
 ] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+chrono-tz = "0.10"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 tracing = "0.1"
+# OpenAPI annotations on the route handlers (#120); the generated document is assembled by the
+# kernel, this crate only describes its own routes.
+utoipa = { version = "5.5.0", features = ["axum_extras", "chrono"] }
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 anyhow = "1.0.104"
 # Validates query-image payloads before they enter the embed queue (already resolved in Cargo.lock
@@ -36,3 +40,8 @@ anyhow = "1.0.104"
 base64 = "0.23"
 # Background query-log retention loop.
 tokio = { version = "1.53.1", features = ["time"] }
+
+[dev-dependencies]
+# `tests/camera_confinement.rs` drives the executor against a real pool, so it needs a runtime and
+# the test macro on top of the `time` feature the retention loop uses.
+tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }

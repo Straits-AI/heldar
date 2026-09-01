@@ -1,0 +1,19 @@
+[package]
+name = "heldar-mcp"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "A capability-scoped MCP sidecar for a Heldar box. Read-only."
+
+[[bin]]
+name = "heldar-mcp"
+path = "src/main.rs"
+
+[dependencies]
+# The generated contract types, same as heldarctl. Neither redeclares API shapes.
+heldar-client = { path = "../../clients/rust" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "io-std", "io-util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"

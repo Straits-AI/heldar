@@ -19,6 +19,7 @@ import {
   Input,
   Panel,
   SectionLabel,
+  ViewerClockNote,
   Select,
   Spinner,
   Stat,
@@ -1529,6 +1530,7 @@ export function Entry() {
             <h1 className="mt-1 font-display text-2xl font-extrabold tracking-tight text-fg">
               Access Control
             </h1>
+            <ViewerClockNote />
           </div>
           <div className="flex items-center gap-3">
             <div className="flex flex-col items-end leading-none">

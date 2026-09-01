@@ -29,14 +29,169 @@ pub fn router() -> Router<AppState> {
             "/api/v1/system/transcode",
             get(get_transcode).put(put_transcode),
         )
+        .route(
+            "/api/v1/system/timezone",
+            get(get_timezone).put(put_timezone),
+        )
+        .route("/api/v1/system/posture", get(get_posture))
+}
+
+/// This box's security posture as machine-readable findings (#126).
+///
+/// FLEET-WIDE and admin-only. The findings describe the HOST — the service user, `/proc`
+/// visibility, volume encryption, how many credentials are unsealed — which is not something a
+/// camera-scoped credential has any business reading, and is exactly the reconnaissance an attacker
+/// with a narrow foothold would want.
+///
+/// Findings never carry a secret or a camera URL, so the output is safe to paste into a support
+/// ticket. `Unknown` is reported where the answer is genuinely not determinable from inside the
+/// container, and is NOT a pass — claiming a control is in place because we could not check it is
+/// the kind of unearned assurance this endpoint exists to replace.
+#[utoipa::path(
+    get, path = "/api/v1/system/posture", tag = "system",
+    operation_id = "getSecurityPosture",
+    responses(
+        (status = 200, description = "Posture findings: id, status (ok|weak|unknown), what was observed, and why it matters"),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_posture(
+    State(st): State<AppState>,
+    principal: Principal,
+) -> AppResult<Json<serde_json::Value>> {
+    principal.require(principal.can_admin(), "read the security posture")?;
+    crate::routes::cameras::require_fleet_scope(&principal, "read the box security posture")?;
+    let findings = crate::services::posture::assess(&st.cfg, &st.pool).await;
+    let weak = findings
+        .iter()
+        .filter(|f| f.status == crate::services::posture::Status::Weak)
+        .count();
+    let unknown = findings
+        .iter()
+        .filter(|f| f.status == crate::services::posture::Status::Unknown)
+        .count();
+    Ok(Json(json!({
+        "findings": findings,
+        "weak": weak,
+        "unknown": unknown,
+        "note": "`unknown` is not a pass — it means the control could not be assessed from inside \
+                 this container. Treat it as unverified, not as satisfied.",
+    })))
+}
+
+/// The box-wide timezone, and — the part that matters — where the effective one comes from.
+///
+/// "UTC" and "nobody has configured a zone" look identical in a timestamp and mean very different
+/// things, so the source is reported beside the value. `server_local_offset` is the box's own clock
+/// offset, previously visible only in the boot log; next to the configured zone it is what lets an
+/// operator see "the site says Asia/Kuala_Lumpur but this container is running on +00:00".
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TimezoneSettings {
+    /// The IANA identifier configured box-wide, or `null` when none is.
+    ///
+    /// Always present in the response.
+    //
+    // `required = true` overrides what the derive infers from `Option` (#156). Without it the
+    // schema said "may be absent" for a field the server never omits, so every generated client had
+    // to handle a case that cannot happen — and a client that handles absent and null differently
+    // would be handling a phantom.
+    #[schema(required = true)]
+    configured: Option<String>,
+    source: crate::services::tz::TzSource,
+    /// The server's own local offset (`%:z`), for spotting a container whose `TZ` disagrees.
+    server_local_offset: String,
+    /// What an unconfigured box does, stated rather than left to be discovered: schedules follow
+    /// the SERVER's local zone and search follows UTC. Setting a zone makes both follow it.
+    unconfigured_behaviour: &'static str,
+}
+
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct TimezoneUpdate {
+    /// An IANA identifier, e.g. `Asia/Kuala_Lumpur`. Empty clears it.
+    timezone: String,
+}
+
+async fn timezone_settings(st: &AppState) -> TimezoneSettings {
+    let (tz, source) = crate::services::tz::site_tz(&st.pool, None).await;
+    TimezoneSettings {
+        configured: tz.map(|t| t.to_string()),
+        source,
+        server_local_offset: chrono::Local::now().format("%:z").to_string(),
+        unconfigured_behaviour:
+            "with no zone configured, recording schedules follow the SERVER's local timezone and \
+             search hour filters follow UTC — the historical behaviour of each. Setting a zone \
+             makes both follow it.",
+    }
+}
+
+#[utoipa::path(
+    get, path = "/api/v1/system/timezone", tag = "system",
+    operation_id = "getTimezone",
+    responses((status = 200, description = "The effective timezone and where it comes from", body = TimezoneSettings)),
+)]
+pub async fn get_timezone(
+    State(st): State<AppState>,
+    principal: Principal,
+) -> AppResult<Json<TimezoneSettings>> {
+    principal.require_cap(Cap::SystemRead, "read the timezone")?;
+    Ok(Json(timezone_settings(&st).await))
+}
+
+/// Set the box-wide timezone (admin only).
+///
+/// REFUSED FOR A CAMERA-SCOPED CREDENTIAL. A zone reinterprets every schedule and every relative
+/// search on the box, so it is fleet-wide by nature — the same reasoning as the transcode engine.
+///
+/// The value is validated here rather than at read time. A stored zone that does not parse falls
+/// back silently by design (a corrupted row must not take the recorder down), so if writes did not
+/// refuse, `Asia/KL` would be accepted with a 200 and the box would quietly keep answering in the
+/// old zone.
+#[utoipa::path(
+    put, path = "/api/v1/system/timezone", tag = "system",
+    operation_id = "setTimezone",
+    request_body = TimezoneUpdate,
+    responses(
+        (status = 200, description = "The new effective timezone", body = TimezoneSettings),
+        (status = 400, description = "Not an IANA timezone identifier", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_timezone(
+    State(st): State<AppState>,
+    principal: Principal,
+    Json(body): Json<TimezoneUpdate>,
+) -> AppResult<Json<TimezoneSettings>> {
+    principal.require(principal.can_admin(), "change the timezone")?;
+    crate::routes::cameras::require_fleet_scope(&principal, "change the box timezone")?;
+
+    let raw = body.timezone.trim().to_string();
+    if !raw.is_empty() && crate::services::tz::parse(&raw).is_none() {
+        return Err(AppError::BadRequest(format!(
+            "`timezone` must be an IANA identifier such as `Asia/Kuala_Lumpur` (got {raw:?}). \
+             Abbreviations and fixed offsets are not accepted: `GMT+8` and `+08:00` cannot express \
+             daylight saving, and a recorder that is an hour out twice a year returns the wrong \
+             footage for a valid search."
+        )));
+    }
+    settings::set_str(&st.pool, crate::services::tz::DEFAULT_TIMEZONE, &raw).await?;
+    crate::auth::audit(
+        &st.pool,
+        &principal,
+        "update_timezone",
+        "settings",
+        "timezone",
+        json!({ "timezone": raw }),
+    )
+    .await;
+    Ok(Json(timezone_settings(&st).await))
 }
 
 const BYTES_PER_GB: f64 = 1024.0 * 1024.0 * 1024.0;
 
 /// The recording disk-limit policy enforced by the retention sweeper. Each value is the operator
 /// override (settings table) when set, otherwise the env default — `overridden` flags which is which.
-#[derive(Debug, Serialize)]
-struct RetentionLimits {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct RetentionLimits {
     max_recordings_gb: f64,
     max_recordings_bytes: i64,
     max_overridden: bool,
@@ -64,8 +219,19 @@ async fn effective_limits(st: &AppState) -> RetentionLimits {
     }
 }
 
-/// Current recording disk limits (effective values). Any authenticated viewer may read.
-async fn get_retention(
+/// Current recording disk limits (effective values), as the retention sweeper will enforce them.
+///
+/// Each value is the operator override when one is set, otherwise the env default; the
+/// `*_overridden` flags say which, so a caller can tell "configured to 500 GB" from "defaulted".
+#[utoipa::path(
+    get, path = "/api/v1/system/retention", tag = "system",
+    operation_id = "getRetentionLimits",
+    responses(
+        (status = 200, description = "Effective recording disk limits", body = RetentionLimits),
+        (status = 403, description = "Missing `system:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_retention(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<RetentionLimits>> {
@@ -73,22 +239,117 @@ async fn get_retention(
     Ok(Json(effective_limits(&st).await))
 }
 
-#[derive(Debug, Deserialize)]
-struct RetentionUpdate {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct RetentionUpdate {
     /// New global recordings cap in GB (> 0). Omit to leave unchanged.
     max_recordings_gb: Option<f64>,
     /// New free-disk floor in GB (>= 0; 0 disables the floor). Omit to leave unchanged.
     min_free_disk_gb: Option<f64>,
+    /// Compute the effect and change nothing (#121).
+    #[serde(default)]
+    dry_run: bool,
+    /// The `plan_hash` from a dry run. Supplying it makes the commit refuse if anything the plan
+    /// depended on has moved since. Omit to commit without planning.
+    #[serde(default)]
+    plan_hash: Option<String>,
 }
 
 /// Set the recording disk limits at runtime (admin only) — the retention sweeper picks them up on its
 /// next pass, no restart. Stored in the settings table; clearing them reverts to the env defaults.
-async fn put_retention(
+///
+/// REFUSED FOR A CAMERA-SCOPED CREDENTIAL: the sweeper that later enforces this cap evicts the
+/// oldest segments fleet-wide, with no principal in scope, so shrinking it deletes other cameras'
+/// footage without ever naming them. Omitted fields are left unchanged.
+#[utoipa::path(
+    put, path = "/api/v1/system/retention", tag = "system",
+    operation_id = "setRetentionLimits",
+    request_body = RetentionUpdate,
+    responses(
+        (status = 200, description = "The new effective limits, or the PLAN when `dry_run` is set — \
+                                      how much is recorded, the new cap, how much the sweeper \
+                                      would evict, and a `plan_hash` to present on commit"),
+        (status = 400, description = "`max_recordings_gb` <= 0, or `min_free_disk_gb` < 0", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 409, description = "The supplied `plan_hash` no longer describes current state — \
+                                      something moved between planning and committing (#121)", body = crate::openapi::ErrorBody),
+    ),
+)]
+/// `dry_run` computes the effect and writes nothing. Supplying the resulting `plan_hash` on the
+/// commit makes it REFUSE if anything the plan depended on has moved — without that, a
+/// confirm-after-plan flow confirms a plan that no longer describes reality, which is worse than no
+/// plan at all because the operator believes they checked.
+///
+/// Omitting `plan_hash` commits directly, deliberately: a plan hash is a safety belt for automation,
+/// not a way to stop a human with an admin key changing a setting.
+pub async fn put_retention(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<RetentionUpdate>,
-) -> AppResult<Json<RetentionLimits>> {
+) -> AppResult<Json<serde_json::Value>> {
     principal.require(principal.can_admin(), "change recording limits")?;
+    // Box-level setting with no camera to scope by, so refusal is the only coherent answer.
+    // This one is the sharpest of the four: the value lands in settings, and the retention sweeper
+    // reads it LATER and evicts the oldest segments FLEET-WIDE (`services/retention.rs`, whose
+    // eviction query carries no camera predicate) with no principal and no scope in scope. A scoped
+    // credential that can shrink this cap deletes other cameras' footage without ever naming them —
+    // the request is scope-clean and the damage happens after it returns.
+    crate::routes::cameras::require_fleet_scope(&principal, "change recording limits")?;
+
+    // WHAT THIS WOULD DELETE, before it deletes it (#121). The sweeper evicts oldest-first,
+    // fleet-wide, with no principal in scope — so an operator who shrinks the cap has already
+    // decided how much footage to destroy, whether or not they realise it.
+    let current_bytes: i64 =
+        sqlx::query_scalar("SELECT COALESCE(SUM(size_bytes), 0) FROM segments")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap_or(0);
+    let protected: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(SUM(size_bytes), 0) FROM segments WHERE evidence_locked = 1",
+    )
+    .fetch_one(&st.pool)
+    .await
+    .unwrap_or(0);
+    let new_cap_bytes = body.max_recordings_gb.map(|gb| (gb * BYTES_PER_GB) as i64);
+    let would_evict = new_cap_bytes
+        .map(|cap| (current_bytes - cap).max(0))
+        .unwrap_or(0);
+
+    let request = json!({
+        "max_recordings_gb": body.max_recordings_gb,
+        "min_free_disk_gb": body.min_free_disk_gb,
+    });
+    // The state the EFFECT depends on — not a timestamp, and not the whole database. A hash over
+    // everything changes constantly and trains people to retry without reading.
+    let state = json!({ "recorded_bytes": current_bytes, "evidence_locked_bytes": protected });
+    let plan_hash = crate::services::plan::hash(&request, &state);
+
+    if body.dry_run {
+        return Ok(Json(json!({
+            "plan_hash": plan_hash,
+            "confirmation_required": would_evict > 0,
+            "effect": {
+                "recorded_bytes": current_bytes,
+                "new_cap_bytes": new_cap_bytes,
+                "would_evict_bytes": would_evict,
+                "evidence_locked_bytes": protected,
+            },
+            "note": if would_evict > 0 {
+                "Committing this shrinks the cap below what is already recorded, so the sweeper \
+                 will delete the oldest footage on its next pass — fleet-wide, oldest-first. \
+                 Evidence-locked segments are never evicted and are excluded from what can be \
+                 freed, so a cap below `evidence_locked_bytes` cannot be met."
+            } else {
+                "Committing this evicts nothing now."
+            },
+        })));
+    }
+
+    // A supplied hash is checked; an absent one is allowed. A plan hash is a safety belt for
+    // automation, not a way to stop a human with an admin key changing a setting directly.
+    if let Err(refusal) = crate::services::plan::check(body.plan_hash.as_deref(), &plan_hash) {
+        return Err(AppError::Conflict(refusal.message()));
+    }
+
     if let Some(gb) = body.max_recordings_gb {
         if !gb.is_finite() || gb <= 0.0 {
             return Err(AppError::BadRequest(
@@ -124,13 +385,17 @@ async fn put_retention(
         json!({ "max_recordings_gb": body.max_recordings_gb, "min_free_disk_gb": body.min_free_disk_gb }),
     )
     .await;
-    Ok(Json(effective_limits(&st).await))
+    // The committed result, in the same envelope shape the dry run uses so a client parses one
+    // response type from this endpoint rather than two.
+    Ok(Json(
+        serde_json::to_value(effective_limits(&st).await).unwrap_or_default(),
+    ))
 }
 
 /// The live-preview transcode engine: effective value + which hardware encoders LOOK available on
 /// this box (device-node presence — a hint for the picker, not a guarantee the driver works).
-#[derive(Debug, Serialize)]
-struct TranscodeSettings {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct TranscodeSettings {
     /// The engine new live publishers use: `software` | `vaapi` | `nvenc`.
     engine: String,
     /// True when the engine is an operator override (settings table) vs the env default.
@@ -164,8 +429,19 @@ async fn transcode_settings(st: &AppState) -> TranscodeSettings {
     }
 }
 
-/// Current live-transcode engine (effective value + detected hardware). Any viewer may read.
-async fn get_transcode(
+/// Current live-transcode engine (effective value + detected hardware).
+///
+/// `vaapi_available` / `nvenc_available` are device-node presence only — a hint for the picker, not
+/// a promise the driver works.
+#[utoipa::path(
+    get, path = "/api/v1/system/transcode", tag = "system",
+    operation_id = "getTranscodeSettings",
+    responses(
+        (status = 200, description = "Effective engine plus detected hardware encoders", body = TranscodeSettings),
+        (status = 403, description = "Missing `system:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_transcode(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<TranscodeSettings>> {
@@ -173,8 +449,8 @@ async fn get_transcode(
     Ok(Json(transcode_settings(&st).await))
 }
 
-#[derive(Debug, Deserialize)]
-struct TranscodeUpdate {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct TranscodeUpdate {
     /// New engine (`software` | `vaapi` | `nvenc`).
     engine: String,
 }
@@ -183,12 +459,26 @@ struct TranscodeUpdate {
 /// already-running publishers (warm AND watched on-demand) are restarted onto it within seconds
 /// (the write pokes a reconcile pass) — attached viewers see a brief reconnect. Stored in the
 /// settings table; the env default remains the fallback.
-async fn put_transcode(
+///
+/// REFUSED FOR A CAMERA-SCOPED CREDENTIAL: it restarts every publisher on the box.
+#[utoipa::path(
+    put, path = "/api/v1/system/transcode", tag = "system",
+    operation_id = "setTranscodeEngine",
+    request_body = TranscodeUpdate,
+    responses(
+        (status = 200, description = "The new effective engine", body = TranscodeSettings),
+        (status = 400, description = "`engine` is not one of `software`, `vaapi`, `nvenc`", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_transcode(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<TranscodeUpdate>,
 ) -> AppResult<Json<TranscodeSettings>> {
     principal.require(principal.can_admin(), "change transcode engine")?;
+    // Restarts every publisher on the box — fleet-wide by nature, not scopable.
+    crate::routes::cameras::require_fleet_scope(&principal, "change the transcode engine")?;
     let engine = body.engine.trim().to_lowercase();
     if !crate::services::mediamtx::VALID_ENGINES.contains(&engine.as_str()) {
         return Err(AppError::BadRequest(format!(
@@ -214,8 +504,8 @@ async fn put_transcode(
 /// Metadata-DB (`heldar.db`) status + size cap. `incremental` = the DB is in `auto_vacuum=INCREMENTAL`
 /// mode, in which the size cap can reclaim freed space back to the OS. `max_overridden` flags an
 /// operator override (settings table) vs the env default.
-#[derive(Debug, Serialize)]
-struct DbStatus {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct DbStatus {
     db_bytes: i64,
     max_db_gb: f64,
     max_db_bytes: i64,
@@ -239,29 +529,62 @@ async fn db_status(st: &AppState) -> AppResult<DbStatus> {
     })
 }
 
-/// Current metadata-DB size + cap + conversion status. Any authenticated viewer may read.
-async fn get_db_status(
+/// Current metadata-DB size + cap + conversion status.
+///
+/// REFUSED FOR A CAMERA-SCOPED CREDENTIAL despite being a read: `db_bytes` grows with the fleet's
+/// cameras, segments and events, which is the same fleet-shape signal `GET /api/v1/system` scopes
+/// away — and a single aggregate cannot be scoped.
+#[utoipa::path(
+    get, path = "/api/v1/system/db", tag = "system",
+    operation_id = "getDbStatus",
+    responses(
+        (status = 200, description = "Metadata-DB size, cap, and auto_vacuum mode", body = DbStatus),
+        (status = 403, description = "Missing `system:read`, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_db_status(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<DbStatus>> {
     principal.require_cap(Cap::SystemRead, "view database status")?;
+    // `db_bytes` grows with the fleet's cameras, segments and events — the same fleet-shape signal
+    // that was just removed from `GET /api/v1/system`, one path segment away. Scoping a single
+    // aggregate is meaningless, so refuse.
+    crate::routes::cameras::require_fleet_scope(&principal, "view database status")?;
     Ok(Json(db_status(&st).await?))
 }
 
-#[derive(Debug, Deserialize)]
-struct DbLimitUpdate {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct DbLimitUpdate {
     /// New metadata-DB size cap in GB (> 0). Omit to leave unchanged.
     max_db_gb: Option<f64>,
 }
 
 /// Set the metadata-DB size cap at runtime (admin only) — the retention sweeper picks it up on its
 /// next pass, no restart. Stored in the settings table; clearing it reverts to the env default.
-async fn put_db_limit(
+///
+/// REFUSED FOR A CAMERA-SCOPED CREDENTIAL — same deferred-execution shape as the recording cap:
+/// written now, enforced later by a fleet-wide sweep that has no principal. Omitting `max_db_gb`
+/// leaves the cap unchanged.
+#[utoipa::path(
+    put, path = "/api/v1/system/db", tag = "system",
+    operation_id = "setDbLimit",
+    request_body = DbLimitUpdate,
+    responses(
+        (status = 200, description = "The new effective DB cap", body = DbStatus),
+        (status = 400, description = "`max_db_gb` <= 0", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn put_db_limit(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<DbLimitUpdate>,
 ) -> AppResult<Json<DbStatus>> {
     principal.require(principal.can_admin(), "change database size cap")?;
+    // Same deferred-execution shape as the recording cap: written now, enforced later by a sweep
+    // that has no principal.
+    crate::routes::cameras::require_fleet_scope(&principal, "change the database size cap")?;
     if let Some(gb) = body.max_db_gb {
         if !gb.is_finite() || gb <= 0.0 {
             return Err(AppError::BadRequest(
@@ -282,8 +605,8 @@ async fn put_db_limit(
     Ok(Json(db_status(&st).await?))
 }
 
-#[derive(Debug, Serialize)]
-struct DbConvertResult {
+#[derive(Debug, Serialize, utoipa::ToSchema)]
+pub struct DbConvertResult {
     /// "already-incremental" (no-op) or "started" (a background conversion was kicked off).
     status: &'static str,
 }
@@ -292,11 +615,24 @@ struct DbConvertResult {
 /// already incremental; otherwise spawns the conversion in the BACKGROUND (it holds a write lock for
 /// its duration) and returns immediately — the UI polls `GET /api/v1/system/db` until `incremental`
 /// flips true. Best-effort + disk-gated + convergence-checked (see `ensure_incremental_autovacuum`).
-async fn post_db_convert(
+///
+/// The 200 means "accepted", not "converted". Refused for a camera-scoped credential — it rewrites
+/// the whole database file.
+#[utoipa::path(
+    post, path = "/api/v1/system/db/convert", tag = "system",
+    operation_id = "convertDbAutoVacuum",
+    responses(
+        (status = 200, description = "`already-incremental` (no-op) or `started` (running in the background)", body = DbConvertResult),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn post_db_convert(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<DbConvertResult>> {
     principal.require(principal.can_admin(), "convert database auto_vacuum")?;
+    // Rewrites the whole database file; there is no per-camera version of this.
+    crate::routes::cameras::require_fleet_scope(&principal, "convert the database")?;
     if crate::services::db_maintenance::auto_vacuum_mode(&st.pool).await? == 2 {
         return Ok(Json(DbConvertResult {
             status: "already-incremental",
@@ -395,9 +731,17 @@ async fn readyz(State(st): State<AppState>) -> Response {
 }
 
 #[derive(Debug, Serialize)]
-struct SystemInfo {
+pub struct SystemInfo {
     name: &'static str,
+    /// The build's own version (`CARGO_PKG_VERSION`).
     version: &'static str,
+    /// The API CONTRACT's version, which is not the build's (#120).
+    ///
+    /// A client needs to know what shape to expect, and the binary version does not answer that: a
+    /// patch release changes `version` without changing a single field, while a breaking API change
+    /// could ship in any release. This is the number a generated client pins against, and
+    /// `GET /api/v1/openapi.json` serves the document it describes.
+    api_version: &'static str,
     started_at: DateTime<Utc>,
     uptime_seconds: i64,
     recorder_enabled: bool,
@@ -420,6 +764,38 @@ struct SystemInfo {
     last_disk_alert_at: Option<DateTime<Utc>>,
     /// Active live-preview transcode engine (software | vaapi | nvenc).
     live_transcode_engine: String,
+    /// Resolved enforcement posture for the two staged security tiers. Reported rather than inferred:
+    /// `ingest_provenance` is deliberately NOT promoted by `HELDAR_DEPLOYMENT_MODE` (see
+    /// `Config::from_env`), so an operator who hardened the deployment mode and assumed both tiers
+    /// moved would otherwise have no way to see that ticketless AI ingest is still accepted.
+    enforcement: EnforcementPosture,
+}
+
+/// The effective value of each staged enforcement tier, plus whether the deployment mode had any say.
+#[derive(Debug, Serialize)]
+struct EnforcementPosture {
+    /// `off` | `warn` | `enforce` — capability enforcement for credentials with no explicit grant.
+    machine_auth: &'static str,
+    /// `off` | `warn` | `enforce` — frame-ticket requirement on the AI ingest path.
+    ingest_provenance: &'static str,
+    /// True when `ingest_provenance` is `enforce`. Named positively so a dashboard does not have to
+    /// string-compare a tier to decide whether to show the "ticketless ingest is accepted" notice.
+    frame_tickets_required: bool,
+    /// `HELDAR_DEPLOYMENT_MODE` as resolved (empty = unset).
+    deployment_mode: String,
+    /// Whether the deployment mode promotes a tier at all. Only `machine_auth` is ever promoted;
+    /// `ingest_provenance` must be set explicitly because it is a client-protocol requirement.
+    machine_auth_promoted_by_mode: bool,
+}
+
+fn enforcement_posture(st: &AppState) -> EnforcementPosture {
+    EnforcementPosture {
+        machine_auth: st.cfg.machine_auth.as_str(),
+        ingest_provenance: st.cfg.ingest_provenance.as_str(),
+        frame_tickets_required: st.cfg.ingest_provenance == crate::config::EnforcementTier::Enforce,
+        deployment_mode: st.cfg.deployment_mode.clone(),
+        machine_auth_promoted_by_mode: st.cfg.deployment_mode_is_production(),
+    }
 }
 
 /// Health of the WebRTC remote-dashboard relay dial-out (see `services::webrtc_rendezvous`).
@@ -443,27 +819,109 @@ fn relay_status(st: &AppState) -> RelayStatus {
     }
 }
 
-async fn system_info(
+/// Box identity, version, uptime and operational health in one call.
+///
+/// Every fleet-shape number here (`cameras_total`, `cameras_recording`, `segments_total`,
+/// `recordings_bytes`, `active_recorders`) is confined to the caller's own cameras, and a scoped
+/// caller's `storage` reports its own footprint with no fleet retention horizon or projection — an
+/// unscoped count beside a one-camera `GET /api/v1/cameras` would be the inventory disclosure the
+/// per-camera checks exist to prevent. `api_version` is the CONTRACT's version, not the build's.
+#[utoipa::path(
+    get, path = "/api/v1/system", tag = "system",
+    operation_id = "getSystemInfo",
+    responses(
+        (status = 200, description = "Box status, scoped to the caller's cameras"),
+        (status = 403, description = "Missing `system:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn system_info(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<SystemInfo>> {
     principal.require_cap(Cap::SystemRead, "view system info")?;
-    let cameras_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cameras")
-        .fetch_one(&st.pool)
-        .await?;
-    let cameras_recording: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM camera_status cs JOIN cameras c ON c.id = cs.camera_id WHERE cs.state = 'recording' AND c.enabled = 1")
-            .fetch_one(&st.pool)
-            .await?;
-    let segments_total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM segments")
-        .fetch_one(&st.pool)
-        .await?;
-    let recordings_bytes: i64 =
-        sqlx::query_scalar("SELECT COALESCE(SUM(size_bytes), 0) FROM segments")
-            .fetch_one(&st.pool)
-            .await?;
-    let active_recorders = st.recorder.active_ids().await.len();
-    let storage = storage::storage_report(&st.pool, &st.cfg).await?;
+    // These four aggregates are the fleet's shape. Unscoped they answered "how many cameras exist
+    // outside your scope, and how much footage do they hold" — precisely the bit `list_cameras`
+    // filters away, handed back as a count. `cameras_total = 14` next to a one-camera
+    // `GET /api/v1/cameras` is a complete inventory disclosure, and differencing it over time reports
+    // fleet changes. Scope every one of them to the caller's cameras.
+    let cam_scope = crate::state::camera_scope_filter(&principal, "id");
+    let mut cameras_total_sql = "SELECT COUNT(*) FROM cameras WHERE 1=1".to_string();
+    if let Some((pred, _)) = &cam_scope {
+        cameras_total_sql.push_str(pred);
+    }
+    let mut q = sqlx::query_scalar::<_, i64>(&cameras_total_sql);
+    if let Some((_, binds)) = &cam_scope {
+        for b in binds {
+            q = q.bind(b.clone());
+        }
+    }
+    let cameras_total: i64 = q.fetch_one(&st.pool).await?;
+
+    let rec_scope = crate::state::camera_scope_filter(&principal, "cs.camera_id");
+    let mut recording_sql = "SELECT COUNT(*) FROM camera_status cs JOIN cameras c ON c.id = cs.camera_id WHERE cs.state = 'recording' AND c.enabled = 1".to_string();
+    if let Some((pred, _)) = &rec_scope {
+        recording_sql.push_str(pred);
+    }
+    let mut q = sqlx::query_scalar::<_, i64>(&recording_sql);
+    if let Some((_, binds)) = &rec_scope {
+        for b in binds {
+            q = q.bind(b.clone());
+        }
+    }
+    let cameras_recording: i64 = q.fetch_one(&st.pool).await?;
+
+    let seg_scope = crate::state::camera_scope_filter(&principal, "camera_id");
+    let mut segments_sql = "SELECT COUNT(*) FROM segments WHERE 1=1".to_string();
+    if let Some((pred, _)) = &seg_scope {
+        segments_sql.push_str(pred);
+    }
+    let mut q = sqlx::query_scalar::<_, i64>(&segments_sql);
+    if let Some((_, binds)) = &seg_scope {
+        for b in binds {
+            q = q.bind(b.clone());
+        }
+    }
+    let segments_total: i64 = q.fetch_one(&st.pool).await?;
+
+    let mut bytes_sql = "SELECT COALESCE(SUM(size_bytes), 0) FROM segments WHERE 1=1".to_string();
+    if let Some((pred, _)) = &seg_scope {
+        bytes_sql.push_str(pred);
+    }
+    let mut q = sqlx::query_scalar::<_, i64>(&bytes_sql);
+    if let Some((_, binds)) = &seg_scope {
+        for b in binds {
+            q = q.bind(b.clone());
+        }
+    }
+    let recordings_bytes: i64 = q.fetch_one(&st.pool).await?;
+    // Recorder ids are camera ids, so an unfiltered count is another fleet-size oracle.
+    let active_recorders = match principal.camera_scope() {
+        Some(scope) => st
+            .recorder
+            .active_ids()
+            .await
+            .iter()
+            .filter(|id| scope.contains(*id))
+            .count(),
+        None => st.recorder.active_ids().await.len(),
+    };
+    // `storage_report` is fleet-wide by construction, so narrow it here. (An earlier version of this
+    // comment justified that by "other callers need it that way" — there are none; this is its only
+    // call site. The reason is that its fleet-wide numbers are correct for the unscoped caller, not
+    // that anything else depends on them.)
+    // `disk` stays: free/total bytes on the volume are a box-level operator fact and disclose nothing
+    // per-camera. The footage-derived fields do disclose — the retention horizon
+    // (MIN(start_time)/MAX(end_time)) reveals when cameras outside the scope started and last
+    // recorded — so a scoped caller gets its OWN footprint and no fleet horizon or projection.
+    let mut storage = storage::storage_report(&st.pool, &st.cfg).await?;
+    if principal.camera_scope().is_some() {
+        storage.recordings_bytes = recordings_bytes;
+        storage.segment_count = segments_total;
+        storage.oldest_segment = None;
+        storage.newest_segment = None;
+        storage.write_rate_bytes_per_day = 0;
+        storage.projected_days_remaining = None;
+    }
     let limits = effective_limits(&st).await;
 
     // Disk health: the latest disk-health alert (any time) and whether one fired recently (within a
@@ -489,6 +947,7 @@ async fn system_info(
     Ok(Json(SystemInfo {
         name: "Heldar Core",
         version: env!("CARGO_PKG_VERSION"),
+        api_version: crate::openapi::API_VERSION,
         started_at: st.started_at,
         uptime_seconds: (Utc::now() - st.started_at).num_seconds(),
         recorder_enabled: st.cfg.recorder_enabled,
@@ -505,5 +964,6 @@ async fn system_info(
         disk_health_ok: recent_disk_alerts == 0,
         last_disk_alert_at,
         live_transcode_engine: crate::services::mediamtx::effective_engine(&st.pool, &st.cfg).await,
+        enforcement: enforcement_posture(&st),
     }))
 }

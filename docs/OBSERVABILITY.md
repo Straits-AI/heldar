@@ -26,7 +26,7 @@ All served by the same Axum process on `HELDAR_API_PORT` (default `8000`).
 |---|---|---|---|
 | GET | `/healthz` | **Liveness** — the process is up. No dependency checks. | `200` always (`{"status":"ok"}`) |
 | GET | `/readyz` | **Readiness** — the SQLite store is reachable (runs `SELECT 1`). | `200 {"ready":true}` / `503 {"ready":false,"reason":"database"}` |
-| GET | `/metrics` | **Prometheus** text exposition (system + per-camera gauges/counters). | `200`, `Content-Type: text/plain; version=0.0.4` |
+| GET | `/metrics` | **Prometheus** text exposition (system + per-camera gauges/counters). Needs `SystemRead` and a **fleet-wide** credential — see below. | `200`, `Content-Type: text/plain; version=0.0.4`; `403` for a camera-scoped credential |
 | GET | `/api/v1/system` | System info incl. the **`storage`** block (disk + footprint + projection). | `200` |
 | GET | `/api/v1/cameras/{id}/gaps?from&to` | Recording-coverage **gaps** for a camera/time window. | `200` (404 if camera unknown) |
 | GET | `/api/v1/health/cameras` | Per-camera live status (`CameraStatus[]`). | `200` |
@@ -88,6 +88,15 @@ All served by the same Axum process on `HELDAR_API_PORT` (default `8000`).
 
 ## 2. Prometheus metrics
 
+> **Scrape with a fleet-wide credential.** When auth is enabled the scraper must present
+> an API key with `SystemRead`, and that key must **not** be camera-scoped. The exposition
+> carries `heldar_camera_up{camera=…}` (and the per-camera counters) for the whole fleet,
+> so a camera-scoped key is refused with `403` rather than served a filtered body:
+> Prometheus reads a series that stops appearing as a camera that ceased to exist and
+> writes a staleness marker, so filtering would quietly corrupt fleet history with gaps
+> indistinguishable from real outages. With auth disabled (the LAN-appliance default)
+> `/metrics` is open, unchanged. See docs/ACCESS-CONTROL.md §4b.
+
 `GET /metrics` renders the exposition below from `services/metrics.rs`. These are
 the **only** metrics exported — there is no histogram/summary, and (note) **no fps
 metric** on `/metrics` (observed fps is available per-camera via the health API,
@@ -100,14 +109,36 @@ metric** on `/metrics` (observed fps is available per-camera via the health API,
 | `heldar_cameras_recording` | gauge | — | Cameras whose status row is `state = 'recording'`. |
 | `heldar_segments_total` | gauge | — | Indexed recording segments. |
 | `heldar_recordings_bytes` | gauge | — | Total bytes of recorded segments (`SUM(size_bytes)`). |
+| `heldar_ai_tasks_enabled` | gauge | — | AI tasks with `enabled = 1`. |
+| `heldar_detections_stored` | gauge | — | Detections currently stored. A **gauge**, not a counter: the retention sweeper prunes old rows, so it can decrease. |
 | `heldar_disk_total_bytes` | gauge | — | Total bytes on the recordings filesystem. *Omitted if statvfs fails.* |
 | `heldar_disk_free_bytes` | gauge | — | Free bytes on the recordings filesystem (`f_bavail`). *Omitted if statvfs fails.* |
 | `heldar_disk_used_percent` | gauge | — | Used percent of the recordings filesystem. *Omitted if statvfs fails.* |
 | `heldar_camera_up` | gauge | `camera`, `state` | `1` when that camera's state is `recording`, else `0`. One series per camera. |
 | `heldar_camera_reconnects_total` | counter | `camera` | Recorder reconnect count (from `camera_status.reconnect_count`). |
-| `heldar_camera_segments_written` | counter | `camera` | Segments written by the recorder. |
+| `heldar_camera_segments_written_total` | counter | `camera` | Segments written by the recorder. |
 | `heldar_camera_bitrate_kbps` | gauge | `camera` | Observed bitrate of the last indexed segment. *Only emitted when known.* |
 | `heldar_camera_last_segment_age_seconds` | gauge | `camera` | Seconds since the last indexed segment. *Only emitted when a segment exists.* |
+
+`scripts/check_documented_metrics.py` compares this table against `services/metrics.rs` in CI, in
+both directions. A name that has drifted produces an alerting rule that matches nothing and
+therefore never fires, which is the worst way for an alert to fail — it looks like health. This
+table was wrong in four places before that check existed.
+
+### What qualification needs and this does not export
+
+The benchmark harness (`docs/benchmarks/README.md`) measures what it can from outside the process
+and reports the rest as `unmeasured` rather than guessing. These are the gaps it runs into, listed
+here because they are metric gaps, not harness gaps:
+
+- **sampler effective FPS.** `heldar_detections_stored` is not a substitute: a sampler running at
+  the requested rate that sees nothing stores nothing. Answering "is the AI keeping up" needs a
+  sampler-side frames-processed counter.
+- **retention sweep duration.** Bytes reclaimed is inferable from `heldar_recordings_bytes` falling;
+  how long a sweep took, and whether it stalled recording, is not visible at all.
+- **SQLite contention.** No busy/retry counter, so the externally visible proxy is the API 5xx rate,
+  which is a superset and cannot separate contention from anything else.
+- **request latency.** No histogram or summary, so P95 has to be measured by the client.
 
 The disk gauges are conditional on `statvfs` succeeding for
 `HELDAR_RECORDINGS_DIR`; the per-camera bitrate / last-segment-age gauges are
@@ -166,12 +197,49 @@ groups:
 
       # 4) Recording gap proxy — segment counter flat while the camera is up.
       - alert: HeldarNoSegmentProgress
-        expr: increase(heldar_camera_segments_written[10m]) == 0 and on(camera) heldar_camera_up == 1
+        expr: increase(heldar_camera_segments_written_total[10m]) == 0 and on(camera) heldar_camera_up == 1
         for: 10m
         labels: { severity: warning }
         annotations:
           summary: "Camera {{ $labels.camera }} wrote no segments in 10m (recording gap)"
 ```
+
+---
+
+## 2b. Correlation ids — following one call across the box
+
+Every response carries `x-request-id`. The box generates one per request, or honours a caller-supplied
+`X-Request-ID` (`X-Heldar-Correlation-ID` is accepted as an inbound alias) so a trace can span the
+caller's system, the relay and the box. It is bounded to 64 characters and stripped to
+`[A-Za-z0-9_-]` before it reaches a log line — the value is caller-controlled, and an unbounded or
+separator-bearing one is how a log gets forged.
+
+The same id reaches three places:
+
+| Surface | How to read it |
+| --- | --- |
+| **Logs** | the id is on the request's tracing span, so every line the handler emits inherits it — `grep req_abc123` returns the whole story of one call |
+| **The audit log** | `audit_log.request_id`, served on `GET /api/v1/audit` and filterable: `?request_id=req_abc123` returns every act that call performed |
+| **Evidence manifests** | recorded beside `audit_id`, so an exported bundle names the call that produced it — and it is the *same* value, not a re-read of the inbound header, so a bundle exported by a client that sent no id is still joinable |
+
+```bash
+# A client reports a failure and quotes the id from its response headers.
+# Manager+ (`registry:manage`) — the audit log reveals operator activity. See docs/ACCESS-CONTROL.md.
+curl -s "$BOX/api/v1/audit?request_id=req_abc123" -H "X-API-Key: $KEY" | jq '.[].action'
+```
+
+`request_id` is **null** when no request carried an id into the row. On a box upgraded to this
+schema that is every row written before the migration — the column was added to a live table and an
+id that was never recorded cannot be backfilled. It would also be null for an act with no request
+behind it, though no background job audits today: the correlation id does not cross into background
+tasks, and inventing one there would make an unattributable act look attributed.
+
+The filter is ANDed with the caller's camera scope, so it narrows what a credential may already see
+and can never widen it. A correlation id names an act, not a permission.
+
+> **Not yet threaded**: background jobs and webhook deliveries carry no correlation id, so a delivered
+> event cannot be joined to the call that produced it. Tracked in
+> [#169](https://github.com/Straits-AI/heldar/issues/169).
 
 ---
 

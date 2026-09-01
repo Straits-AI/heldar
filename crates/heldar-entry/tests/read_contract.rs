@@ -19,6 +19,13 @@ async fn entry_events_read_view_exposes_the_cross_app_contract() {
         .connect("sqlite::memory:")
         .await
         .expect("in-memory sqlite");
+    // Same order the composing server boots in: kernel first, then the app crates. It is not
+    // ceremony — entry migration 0004 backfills the KERNEL's `media_artifacts` with the gate evidence
+    // this crate recorded before the media guard existed, so an entry schema stood up against a bare
+    // database is a schema no deployment ever has.
+    heldar_kernel::db::run_migrations(&pool)
+        .await
+        .expect("kernel migrations");
     heldar_entry::schema::init(&pool)
         .await
         .expect("entry schema init (creates entry_events + the entry_events_read view)");

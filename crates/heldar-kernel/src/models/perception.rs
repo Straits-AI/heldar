@@ -31,7 +31,7 @@ pub struct AiTask {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AiTaskCreate {
     pub task_type: String,
     pub stream_profile: Option<String>,
@@ -41,7 +41,7 @@ pub struct AiTaskCreate {
     pub enabled: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct AiTaskUpdate {
     pub task_type: Option<String>,
     pub stream_profile: Option<String>,
@@ -70,7 +70,7 @@ pub struct Detection {
 
 /// One detection inside an ingest request.
 // `Serialize` so the Wasm plugin host (heldar-wasm) can marshal a batch to JSON for a sandboxed guest.
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, utoipa::ToSchema)]
 pub struct DetectionIngest {
     pub label: Option<String>,
     pub confidence: Option<f64>,
@@ -193,7 +193,7 @@ impl Provenance {
 }
 
 /// Optional event an AI worker can raise alongside its detections.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct IngestEvent {
     pub event_type: String,
     pub severity: Option<String>,
@@ -201,7 +201,7 @@ pub struct IngestEvent {
 }
 
 /// Payload an AI worker POSTs to ingest detections (and optionally an event) for a camera.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct AiIngest {
     pub camera_id: String,
     pub task_type: String,
@@ -240,10 +240,21 @@ pub struct Zone {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ZoneCreate {
     pub name: String,
     pub kind: Option<String>,
+    /// Vertices, normalized 0..1. At least 3 for a polygon, exactly 2 for a `line` zone.
+    //
+    // `///` above is CONTRACT TEXT — utoipa publishes it as the schema description, so it says what
+    // an integrator needs and nothing about our internals. The rest belongs here:
+    //
+    // This stays a `Value` at the Rust boundary on purpose (#156). `routes::zones::validate_polygon`
+    // checks vertex count, pairing and the 0..1 range, and answers with the point that is wrong —
+    // "polygon point 3 is not numeric", "coordinates must be normalized 0..1 (point 5)". Typing the
+    // field as `Vec<Coordinate>` would hand that to serde and replace those with a generic
+    // deserialize error, which is a worse answer for an operator. Only the SCHEMA is tightened.
+    #[schema(value_type = Vec<crate::openapi::Coordinate>)]
     pub polygon: Value,
     pub dwell_seconds: Option<f64>,
     pub labels: Option<Value>,
@@ -252,10 +263,13 @@ pub struct ZoneCreate {
     pub enabled: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct ZoneUpdate {
     pub name: Option<String>,
     pub kind: Option<String>,
+    /// Vertices, normalized 0..1. Omit to leave the geometry unchanged.
+    // Stays a `Value` for the same reason as `ZoneCreate::polygon`.
+    #[schema(value_type = Option<Vec<crate::openapi::Coordinate>>)]
     pub polygon: Option<Value>,
     pub dwell_seconds: Option<f64>,
     pub labels: Option<Value>,
