@@ -192,12 +192,24 @@ jobs:
     name: container images build
     runs-on: ubuntu-latest
     steps:
+      # fetch-depth: 0 — the default of 1 leaves the base commit absent, so the diff below finds
+      # nothing and the job skips itself on exactly the PRs it exists for. It did: the first run of
+      # this job skipped on a PR that changed apps/ai/Dockerfile. Caught only because the skip
+      # branch SAYS why; a silent no-op would have read as a pass.
       - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
       - id: changed
         run: |
           set -euo pipefail
           base="${{ github.event.pull_request.base.sha || 'HEAD~1' }}"
-          if git diff --name-only "$base"...HEAD | grep -qE '(Dockerfile|requirements.*\.txt|package(-lock)?\.json)$'; then
+          git rev-parse --verify "$base^{commit}" >/dev/null 2>&1 || {
+            echo "::error::base commit $base is not present — cannot tell what changed, refusing to skip"
+            exit 1
+          }
+          changed=$(git diff --name-only "$base"...HEAD)
+          echo "$changed" | sed 's/^/  changed: /'
+          if echo "$changed" | grep -qE '(Dockerfile|requirements.*\.txt|package(-lock)?\.json)$'; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
