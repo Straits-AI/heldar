@@ -136,5 +136,66 @@ CHAIN_DET=$(curl -s "$API/api/v1/cameras/$CAM/detections?limit=20" \
   | python3 -c 'import sys,json; print(sum(1 for d in json.load(sys.stdin) if d.get("track_id")=="chain"))' 2>/dev/null || echo 0)
 assert_ge "$CHAIN_DET" 1 "the chain's detection is queryable afterwards"
 
+# ---------------------------------------------------------------------------------------------
+# ...and out the other end: the detection's instant must be FETCHABLE FOOTAGE (#113 criterion 3).
+#
+# The chain above ends at "a detection is stored". That is not evidence yet. The criterion says
+# "generated stream to SEARCHABLE EVIDENCE", and the half nothing tested is whether the instant a
+# detection names can actually be retrieved as video — which is the entire proposition of an NVR.
+# ---------------------------------------------------------------------------------------------
+log "## evidence: the detection's instant is fetchable footage"
+
+# Give the recorder a moment to close and index a segment covering the detection just ingested.
+sleep 8
+NOW=$(python3 -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+AGO=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=3)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+
+TL=$(curl -s "$API/api/v1/cameras/$CAM/timeline?from=$AGO&to=$NOW")
+echo "$TL" | python3 -m json.tool 2>/dev/null | head -20 | tee -a "$REPORT"
+RECORDED=$(echo "$TL" | python3 -c 'import sys,json; print(int(json.load(sys.stdin).get("recorded_seconds") or 0))' 2>/dev/null || echo 0)
+# The stream has been publishing since the stack came up, so the window the detection sits in must
+# have real coverage. Zero means the recorder never wrote the footage the detection describes.
+assert_ge "$RECORDED" 5 "the detection's window has recorded footage behind it"
+
+# Export exactly the NEWEST range the timeline just reported, rather than a wide window.
+#
+# Two reasons, both learned by getting it wrong. A wide window spans gaps and the retention sweeper
+# prunes aggressively in this short-lived stack, so asking for three minutes RACED the sweeper: the
+# export read its segment list, retention removed a row and its file, and ffmpeg's concat failed with
+# "Impossible to open" — a 500 that says nothing about the evidence path (filed as #183). And asking
+# for exactly what the timeline promised is the stronger assertion anyway: it holds the box to its
+# own answer.
+read -r CLIP_FROM CLIP_TO <<EOF2
+$(echo "$TL" | python3 -c '
+import sys, json
+r = (json.load(sys.stdin).get("ranges") or [])
+print(r[-1]["start"], r[-1]["end"]) if r else print("", "")' 2>/dev/null)
+EOF2
+assert_ge "${#CLIP_FROM}" 10 "the timeline named a range to export"
+
+# The clip route answers with JSON DESCRIBING the export — id, url, covered_seconds, gaps — not with
+# the video. An earlier version saved that JSON to a .mp4 and measured 462 bytes, which reads exactly
+# like a broken export and was a broken assertion.
+CLIP=$(curl -s -X POST "$API/api/v1/cameras/$CAM/clip" \
+  -H 'content-type: application/json' -d "{\"from\":\"$CLIP_FROM\",\"to\":\"$CLIP_TO\"}")
+echo "$CLIP" | python3 -m json.tool 2>/dev/null | tee -a "$REPORT"
+COVERED=$(echo "$CLIP" | python3 -c 'import sys,json; print(int(json.load(sys.stdin).get("covered_seconds") or 0))' 2>/dev/null || echo 0)
+CLIP_URL=$(echo "$CLIP" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("url",""))' 2>/dev/null)
+# The window came FROM the timeline, so less than most of it means the box cannot export footage it
+# just said it had.
+assert_ge "$COVERED" 5 "the export covers the footage the timeline promised"
+
+# FOLLOW THE URL. This is the "accessible artifact" half of the criterion: a hit that names an export
+# nobody can fetch is not evidence.
+ART_CODE=$(curl -s -o "$DATA/ai_evidence.mp4" -w '%{http_code}' "$API$CLIP_URL")
+assert_eq "200" "$ART_CODE" "the exported clip is fetchable at the url the API returned"
+# `ftyp` at offset 4 — an ISO-BMFF box. When the file was missing, the media route fell through to
+# the dashboard's SPA and returned 200 with index.html: 3549 bytes, which a size floor alone would
+# have accepted. `<!doctype` puts `ctyp` at that offset, which is how it was spotted.
+ART_MAGIC=$(dd if="$DATA/ai_evidence.mp4" bs=1 skip=4 count=4 2>/dev/null)
+assert_eq "ftyp" "$ART_MAGIC" "the fetched artifact is an MP4, not an error body"
+ART_BYTES=$(stat -f%z "$DATA/ai_evidence.mp4" 2>/dev/null || stat -c%s "$DATA/ai_evidence.mp4" 2>/dev/null || echo 0)
+assert_ge "$ART_BYTES" 10000 "the fetched clip contains actual video"
+
 log "DONE"
 assert_summary
