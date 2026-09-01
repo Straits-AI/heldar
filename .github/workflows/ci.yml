@@ -163,13 +163,22 @@ jobs:
           ignore: RUSTSEC-2023-0071
 
   ai:
-    name: ai worker (unit)
+    name: ai worker (unit, py${{ matrix.python }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The OLDEST version apps/ai/README.md promises, and the one the shipped image runs. A
+        # requirements floor that quietly drops the documented minimum is otherwise invisible:
+        # Dependabot #77 proposed `numpy>=2.5.1`, which cannot be installed on Python 3.11 at all
+        # (it requires >=3.12), while the README says 3.10+ and the worker runs there today. Nothing
+        # would have caught that — the Dockerfile pins one version and pip-audit pinned another.
+        python: ["3.10", "3.14"]
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "${{ matrix.python }}"
       # Core deps only — the same three the shipped image installs. The heavy stacks (ultralytics,
       # paddleocr, torch) are lazily imported and deliberately NOT installed here; the OCR tests
       # inject fakes for both PaddleOCR majors precisely so they need neither.
