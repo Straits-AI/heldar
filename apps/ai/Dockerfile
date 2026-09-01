@@ -7,7 +7,7 @@
 #   RUN pip install --no-cache-dir "ultralytics>=8.3" "lap>=0.5"
 # Pinned base: concrete minor.patch tag + multi-arch index @sha256 digest for reproducibility.
 # To bump: `docker buildx imagetools inspect python:<tag>` and update the digest (see docs/SUPPLY-CHAIN.md).
-FROM python:3.13.14-slim@sha256:9662417aace5ae7b8e2609cce472b72a8958e134ba372808abe9cc1a0c0125e6
+FROM python:3.14.7-slim@sha256:656d12e70054d5fda18a045e2494c96701e9792dd1445f95b3d038df954f57e9
 
 # Keep Python lean and logs unbuffered (so they stream out of the container).
 ENV PYTHONUNBUFFERED=1 \
