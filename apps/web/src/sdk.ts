@@ -37,6 +37,7 @@ export {
   Spinner,
   EmptyState,
   SectionLabel,
+  ViewerClockNote,
   Drawer,
 } from "./components/ui";
 
@@ -45,6 +46,7 @@ export { Login } from "./components/Login";
 
 // --- formatting helpers ---
 export {
+  friendlyError,
   formatBytes,
   formatDuration,
   formatUptime,

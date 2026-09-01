@@ -23,12 +23,14 @@ pub struct BackupDestination {
 }
 
 /// Client-facing destination: secret config values are replaced with `***`.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct BackupDestinationView {
     pub id: String,
     pub name: String,
+    #[schema(value_type = BackupKind)]
     pub kind: String,
     /// The config blob with any secret values masked to `***`.
+    #[schema(value_type = std::collections::HashMap<String, String>)]
     pub config: Value,
     /// Whether at least one secret credential is configured (so the UI can show "set" without the value).
     pub has_credentials: bool,
@@ -69,7 +71,7 @@ impl From<BackupDestination> for BackupDestinationView {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct BackupDestinationCreate {
     pub name: String,
     /// `local` | `sftp` | `ftp` | `s3`.
@@ -78,7 +80,7 @@ pub struct BackupDestinationCreate {
     pub enabled: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct BackupDestinationUpdate {
     pub name: Option<String>,
     pub kind: Option<String>,
@@ -87,7 +89,7 @@ pub struct BackupDestinationUpdate {
 }
 
 /// Result of POST /api/v1/backup/destinations/{id}/test (a connectivity / writability probe).
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct BackupTestResult {
     pub ok: bool,
     pub error: Option<String>,
@@ -95,12 +97,13 @@ pub struct BackupTestResult {
 }
 
 /// A scheduled backup policy: ship a camera selection's recent footage to a destination on an interval.
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, FromRow, utoipa::ToSchema)]
 pub struct BackupPolicy {
     pub id: String,
     pub name: String,
     pub destination_id: String,
     /// JSON array of camera ids; empty array means all cameras.
+    #[schema(value_type = Vec<String>)]
     pub camera_ids: Json<Value>,
     pub incident_lock_only: bool,
     pub schedule_interval_s: i64,
@@ -112,7 +115,7 @@ pub struct BackupPolicy {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct BackupPolicyCreate {
     pub name: String,
     pub destination_id: String,
@@ -123,7 +126,7 @@ pub struct BackupPolicyCreate {
     pub enabled: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct BackupPolicyUpdate {
     pub name: Option<String>,
     pub destination_id: Option<String>,
@@ -135,18 +138,22 @@ pub struct BackupPolicyUpdate {
 }
 
 /// A single backup run (policy-scheduled, manually triggered, or an on-demand archive export).
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, FromRow, utoipa::ToSchema)]
 pub struct BackupJob {
     pub id: String,
     pub policy_id: Option<String>,
     pub destination_id: Option<String>,
     /// `policy` | `on_demand_archive`.
+    #[schema(value_type = BackupKind)]
     pub kind: String,
+    /// JSON array of camera ids the run covers; empty array means every camera on the box.
+    #[schema(value_type = Vec<String>)]
     pub camera_ids: Json<Value>,
     pub from_time: Option<DateTime<Utc>>,
     pub to_time: Option<DateTime<Utc>>,
     pub incident_lock_only: bool,
     /// `pending` | `running` | `completed` | `error`.
+    #[schema(value_type = BackupJobStatus)]
     pub status: String,
     pub files_total: i64,
     pub files_copied: i64,
@@ -159,10 +166,18 @@ pub struct BackupJob {
     pub started_at: Option<DateTime<Utc>>,
     pub finished_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    /// Principal id that ORDERED this job — an api key id, a user id, or `system` when auth is off.
+    /// NULL for the background scheduler (it holds no principal) and for rows predating migration
+    /// 0015. A detached transfer re-checks this credential while it runs; see
+    /// [`crate::services::backup::creator_standing`].
+    pub created_by: Option<String>,
+    /// `api_key` | `user` | `system`, deciding HOW `created_by` is re-checked. NULL alongside a NULL
+    /// `created_by`.
+    pub created_by_kind: Option<String>,
 }
 
 /// Request body for POST /api/v1/archive/export — zip a selection of recorded footage on demand.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct ArchiveExportRequest {
     /// Camera ids to include; empty/omitted means all cameras.
     #[serde(default)]
@@ -172,4 +187,34 @@ pub struct ArchiveExportRequest {
     pub incident_lock_only: Option<bool>,
     /// Trim each segment to the [from, to] window (re-mux with -c copy); requires both bounds.
     pub trim: Option<bool>,
+}
+
+/// Where a backup writes to, for the published schema only (#156).
+///
+/// Stored as a `String`; `routes::backup::VALID_KINDS` is what constrains writes. See
+/// [`crate::models::camera::RecordMode`] for why reads stay forgiving.
+#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupKind {
+    /// A directory on this box.
+    Local,
+    Sftp,
+    Ftp,
+    S3,
+}
+
+/// A backup job's lifecycle state, for the published schema only (#156).
+///
+/// Only ever written by the server, as one of these four literals.
+#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum BackupJobStatus {
+    /// Queued, not yet started.
+    Pending,
+    /// Copying now.
+    Running,
+    /// Finished; check `files_copied` against `files_total`.
+    Completed,
+    /// Stopped on an error; `error` says what.
+    Error,
 }

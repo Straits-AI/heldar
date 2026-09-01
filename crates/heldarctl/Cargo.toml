@@ -1,0 +1,23 @@
+[package]
+name = "heldarctl"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "The supported operator and automation interface for a Heldar box."
+
+[[bin]]
+name = "heldarctl"
+path = "src/main.rs"
+
+[dependencies]
+# The GENERATED contract types. heldarctl does not redeclare request/response shapes — that is the
+# drift #120 exists to prevent, and the dashboard already learned it the hard way.
+heldar-client = { path = "../../clients/rust" }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+[dev-dependencies]
+tempfile = "3"

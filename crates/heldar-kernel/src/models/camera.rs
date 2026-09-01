@@ -78,7 +78,7 @@ impl Camera {
 }
 
 /// Client-facing camera representation: credentials stripped, stream URLs masked.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
 pub struct CameraView {
     pub id: String,
     pub site_id: Option<String>,
@@ -103,6 +103,7 @@ pub struct CameraView {
     pub retention_hours: i64,
     pub storage_quota_bytes: Option<i64>,
     pub record_audio: bool,
+    #[schema(value_type = RecordMode)]
     pub record_mode: String,
     pub pre_roll_seconds: i64,
     pub post_roll_seconds: i64,
@@ -207,7 +208,15 @@ fn default_vendor() -> String {
 #[derive(Debug, Deserialize, Default)]
 pub struct CameraUpdate {
     pub name: Option<String>,
-    pub site_id: Option<String>,
+    /// Absent = leave the camera where it is. `null` = detach it from its site.
+    ///
+    /// The double option is load-bearing (#125): a camera's site carries the timezone its recording
+    /// schedule is read in, so `site_id` is not a label. Collapsing absent and null — which serde
+    /// does by default — meant `{"site_id": null}` returned 200 while silently keeping the old
+    /// site, and there was NO way to return a camera to the box-wide default through the API at
+    /// all, which made `DELETE /api/v1/sites/{id}`'s "reassign them first" impossible to follow.
+    #[serde(default, deserialize_with = "crate::util::double_option")]
+    pub site_id: Option<Option<String>>,
     pub vendor: Option<String>,
     pub model: Option<String>,
     pub address: Option<String>,
@@ -288,4 +297,23 @@ pub struct CameraStatus {
     pub last_error: Option<String>,
     pub recorder_pid: Option<i64>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// The values `record_mode` may hold, for the published schema only (#156).
+///
+/// The stored field stays a `String`. Decoding a row into a strict enum would turn a hand-edited or
+/// legacy value into a 500 on read, and a recorder should not stop answering because someone typed
+/// into the database. Writes are what constrain it — `routes::cameras::validate_record_mode` refuses
+/// anything else — so the contract can name the four values honestly while reads stay forgiving.
+#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordMode {
+    /// Always recording.
+    Continuous,
+    /// Recording only inside a schedule window.
+    Scheduled,
+    /// Recording only while a trigger window is open.
+    Event,
+    /// Schedule windows plus triggers.
+    ScheduledEvent,
 }

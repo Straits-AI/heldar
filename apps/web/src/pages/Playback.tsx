@@ -1,7 +1,7 @@
 import Hls from "hls.js";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { api } from "../lib/api";
+import { api, ApiError } from "../lib/api";
 import { usePoll } from "../lib/usePoll";
 import type { PlaybackSession } from "../lib/types";
 import { Button, EmptyState, SectionLabel, Spinner, Stat } from "../components/ui";
@@ -21,6 +21,26 @@ function toLocalInput(d: Date): string {
   // datetime-local wants local "YYYY-MM-DDTHH:mm".
   const p = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** Exclusive upper bound for a minute-granular `to`, as ISO.
+ *
+ *  The controls are `datetime-local`, so `to` carries no seconds: "23:14" means "through the end of
+ *  23:14", not "at 23:14:00". The kernel's overlap query is `start_time < to`, so passing 23:14:00
+ *  drops everything recorded during that minute. On a live camera that is the NEWEST footage, and
+ *  the open then reports no footage while the recorder is actively writing — worst on a camera that
+ *  only just started, where ALL footage sits inside the current partial minute. Advance to the next
+ *  minute boundary so the selected minute is fully covered. */
+function exclusiveEndIso(localInput: string): string | null {
+  const d = new Date(localInput);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Date(Math.floor(d.getTime() / 60_000) * 60_000 + 60_000).toISOString();
+}
+
+/** The kernel 404s a window it has no footage for. That is a normal outcome — an operator picked a
+ *  quiet window — not a malfunction, so it must not be reported as a failure to open. */
+function isNoFootage(e: unknown): boolean {
+  return e instanceof ApiError && e.status === 404 && e.message.includes("no recorded footage");
 }
 
 function gridCols(n: number): string {
@@ -47,9 +67,9 @@ export function Playback() {
     const fromD = new Date(fromP);
     const toD = new Date(toP);
     if (isNaN(fromD.getTime()) || isNaN(toD.getTime()) || fromD >= toD) return null;
-    // datetime-local fields are minute-granular: `from` floors via toLocalInput; ceil `to` to the
-    // next whole minute so the linked instant's trailing footage is never truncated away.
-    return { camera, from: fromD, to: new Date(Math.ceil(toD.getTime() / 60_000) * 60_000) };
+    // Both land in minute-granular inputs; `exclusiveEndIso` covers the whole `to` minute at submit
+    // time, so the linked instant's trailing footage survives without rounding the field itself up.
+    return { camera, from: fromD, to: toD };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -106,15 +126,18 @@ export function Playback() {
     // Validate BEFORE converting: a cleared datetime-local field makes `new Date("")` an Invalid
     // Date whose toISOString() throws — which would strand the page on "Building sessions…".
     const fromIso = localInputToIso(from);
-    const toIso = localInputToIso(to);
-    if (!fromIso || !toIso) {
+    const toRawIso = localInputToIso(to);
+    if (!fromIso || !toRawIso) {
       setError("Both `from` and `to` times are required.");
       return;
     }
-    if (new Date(fromIso) >= new Date(toIso)) {
+    // Validate on the raw fields (what the operator actually typed), but query through the END of
+    // the `to` minute — see exclusiveEndIso.
+    if (new Date(fromIso) >= new Date(toRawIso)) {
       setError("`from` must be before `to`.");
       return;
     }
+    const toIso = exclusiveEndIso(to)!;
     setOpening(true);
     releaseSessions();
     setSessions(null);
@@ -126,11 +149,12 @@ export function Playback() {
         ids.map((id) =>
           api
             .createPlaybackSession(id, fromIso, toIso)
-            .then((s) => ({ id, session: s, error: null as string | null }))
+            .then((s) => ({ id, session: s, error: null as string | null, noFootage: false }))
             .catch((e: unknown) => ({
               id,
               session: null as PlaybackSession | null,
               error: e instanceof Error ? e.message : String(e),
+              noFootage: isNoFootage(e),
             })),
         ),
       );
@@ -139,17 +163,21 @@ export function Playback() {
         .filter((r) => r.session && r.session.segment_count > 0)
         .map((r) => r.session!);
       // A server error is NOT "no footage" — report it separately so an operator never reads a
-      // backend failure as evidence that footage does not exist.
+      // backend failure as evidence that footage does not exist. The converse matters just as much:
+      // the kernel signals an empty window with a 404, so treat that as "no footage" rather than
+      // letting it surface as "Failed to open", which reads as a fault in a healthy recorder.
       const noFootage = results
-        .filter((r) => r.session && r.session.segment_count === 0)
+        .filter((r) => (r.session && r.session.segment_count === 0) || r.noFootage)
         .map((r) => nameFor(r.id));
       const errored = results
-        .filter((r) => !r.session)
+        .filter((r) => !r.session && !r.noFootage)
         .map((r) => `${nameFor(r.id)} (${r.error ?? "unknown error"})`);
       activeSessions.current = ok;
       setSkipped(noFootage);
       setFailed(errored);
-      if (ok.length === 0 && errored.length === 0) {
+      // Only a blanket message when nothing more specific was collected — the per-camera lists below
+      // already name every camera that had no footage.
+      if (ok.length === 0 && errored.length === 0 && noFootage.length === 0) {
         setError("No recorded footage for the selected cameras in that window.");
       }
       setSessions(ok);
@@ -361,7 +389,8 @@ export function Playback() {
         )}
         {skipped.length > 0 && (
           <div className="mb-4 rounded-md border border-line bg-panel px-3 py-2 font-mono text-[11px] text-fg-muted">
-            No footage in window for: {skipped.join(", ")}
+            No footage in this window for: {skipped.join(", ")} — the recording is outside the
+            selected range, not missing. Try widening From/To.
           </div>
         )}
 

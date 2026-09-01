@@ -1,0 +1,16 @@
+# GENERATED — see scripts/gen_clients.py
+#
+# The empty [workspace] is load-bearing: without it cargo folds this crate into the
+# repository workspace and refuses to build it, because it is not a member. A generated
+# client has to build on its own — that is the whole point of building it.
+[workspace]
+
+[package]
+name = "heldar-client"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

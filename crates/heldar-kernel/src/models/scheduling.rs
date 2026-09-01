@@ -5,7 +5,7 @@ use sqlx::types::Json;
 use sqlx::FromRow;
 
 /// A per-camera schedule that captures a live JPEG every `interval_seconds`.
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, FromRow, utoipa::ToSchema)]
 pub struct SnapshotSchedule {
     pub id: String,
     pub camera_id: String,
@@ -16,13 +16,13 @@ pub struct SnapshotSchedule {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct SnapshotScheduleCreate {
     pub interval_seconds: Option<i64>,
     pub enabled: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct SnapshotScheduleUpdate {
     pub interval_seconds: Option<i64>,
     pub enabled: Option<bool>,
@@ -42,7 +42,8 @@ pub struct PersistedSnapshot {
 
 /// A recurring per-camera recording window, applied when the camera's `record_mode` is `scheduled`
 /// or `scheduled_event`. `days` is a JSON array of weekday ints (0=Mon..6=Sun); `time_start` /
-/// `time_end` are "HH:MM" 24h in the SERVER's LOCAL timezone (chrono::Local). When `time_start` >
+/// `time_end` are "HH:MM" 24h read in the camera's SITE timezone (#125), falling back to the
+/// server's local zone when nothing is configured. When `time_start` >
 /// `time_end` the window wraps past midnight (its early-morning portion is attributed to the day it
 /// started on).
 #[derive(Debug, Clone, Serialize, FromRow)]
@@ -57,7 +58,7 @@ pub struct RecordSchedule {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RecordScheduleCreate {
     /// JSON array of weekday ints (0=Mon..6=Sun).
     pub days: Value,
@@ -68,7 +69,7 @@ pub struct RecordScheduleCreate {
     pub enabled: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct RecordScheduleUpdate {
     pub days: Option<Value>,
     pub time_start: Option<String>,

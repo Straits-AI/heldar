@@ -106,6 +106,13 @@ fn client_facing_base(base: &str, request_host: Option<&str>) -> String {
     }
 }
 
+/// Origin-relative prefixes used when [`crate::config::Config::media_same_origin`] is on. These are a
+/// CONTRACT with the reverse proxy: it must route `{prefix}/<rest>` to the matching MediaMTX port with
+/// the prefix stripped (HLS 8888, WebRTC/WHEP 8889). Changing either string requires the same change
+/// in `deploy/Caddyfile`.
+const MEDIA_HLS_PREFIX: &str = "/live/hls";
+const MEDIA_WHEP_PREFIX: &str = "/live/whep";
+
 fn is_loopback_host(h: &str) -> bool {
     matches!(h, "127.0.0.1" | "localhost" | "0.0.0.0" | "::1" | "[::1]")
 }
@@ -145,6 +152,7 @@ pub async fn ensure_live(
     state: &AppState,
     camera_id: &str,
     request_host: Option<&str>,
+    subject: crate::services::live_token::Subject,
 ) -> AppResult<LiveUrls> {
     let cam: Option<Camera> = sqlx::query_as::<_, Camera>("SELECT * FROM cameras WHERE id = ?")
         .bind(camera_id)
@@ -195,18 +203,52 @@ pub async fn ensure_live(
     // (configured with HTTP external auth) calls the kernel back per read; when kernel auth is enabled
     // the read is refused unless the URL carries this token — so the browser streaming directly from
     // MediaMTX is still gated by kernel auth. Token chars are URL-safe (base64url + digits + dots).
+    // Bound to the SUBJECT that asked for it, so the callback can withdraw the read when that
+    // credential is revoked, deactivated or re-scoped off this camera.
     let token = crate::services::live_token::mint(
         &name,
         chrono::Utc::now().timestamp(),
         state.cfg.live_token_ttl_secs,
+        &subject,
     );
+    let (hls_url, webrtc_url) =
+        browser_media_urls(state.cfg.media_same_origin, hls, webrtc, &name, &token);
     Ok(LiveUrls {
-        hls_url: format!("{hls}/{name}/index.m3u8?token={token}"),
-        webrtc_url: format!("{webrtc}/{name}"),
+        hls_url,
+        webrtc_url,
         rtsp_url: format!("{rtsp}/{name}?token={token}"),
         name,
         token,
     })
+}
+
+/// The two BROWSER-facing media URLs (HLS + WebRTC/WHEP base) for `name`.
+///
+/// With `same_origin`, they are origin-RELATIVE so they inherit the page's scheme and port. This is
+/// what makes live view work behind a TLS terminator: an absolute `http://host:8888/…` served to an
+/// `https://` page is blocked as mixed content, and HSTS only makes it worse by upgrading it to an
+/// `https://host:8888` that MediaMTX serves no TLS on. The proxy in front is responsible for mapping
+/// [`MEDIA_HLS_PREFIX`]/[`MEDIA_WHEP_PREFIX`] back onto MediaMTX (see `deploy/Caddyfile`).
+///
+/// Otherwise they stay absolute against the (host-rewritten) MediaMTX bases — the plain-HTTP LAN
+/// dashboard, where there is no proxy to route the prefixes.
+fn browser_media_urls(
+    same_origin: bool,
+    hls_base: &str,
+    webrtc_base: &str,
+    name: &str,
+    token: &str,
+) -> (String, String) {
+    if same_origin {
+        return (
+            format!("{MEDIA_HLS_PREFIX}/{name}/index.m3u8?token={token}"),
+            format!("{MEDIA_WHEP_PREFIX}/{name}"),
+        );
+    }
+    (
+        format!("{hls_base}/{name}/index.m3u8?token={token}"),
+        format!("{webrtc_base}/{name}"),
+    )
 }
 
 /// Program MediaMTX's WebRTC ICE servers (STUN/TURN) so it gathers reachable candidates for remote
@@ -424,5 +466,51 @@ mod tests {
             select_codec_args("bogus", "/dev/dri/renderD128"),
             SOFTWARE_CODEC_ARGS
         );
+    }
+
+    #[test]
+    fn same_origin_media_urls_are_relative_so_https_pages_can_load_them() {
+        // The regression: absolute http://host:8888 URLs handed to an https:// dashboard are blocked
+        // as mixed content, so live view dies entirely behind the TLS overlay.
+        let (hls, whep) = browser_media_urls(
+            true,
+            "http://cam.example.com:8888",
+            "http://cam.example.com:8889",
+            "cam_front",
+            "tok123",
+        );
+        assert_eq!(hls, "/live/hls/cam_front/index.m3u8?token=tok123");
+        assert_eq!(whep, "/live/whep/cam_front");
+        // Relative means no scheme and no authority to disagree with the page's.
+        for u in [&hls, &whep] {
+            assert!(u.starts_with('/'), "must be origin-relative: {u}");
+            assert!(!u.contains("://"), "must carry no scheme: {u}");
+        }
+    }
+
+    #[test]
+    fn default_mode_keeps_absolute_mediamtx_urls() {
+        // The plain-HTTP LAN dashboard has no proxy to route /live/* — it must keep talking to
+        // MediaMTX directly, so this path must not change.
+        let (hls, whep) = browser_media_urls(
+            false,
+            "http://192.168.1.50:8888",
+            "http://192.168.1.50:8889",
+            "cam_front",
+            "tok123",
+        );
+        assert_eq!(
+            hls,
+            "http://192.168.1.50:8888/cam_front/index.m3u8?token=tok123"
+        );
+        assert_eq!(whep, "http://192.168.1.50:8889/cam_front");
+    }
+
+    #[test]
+    fn same_origin_prefixes_match_the_reverse_proxy_contract() {
+        // These strings are duplicated in deploy/Caddyfile (handle_path blocks). If either side
+        // changes without the other, live view 404s behind TLS.
+        assert_eq!(MEDIA_HLS_PREFIX, "/live/hls");
+        assert_eq!(MEDIA_WHEP_PREFIX, "/live/whep");
     }
 }

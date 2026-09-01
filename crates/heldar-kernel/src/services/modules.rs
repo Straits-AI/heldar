@@ -22,6 +22,24 @@ pub const WEBHOOK_EVENTS_PATH: &str = "/heldar/events";
 pub const HEALTH_PATH: &str = "/heldar/health";
 const WEBHOOK_SECRET_PREFIX: &str = "whsec_";
 
+/// The ceiling on what a sidecar's minted key may ever hold, whatever role it asks for.
+///
+/// This is the same least-privilege intent `validate_plugin_role` had (never `admin`/`manager`/`guard`),
+/// expressed as a capability INTERSECTION so it keeps holding now that grants are explicit: a sidecar
+/// registration cannot mint itself out of the ceiling by naming capabilities instead of a role. The
+/// three privileged capabilities are absent by construction, as is `ai:embedwork` (the operator's
+/// pending search text is not a sidecar's business).
+const PLUGIN_ALLOWED_CAPS: auth::CapSet = auth::CapSet::of_const(&[
+    auth::Cap::CameraRead,
+    auth::Cap::VideoLive,
+    auth::Cap::VideoPlayback,
+    auth::Cap::EventsRead,
+    auth::Cap::AiTasks,
+    auth::Cap::AiFrames,
+    auth::Cap::AiIngest,
+    auth::Cap::SystemRead,
+]);
+
 /// Plugin keys are least-privilege: only `viewer` (read) or `integration` (read + ingest) are
 /// grantable. `admin`/`manager`/`guard` are never minted for a sidecar.
 fn validate_plugin_role(role: &str) -> AppResult<&'static str> {
@@ -32,6 +50,24 @@ fn validate_plugin_role(role: &str) -> AppResult<&'static str> {
             "`role` must be viewer|integration".into(),
         )),
     }
+}
+
+/// The explicit capability grant stored on a sidecar's minted key: its role expansion INTERSECTED with
+/// [`PLUGIN_ALLOWED_CAPS`].
+///
+/// Storing an explicit grant (rather than leaving `capabilities` NULL) is what makes a sidecar key
+/// contained on day one, in every tier — it never rides the legacy role expansion at all. The base is
+/// the LEGACY expansion, not the enforced one, so a newly registered sidecar is never narrower than the
+/// ceiling allows regardless of which tier the box happens to be running.
+fn plugin_capabilities(role: &str) -> Vec<String> {
+    let expanded = auth::Role::parse(role)
+        .map(auth::legacy_caps)
+        .unwrap_or(auth::CapSet::NONE);
+    PLUGIN_ALLOWED_CAPS
+        .iter()
+        .filter(|c| expanded.contains(*c))
+        .map(|c| c.slug().to_string())
+        .collect()
 }
 
 fn validate_id(id: &str) -> AppResult<()> {
@@ -126,8 +162,15 @@ pub async fn register(
 
     let mut tx = pool.begin().await?;
     sqlx::query(
-        "INSERT INTO api_keys (id, name, key_hash, key_prefix, role, active, created_at)
-         VALUES (?,?,?,?,?,1,?)",
+        // scope_kind is bound EXPLICITLY. Omitting it took the column default `'all'` from migration
+        // 0012, so registering a module minted an UNSCOPED key and handed back its plaintext token —
+        // a scope escape by column default, reachable without touching a camera-keyed route. A sidecar
+        // is registered by an unscoped admin (routes::modules::register refuses a scoped caller), so
+        // 'all' is correct here; it is written down rather than defaulted, so the next column added
+        // cannot silently re-open this.
+        "INSERT INTO api_keys (id, name, key_hash, key_prefix, role, active, created_at, capabilities,
+                               scope_kind)
+         VALUES (?,?,?,?,?,1,?,?,'all')",
     )
     .bind(&api_key_id)
     .bind(format!("module:{}", req.id))
@@ -135,6 +178,7 @@ pub async fn register(
     .bind(&key_prefix)
     .bind(role)
     .bind(now)
+    .bind(serde_json::to_string(&plugin_capabilities(role)).unwrap_or_else(|_| "[]".into()))
     .execute(&mut *tx)
     .await?;
     sqlx::query(

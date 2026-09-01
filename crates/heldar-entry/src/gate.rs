@@ -25,7 +25,7 @@ use heldar_kernel::repo;
 use heldar_kernel::services::camera_control;
 
 /// A camera's gate-actuation policy row.
-#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow, utoipa::ToSchema)]
 pub struct GatePolicy {
     pub camera_id: String,
     /// Auto-open on `matched` entry events (manual guard-open works whenever a policy row exists).
@@ -72,6 +72,31 @@ impl GateActuator {
     /// barrier only for `auth_status = "matched"` on a camera whose policy is enabled, and only
     /// while the kill-switch is off. All failures are logged/evented, never propagated.
     pub async fn auto_open(&self, camera_id: &str, entry_event_id: &str, auth_status: &str) {
+        self.auto_open_with(
+            camera_id,
+            entry_event_id,
+            auth_status,
+            serde_json::Value::Null,
+        )
+        .await;
+    }
+
+    /// [`Self::auto_open`] plus the PROVENANCE of the reads that produced the decision.
+    ///
+    /// This is the first time a barrier opening is attributable to a credential: the `gate_opened`
+    /// event now carries which producer's reads voted it open (`kernel:native_anpr`, or the api key id
+    /// of the worker), and how many votes there were. An incident responder asking "who opened lane 1
+    /// at 03:14?" previously had `{"mode":"auto"}` and nothing else.
+    ///
+    /// The actuation POLICY checks above are deliberately untouched — provenance is recorded, never
+    /// consulted, so nothing about which reads open a barrier changes here.
+    pub async fn auto_open_with(
+        &self,
+        camera_id: &str,
+        entry_event_id: &str,
+        auth_status: &str,
+        provenance: serde_json::Value,
+    ) {
         if auth_status != "matched" {
             return;
         }
@@ -88,8 +113,15 @@ impl GateActuator {
         let outcome = self
             .pulse(camera_id, policy.output_port, policy.pulse_ms)
             .await;
-        self.log_actuation(camera_id, entry_event_id, "auto", &policy, outcome)
-            .await;
+        self.log_actuation(
+            camera_id,
+            entry_event_id,
+            "auto",
+            &policy,
+            outcome,
+            provenance,
+        )
+        .await;
     }
 
     /// Manual guard-open: same pulse + event trail, but bypasses the `enabled` (auto) flag — a
@@ -116,8 +148,17 @@ impl GateActuator {
             Ok(ms) => Ok(*ms),
             Err(e) => Err(AppError::BadRequest(format!("gate open failed: {e}"))),
         };
-        self.log_actuation(camera_id, principal_id, "manual", &policy, outcome)
-            .await;
+        // A manual open is already attributable — the acting principal is the `reference`, and the
+        // route layer audits it separately.
+        self.log_actuation(
+            camera_id,
+            principal_id,
+            "manual",
+            &policy,
+            outcome,
+            json!({ "source": "operator", "principal": principal_id }),
+        )
+        .await;
         res
     }
 
@@ -134,6 +175,9 @@ impl GateActuator {
     }
 
     /// Write the actuation outcome to the kernel event log (the alert notifier / webhooks see it).
+    ///
+    /// `provenance` is the server-authored trail of what drove the decision — carried through so the
+    /// `gate_opened` record answers "which credential's reads opened this barrier?" without a join.
     async fn log_actuation(
         &self,
         camera_id: &str,
@@ -141,16 +185,17 @@ impl GateActuator {
         mode: &str,
         policy: &GatePolicy,
         outcome: AppResult<u64>,
+        provenance: serde_json::Value,
     ) {
         match outcome {
             Ok(ms) => {
-                tracing::info!(%camera_id, mode, port = policy.output_port, pulse_ms = ms, "gate: opened");
+                tracing::info!(%camera_id, mode, port = policy.output_port, pulse_ms = ms, provenance = %provenance, "gate: opened");
                 let _ = repo::log_event(
                     &self.pool,
                     Some(camera_id),
                     "gate_opened",
                     "info",
-                    json!({ "mode": mode, "reference": reference, "port": policy.output_port, "pulse_ms": ms }),
+                    json!({ "mode": mode, "reference": reference, "port": policy.output_port, "pulse_ms": ms, "provenance": provenance }),
                 )
                 .await;
             }
@@ -161,7 +206,7 @@ impl GateActuator {
                     Some(camera_id),
                     "gate_open_failed",
                     "warning",
-                    json!({ "mode": mode, "reference": reference, "port": policy.output_port, "error": e.to_string() }),
+                    json!({ "mode": mode, "reference": reference, "port": policy.output_port, "error": e.to_string(), "provenance": provenance }),
                 )
                 .await;
             }

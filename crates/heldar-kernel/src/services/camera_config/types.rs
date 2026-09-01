@@ -13,7 +13,7 @@ fn default_onvif_username() -> String {
 }
 
 /// Device identity from `GET /ISAPI/System/deviceInfo`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct DeviceInfo {
     pub device_name: Option<String>,
@@ -24,7 +24,7 @@ pub struct DeviceInfo {
 
 /// A streaming channel's video encoding configuration (`GET /ISAPI/Streaming/channels/{id}`).
 /// `fps` is centi-fps as the device reports it (2000 = 20fps); `bitrate`/`vbr_upper_cap` are kbps.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct VideoConfig {
     pub channel_id: i64,
@@ -40,7 +40,7 @@ pub struct VideoConfig {
 }
 
 /// Partial update to a [`VideoConfig`] (read-modify-write); every field is optional.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct VideoConfigPatch {
     #[serde(default)]
@@ -62,7 +62,7 @@ pub struct VideoConfigPatch {
 }
 
 /// Device clock configuration (`GET/PUT /ISAPI/System/time`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct TimeConfig {
     /// `manual` or `NTP`.
@@ -74,7 +74,7 @@ pub struct TimeConfig {
 }
 
 /// NTP server configuration (`GET/PUT /ISAPI/System/time/ntpServers/1`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct NtpConfig {
     /// `hostname` or `ipaddress`.
@@ -84,7 +84,7 @@ pub struct NtpConfig {
 }
 
 /// Integration toggles from `GET/PUT /ISAPI/System/Network/Integrate`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct OnvifSettings {
     pub onvif_enabled: bool,
@@ -92,7 +92,7 @@ pub struct OnvifSettings {
 }
 
 /// ONVIF user role (`/ISAPI/Security/ONVIF/users`). Carries the device's verbatim `userType` values.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "camelCase")]
 pub enum OnvifUserType {
     Administrator,
@@ -101,7 +101,7 @@ pub enum OnvifUserType {
 }
 
 /// Request to ensure a dedicated ONVIF user exists on the device (create-if-absent).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct EnsureOnvifUserRequest {
     #[serde(default = "default_onvif_username")]
@@ -113,7 +113,7 @@ pub struct EnsureOnvifUserRequest {
 
 /// On-screen-display overlay configuration
 /// (`GET/PUT /ISAPI/System/Video/inputs/channels/1/overlays`). Style fields are optional.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct OsdConfig {
     pub datetime_enabled: bool,
@@ -127,14 +127,14 @@ pub struct OsdConfig {
 }
 
 /// Reboot request body (`PUT /ISAPI/System/reboot` — DISRUPTIVE; requires explicit confirmation).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct RebootRequest {
     pub confirm: bool,
 }
 
 /// Day/night (IR-cut filter) configuration (`GET/PUT /ISAPI/Image/channels/1/ircutFilter`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct DayNightConfig {
     /// `auto` | `day` | `night` | `schedule` (verbatim ISAPI `IrcutFilterType`).
@@ -145,7 +145,7 @@ pub struct DayNightConfig {
 }
 
 /// Partial update to a [`DayNightConfig`] (read-modify-write); every field is optional.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct DayNightPatch {
     #[serde(default)]
@@ -157,7 +157,7 @@ pub struct DayNightPatch {
 /// Image/lighting configuration, aggregated from the per-channel ISAPI image sub-resources
 /// (`/ISAPI/Image/channels/1/{color,WDR,BLC,supplementLight}`). Fields the device does not expose
 /// are `None` and are never written back.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct ImageConfig {
     /// 0–100 (`color`).
@@ -214,7 +214,7 @@ pub struct BuiltinDetection {
 /// expose a fixed set of slots (4 on the verified DS-2CD3T56WDV3-L); an unused slot is `enabled:
 /// false` with a degenerate line. Coordinates are normalized 0..1 in our API (the device speaks
 /// 0..1000).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SmartLine {
     pub id: i64,
@@ -224,11 +224,14 @@ pub struct SmartLine {
     /// `any` | `left-right` | `right-left` (verbatim device tokens).
     pub direction: String,
     /// Exactly two endpoints, normalized 0..1.
+    // The Rust type is already precise; `Coordinate` is what makes the SCHEMA say so (#156). The
+    // derive cannot — see `openapi::Coordinate` for why it is hand-written.
+    #[schema(value_type = Vec<crate::openapi::Coordinate>)]
     pub points: Vec<[f64; 2]>,
 }
 
 /// The device's line-crossing configuration: a master arm switch + the rule slots.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct LineCrossingConfig {
     pub enabled: bool,
@@ -237,7 +240,7 @@ pub struct LineCrossingConfig {
 
 /// One intrusion (field-detection) region slot (`/ISAPI/Smart/FieldDetection/1`
 /// `FieldDetectionRegion`). An unconfigured slot carries NO coordinates on the device.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct SmartRegion {
     pub id: i64,
@@ -247,11 +250,14 @@ pub struct SmartRegion {
     /// Seconds a target must stay inside before the alarm fires (device `timeThreshold`).
     pub time_threshold: i64,
     /// Polygon vertices, normalized 0..1 (empty = slot unconfigured).
+    // The Rust type is already precise; `Coordinate` is what makes the SCHEMA say so (#156). The
+    // derive cannot — see `openapi::Coordinate` for why it is hand-written.
+    #[schema(value_type = Vec<crate::openapi::Coordinate>)]
     pub points: Vec<[f64; 2]>,
 }
 
 /// The device's intrusion-detection configuration: a master arm switch + the region slots.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct IntrusionConfig {
     pub enabled: bool,
@@ -260,7 +266,7 @@ pub struct IntrusionConfig {
 
 /// The device's basic motion-detection configuration. The grid layout itself is left on-device
 /// (a full-frame grid is the common default); only the arm switch + sensitivity are exposed.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct MotionConfig {
     pub enabled: bool,
@@ -270,7 +276,7 @@ pub struct MotionConfig {
 }
 
 /// One alarm/relay output port (`GET /ISAPI/System/IO/outputs`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct IoOutput {
     pub id: i64,
@@ -303,7 +309,7 @@ pub struct NativePlateRead {
 }
 
 /// A single configuration action applied across one or more cameras.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum BulkAction {
     /// Enable ONVIF + ISAPI integration and provision a dedicated ONVIF user.
@@ -328,7 +334,7 @@ pub enum BulkAction {
 }
 
 /// Apply a [`BulkAction`] to a set of cameras (`camera_ids` None = every camera).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct BulkConfigRequest {
     #[serde(default)]
@@ -337,7 +343,7 @@ pub struct BulkConfigRequest {
 }
 
 /// Per-camera outcome of a bulk action.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct BulkCameraResult {
     pub camera_id: String,
@@ -347,7 +353,7 @@ pub struct BulkCameraResult {
 }
 
 /// Aggregate result of a bulk action across all targeted cameras.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub struct BulkConfigResponse {
     pub results: Vec<BulkCameraResult>,

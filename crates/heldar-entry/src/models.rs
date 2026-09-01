@@ -7,7 +7,7 @@ use serde_json::Value;
 use sqlx::types::Json;
 use sqlx::FromRow;
 
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, FromRow, utoipa::ToSchema)]
 pub struct Vehicle {
     pub id: String,
     pub plate: String,
@@ -28,7 +28,7 @@ pub struct Vehicle {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct VehicleCreate {
     pub plate: String,
     pub owner_name: Option<String>,
@@ -45,7 +45,7 @@ pub struct VehicleCreate {
     pub valid_until: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct VehicleUpdate {
     pub plate: Option<String>,
     pub owner_name: Option<String>,
@@ -62,7 +62,7 @@ pub struct VehicleUpdate {
     pub valid_until: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, FromRow, utoipa::ToSchema)]
 pub struct VisitorPass {
     pub id: String,
     pub code: String,
@@ -77,6 +77,7 @@ pub struct VisitorPass {
     pub site_id: Option<String>,
     pub valid_from: DateTime<Utc>,
     pub valid_until: DateTime<Utc>,
+    #[schema(value_type = PassStatus)]
     pub status: String,
     pub checked_in_at: Option<DateTime<Utc>>,
     pub checked_out_at: Option<DateTime<Utc>>,
@@ -85,7 +86,7 @@ pub struct VisitorPass {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct VisitorPassCreate {
     pub visitor_name: String,
     pub phone: Option<String>,
@@ -99,7 +100,7 @@ pub struct VisitorPassCreate {
     pub valid_until: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct VisitorPassUpdate {
     pub visitor_name: Option<String>,
     pub phone: Option<String>,
@@ -113,7 +114,7 @@ pub struct VisitorPassUpdate {
     pub status: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, FromRow)]
+#[derive(Debug, Clone, Serialize, FromRow, utoipa::ToSchema)]
 pub struct Watchlist {
     pub id: String,
     pub plate: String,
@@ -127,7 +128,7 @@ pub struct Watchlist {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct WatchlistCreate {
     pub plate: String,
     pub kind: Option<String>,
@@ -136,7 +137,7 @@ pub struct WatchlistCreate {
     pub active: Option<bool>,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize, Default, utoipa::ToSchema)]
 pub struct WatchlistUpdate {
     pub kind: Option<String>,
     pub reason: Option<String>,
@@ -175,5 +176,28 @@ pub struct AuditLog {
     pub target_type: Option<String>,
     pub target_id: Option<String>,
     pub detail: Json<Value>,
+    /// The correlation id of the request that caused this act (#169).
+    ///
+    /// `None` for every row written before migration 0020 — the column was added to a live table and
+    /// cannot be backfilled — and for any act with no request behind it, though nothing background
+    /// audits today. It is a fact worth reading, not a missing value.
+    pub request_id: Option<String>,
     pub created_at: DateTime<Utc>,
+}
+
+/// A visitor pass's state, for the published schema only (#156).
+///
+/// Stored as a `String`; `routes::update_pass` is what constrains writes to these five. Decoding
+/// into a strict enum would turn a legacy row into a 500 on read, so reads stay forgiving.
+#[derive(serde::Serialize, serde::Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PassStatus {
+    /// Issued and not yet used.
+    Active,
+    CheckedIn,
+    CheckedOut,
+    /// Past its validity window.
+    Expired,
+    /// Cancelled before use.
+    Revoked,
 }

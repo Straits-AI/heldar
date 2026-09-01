@@ -9,7 +9,7 @@ import { useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { api, ApiError } from "../lib/api";
 import { usePoll } from "../lib/usePoll";
-import {
+import { ViewerClockNote,
   Button,
   EmptyState,
   Field,
@@ -298,6 +298,7 @@ export function Incidents() {
             <h1 className="mt-1 font-display text-2xl font-extrabold tracking-tight text-fg">
               Incident Cases
             </h1>
+            <ViewerClockNote />
           </div>
           <div className="flex items-center gap-3">
             {principal && (

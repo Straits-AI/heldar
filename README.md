@@ -37,11 +37,17 @@ curl -fsSL https://heldar.swmengappdev.workers.dev/install.sh | sh
 
 Pulls the prebuilt **OPEN** images (kernel + generic apps) and starts MediaMTX + core + web — the
 dashboard is then at `http://localhost:8080`. Add the reference AI worker with `--profile ai`; update
-with `docker compose pull`. For production (auth on, secure cookies, strict boot guardrails) layer the
-hardening overlay, and add the TLS overlay to terminate HTTPS:
+with `docker compose pull`. For production layer three overlays — they harden different things and are
+separate on purpose:
+
+- `compose.prod.yml` — the **application** posture: auth on, secure cookies, strict boot guardrails.
+- `compose.hardened.yml` — the **container**: read-only root filesystems, all capabilities dropped,
+  `no-new-privileges`, CPU/memory/PID ceilings, bounded logs. See `docs/PRODUCTION.md`.
+- `compose.tls.yml` — terminates HTTPS.
 
 ```bash
-docker compose -f deploy/compose.yml -f deploy/compose.prod.yml -f deploy/compose.tls.yml up -d
+docker compose -f deploy/compose.yml -f deploy/compose.prod.yml \
+  -f deploy/compose.hardened.yml -f deploy/compose.tls.yml up -d
 ```
 
 The hardening overlay marks the session cookie `Secure`, so it expects HTTPS in front of it — the TLS
@@ -88,6 +94,28 @@ in a photo and get similarity-ranked detection crops with jump-to-playback. Rank
 embeddings computed by the AI worker (optional `requirements-embed.txt` extra) — fully local, no
 cloud: [`docs/SEARCH.md`](docs/SEARCH.md).
 
+**Signed evidence bundles** make an export defensible after it leaves the box. A bundle carries the
+clip, the events and detections in the window, the audit trail, the source segment hashes and the
+recording gaps — under one Ed25519 signature, verifiable offline with `python3` and `openssl` alone:
+[`docs/EVIDENCE.md`](docs/EVIDENCE.md). It states what it cannot prove, too: the appliance stamps its
+own clock, so the signature attests to origin and integrity, never to time.
+
+**`heldar-mcp`** lets an agent ask a box questions over MCP — a separate read-only sidecar, never an
+LLM endpoint inside the recorder: [`docs/MCP.md`](docs/MCP.md).
+
+**`heldarctl`** is the supported operator and automation interface — contexts for multiple boxes,
+stable JSON, documented exit codes, and `heldarctl doctor` as the one command that tells an installer
+what to fix: [`docs/HELDARCTL.md`](docs/HELDARCTL.md). It ships for the same architectures as the
+core binary.
+
+**Capacity claims are measured, not asserted.** `scripts/bench/harness.py` boots a declared camera
+workload — count, codec, bitrate, GOP, AI profile — against a real recorder, injects camera, MediaMTX
+and core faults, and writes a machine-readable result with full hardware and software provenance. CI
+then refuses any camera-count claim in [`docs/sizing.md`](docs/sizing.md) that does not cite a run
+that passed, and refuses one whose thresholds were changed after the run — so a bar cannot be
+loosened to rescue a number. What is *not* measured is reported as `unmeasured` rather than assumed,
+because an unmeasured threshold is not a met one: [`docs/benchmarks/README.md`](docs/benchmarks/README.md).
+
 Onboard a camera (you supply the address and credentials; the RTSP URL is built from the vendor
 template):
 
@@ -99,6 +127,7 @@ curl -X POST http://localhost:8000/api/v1/cameras -H 'content-type: application/
 curl http://localhost:8000/api/v1/system                     # uptime, camera/segment counts
 curl http://localhost:8000/api/v1/cameras/gate_a/timeline    # recorded ranges
 curl http://localhost:8000/api/v1/system/retention           # recording size cap + free-disk floor
+curl http://localhost:8000/api/v1/system/timezone            # the site clock schedules and search use
 ```
 
 > Do not brute-force camera credentials. HikVision devices lock out after failed attempts.
@@ -110,6 +139,27 @@ curl http://localhost:8000/api/v1/system/retention           # recording size ca
 > The metadata DB is also bounded (`HELDAR_MAX_DB_GB`, default 4), and a pre-existing DB self-converts to
 > `auto_vacuum=INCREMENTAL` in the background on first upgrade (`HELDAR_DB_AUTOVACUUM_CONVERT=true`).
 
+> **Generated API clients.** The box publishes an OpenAPI contract (`GET /api/v1/openapi.json`, and
+> `openapi.json` on every release). TypeScript, Python and Rust clients are generated from it and
+> compiled in CI, so a `$ref` to a missing schema or a duplicated operation id is a build failure
+> rather than a surprise later. See [`clients/`](clients/) and a worked integration in
+> [`examples/api-client/`](examples/api-client/).
+
+> **Sites.** `GET`/`POST /api/v1/sites`, `GET`/`PATCH`/`DELETE /api/v1/sites/{id}` (writes admin +
+> fleet-scope only; moving a camera between sites is too, via `PATCH /api/v1/cameras/{id}`).
+> A site carries the timezone its cameras' schedules and searches are read in. Changing it moves
+> those recording windows, so the response says how many cameras it moved; a site with cameras
+> attached cannot be deleted, because that would drop them to the box default and reinterpret their
+> windows silently.
+
+> **Which clock is yours.** The dashboard's System page shows the effective timezone, where it came
+> from, and any sites overriding it; the recording-schedule panel labels its windows with the clock
+> they are read in. Timestamps are stored in UTC. *Interpretation* — a schedule's "18:00",
+> a search's "after 6pm", "yesterday" — follows the site's timezone once one is set
+> (`GET`/`PUT /api/v1/system/timezone`, admin-only). With none set, schedules follow the server's
+> local zone and search follows UTC, exactly as before, so nothing moves until you choose. Set one
+> and both move together. See [#125](https://github.com/Straits-AI/heldar/issues/125).
+
 Run the reference AI worker against an AI-enabled camera:
 
 ```bash
@@ -119,6 +169,19 @@ HELDAR_API=http://localhost:8000 .venv/bin/python worker.py
 
 See the [Quickstart](https://heldar.swmengappdev.workers.dev/docs/getting-started/quickstart) for
 enabling detection tasks, drawing zones, and configuring alerting.
+
+> **AI ingest provenance.** Detections posted over `/api/v1/ai/events` are always recorded as
+> `source: "worker"` — the kernel writes that attribute itself and strips whatever the client sent, so
+> no API caller can claim to be a camera's on-board ANPR engine (a read the barrier treats as
+> authoritative). Workers additionally **lease** their tasks and post a server-issued **frame ticket**,
+> which lets the kernel derive `camera_id`/`task_type`/`frame_id` instead of trusting the body.
+> Requiring the ticket is staged: `HELDAR_INGEST_PROVENANCE` defaults to `warn` (ticketless ingest
+> still works, with a once-per-hour notice per credential) and is **never promoted automatically** —
+> not even by `HELDAR_DEPLOYMENT_MODE=production*`, because unlike `HELDAR_MACHINE_AUTH` it is a
+> CLIENT protocol change: `enforce` 401s every worker that does not yet mint a ticket. Set it
+> explicitly after the hourly `ingest_unleased` log goes quiet.
+> See [ADR 0005](docs/adr/0005-task-lease-bound-ai-ingest.md)
+> and [`docs/AI-WORKERS.md`](docs/AI-WORKERS.md) §5.0.
 
 ### Default ports
 

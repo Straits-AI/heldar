@@ -61,9 +61,21 @@ fn contains_word(hay: &str, needle: &str) -> bool {
 
 /// Transparent rule-based parser. `cameras` is (id, name) so phrases like "gate b" resolve to a camera.
 pub fn parse_rules(query: &str, cameras: &[(String, String)]) -> QueryPlan {
+    parse_rules_in(query, cameras, chrono_tz::Tz::UTC)
+}
+
+/// [`parse_rules`] with the zone that "today"/"yesterday" mean a day IN (#125).
+///
+/// A calendar day is a wall-clock notion: "yesterday" at a site eight hours ahead is a different
+/// 24 hours than "yesterday" in UTC, overlapping by only two thirds. Resolving it in UTC and then
+/// showing an operator the results is how a search looks right and answers about the wrong day.
+pub fn parse_rules_in(query: &str, cameras: &[(String, String)], tz: chrono_tz::Tz) -> QueryPlan {
     let q = query.to_lowercase();
     let now = Utc::now();
-    let mut plan = QueryPlan::default();
+    let mut plan = QueryPlan {
+        tz: Some(tz.to_string()),
+        ..Default::default()
+    };
 
     // "red zone"/"red area" is a restricted-area phrase, NOT the colour red — don't let it set color.
     let red_zone_phrase = q.contains("red zone") || q.contains("red area");
@@ -154,17 +166,18 @@ pub fn parse_rules(query: &str, cameras: &[(String, String)]) -> QueryPlan {
     plan.cameras.dedup();
 
     // Relative date windows.
+    // A calendar day starts at the SITE's midnight, and `from_wall_clock` resolves the two days a
+    // year where that local midnight is skipped or repeated.
+    let local_today = now.with_timezone(&tz).date_naive();
+    let midnight = |d: chrono::NaiveDate| {
+        heldar_kernel::services::tz::from_wall_clock(tz, d.and_hms_opt(0, 0, 0).unwrap())
+    };
     if q.contains("yesterday") {
-        let start = (now - TimeDelta::try_days(1).unwrap())
-            .date_naive()
-            .and_hms_opt(0, 0, 0)
-            .unwrap()
-            .and_utc();
+        let start = midnight(local_today - TimeDelta::try_days(1).unwrap());
         plan.from = Some(start.to_rfc3339());
-        plan.to = Some((start + TimeDelta::try_days(1).unwrap()).to_rfc3339());
+        plan.to = Some(midnight(local_today).to_rfc3339());
     } else if q.contains("today") {
-        let start = now.date_naive().and_hms_opt(0, 0, 0).unwrap().and_utc();
-        plan.from = Some(start.to_rfc3339());
+        plan.from = Some(midnight(local_today).to_rfc3339());
     } else if q.contains("last week") || q.contains("past week") || q.contains("this week") {
         plan.from = Some((now - TimeDelta::try_days(7).unwrap()).to_rfc3339());
     } else if let Some(days) = parse_last_n_days(&q) {
@@ -344,5 +357,55 @@ mod tests {
         let cams = vec![("cam_gate_b".to_string(), "Gate B".to_string())];
         let p = parse_rules("white cars at gate b after 6pm", &cams);
         assert_eq!(p.cameras, vec!["cam_gate_b".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod tz_tests {
+    use super::*;
+    use chrono_tz::Tz;
+
+    /// "yesterday" is a wall-clock notion. At a site eight hours ahead it is a different 24 hours
+    /// than the UTC one — they overlap by two thirds — so a search resolved in the wrong zone looks
+    /// right and answers about the wrong day.
+    #[test]
+    fn yesterday_is_the_sites_calendar_day_not_utcs() {
+        let kl = parse_rules_in("yesterday", &[], Tz::Asia__Kuala_Lumpur);
+        let utc = parse_rules_in("yesterday", &[], Tz::UTC);
+
+        let (kl_from, utc_from) = (kl.from.clone().unwrap(), utc.from.clone().unwrap());
+        assert_ne!(
+            kl_from, utc_from,
+            "Kuala Lumpur is +08:00, so its midnight is not UTC's — if these match, the zone is \
+             not reaching the window and this test proves nothing"
+        );
+        // KL midnight is 16:00Z the previous day.
+        assert!(
+            kl_from.ends_with("+08:00") || kl_from.contains("T16:00:00"),
+            "KL's day should start at its own midnight: {kl_from}"
+        );
+        assert_eq!(
+            kl.tz.as_deref(),
+            Some("Asia/Kuala_Lumpur"),
+            "the plan must record which zone it was resolved in, or a logged plan cannot be re-run"
+        );
+
+        // The window is exactly 24 hours in both.
+        for p in [&kl, &utc] {
+            let f = chrono::DateTime::parse_from_rfc3339(p.from.as_ref().unwrap()).unwrap();
+            let t = chrono::DateTime::parse_from_rfc3339(p.to.as_ref().unwrap()).unwrap();
+            assert_eq!((t - f).num_hours(), 24, "a calendar day is 24h here");
+        }
+    }
+
+    /// The zone a plan was resolved in is always recorded, so a `search_log` row from before this
+    /// existed (no field) is distinguishable from one resolved to UTC deliberately.
+    #[test]
+    fn every_plan_records_its_zone() {
+        for tz in [Tz::UTC, Tz::Asia__Kuala_Lumpur, Tz::America__New_York] {
+            let p = parse_rules_in("red car after 6pm", &[], tz);
+            assert_eq!(p.tz.as_deref(), Some(tz.name()));
+            assert_eq!(p.hour_min, Some(18), "the hour itself is zone-independent");
+        }
     }
 }
