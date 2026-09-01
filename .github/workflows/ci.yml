@@ -77,6 +77,12 @@ jobs:
           python3 scripts/verify_capacity_claims.py
           # Documented metric names must match the exposition, both ways. An alerting rule copied
           # from a drifted table matches nothing and never fires, which looks exactly like health.
+          # Two places pinning the same dependency must agree. #87 bumped the composed Caddy
+          # image and left scripts/setup_caddy.sh behind, so the required TLS e2e check went green
+          # having installed the OLD Caddy — a passing check about a version the change was not
+          # making.
+          python3 scripts/test_pinned_versions.py
+          python3 scripts/check_pinned_versions.py
           python3 scripts/bench/test_doc_drift.py
           python3 scripts/check_documented_metrics.py
       - name: read-seam lint (cross-app reads go through *_read views)

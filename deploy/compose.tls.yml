@@ -20,7 +20,7 @@ services:
   caddy:
     # Pinned tag + digest, same policy as every other image in the stack (docs/SUPPLY-CHAIN.md).
     # To bump: `docker buildx imagetools inspect caddy:<tag>` and update both halves.
-    image: caddy:2.10.2@sha256:c3d7ee5d2b11f9dc54f947f68a734c84e9c9666c92c88a7f30b9cba5da182adb
+    image: caddy:2.11.4@sha256:df7f1c2fb114453b951de51a98efc010db1655a92c2e86be6706714e2417a78d
     restart: unless-stopped
     # Host networking: Caddy binds :80/:443 on the host directly and reverse-proxies to the
     # dashboard on 127.0.0.1:8080. Matches the rest of the stack; no bridge/port-map needed.
