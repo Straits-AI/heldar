@@ -156,6 +156,24 @@ jobs:
           #   cargo tree -i rsa --all-features   # -> "nothing to print"
           ignore: RUSTSEC-2023-0071
 
+  ai:
+    name: ai worker (unit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      # Core deps only — the same three the shipped image installs. The heavy stacks (ultralytics,
+      # paddleocr, torch) are lazily imported and deliberately NOT installed here; the OCR tests
+      # inject fakes for both PaddleOCR majors precisely so they need neither.
+      - run: pip install -r apps/ai/requirements-core.txt
+      # apps/ai had NO tests and was in no CI job at all, which is how #188 shipped: a fresh install
+      # resolves PaddleOCR 3.x, the code targeted 2.x, and every failure was swallowed — the worker
+      # emitted vehicles with no plate forever while looking healthy. Not a crash, so only an
+      # assertion catches it.
+      - run: python3 apps/ai/test_ocr_backend.py
+
   web:
     name: web (build)
     runs-on: ubuntu-latest

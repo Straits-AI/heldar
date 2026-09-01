@@ -1145,6 +1145,11 @@ them only if you want plate reads (see `apps/ai/requirements.txt`):
 pip install paddleocr      # or: pip install easyocr
 ```
 
+Either PaddleOCR major works: the worker detects 2.x vs 3.x at start-up and adapts the constructor,
+the inference call and the result parsing, which differ across that boundary. If a backend is
+installed but will not start, the log says so and names the error — it no longer tells you to install
+something that is already there (#188).
+
 ### 12.3 Color heuristic + direction config
 
 - **Color** (`_estimate_color`) is a crude dominant-color estimate over the central

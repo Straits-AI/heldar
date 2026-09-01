@@ -8,5 +8,10 @@
 #
 # This pins PaddleOCR (PP-OCR), the preferred backend. To use EasyOCR instead, comment the line below
 # and uncomment easyocr (it shares torch with ultralytics). Both download models on first use.
+#
+# The floor stays open across the 2.x/3.x major boundary ON PURPOSE: worker.py detects which major is
+# installed and drives the matching constructor, inference call and result shape (#188). It did not
+# always — it targeted 2.x while this unbounded floor resolved to 3.x, and every resulting failure was
+# swallowed, so plate reads silently never happened. `apps/ai/test_ocr_backend.py` pins both shapes.
 paddleocr>=2.7
 # easyocr>=1.7
