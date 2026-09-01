@@ -13,7 +13,7 @@
 # lazily when a YOLO task actually runs, so motion-only deployments can omit it.
 # GPU is used automatically when torch detects CUDA; otherwise it runs on CPU.
 ultralytics>=8.3
-lap>=0.5            # ByteTrack data-association solver (model.track tracker)
+lap>=0.5.13            # ByteTrack data-association solver (model.track tracker)
 
 # Stage 4 ANPR plate OCR — OPTIONAL. Pick ONE (or neither). Only needed for the
 # "anpr" task type's plate reading; the AnprAnalyzer falls back to emitting vehicles
