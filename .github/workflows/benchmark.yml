@@ -55,7 +55,7 @@ jobs:
         # `always()`: a FAILED run is the one worth keeping. The harness exits non-zero on a failed
         # threshold, and losing the evidence because the gate did its job would be perverse.
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: benchmark-${{ inputs.scenario || 'smoke-2cam' }}
           path: docs/benchmarks/results/
