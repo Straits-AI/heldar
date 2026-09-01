@@ -7,8 +7,218 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Revoking an API key now stops the backup transfer it left running.** `POST /backup/policies/{id}/trigger`
+  answers 202 and detaches the copy, which keeps moving footage for up to `HELDAR_BACKUP_JOB_TIMEOUT_S`
+  (default an hour) — and for `sftp`/`ftp`/`s3` destinations, off the box entirely, where no later
+  guard can reach it. Every authorization for that job was made once, at request time, and the job row
+  carried no way back to the credential that made it, so revocation — the operator saying "this
+  credential is compromised" — did nothing to bytes already in flight. Narrowing `scope_cameras` was
+  the same defect against the camera boundary: the job went on shipping a camera the credential no
+  longer held.
+
+  `backup_jobs` now records **who ordered the job** (`created_by`, `created_by_kind`; kernel migration
+  0015) and the transfer re-checks that credential before the first byte and every few seconds after,
+  aborting with the reason recorded on the job. Withdrawn means revoked, deactivated, deleted, expired,
+  or re-scoped off a camera the job covers. Files already copied are left in place — they are backups,
+  not spoils.
+
+  **No behaviour change** for the scheduler (it holds no principal, so its jobs record no creator),
+  for boxes running with auth disabled, or for jobs created before the upgrade. A database read failure
+  during the re-check lets the transfer continue, loudly: the recorder shares that SQLite and a busy
+  timeout must not destroy a backup.
+
+### Documented
+
+- **How long a scope decision lasts**, per surface, in `docs/ACCESS-CONTROL.md`. `/media/*` re-authorizes
+  every single request, so a clip, playback session or archive URL is not a bearer capability and a
+  re-scope bites mid-scrub; AI leases re-derive their candidate list from the current scope on every
+  renew. The exception is **live view**: MediaMTX authorizes from a signed URL token and consults no
+  credential, so a revoked key keeps streaming for up to `HELDAR_LIVEVIEW_TOKEN_TTL_SECS` (default
+  3600 s) — and an established WebRTC session is not bounded by it at all. Lower the TTL if revocation
+  needs to bite promptly.
+- **A camera-confined search no longer loses the caller's own rows to a page of other cameras'.**
+  `heldar-search`'s executor fetched each source `ORDER BY <ts> DESC LIMIT fetch_cap` and applied
+  `plan.cameras` afterwards in Rust, so the cap bounded rows EXAMINED rather than rows returned:
+  newer rows from cameras the caller did not name ate the page and the caller's own older in-window
+  matches never reached the filter — unreachable afterwards, since these routes carry no offset or
+  cursor. For a camera-scoped credential that list is its scope, so this was the scope layer denying
+  the caller its own data. The same ordering made `truncated` report the FLEET's in-window volume
+  beside a `count` of 0. The confinement is now pushed into each source query (deduped, and skipped
+  above 1000 distinct ids so an absurd caller-supplied list degrades to the Rust filter instead of
+  exhausting SQLite's variable ceiling).
+
+- **Movement's audit entries name the camera they are about, so a scoped operator can see its own
+  work.** `GET /api/v1/audit` filters on `audit_log.subject_camera_id` and hides NULL subjects from a
+  camera-scoped reader; `heldar-movement` audited every action with an empty `detail`, so every
+  movement act — including a breach acknowledged on the reader's own camera — was visible only to a
+  fleet-wide credential. Breach ack/resolve and the person search now carry their camera. Acts naming
+  TWO cameras (link create/delete, candidate confirm/reject) deliberately still carry none: a single
+  column cannot say "both ends", and naming either one would disclose adjacency to that end's holder.
+
 ### Fixed
 
+- **A whitespace-padded camera id could create a self-link.** `POST /api/v1/movement/links` compared
+  the raw `from_camera`/`to_camera` while the insert bound the trimmed values, so
+  `{"from_camera":"cam_a","to_camera":" cam_a"}` stored the `cam_a → cam_a` link the guard forbids.
+
+### Testing
+
+- **`heldar-movement` is driven end to end** (`crates/heldar-server/tests/movement_scope_e2e.rs`):
+  every route, against credentials minted through the real `POST /api/v1/api-keys` — unscoped, scoped
+  to both ends of a link, to one end, and to neither — asserting no cross-camera read or act and no
+  false deny on the credential's own cameras. It records per route whether the scope filter answered
+  or an unholdable capability refused, so the seven movement routes the route census could only list
+  as named debt are now actually exercised.
+
+## [0.5.0] - 2026-08-13
+
+Closes the last of the re-audit's code blockers. **Two breaking changes need a decision before you
+upgrade** — read Breaking and Upgrading first.
+
+### Breaking
+
+- **Sidecar plugin UIs no longer share the console's origin.** The iframe sandbox granted
+  `allow-same-origin`, and plugins are served through the `/m/{id}` proxy — on the console's own
+  origin — so a plugin could reach the parent DOM and call the kernel API with the operator's session
+  cookie, far beyond its own minted key. An imported plugin was effectively first-party code whatever
+  its manifest said. The frame now runs in an **opaque origin**: no parent DOM, no storage, and no
+  session cookie on its requests. A `postMessage` host bridge mediates, confining every request to
+  that plugin's own `/m/{id}/` root and forwarding only `content-type`.
+
+  **Plugin UIs that called `/api/v1/*` directly, or touched the parent document, will stop working.**
+  Move them to the bridge (a copy-pasteable shim is in the module-system guide), or fetch kernel data
+  server-side in the sidecar with its own capability-scoped key.
+
+- **Deleting a camera now requires admin, and refuses while evidence is held.** It purges recordings,
+  so it is no longer a manager-level action. A camera with evidence-locked segments returns 409 with
+  the count and how to release the hold.
+
+### Security
+
+- **Interactive media jobs have a concurrency ceiling** (`HELDAR_MEDIA_JOB_CONCURRENCY`, default 3),
+  covering playback session builds, clip exports and snapshots. Each forks ffmpeg and does heavy disk
+  I/O; unbounded, they starve the recorder — the one process that must never miss. A caller that
+  cannot get a slot gets a 503 telling it to retry, rather than being queued indefinitely. Recording
+  itself deliberately takes no permit.
+
+- **Backup destination credentials and webhook signing secrets are sealed at rest.** They were masked
+  as `***` in API responses but written to SQLite in the clear, so a stolen database or a copied DB
+  backup yielded SFTP/FTP passwords, S3 secret keys and HMAC keys outright — the masking only ever
+  protected a shoulder-surfer, not the file. They are sealed with the existing `HELDAR_SECRET_KEY`,
+  unsealed at the point of use, migrated on boot, and covered by `rekey-secrets`.
+
+  An unsealable credential degrades rather than corrupting: a webhook delivers UNSIGNED with an error
+  logged (the alert still arrives), and a backup credential reads as unset so the destination fails
+  its own validation with an actionable message. Neither hands ciphertext to a subprocess.
+
+### Tests
+
+- **The upgrade path is qualified in CI.** A previous release's binary boots against a fresh database
+  and seeds rows through its own API; the current build then boots on that same database. It is the
+  only test that exercises the migration chain against a database an older release actually wrote.
+  The upgraded box must serve, not merely boot.
+
+- **Backups are proven to restore.** Seed, online snapshot via `backup-db`, destroy the database and
+  its WAL/SHM, restore, verify. A control boot on the wiped directory asserts zero rows first —
+  without it, a restore that silently did nothing would still pass.
+
+- **`apps/web` gains a unit lane** (vitest, CI-gated). It had none; it guards the sidecar bridge's
+  containment check, which decides what a sandboxed plugin may ask the host to fetch.
+
+### Upgrading
+
+- **Plugin authors must migrate** — see Breaking. This is the only change that requires action from
+  anyone other than an operator.
+- **Nothing needs re-configuring.** Existing credentials are sealed automatically on first boot when
+  `HELDAR_SECRET_KEY` is set; without a key, behaviour is unchanged (plaintext at rest, as before).
+- **Rotate keys with `heldar-core rekey-secrets`**, which now covers webhook and backup credentials as
+  well as camera passwords. A rotation that moved only camera passwords would leave the others sealed
+  under a retired key, and webhooks would silently start delivering unsigned.
+- **Gate operators:** the v0.4.0 note still applies — a below-threshold ANPR commit-on-prune records a
+  guard-review event instead of opening the barrier.
+
+## [0.4.1] - 2026-08-12
+
+### Fixed
+
+- **The container image builds again.** The Rust builder base was pinned to 1.85.1 to match the
+  workspace MSRV, but the locked dependency tree moved past it — `icu_*` 2.2 requires rustc 1.86 —
+  so the v0.4.0 image build failed and no `0.4.0` images were published. The base now tracks what the
+  build actually needs rather than the MSRV. CI builds with `stable`, so the two toolchains disagreed
+  and nothing caught it until a tag ran the image build, which is the only job using that base.
+  v0.4.0's crates and musl binaries are unaffected and remain published; only the container images
+  were missing, and they ship as `0.4.1`.
+
+## [0.4.0] - 2026-08-12
+
+A security and production-qualification release. Two external audits drove it, and most of the work
+is closing gaps they found rather than adding features. **Read "Breaking" and "Upgrading" before
+deploying** — the authorization model changed, one gate behaviour changed, and the published kernel
+API lost items.
+
+### Breaking
+
+- **`Principal` carries capabilities and a camera scope, and `can_view()` is gone.** It returned
+  `true` for every authenticated principal, so a machine credential could read cameras, footage,
+  playback and search. It was deleted rather than narrowed, so the compiler enumerated all 85 call
+  sites instead of leaving a half-applied check that reads as protection it is not. Downstream
+  compositions that construct a `Principal` or call `can_view()` must be updated.
+- **`net_guard::egress_client` is removed**, and `pinned_egress_client` / `resolve_validate_pin`
+  return `Result` instead of falling back to a default client. The fallback was fail-OPEN: it handed
+  back a redirect-following, unpinned client at exactly the moment the guard failed to build.
+- **A below-threshold ANPR commit-on-prune no longer opens the barrier.** It still writes the entry
+  event — the audit record is the point of commit-on-prune — but marks it for guard review. Without
+  this, a single accepted plate read still opened the gate ~30s later on prune, so hardening the vote
+  path alone left the actuation capability intact. **Sites where vehicles pass quickly will see
+  barriers stop auto-opening for reads that never reached `min_votes`.**
+
+### Security
+
+- **Capability-scoped machine credentials.** API keys carry an explicit capability grant, an optional
+  camera scope and an expiry, instead of a role alone. Keys minted before this release keep exactly
+  today's reach under the default tier; `HELDAR_MACHINE_AUTH=enforce` narrows the `integration` role
+  to what a real AI worker calls. No key is bricked and none needs re-minting.
+- **AI ingest is bound to a server-issued lease and per-frame ticket**, so the kernel derives the
+  camera, task type and frame id from the ticket rather than trusting the request body.
+- **`source = "camera_native"` can no longer be asserted through the ingest API.** Provenance is a
+  parameter of the ingest path and the attributes blob is rewritten before insert, so the value the
+  barrier treats as authoritative is server-authored on every path — including the crash-replay
+  fan-out, which bypasses the HTTP handler entirely. This rewrite is unconditional in every tier.
+- **The recorded-media plane is authorized, not just authenticated.** `/media/*` resolved a principal
+  and discarded it, so any authenticated credential read every recording, clip, snapshot and backup
+  archive. Each subtree now requires its capability, archives are admin-only, and recordings enforce
+  camera scope.
+- **Server-initiated egress resolves and pins DNS.** Only literal-IP hosts were validated, so a
+  hostname resolving to loopback/RFC1918/`169.254.169.254` passed and connected. Every A/AAAA record
+  is now validated and the validated addresses pinned into the client. `EgressPolicy::PUBLIC` became
+  an allowlist of globally routable addresses — "not private" still admitted CGNAT, benchmarking,
+  documentation and reserved space.
+- **The sidecar reverse proxy is guarded per request**, not only at registration, with a bounded
+  response and origin-authority headers (`Set-Cookie`, HSTS, `Access-Control-Allow-*`) stripped.
+- **Empty `HELDAR_CORS_ORIGINS` means same-origin only.** It meant allow-ANY, while the production
+  example shipped it empty and documented it as same-origin — so following the production template
+  allowed every origin, and the strict-prod guardrail never caught it because it only looked for `*`.
+- **Ingest dedup keys are namespaced by provenance**, so a client cannot claim a kernel producer's
+  `(camera_id, frame_id)` and have the genuine camera-native read swallowed as a redelivery.
+- **Auth-off on a non-loopback bind warns loudly**, and `HELDAR_DEPLOYMENT_MODE=production*` turns it
+  into a boot refusal.
+
+### Fixed
+
+- **Live view works behind TLS.** MediaMTX serves HLS/WebRTC on plaintext ports and the kernel
+  rewrote only the host, so an HTTPS dashboard handed the browser `http://host:8888/…` — blocked as
+  mixed content. With `HELDAR_MEDIA_SAME_ORIGIN` the kernel emits origin-relative URLs and the
+  reverse proxy routes them.
+- **Multi-worker AI deployments no longer collapse to one node.** Lease acquisition had no shard, so
+  the first worker took every task and renewed it indefinitely. Leasing now uses the same assignment
+  task discovery hands out.
+- **Playback covers the whole selected minute.** The `to` control is minute-granular, so a `to` of
+  "now" floored to `:00` and excluded footage recorded in the current partial minute — reporting no
+  footage while the recorder was actively writing.
+- **An empty playback window is reported as "no footage", not "failed to open"**, so a quiet window
+  no longer reads as a malfunction.
 - **The from-source quickstart works in any clone.** `scripts/run_stack.sh` resolved its paths from a
   hardcoded `/home/soh/cctv`, so for everyone else it started nothing — and, having no precondition
   checks, still printed `stack up: …` and slept for 30 minutes. It now resolves paths relative to the
@@ -34,6 +244,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   3.2 (it now waits on the core PID), and the `fuser -k` port cleanup falls back to `lsof` where
   `fuser` has no `-k`.
 
+### Added
+
+- **A TLS reference deployment** (`deploy/compose.tls.yml` + `Caddyfile`), with Let's Encrypt and LAN
+  self-signed modes, and cleartext services pinned to loopback.
+- **CI runs the integration suites**: Playwright (HTTP and a second HTTPS + auth-enabled stack),
+  synthetic-camera media validation, RBAC, and ingest-provenance validation at both enforcement
+  tiers — plus npm audit, pip-audit, gitleaks and Trivy.
+- **Container bases, MediaMTX and Caddy are pinned to tag + digest**, with a supply-chain policy in
+  `docs/SUPPLY-CHAIN.md` and dependabot covering the docker/compose/pip ecosystems.
+
 ### Documentation
 
 - Docs no longer describe the retired generated-tree model. `LICENSING.md`, `DESIGN-PRINCIPLES.md` #8,
@@ -56,6 +276,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - README/CONTRIBUTING dev setup now includes the dashboard `npm ci` step that `run_stack.sh` requires,
   and the README no longer describes the production overlay as switching to a private image (it is an
   open hardening overlay).
+
+### Upgrading
+
+- **Nothing is required to keep working.** Existing API keys, the auth-disabled LAN default, and
+  ticketless AI workers all behave as before.
+- **`HELDAR_INGEST_PROVENANCE` defaults to `warn` and is deliberately NOT promoted by
+  `HELDAR_DEPLOYMENT_MODE`.** Requiring frame tickets is a client protocol change: enforcing it
+  rejects every worker that does not yet mint one. Run `warn` (it names, once per hour per
+  credential, exactly who would break), upgrade those workers, then set `enforce`.
+- **`HELDAR_MACHINE_AUTH` does auto-promote to `enforce` under `HELDAR_DEPLOYMENT_MODE=production*`.**
+  It is server-side only, and the enforced expansion keeps every endpoint a real AI worker calls.
+- **Gate operators:** see the commit-on-prune change under Breaking before upgrading a barrier site.
 
 ## [0.3.1] - 2026-07-31
 

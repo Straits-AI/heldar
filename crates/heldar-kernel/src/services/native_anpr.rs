@@ -24,12 +24,17 @@ use std::time::Duration;
 use chrono::Utc;
 use serde_json::json;
 
-use crate::models::{AiIngest, Camera, DetectionIngest};
+use crate::models::{AiIngest, Camera, DetectionIngest, KernelProducer, Provenance};
 use crate::services::camera_config::types::NativePlateRead;
 use crate::services::camera_config::{self};
 use crate::state::AppState;
 
 /// Marker value carried in `attributes.source` for on-board reads (the entry engine keys on it).
+///
+/// This poller no longer WRITES it: the value is stamped by
+/// [`crate::services::perception_ingest::ingest_batch`] from the [`Provenance::Kernel`] it is handed,
+/// which is why nothing reachable from the HTTP API can produce it. The constant remains the shared
+/// definition of the marker (see [`KernelProducer::source`]).
 pub const SOURCE_CAMERA_NATIVE: &str = "camera_native";
 
 /// Run the poller loop forever (spawned supervised by the composing server). Self-idles when no
@@ -149,17 +154,25 @@ async fn ingest_read(st: &AppState, cam: &Camera, read: &NativePlateRead) {
             // No worker track id: the entry engine falls back to keying on the plate itself,
             // which also consolidates a burst of duplicate device reads within its TTL window.
             track_id: None,
+            // NOTE: no `source` here. The ingest path writes it from the Provenance below — a
+            // producer that stamps its own marker would be indistinguishable from a client that
+            // forged one, which is the exact confusion this change removes.
             attributes: Some(json!({
                 "plate": read.plate,
-                "source": SOURCE_CAMERA_NATIVE,
                 "direction": direction,
                 "country": read.country,
                 "model_versions": { "anpr": "camera_native" },
             })),
         }],
         event: None,
+        frame_ticket: None,
     };
-    match crate::services::perception_ingest::ingest_batch(st, &batch).await {
+    // The ONE call site in the tree that can name a kernel producer, and therefore the only path that
+    // can produce `source = "camera_native"` — the marker `heldar-entry` weights as authoritative.
+    let prov = Provenance::Kernel {
+        producer: KernelProducer::NativeAnpr,
+    };
+    match crate::services::perception_ingest::ingest_batch(st, &batch, &prov).await {
         Ok(outcome) if outcome.duplicate => {
             tracing::debug!(camera_id = %cam.id, plate = %read.plate, "native_anpr: duplicate read skipped");
         }

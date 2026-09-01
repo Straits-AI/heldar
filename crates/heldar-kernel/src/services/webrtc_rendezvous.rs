@@ -101,9 +101,16 @@ async fn bridge_to_local_whep(
         Some(false) => anyhow::bail!("camera {camera_id} is disabled — not bridging"),
         Some(true) => {}
     }
-    let live = mediamtx::ensure_live(state, camera_id, None)
-        .await
-        .map_err(|e| anyhow::anyhow!("ensure_live({camera_id}) failed: {e}"))?;
+    // The rendezvous holds a SITE token, not a `Principal`: there is no per-camera credential to
+    // re-check, and a remote viewer must not lose their stream because an unrelated key was revoked.
+    let live = mediamtx::ensure_live(
+        state,
+        camera_id,
+        None,
+        crate::services::live_token::Subject::Site,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("ensure_live({camera_id}) failed: {e}"))?;
     let whep = format!("{}/whep", live.webrtc_url);
     let answer = state
         .http
@@ -484,6 +491,10 @@ fn forward_request_header(name: &str) -> bool {
             | "accept"
             | "content-type"
             | "range"
+            // Correlation must survive the relay: a remote caller's id is dropped here otherwise, and
+            // cross-relay tracing is the case the feature exists for.
+            | "x-request-id"
+            | "x-heldar-correlation-id"
             | "if-none-match"
             | "if-modified-since"
     )
@@ -499,8 +510,27 @@ fn forward_response_header(name: &str) -> bool {
             | "accept-ranges"
             | "cache-control"
             | "etag"
+            // ...and back out, or the remote caller never learns the id its call was given.
+            | "x-request-id"
             | "last-modified"
     )
+}
+
+/// A relay error body in the SAME shape `AppError::into_response` emits.
+///
+/// The relay hand-builds its responses (it is proxying, not returning from a handler), so it does not
+/// go through `AppError` — and without this it was the one production path where a client got
+/// `{"error": …}` with no `code`/`retryable` beside it. A caller using one parser for local and
+/// relayed calls would silently see `code: undefined` only over the remote path.
+fn relay_error(msg: &str, status: u16) -> String {
+    let status =
+        axum::http::StatusCode::from_u16(status).unwrap_or(axum::http::StatusCode::BAD_GATEWAY);
+    serde_json::json!({
+        "error": msg,
+        "code": crate::error::AppError::code_for_status(status),
+        "retryable": crate::error::AppError::retryable_for_status(status),
+    })
+    .to_string()
 }
 
 /// Replay one relay job against the local kernel; returns (status, response headers, base64 body).
@@ -522,7 +552,7 @@ async fn replay_relay_job(
             return (
                 400,
                 HashMap::new(),
-                B64.encode(br#"{"error":"bad relay path"}"#),
+                B64.encode(relay_error("bad relay path", 400).as_bytes()),
             );
         }
     };
@@ -533,7 +563,7 @@ async fn replay_relay_job(
         return (
             403,
             HashMap::new(),
-            B64.encode(br#"{"error":"relay path not allowed"}"#),
+            B64.encode(relay_error("relay path not allowed", 403).as_bytes()),
         );
     }
     let method = reqwest::Method::from_bytes(job.method.as_bytes()).unwrap_or(reqwest::Method::GET);
@@ -575,7 +605,9 @@ async fn replay_relay_job(
                 return (
                     413,
                     HashMap::new(),
-                    B64.encode(br#"{"error":"relay response too large; use range requests"}"#),
+                    B64.encode(
+                        relay_error("relay response too large; use range requests", 413).as_bytes(),
+                    ),
                 );
             }
             let body = resp.bytes().await.unwrap_or_default();
@@ -589,7 +621,7 @@ async fn replay_relay_job(
         Err(e) => (
             502,
             HashMap::new(),
-            B64.encode(format!(r#"{{"error":"relay upstream: {e}"}}"#).as_bytes()),
+            B64.encode(relay_error(&format!("relay upstream: {e}"), 502).as_bytes()),
         ),
     }
 }

@@ -12,8 +12,9 @@ use axum::{Json, Router};
 use serde::Deserialize;
 use serde_json::json;
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::{AppError, AppResult};
+use crate::services::media_scope;
 use crate::services::playback_session::{self, PlaybackSession};
 use crate::state::AppState;
 use crate::util;
@@ -30,20 +31,40 @@ pub fn router() -> Router<AppState> {
         )
 }
 
-#[derive(Debug, Deserialize)]
-struct CreateSessionRequest {
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreateSessionRequest {
     from: String,
     to: String,
 }
 
-async fn create_session(
+/// Start an HLS playback session over a recorded window.
+///
+/// Returns the manifest URL. The session's media is re-guarded on EVERY fetch, so a URL is not a
+/// bearer capability: re-scoping the credential stops the scrub mid-playback.
+#[utoipa::path(
+    post, path = "/api/v1/cameras/{id}/playback/sessions", tag = "recordings",
+    operation_id = "createPlaybackSession",
+    params(("id" = String, Path, description = "Camera id")),
+    responses(
+        (status = 200, description = "The session and its manifest URL"),
+        (status = 400, description = "Bad range", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Missing `video:playback`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera, or no footage in the range", body = crate::openapi::ErrorBody),
+        (status = 503, description = "Media job concurrency limit reached", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn create_session(
     State(st): State<AppState>,
     Path(id): Path<String>,
     principal: Principal,
     Json(req): Json<CreateSessionRequest>,
 ) -> AppResult<Json<PlaybackSession>> {
     // viewer+: any authenticated principal (the extractor enforces auth when it is enabled).
-    principal.require(principal.can_view(), "create playback sessions")?;
+    principal.require_cap(Cap::VideoPlayback, "create playback sessions")?;
+    // Camera scope before any footage is touched: creating a session read-locks and transcodes this
+    // camera's segments over an arbitrary window, so capability alone let a scoped credential build a
+    // segment-spanning VOD of a camera it does not hold.
+    st.camera_scope_check(&principal, &id)?;
     let from = util::parse_rfc3339(&req.from)
         .ok_or_else(|| AppError::BadRequest("invalid `from` timestamp".into()))?;
     let to = util::parse_rfc3339(&req.to)
@@ -61,13 +82,45 @@ async fn create_session(
     Ok(Json(session))
 }
 
-async fn delete_session(
+/// End a playback session and remove its media.
+#[utoipa::path(
+    delete, path = "/api/v1/playback/sessions/{session_id}", tag = "recordings",
+    operation_id = "deletePlaybackSession",
+    params(("session_id" = String, Path, description = "Playback session id")),
+    responses(
+        (status = 204, description = "Ended"),
+        (status = 403, description = "Missing `video:playback`", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown session, or one for a camera this credential does not hold", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_session(
     State(st): State<AppState>,
     Path(session_id): Path<String>,
     principal: Principal,
 ) -> AppResult<StatusCode> {
     // viewer+: any authenticated principal.
-    principal.require(principal.can_view(), "delete playback sessions")?;
+    principal.require_cap(Cap::VideoPlayback, "delete playback sessions")?;
+    // A session id names no camera, so scope comes from the session's media attribution — resolved
+    // BEFORE `delete_session` probes the directory, so a session belonging to another camera and a
+    // session that never existed answer with the identical 403 body. Deleting someone else's session
+    // is not a nuisance: it releases the evidence read-locks that session held on their segments.
+    // An unattributed session (no `media_artifacts` row) is refused for a scoped caller, which is the
+    // fail-closed answer; unscoped credentials skip this entirely and behave exactly as before.
+    if principal.camera_scope().is_some() {
+        let key = format!("playback/{session_id}");
+        let held = match media_scope::owners(&st.pool, &key).await {
+            media_scope::Owners::Cameras(cams) => {
+                !cams.is_empty() && cams.iter().all(|c| principal.camera_allowed(c))
+            }
+            media_scope::Owners::Unattributed => false,
+        };
+        if !held {
+            return Err(crate::state::scope_denied_owner(
+                "playback session",
+                "delete playback sessions",
+            ));
+        }
+    }
     playback_session::delete_session(&st, &session_id).await?;
     auth::audit(
         &st.pool,

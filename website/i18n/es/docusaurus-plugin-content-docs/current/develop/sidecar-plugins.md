@@ -142,7 +142,9 @@ claves `viewer` son de solo lectura.
   cuando confíes en la ruta).
 - La consola **nunca reenvía tu cookie de sesión** a un sidecar; el sidecar se autentica en el kernel
   únicamente con su propia clave acuñada.
-- El iframe de la interfaz del plugin está en sandbox (`allow-scripts allow-same-origin allow-forms allow-popups`);
-  no puede navegar ni actuar sobre el frame de la consola principal.
+- El iframe de la interfaz del plugin está en sandbox **sin `allow-same-origin`**
+  (`allow-scripts allow-forms`), por lo que se ejecuta en un origen opaco: no puede acceder al DOM ni al
+  almacenamiento de la consola, y sus peticiones no llevan la cookie de sesión. Para llamar a su propio
+  backend usa el puente del host, que confina cada petición a la raíz `/m/{id}/` de ese plugin.
 - La desinstalación revoca completamente la clave y la suscripción, por lo que un plugin eliminado no
   conserva ningún acceso activo.

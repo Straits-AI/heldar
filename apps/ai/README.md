@@ -11,16 +11,35 @@ posts results back.
 
 ## What it does
 
-1. **Discovers work** by polling `GET {API}/api/v1/ai/tasks`, which returns one
-   entry per enabled AI task on an enabled camera:
+1. **Leases work** by calling `POST {API}/api/v1/ai/leases` with its `worker_id`,
+   which returns one entry per leased task:
    `{ id, camera_id, task_type, stream_profile, fps, width, config, frame_url }`.
+   Acquire and renew are the same call. A `404` means the kernel predates task
+   leases, and the worker falls back to `GET {API}/api/v1/ai/tasks` for the rest
+   of the process's life (logged once) — so a new worker still runs against an
+   old core.
 2. For each task, on a loop at the task's `fps`, it **pulls the latest frame**
    from `{API}{frame_url}` (JPEG bytes). A `404` means "no frame sampled yet"
-   and is treated as a skip, not an error.
+   and is treated as a skip, not an error. When the worker holds a live lease on
+   that task the response also carries an **`x-frame-ticket`**, which it stores on
+   the frame (not on the task) and posts back verbatim.
 3. It runs the **analyzer** chosen by `task_type` and **POSTs results** to
-   `{API}/api/v1/ai/events`.
-4. It **re-polls** `/ai/tasks` every `--poll-interval` seconds to pick up new,
-   changed, or removed tasks (reconciling the set of per-task threads).
+   `{API}/api/v1/ai/events`, including the frame ticket when it has one. A core
+   running `HELDAR_INGEST_PROVENANCE=enforce` requires it; one running the default
+   `warn` accepts the post either way.
+4. It **re-leases** every `--poll-interval` seconds to pick up new, changed, or
+   removed tasks (reconciling the set of per-task threads) and to renew. A task
+   runner that is refused on lease/ticket grounds (`401 frame_ticket_required` or
+   `409`) drops that batch, wakes the supervisor early, and continues with the
+   next frame — it never resends a body under a different ticket, because a ticket
+   names one specific captured frame. On shutdown it releases the lease so a
+   restart does not wait out the TTL.
+
+> The worker never sets `attributes.source` or `attributes._prov`. Both are
+> server-owned: the kernel writes them from the credential and lease the batch
+> arrived under, and strips anything a client sends. In particular a worker
+> **cannot** claim `source: "camera_native"`, which the entry engine treats as an
+> authoritative plate read.
 5. A separate daemon thread **fast-polls**
    `GET {API}/api/v1/ai/embed-queries?worker_id=...` (default every `1 s`,
    `--embed-poll-interval`) and answers **semantic-search query embeddings**
@@ -123,7 +142,8 @@ which override the built-in defaults.
 | Flag | Env var | Default | Meaning |
 |------|---------|---------|---------|
 | `--api` | `HELDAR_API` | `http://localhost:8000` | Heldar Core base URL |
-| `--poll-interval` | `HELDAR_AI_POLL_INTERVAL` | `10` | Seconds between `/ai/tasks` re-polls |
+| `--poll-interval` | `HELDAR_AI_POLL_INTERVAL` | `10` | Seconds between lease renewals (`/ai/leases`, falling back to `/ai/tasks`) |
+| `--lease-ttl` | `HELDAR_AI_LEASE_TTL` | `60` | Requested task-lease lifetime (s); kernel clamps to `15..=300`, and the worker floors it at 3× the poll interval so a renewal never races its own expiry |
 | `--http-timeout` | `HELDAR_HTTP_TIMEOUT` | `10` | Per-request timeout (s) |
 | `--http-max-retries` | `HELDAR_HTTP_MAX_RETRIES` | `5` | Retries for transient HTTP failures |
 | `--backoff-base` | `HELDAR_HTTP_BACKOFF_BASE` | `0.5` | Initial backoff (s) |

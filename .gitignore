@@ -56,3 +56,11 @@ infra/mediamtx/*.tar.gz
 # Playwright MCP scratch (screenshots/console logs)
 .playwright-mcp/
 .superpowers/
+infra/caddy/caddy
+infra/caddy/*.tar.gz
+
+# Private keys. data/ is already ignored, but an operator who points HELDAR_DATA_DIR
+# somewhere inside the tree must not be one `git add` away from publishing the appliance
+# identity that signs its evidence bundles (#118).
+*.pkcs8
+evidence-signing-key*

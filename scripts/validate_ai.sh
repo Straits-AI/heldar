@@ -1,7 +1,17 @@
 #!/usr/bin/env bash
-# Stage 2 validation: create an AI task on a real camera, confirm the sampler produces frames, the
-# worker contract endpoints work, and detection ingestion round-trips. Assumes the stack is running
-# and camera cam_192_168_0_2 is registered.
+# Stage 2 validation: create an AI task, confirm THE SAMPLER PRODUCES A FRAME FROM A LIVE STREAM,
+# that the worker contract endpoints work, and that detection ingestion round-trips.
+#
+# Runs against the synthetic stack (scripts/validate_subsystems.sh), which publishes a real RTSP
+# stream for the whole run. CI excluded this script for years on the grounds that it "needs a REAL
+# camera actively streaming ... cannot be satisfied synthetically" — that stopped being true once the
+# subsystem stack existed: it publishes a live stream, `ai_enabled` defaults to true
+# (config.rs), and the sampler falls back to the record URL when a camera has no sub-stream
+# (services/sampler.rs), which is exactly the synthetic camera's shape.
+#
+# The frame check below is the one that needed a live stream, and it is the point of the script: it
+# is the only place anything asserts that the SAMPLER, rather than a hand-posted event, turned a
+# stream into a frame.
 set -u
 API=http://127.0.0.1:8000
 CAM="${CAM:-cam_192_168_0_2}"
@@ -11,17 +21,23 @@ mkdir -p "$DATA"
 REPORT="$DATA/validate_ai.txt"
 : > "$REPORT"
 log(){ echo "$@" | tee -a "$REPORT"; }
+. "$ROOT/scripts/lib/assert.sh"
 
 curl -s --retry 30 --retry-delay 1 --retry-connrefused -o /dev/null "$API/healthz" || { log "core down"; exit 1; }
 log "core up"
 
 log "## create AI task (detection, 5fps, 640px) on $CAM"
-curl -s -X POST "$API/api/v1/cameras/$CAM/ai-tasks" -H 'content-type: application/json' \
-  -d '{"task_type":"detection","fps":5,"width":640,"config":{"model":"yolo-demo"}}' \
-  | python3 -m json.tool 2>/dev/null | tee -a "$REPORT"
+TASK=$(curl -s -X POST "$API/api/v1/cameras/$CAM/ai-tasks" -H 'content-type: application/json' \
+  -d '{"task_type":"detection","fps":5,"width":640,"config":{"model":"yolo-demo"}}')
+echo "$TASK" | python3 -m json.tool 2>/dev/null | tee -a "$REPORT"
+TASK_ID=$(echo "$TASK" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("id",""))' 2>/dev/null)
+assert_contains "$TASK_ID" "ai_" "the AI task was created and has an id"
 
 log "## worker discovery: GET /api/v1/ai/tasks"
-curl -s "$API/api/v1/ai/tasks" | python3 -m json.tool 2>/dev/null | tee -a "$REPORT"
+TASKS=$(curl -s "$API/api/v1/ai/tasks")
+echo "$TASKS" | python3 -m json.tool 2>/dev/null | tee -a "$REPORT"
+# A worker that cannot see the task cannot lease it, so the rest of the pipeline is unreachable.
+assert_contains "$TASKS" "$CAM" "the task is visible to a worker on /api/v1/ai/tasks"
 
 log "## wait for sampler to produce a frame"
 FRAME_OK=0
@@ -32,6 +48,13 @@ for i in $(seq 1 25); do
 done
 log "frame http=$code ok=$FRAME_OK"
 file "$DATA/ai_frame.jpg" 2>/dev/null | tee -a "$REPORT"
+# THE ASSERTION THIS SCRIPT EXISTS FOR. Everything else here can be satisfied by posting JSON at the
+# API; this is the only check that something decoded a live stream into a frame. It is also the one
+# the old CI comment claimed could not be satisfied synthetically.
+assert_eq "1" "$FRAME_OK" "the sampler produced a frame from the live stream"
+# A 200 carrying zero bytes would pass the check above. JPEG magic is what makes it a frame.
+FRAME_MAGIC=$(head -c2 "$DATA/ai_frame.jpg" 2>/dev/null | od -An -tx1 | tr -d ' \n')
+assert_eq "ffd8" "$FRAME_MAGIC" "the frame is a JPEG, not an empty 200"
 log "frame age header:"
 curl -s -D - -o /dev/null "$API/api/v1/cameras/$CAM/frame" | grep -i '^x-frame' | tee -a "$REPORT"
 
@@ -47,9 +70,132 @@ curl -s -X POST "$API/api/v1/ai/events" -H 'content-type: application/json' -d "
 }" | python3 -m json.tool 2>/dev/null | tee -a "$REPORT"
 
 log "## query detections"
-curl -s "$API/api/v1/cameras/$CAM/detections?limit=5" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d),"detections"); [print(" ",x["label"],x["confidence"],x["bbox"]) for x in d]' 2>/dev/null | tee -a "$REPORT"
+DETS=$(curl -s "$API/api/v1/cameras/$CAM/detections?limit=5")
+echo "$DETS" | python3 -c 'import sys,json; d=json.load(sys.stdin); print(len(d),"detections"); [print(" ",x["label"],x["confidence"],x["bbox"]) for x in d]' 2>/dev/null | tee -a "$REPORT"
+N_DETS=$(echo "$DETS" | python3 -c 'import sys,json; print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)
+assert_ge "$N_DETS" 2 "both ingested detections round-trip through the query API"
 
 log "## metrics (AI)"
-curl -s "$API/metrics" | grep -E 'heldar_(ai_tasks_enabled|detections_total)' | tee -a "$REPORT"
+# `heldar_detections_stored`, NOT `heldar_detections_total`: the exposition never emitted the latter,
+# so this grep matched nothing and printed nothing, in a script with no assertions to notice.
+AI_METRICS=$(curl -s "$API/metrics" | grep -E 'heldar_(ai_tasks_enabled|detections_stored)')
+echo "$AI_METRICS" | tee -a "$REPORT"
+assert_contains "$AI_METRICS" "heldar_ai_tasks_enabled" "the enabled AI task is visible in /metrics"
+assert_contains "$AI_METRICS" "heldar_detections_stored" "stored detections are visible in /metrics"
+
+# ---------------------------------------------------------------------------------------------
+# THE WHOLE CHAIN, in one pass: lease -> ticketed frame pull -> attributable ingest (#113).
+#
+# Everything above proves the pieces separately. This is the only place anything walks the path a
+# real worker walks, against the stream the stack is actually publishing — which is what criterion 3
+# asks for. It is deterministic on purpose: a fixed bbox and no model, so the assertion is about the
+# PROVENANCE CHAIN and not about whether a detector found something.
+# ---------------------------------------------------------------------------------------------
+log "## worker chain: lease -> ticketed frame -> attributable ingest"
+
+LEASE=$(curl -s -X POST "$API/api/v1/ai/leases" -H 'content-type: application/json' \
+  -d '{"worker_id":"validate-ai-mock","ttl_secs":60}')
+echo "$LEASE" | python3 -m json.tool 2>/dev/null | tee -a "$REPORT"
+LEASED_TASK=$(echo "$LEASE" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+t = [x for x in d.get("tasks", []) if x.get("camera_id") == sys.argv[1]]
+print(t[0]["id"] if t else "")' "$CAM" 2>/dev/null)
+FRAME_URL=$(echo "$LEASE" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+t = [x for x in d.get("tasks", []) if x.get("camera_id") == sys.argv[1]]
+print(t[0]["frame_url"] if t else "")' "$CAM" 2>/dev/null)
+assert_contains "$LEASED_TASK" "ai_" "the worker leased this camera's task"
+
+# `frame_url` is used AS ISSUED. The server already builds it with `?profile=…&task=…` (ai.rs) —
+# appending another `?task=` produced a second `?`, the server saw no valid task, minted no ticket,
+# and the chain assertion below failed against a perfectly healthy box. The contract hands a worker
+# the exact URL to pull for this reason; taking it apart is how a client reintroduces a bug the
+# server went out of its way to prevent.
+#
+# A pull WITHOUT the task parameter returns the same bytes and no ticket — that is how the dashboard
+# reads frames, and it is why the ticket proves a lease rather than mere access.
+HDRS=$(curl -s -D - -o "$DATA/ai_chain_frame.jpg" "$API$FRAME_URL")
+TICKET=$(echo "$HDRS" | tr -d '\r' | awk 'tolower($1)=="x-frame-ticket:"{print $2}')
+assert_ge "${#TICKET}" 16 "the leased frame pull returned an x-frame-ticket"
+
+# A ticket that does not travel is a ticket that proves nothing — post it back with the detections.
+INGEST=$(curl -s -X POST "$API/api/v1/ai/events" -H 'content-type: application/json' -d "{
+  \"camera_id\":\"$CAM\",\"task_type\":\"detection\",\"frame_ticket\":\"$TICKET\",
+  \"detections\":[{\"label\":\"person\",\"confidence\":0.95,\"bbox\":[0.4,0.4,0.1,0.2],\"track_id\":\"chain\"}]
+}")
+echo "$INGEST" | python3 -m json.tool 2>/dev/null | tee -a "$REPORT"
+TICKETED=$(echo "$INGEST" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("ticketed"))' 2>/dev/null)
+# `ticketed: true` is the server saying the batch was bound to a frame IT issued — the end of the
+# chain. Under the default `warn` tier an untricketed batch is still accepted, so asserting the
+# ingest merely succeeded would pass with no provenance at all.
+assert_eq "True" "$TICKETED" "the ingest was bound to a server-issued frame (ticketed)"
+
+CHAIN_DET=$(curl -s "$API/api/v1/cameras/$CAM/detections?limit=20" \
+  | python3 -c 'import sys,json; print(sum(1 for d in json.load(sys.stdin) if d.get("track_id")=="chain"))' 2>/dev/null || echo 0)
+assert_ge "$CHAIN_DET" 1 "the chain's detection is queryable afterwards"
+
+# ---------------------------------------------------------------------------------------------
+# ...and out the other end: the detection's instant must be FETCHABLE FOOTAGE (#113 criterion 3).
+#
+# The chain above ends at "a detection is stored". That is not evidence yet. The criterion says
+# "generated stream to SEARCHABLE EVIDENCE", and the half nothing tested is whether the instant a
+# detection names can actually be retrieved as video — which is the entire proposition of an NVR.
+# ---------------------------------------------------------------------------------------------
+log "## evidence: the detection's instant is fetchable footage"
+
+# Give the recorder a moment to close and index a segment covering the detection just ingested.
+sleep 8
+NOW=$(python3 -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+AGO=$(python3 -c 'import datetime; print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=3)).strftime("%Y-%m-%dT%H:%M:%SZ"))')
+
+TL=$(curl -s "$API/api/v1/cameras/$CAM/timeline?from=$AGO&to=$NOW")
+echo "$TL" | python3 -m json.tool 2>/dev/null | head -20 | tee -a "$REPORT"
+RECORDED=$(echo "$TL" | python3 -c 'import sys,json; print(int(json.load(sys.stdin).get("recorded_seconds") or 0))' 2>/dev/null || echo 0)
+# The stream has been publishing since the stack came up, so the window the detection sits in must
+# have real coverage. Zero means the recorder never wrote the footage the detection describes.
+assert_ge "$RECORDED" 5 "the detection's window has recorded footage behind it"
+
+# Export exactly the NEWEST range the timeline just reported, rather than a wide window.
+#
+# Two reasons, both learned by getting it wrong. A wide window spans gaps and the retention sweeper
+# prunes aggressively in this short-lived stack, so asking for three minutes RACED the sweeper: the
+# export read its segment list, retention removed a row and its file, and ffmpeg's concat failed with
+# "Impossible to open" — a 500 that says nothing about the evidence path (filed as #183). And asking
+# for exactly what the timeline promised is the stronger assertion anyway: it holds the box to its
+# own answer.
+read -r CLIP_FROM CLIP_TO <<EOF2
+$(echo "$TL" | python3 -c '
+import sys, json
+r = (json.load(sys.stdin).get("ranges") or [])
+print(r[-1]["start"], r[-1]["end"]) if r else print("", "")' 2>/dev/null)
+EOF2
+assert_ge "${#CLIP_FROM}" 10 "the timeline named a range to export"
+
+# The clip route answers with JSON DESCRIBING the export — id, url, covered_seconds, gaps — not with
+# the video. An earlier version saved that JSON to a .mp4 and measured 462 bytes, which reads exactly
+# like a broken export and was a broken assertion.
+CLIP=$(curl -s -X POST "$API/api/v1/cameras/$CAM/clip" \
+  -H 'content-type: application/json' -d "{\"from\":\"$CLIP_FROM\",\"to\":\"$CLIP_TO\"}")
+echo "$CLIP" | python3 -m json.tool 2>/dev/null | tee -a "$REPORT"
+COVERED=$(echo "$CLIP" | python3 -c 'import sys,json; print(int(json.load(sys.stdin).get("covered_seconds") or 0))' 2>/dev/null || echo 0)
+CLIP_URL=$(echo "$CLIP" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("url",""))' 2>/dev/null)
+# The window came FROM the timeline, so less than most of it means the box cannot export footage it
+# just said it had.
+assert_ge "$COVERED" 5 "the export covers the footage the timeline promised"
+
+# FOLLOW THE URL. This is the "accessible artifact" half of the criterion: a hit that names an export
+# nobody can fetch is not evidence.
+ART_CODE=$(curl -s -o "$DATA/ai_evidence.mp4" -w '%{http_code}' "$API$CLIP_URL")
+assert_eq "200" "$ART_CODE" "the exported clip is fetchable at the url the API returned"
+# `ftyp` at offset 4 — an ISO-BMFF box. When the file was missing, the media route fell through to
+# the dashboard's SPA and returned 200 with index.html: 3549 bytes, which a size floor alone would
+# have accepted. `<!doctype` puts `ctyp` at that offset, which is how it was spotted.
+ART_MAGIC=$(dd if="$DATA/ai_evidence.mp4" bs=1 skip=4 count=4 2>/dev/null)
+assert_eq "ftyp" "$ART_MAGIC" "the fetched artifact is an MP4, not an error body"
+ART_BYTES=$(stat -f%z "$DATA/ai_evidence.mp4" 2>/dev/null || stat -c%s "$DATA/ai_evidence.mp4" 2>/dev/null || echo 0)
+assert_ge "$ART_BYTES" 10000 "the fetched clip contains actual video"
 
 log "DONE"
+assert_summary

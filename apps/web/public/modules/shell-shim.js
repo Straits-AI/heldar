@@ -36,6 +36,7 @@ export const {
   Spinner,
   EmptyState,
   SectionLabel,
+  ViewerClockNote,
   Drawer,
   // shared auth surface
   Login,
@@ -48,6 +49,10 @@ export const {
   timeAgo,
   isoToLocalInput,
   localInputToIso,
+  // Was missing: sdk.ts has exported it since the SDK was introduced, and modules/search imports it.
+  // A module bundle resolving `@heldar/shell` through THIS file got `undefined` and threw on first
+  // use — it typechecks against sdk.ts, so nothing caught it until sdk.test.ts.
+  friendlyError,
 } = S;
 
 export default S;

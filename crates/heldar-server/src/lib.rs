@@ -15,10 +15,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Context;
-use axum::extract::{FromRequestParts, Request, State};
-use axum::http::{HeaderValue, StatusCode};
-use axum::middleware::Next;
-use axum::response::{IntoResponse, Response};
+use axum::http::HeaderValue;
 use axum::Router;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::{ServeDir, ServeFile};
@@ -55,8 +52,33 @@ pub trait Verticals: Send + Sync {
         Ok(())
     }
     /// Spawn vertical background loops (use [`spawn_supervised`] for resilience).
+    ///
+    /// A loop holds NO principal, so nothing it does is scope-checked. That is the sharpest edge in
+    /// this trait: if a camera-scoped credential can write state your loop later acts on, the loop
+    /// executes that write with no scope at all. In this workspace an authorised `PATCH` of one
+    /// camera's `retention_hours` made the retention sweeper delete a DIFFERENT camera's recordings —
+    /// every guard answered correctly; the damage happened afterwards. Retention now evicts on a
+    /// per-camera fair share for exactly this reason. If your loop consumes operator-writable state,
+    /// bound each camera's effect on the others.
     fn spawn_loops(&self, _pool: &sqlx::SqlitePool) {}
     /// Merge vertical routers onto the app (inside the /api/v1 auth floor).
+    ///
+    /// # What you get, and what you must do yourself
+    ///
+    /// AUTHENTICATION is structural: this runs before `require_api_auth` is layered on, so a merged
+    /// route cannot be unauthenticated by accident.
+    ///
+    /// CAMERA SCOPE is not. An authenticated `Principal` may carry `Scope::Cameras`, and nothing
+    /// forces a handler to consult it — in THIS workspace 47 routes across three app crates shipped
+    /// with no scope call at all, with the primitives public in a crate they already depended on.
+    /// Use them: `heldar_kernel::routes::cameras::require_fleet_scope` to refuse a scoped credential
+    /// outright, `heldar_kernel::state::{camera_scope_filter, confine_camera_ids, camera_selection}`
+    /// to confine reads, writes and deferred work. Scope is orthogonal to role — `Cap::Admin` does
+    /// NOT exempt a credential — and a route keyed by a resource id rather than a camera id still
+    /// has to resolve its owning camera.
+    ///
+    /// Assert it with `heldar_testkit::Census`, pointed at your own source roots AND this
+    /// workspace's, so the composed surface is checked rather than each half separately.
     fn merge_routes(&self, router: Router<AppState>) -> Router<AppState> {
         router
     }
@@ -74,6 +96,29 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
     init_tracing();
 
     let cfg = Arc::new(Config::from_env());
+
+    // A SECRET SOURCE THAT WAS NAMED BUT COULD NOT BE READ STOPS THE BOOT (#126).
+    //
+    // An operator who set `HELDAR_SECRET_KEY_FILE` asked for encryption at rest. Starting anyway
+    // would store every camera credential in plaintext while the deployment believed they were
+    // sealed — and the failure would stay invisible until someone read the database.
+    //
+    // Checked HERE rather than in `Config::from_env()`, which is the repo's test-config idiom: a
+    // panic there meant one stale variable in a developer's shell detonated 144 unrelated tests.
+    // Refusing at boot is the same fail-closed guarantee, where the message is actionable.
+    // Subcommands are covered too — `rekey-secrets` reading a half-configured key is worse, not
+    // better, than the server doing so.
+    let secret_errors = Config::secret_source_errors();
+    if !secret_errors.is_empty() {
+        anyhow::bail!(
+            "refusing to start: {} secret source(s) were configured but could not be read. \
+             Continuing would store credentials in plaintext while this deployment believes they \
+             are encrypted.\n  {}",
+            secret_errors.len(),
+            secret_errors.join("\n  ")
+        );
+    }
+
     // One-shot admin subcommands run a maintenance task and exit, bypassing the server boot (and its
     // process-wide key install + guardrails, which they manage themselves).
     if let Some(cmd) = std::env::args().nth(1) {
@@ -83,6 +128,15 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
     // built, and run the internet-exposed production guardrails (warn, or refuse under STRICT_PROD).
     services::secrets::init_key(cfg.secret_key_b64.as_deref()).context("HELDAR_SECRET_KEY")?;
     cfg.enforce_production_guardrails()?;
+    // A DECLARED high-assurance posture is verified, not taken on trust (#126, ADR 0006). Camera
+    // credentials reach ffmpeg in its argv and cannot be removed from there without changing the
+    // media path; what the box can do is refuse when a deployment says no untrusted local user can
+    // read them and the mount options say otherwise.
+    if let Some(why) =
+        services::posture::credential_isolation_failure(cfg.require_credential_isolation)
+    {
+        anyhow::bail!("{why}");
+    }
     // Surface the effective local timezone at boot. Recording schedules are evaluated in server-local
     // time (chrono::Local); in a container/appliance with no tzdata or TZ unset, Local silently
     // resolves to UTC, so an operator who set "09:00 local" would record in UTC. Logging the offset
@@ -115,6 +169,25 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
     if resealed > 0 {
         tracing::info!("sealed {resealed} legacy camera credential(s) at rest");
     }
+    // Same treatment for the other secret-bearing fields: webhook signing keys and backup destination
+    // credentials were masked in API responses but written to SQLite in the clear.
+    let resealed_creds = services::secrets::reencrypt_stored_credentials(&pool)
+        .await
+        .context("re-encrypt stored credentials")?;
+    if resealed_creds > 0 {
+        tracing::info!("sealed {resealed_creds} legacy webhook/backup credential(s) at rest");
+    }
+    // One boxed banner naming the resolved machine-credential posture and every credential still on a
+    // role expansion. Best-effort: a failed query here must never stop the box from booting.
+    let legacy_keys: Vec<(String, String)> =
+        sqlx::query_as("SELECT id, name FROM api_keys WHERE capabilities IS NULL AND active = 1")
+            .fetch_all(&pool)
+            .await
+            .unwrap_or_default();
+    cfg.log_machine_auth_banner(&legacy_keys);
+    // Name the size of the clip-attribution cliff (see the fn doc) instead of letting it surface as
+    // "my scoped key gets 403 on an old clip".
+    log_unattributed_clips(&pool, &cfg.clips_dir).await;
     // Release any transient segment read-locks left by a crash mid clip/snapshot export.
     db::clear_segment_read_locks(&pool)
         .await
@@ -223,6 +296,7 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
         modules,
         catalog: catalog.clone(),
         http,
+        media_jobs: services::media_jobs::MediaJobGovernor::new(cfg.media_job_concurrency),
         started_at: chrono::Utc::now(),
     };
 
@@ -242,6 +316,16 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
             services::health::run(p.clone(), c.clone())
         });
         let (p, c) = (pool.clone(), cfg.clone());
+        // Withdraw live streams whose credential no longer stands. Only matters for transports that
+        // never re-present their token (WebRTC, RTSP readers) — the auth callback already handles
+        // HLS. Opt-out by setting the interval to 0.
+        if state.cfg.live_reaper_interval_s > 0 {
+            let st = state.clone();
+            spawn_supervised("live-reaper", move || {
+                let st = st.clone();
+                async move { heldar_kernel::services::live_reaper::run(st).await }
+            });
+        }
         spawn_supervised("retention", move || {
             services::retention::run(p.clone(), c.clone())
         });
@@ -417,45 +501,61 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
         }
     }
 
-    // Allow all origins if configured with "*" or left empty; otherwise restrict to the list.
-    let allow_all = cfg.cors_origins.is_empty() || cfg.cors_origins.iter().any(|o| o == "*");
-    let cors = if allow_all {
-        CorsLayer::new()
-            .allow_origin(Any)
-            .allow_methods(Any)
-            .allow_headers(Any)
-    } else {
-        let origins: Vec<HeaderValue> = cfg
-            .cors_origins
-            .iter()
-            .filter_map(|o| o.parse::<HeaderValue>().ok())
-            .collect();
-        CorsLayer::new()
-            .allow_origin(origins)
-            .allow_methods(Any)
-            .allow_headers(Any)
+    let cors: Option<CorsLayer> = match cors_mode(&cfg.cors_origins) {
+        // No layer at all: the browser's same-origin policy is the whole rule. The dashboard is
+        // served from this origin, so it needs nothing here.
+        CorsMode::SameOriginOnly => None,
+        CorsMode::AllowAny => Some(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        ),
+        CorsMode::Allowlist => {
+            let origins: Vec<HeaderValue> = cfg
+                .cors_origins
+                .iter()
+                .filter_map(|o| o.parse::<HeaderValue>().ok())
+                .collect();
+            Some(
+                CorsLayer::new()
+                    .allow_origin(origins)
+                    .allow_methods(Any)
+                    .allow_headers(Any),
+            )
+        }
     };
 
     // Open generic apps merge their routers here; the kernel router is unaware of them.
     let app = Router::new()
         .merge(routes::api_router())
         .merge(routes::metrics::router())
+        .merge(heldar_kernel::openapi::router())
         .merge(heldar_entry::routes::router())
         .merge(heldar_movement::routes::router(movement_cfg.clone()))
         .merge(heldar_search::routes::router(search_cfg.clone()));
     // Proprietary verticals merge their routers via the seam (a no-op in the open build).
     // Recorded media (/media/*) is the same sensitive footage the API gates — so guard it with the
-    // SAME auth when enabled. The browser sends the session cookie with <img>/<video> requests, so the
-    // dashboard keeps working; an unauthenticated client gets 401. No-op when auth is disabled.
+    // SAME auth AND the same camera scope when enabled. The browser sends the session cookie with
+    // <img>/<video> requests, so the dashboard keeps working; an unauthenticated client gets 401.
+    // No-op when auth is disabled.
+    //
+    // The guard itself lives in the kernel (`services::media_scope`) rather than here, because the
+    // flat subtrees (clips, playback sessions, evidence snapshots, archives) name no camera in their
+    // path and are resolved through the `media_artifacts` sidecar the kernel's producers write. Every
+    // `nest_service` prefix below must be recognised by `media_scope::requirement`, which refuses an
+    // unrecognised prefix outright — adding a sixth subtree here without extending it fails CLOSED
+    // (403 for every credential) instead of serving it ungated.
     let media = Router::new()
         .nest_service("/media/recordings", ServeDir::new(&cfg.recordings_dir))
         .nest_service("/media/clips", ServeDir::new(&cfg.clips_dir))
         .nest_service("/media/snapshots", ServeDir::new(&cfg.snapshots_dir))
         .nest_service("/media/playback", ServeDir::new(&cfg.playback_dir))
         .nest_service("/media/archives", ServeDir::new(&cfg.archive_dir))
+        .nest_service("/media/evidence", ServeDir::new(&cfg.evidence_dir))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
-            media_guard,
+            services::media_scope::guard,
         ));
     // Authentication floor for the ENTIRE /api/v1 surface — kernel, open apps, and verticals
     // alike (issue #52): a handler that forgets to name `Principal` can no longer answer
@@ -463,6 +563,13 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
     // non-/api/v1 paths pass through (media has its own guard below).
     let app = verticals
         .merge_routes(app)
+        // Idempotency sits INSIDE the auth floor, deliberately: it scopes keys to the principal, and
+        // the principal is what the floor resolves. Outside it there would be no identity to scope
+        // by, and one caller could replay another's result by guessing a key.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            heldar_kernel::idempotency::layer,
+        ))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             heldar_kernel::auth::require_api_auth,
@@ -488,10 +595,16 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
         }
     };
 
-    let app = app
-        .layer(TraceLayer::new_for_http())
-        .layer(cors)
-        .with_state(state);
+    // Outermost of the app layers so EVERY response carries the id, including auth rejections and
+    // errors raised before a handler runs — those are exactly the ones a caller needs to quote.
+    let app = app.layer(axum::middleware::from_fn(heldar_kernel::request_id::layer));
+    let app = app.layer(TraceLayer::new_for_http());
+    // Same-origin-only attaches NO layer at all, rather than a permissive one.
+    let app = match cors {
+        Some(layer) => app.layer(layer),
+        None => app,
+    };
+    let app = app.with_state(state);
 
     let addr = format!("{}:{}", cfg.api_host, cfg.api_port);
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -510,6 +623,34 @@ pub async fn run(verticals: impl Verticals) -> anyhow::Result<()> {
         .context("server error")?;
 
     Ok(())
+}
+
+/// What the configured origin list means for the CORS layer.
+#[derive(Debug, PartialEq, Eq)]
+enum CorsMode {
+    /// No CORS layer — cross-origin reads are refused by the browser's own same-origin policy.
+    SameOriginOnly,
+    /// `Access-Control-Allow-Origin: *`. Only ever from an explicit `*` entry.
+    AllowAny,
+    /// Restricted to the configured origins.
+    Allowlist,
+}
+
+/// Classify `HELDAR_CORS_ORIGINS` into a posture.
+///
+/// EMPTY MEANS SAME-ORIGIN ONLY. This used to mean allow-ANY, which inverted the documented
+/// behaviour: `.env.production.example` ships `HELDAR_CORS_ORIGINS=` commented "leave empty for
+/// same-origin only", so an operator following the production template got every origin allowed —
+/// and the strict-prod guardrail missed it, because it only ever looked for a literal `*`. Allow-any
+/// now requires deliberately writing `*`.
+fn cors_mode(origins: &[String]) -> CorsMode {
+    if origins.is_empty() {
+        CorsMode::SameOriginOnly
+    } else if origins.iter().any(|o| o == "*") {
+        CorsMode::AllowAny
+    } else {
+        CorsMode::Allowlist
+    }
 }
 
 /// One-shot admin subcommands (run then exit, bypassing the server boot). Usage:
@@ -534,7 +675,11 @@ async fn run_subcommand(cmd: &str, cfg: &Config) -> anyhow::Result<()> {
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .context("HELDAR_SECRET_KEY (the new key) must be set")?;
-            let old_raw = std::env::var("HELDAR_SECRET_KEY_OLD").unwrap_or_default();
+            let old_raw = heldar_kernel::services::secret_source::resolve("HELDAR_SECRET_KEY_OLD")
+                .ok()
+                .flatten()
+                .map(|r| r.expose().to_string())
+                .unwrap_or_default();
             let old_b64 = old_raw.trim();
             if old_b64.is_empty() {
                 anyhow::bail!(
@@ -548,9 +693,16 @@ async fn run_subcommand(cmd: &str, cfg: &Config) -> anyhow::Result<()> {
                 anyhow::bail!("HELDAR_SECRET_KEY_OLD == HELDAR_SECRET_KEY — nothing to rotate");
             }
             let pool = db::init_pool(cfg).await.context("open database")?;
-            let n = services::admin::rekey_camera_secrets(&pool, &old_key, &new_key).await?;
+            // ONE TRANSACTION. A failure part-way through used to leave some rows under the new
+            // key and some under the old, and a mixed database is not a partial success: every
+            // camera on the wrong side of the split stops recording, because decrypting with the
+            // wrong key is a hard error by design.
+            let (n, m) = services::admin::rekey_all(&pool, &old_key, &new_key).await?;
             pool.close().await;
-            println!("rekey-secrets: re-sealed {n} camera credential(s) under the new key");
+            println!(
+                "rekey-secrets: re-sealed {n} camera credential(s) and {m} webhook/backup \
+                 credential(s) under the new key"
+            );
             Ok(())
         }
         "convert-autovacuum" => {
@@ -571,7 +723,7 @@ async fn run_subcommand(cmd: &str, cfg: &Config) -> anyhow::Result<()> {
                  Usage:\n  \
                  heldar-core                    run the server (default)\n  \
                  heldar-core backup-db <dest>   online snapshot of the metadata DB (SQLite VACUUM INTO)\n  \
-                 heldar-core rekey-secrets      re-seal camera credentials (HELDAR_SECRET_KEY_OLD -> HELDAR_SECRET_KEY)\n  \
+                 heldar-core rekey-secrets      re-seal camera + webhook + backup credentials, atomically (HELDAR_SECRET_KEY_OLD -> HELDAR_SECRET_KEY)\n  \
                  heldar-core convert-autovacuum one-time DB auto_vacuum=INCREMENTAL conversion (run with the server stopped)"
             );
             Ok(())
@@ -580,23 +732,83 @@ async fn run_subcommand(cmd: &str, cfg: &Config) -> anyhow::Result<()> {
     }
 }
 
-/// Auth guard for the recorded-media plane. When auth is enabled, requires a valid principal (resolved
-/// exactly like the API via the `Principal` extractor — cookie / Bearer / API key); 401 otherwise. A
-/// no-op pass-through when auth is disabled (the LAN-appliance default).
-async fn media_guard(State(st): State<AppState>, req: Request, next: Next) -> Response {
-    if !st.cfg.auth_enabled {
-        return next.run(req).await;
+/// Count clip files on disk that predate the `media_artifacts` sidecar, and say so once at boot.
+///
+/// The WHOLE API contract: the kernel's routes plus every app crate's.
+///
+/// Assembled here because this is the only crate that depends on all of them — the kernel cannot
+/// name an app crate's handler, and an app crate cannot name the kernel's document. Serving a
+/// partial document would be worse than serving none: an integrator reasonably reads a missing
+/// route as a route that does not exist.
+pub fn api_document() -> serde_json::Value {
+    heldar_kernel::openapi::document_with(&[
+        heldar_entry::openapi::fragment(),
+        heldar_movement::openapi::fragment(),
+        heldar_search::openapi::fragment(),
+    ])
+}
+
+/// There is no `clips` table and no camera id inside `clip_<uuid>.mp4`, so migration 0013 cannot
+/// backfill attribution for clips exported before it ran. Those files stay readable for every
+/// unscoped credential (which is every human role) and become 403 for a camera-SCOPED credential.
+/// That is the fail-closed answer, but it is a cliff — so report its exact size at boot rather than
+/// letting an operator discover it as a support ticket. Best-effort: never fails the boot.
+async fn log_unattributed_clips(pool: &sqlx::SqlitePool, clips_dir: &std::path::Path) {
+    let Ok(mut entries) = tokio::fs::read_dir(clips_dir).await else {
+        return;
+    };
+    // ONE query, not one per file: a box with thousands of retained clips must not pay thousands of
+    // round-trips on the boot path. A query failure yields an empty set, which would over-report, so
+    // bail instead of guessing.
+    let Ok(attributed) =
+        sqlx::query_scalar::<_, String>("SELECT path FROM media_artifacts WHERE kind = 'clip'")
+            .fetch_all(pool)
+            .await
+            .map(|v| v.into_iter().collect::<std::collections::HashSet<_>>())
+    else {
+        return;
+    };
+    let mut on_disk = 0usize;
+    let mut unattributed = 0usize;
+    while let Ok(Some(entry)) = entries.next_entry().await {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.ends_with(".mp4") {
+            continue;
+        }
+        on_disk += 1;
+        if !attributed.contains(&format!("clips/{name}")) {
+            unattributed += 1;
+        }
     }
-    let (mut parts, body) = req.into_parts();
-    match auth::Principal::from_request_parts(&mut parts, &st).await {
-        Ok(_) => next.run(Request::from_parts(parts, body)).await,
-        Err(_) => StatusCode::UNAUTHORIZED.into_response(),
+    if unattributed > 0 {
+        tracing::warn!(
+            target: "heldar::security",
+            clips_on_disk = on_disk,
+            unattributed = unattributed,
+            "{unattributed} of {on_disk} exported clip(s) predate media attribution and carry no \
+             owning camera. They remain readable for every unscoped credential (all human roles) and \
+             are refused for camera-SCOPED credentials. Clips exported from now on are attributed."
+        );
     }
 }
 
 fn init_tracing() {
+    // `HELDAR_LOG` first, then the conventional `RUST_LOG`. Only HELDAR_LOG used to be read, so an
+    // operator who set RUST_LOG=warn — the thing every Rust program honours — got no effect at all
+    // and kept the `info` default. That is not hypothetical: the live box sets RUST_LOG=warn and had
+    // a 300 MB core.log because of it.
     let filter = EnvFilter::try_from_env("HELDAR_LOG")
-        .unwrap_or_else(|_| EnvFilter::new("info,heldar_core=debug"));
+        .or_else(|_| EnvFilter::try_from_default_env())
+        .unwrap_or_else(|_| EnvFilter::new("info,heldar_core=debug"))
+        // Floor the correlation span whatever the global level says. It is `info_span!`, so a
+        // perfectly reasonable `warn` filter would drop the span and every warn/error line inside a
+        // request would lose its `request_id` — the id disappearing exactly when an operator is
+        // grepping for it. Costs one span per request.
+        .add_directive(
+            "heldar_kernel::request_id=info"
+                .parse()
+                .expect("static directive"),
+        );
     tracing_subscriber::registry()
         .with(filter)
         .with(tracing_subscriber::fmt::layer())
@@ -665,4 +877,71 @@ async fn shutdown_signal(
         m.shutdown().await;
     }
     sampler.shutdown().await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn empty_origins_mean_same_origin_only_not_allow_any() {
+        // The regression this guards: empty used to fall through to `allow_origin(Any)`, so the
+        // documented "leave empty for same-origin only" production setting allowed every origin.
+        assert_eq!(cors_mode(&[]), CorsMode::SameOriginOnly);
+    }
+
+    #[test]
+    fn allow_any_requires_an_explicit_wildcard() {
+        assert_eq!(cors_mode(&v(&["*"])), CorsMode::AllowAny);
+        // A wildcard anywhere in the list still widens it — worth stating so it is not read as
+        // "only when it is the sole entry".
+        assert_eq!(
+            cors_mode(&v(&["https://cam.example.com", "*"])),
+            CorsMode::AllowAny
+        );
+    }
+
+    /// The media plane's own rules moved into `heldar_kernel::services::media_scope` (which owns the
+    /// `media_artifacts` attribution the flat subtrees need) and are tested there. What stays this
+    /// crate's responsibility is that the two sides agree: every prefix mounted below is one the
+    /// guard recognises. `requirement` refuses anything it does not recognise, for EVERY credential,
+    /// so a prefix mounted here and missed there is a hard 403, not an ungated subtree — this test
+    /// turns that into a build-time-visible failure instead of a production one.
+    #[test]
+    fn every_mounted_media_prefix_is_one_the_guard_recognises() {
+        use heldar_kernel::services::media_scope::requirement;
+        // Keep in lockstep with the `nest_service` calls in `run`.
+        for path in [
+            "/media/recordings/cam_a/x.mp4",
+            "/media/clips/clip_x.mp4",
+            "/media/snapshots/s.jpg",
+            "/media/playback/pbs_1/index.m3u8",
+            "/media/archives/backup.zip",
+            "/media/evidence/ev_x.heldar-evidence",
+        ] {
+            assert!(
+                requirement(path).is_some(),
+                "{path} is mounted but media_scope::requirement does not recognise it"
+            );
+        }
+        // And the converse: an unmounted subtree is refused rather than served.
+        assert_eq!(requirement("/media/newthing/x"), None);
+        assert_eq!(requirement("/api/v1/cameras"), None);
+    }
+
+    #[test]
+    fn explicit_origins_are_an_allowlist() {
+        assert_eq!(
+            cors_mode(&v(&["https://cam.example.com"])),
+            CorsMode::Allowlist
+        );
+        assert_eq!(
+            cors_mode(&v(&["http://localhost:5173", "https://cam.example.com"])),
+            CorsMode::Allowlist
+        );
+    }
 }

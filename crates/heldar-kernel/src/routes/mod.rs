@@ -10,6 +10,7 @@ pub mod camera_config;
 pub mod camera_control;
 pub mod cameras;
 pub mod discovery;
+pub mod evidence;
 pub mod health;
 pub mod incidents;
 pub mod liveview;
@@ -24,6 +25,7 @@ pub mod recording_control;
 pub mod recordings;
 pub mod registry;
 pub mod schedules;
+pub mod sites;
 pub mod snapshot_schedules;
 pub mod system;
 pub mod webhooks;
@@ -44,6 +46,8 @@ pub fn api_router() -> Router<AppState> {
         .merge(anr::router())
         .merge(recording_control::router())
         .merge(playback::router())
+        .merge(evidence::router())
+        .merge(sites::router())
         .merge(playback_sessions::router())
         .merge(liveview::router())
         .merge(media_auth::router())
