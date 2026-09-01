@@ -10,6 +10,7 @@ mkdir -p "$DATA"
 REPORT="$DATA/validate_search.txt"
 : > "$REPORT"
 log(){ echo "$@" | tee -a "$REPORT"; }
+. "$ROOT/scripts/lib/assert.sh"
 jqget(){ python3 -c "import sys,json;d=json.load(sys.stdin);print($1)"; }
 anpr(){ curl -s -o /dev/null -X POST "$API/ai/events" -H 'content-type: application/json' -d "{\"camera_id\":\"$CAM\",\"task_type\":\"anpr\",\"detections\":[{\"label\":\"car\",\"confidence\":0.9,\"track_id\":\"$1\",\"bbox\":[0.4,0.4,0.2,0.3],\"attributes\":{\"plate\":\"$2\",\"plate_confidence\":0.95,\"color\":\"white\",\"vehicle_type\":\"car\"}}]}"; }
 
@@ -52,4 +53,9 @@ log "## identity-query audit (plate search writes audit_log):"
 curl -s -X POST "$API/search/nl" -H 'content-type: application/json' -d '{"query":"vehicle SEEK999"}' >/dev/null
 log "  search_identity_query audit entries: $(curl -s "$API/audit?action=search_identity_query&limit=5" | jqget 'len(d)')"
 log "  search_log rows: $(sqlite3 "$DATA/heldar.db" 'SELECT count(*) FROM search_log;' 2>/dev/null)"
+# Search's guarantee: a structured query answers, and an identity query is audited — the audit is the
+# part that matters, since it is what makes a plate lookup accountable.
+IDQ=$(curl -s "$API/audit?action=search_identity_query&limit=5" | python3 -c 'import sys,json;print(len(json.load(sys.stdin)))' 2>/dev/null || echo 0)
+assert_ge "$IDQ" 1 "identity query is audited"
 log "DONE"
+assert_summary

@@ -22,12 +22,14 @@ import {
   Input,
   Panel,
   SectionLabel,
+  ViewerClockNote,
   Select,
   Spinner,
   Stat,
   StatusPill,
   cx,
   formatClock,
+  friendlyError,
   localInputToIso,
 } from "@heldar/shell";
 import type {
@@ -212,10 +214,16 @@ function PlanChip({ label, value }: { label: string; value: ReactNode }) {
 
 function planEntries(plan: QueryPlan, nameFor: NameFor): { label: string; value: string }[] {
   const e: { label: string; value: string }[] = [];
+  // WHICH CLOCK THE HOUR FILTER WAS READ IN (#125). This said "UTC" unconditionally, which was
+  // accidentally true only while setting a zone required curl. The server now reads hour filters in
+  // the resolved site zone and states which in `plan.tz`, so a hardcoded label here would tell an
+  // operator their "after 6pm" search covered 18:00 UTC when it covered 18:00 Kuala Lumpur — the
+  // "convincing, WRONG footage" this whole feature exists to prevent, on the page that names it.
+  const zone = plan.tz ?? "UTC";
   if (plan.from) e.push({ label: "From", value: formatClock(plan.from) });
   if (plan.to) e.push({ label: "To", value: formatClock(plan.to) });
-  if (plan.hour_min != null) e.push({ label: "After", value: `${fmtHour(plan.hour_min)} UTC` });
-  if (plan.hour_max != null) e.push({ label: "Before", value: `${fmtHour(plan.hour_max)} UTC` });
+  if (plan.hour_min != null) e.push({ label: "After", value: `${fmtHour(plan.hour_min)} ${zone}` });
+  if (plan.hour_max != null) e.push({ label: "Before", value: `${fmtHour(plan.hour_max)} ${zone}` });
   if (plan.cameras && plan.cameras.length > 0)
     e.push({ label: "Cameras", value: plan.cameras.map((c) => nameFor(c)).join(", ") });
   if (plan.sources && plan.sources.length > 0)
@@ -824,7 +832,7 @@ function SemanticConsole({ nameFor, cameras }: { nameFor: NameFor; cameras: Came
           "Embedding worker offline — semantic search needs a running AI worker with the CLIP extra installed.",
         );
       } else {
-        setError(err instanceof ApiError ? err.message : String(err));
+        setError(friendlyError(err));
       }
       setResult(null);
       setSearched(true);
@@ -1461,6 +1469,7 @@ export function Search() {
             <h1 className="mt-1 font-display text-2xl font-extrabold tracking-tight text-fg">
               Semantic Search
             </h1>
+            <ViewerClockNote />
           </div>
           <div className="flex items-center gap-3">
             <div className="flex flex-col items-end leading-none">

@@ -131,6 +131,19 @@ pub async fn create_session(
     crate::repo::set_segments_locked(&state.pool, &seg_ids, true).await;
 
     let hls_time = segment_seconds.max(2);
+    // Hold a media-job permit for the BUILD only. A two-hour window probes and remuxes every
+    // overlapping segment — thousands of files at two-second segments — and unbounded concurrency here
+    // starves the recorder. The permit drops with `_permit` at the end of this scope, including on the
+    // error paths below, so a failed build never leaks a slot.
+    let _permit = match state.media_jobs.acquire("playback_session").await {
+        Ok(p) => p,
+        Err(e) => {
+            // Release the read-locks we already took; a rejected job must leave no trace.
+            crate::repo::set_segments_locked(&state.pool, &seg_ids, false).await;
+            let _ = tokio::fs::remove_dir_all(&session_dir).await;
+            return Err(e);
+        }
+    };
     let build = generate_hls(state, &session_dir, &segments, from, requested, hls_time).await;
     if let Err(e) = build {
         // Generation failed: release the locks and remove the half-built dir, then surface the error.
@@ -156,6 +169,20 @@ pub async fn create_session(
         let _ = tokio::fs::remove_dir_all(&session_dir).await;
         return Err(AppError::Other(e.into()));
     }
+
+    // Attribute the whole session DIRECTORY to its camera. `playback/<id>` is the key, so one row
+    // covers index.m3u8, init.mp4 and every seg_*.m4s — a 900-request HLS scrub shares one lookup.
+    // Written last, once the session is complete and its sidecar is durable, so no attribution ever
+    // outlives a half-built session. Without this row the session is Unattributed: a camera-scoped
+    // credential cannot read it AND (see routes/playback_sessions.rs) cannot delete it either, which
+    // is the fail-closed direction on both.
+    crate::services::media_scope::attribute(
+        &state.pool,
+        &format!("playback/{session_id}"),
+        &[camera_id.to_string()],
+        crate::services::media_scope::KIND_PLAYBACK_SESSION,
+    )
+    .await;
 
     tracing::info!(
         session = %session_id,
@@ -308,6 +335,10 @@ pub async fn delete_session(state: &AppState, session_id: &str) -> AppResult<()>
     tokio::fs::remove_dir_all(&session_dir)
         .await
         .map_err(|e| AppError::Other(e.into()))?;
+    // Drop the attribution with the artifact. Ordered AFTER the directory is gone so a failed removal
+    // never leaves a served session without its scope row (which would be readable by nobody scoped
+    // and, worse, indistinguishable from a producer that forgot to attribute).
+    crate::services::media_scope::forget(&state.pool, &format!("playback/{session_id}")).await;
     tracing::info!(session = %session_id, "playback: deleted session");
     Ok(())
 }
@@ -359,6 +390,13 @@ async fn sweep(state: &AppState) -> anyhow::Result<()> {
         }
         match tokio::fs::remove_dir_all(&path).await {
             Ok(()) => {
+                // Forget the attribution row with the directory, so `media_artifacts` does not grow
+                // one orphan per expired session. This runs in a background sweeper that holds no
+                // Principal: `forget` is a plain DELETE and adds no auth failure mode here.
+                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                    crate::services::media_scope::forget(&state.pool, &format!("playback/{name}"))
+                        .await;
+                }
                 tracing::debug!(dir = %path.display(), "playback_session_cleanup: removed expired session")
             }
             Err(e) => {
@@ -391,5 +429,222 @@ mod tests {
         assert!(!is_valid_session_id("clip_123")); // wrong prefix
         assert!(!is_valid_session_id("pbs_with.dot"));
         assert!(!is_valid_session_id(&format!("pbs_{}", "a".repeat(80)))); // too long
+    }
+
+    async fn test_state() -> AppState {
+        test_state_in(std::env::temp_dir().join(format!("heldar_pbs_{}", Uuid::new_v4().simple())))
+            .await
+    }
+
+    /// A state whose `playback_dir` is an isolated temp directory, so the delete/sweep tests write
+    /// (and remove) real directories without touching the repo or a developer's data dir.
+    async fn test_state_in(playback_dir: std::path::PathBuf) -> AppState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let mut raw = crate::config::Config::from_env();
+        raw.playback_dir = playback_dir;
+        let cfg = std::sync::Arc::new(raw);
+        AppState {
+            recorder: crate::services::recorder::RecorderManager::new(pool.clone(), cfg.clone()),
+            sampler: crate::services::sampler::SamplerManager::new(pool.clone(), cfg.clone()),
+            live: crate::services::live_publisher::LivePublisherManager::new(
+                pool.clone(),
+                cfg.clone(),
+                reqwest::Client::new(),
+            ),
+            mirror: None,
+            consumers: std::sync::Arc::new(Vec::new()),
+            modules: std::sync::Arc::new(Vec::new()),
+            catalog: std::sync::Arc::new(crate::services::registry::CatalogService::new(&cfg)),
+            http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
+            started_at: Utc::now(),
+            pool,
+            cfg,
+        }
+    }
+
+    async fn insert_camera(pool: &sqlx::SqlitePool, id: &str) {
+        let now = Utc::now();
+        sqlx::query("INSERT INTO cameras (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)")
+            .bind(id)
+            .bind(format!("Camera {id}"))
+            .bind(now)
+            .bind(now)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    async fn insert_segment(
+        pool: &sqlx::SqlitePool,
+        camera_id: &str,
+        start: DateTime<Utc>,
+        end: DateTime<Utc>,
+    ) {
+        sqlx::query(
+            "INSERT INTO segments (id, camera_id, path, start_time, end_time, duration_s, container, size_bytes, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, 'mp4', 0, ?)",
+        )
+        .bind(format!("seg_{}", start.timestamp()))
+        .bind(camera_id)
+        .bind("/nonexistent.mp4")
+        .bind(start)
+        .bind(end)
+        .bind((end - start).num_milliseconds() as f64 / 1000.0)
+        .bind(start)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Build a session directory + sidecar by hand (no ffmpeg) and register its attribution exactly
+    /// as `create_session` does, so the delete/sweep paths can be exercised without a media build.
+    async fn plant_session(state: &AppState, id: &str, camera_id: &str) -> std::path::PathBuf {
+        let dir = state.cfg.playback_dir.join(id);
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let meta = SessionMeta {
+            id: id.to_string(),
+            camera_id: camera_id.to_string(),
+            from: Utc::now() - chrono::Duration::minutes(5),
+            to: Utc::now(),
+            duration_s: 300.0,
+            segment_count: 0,
+            segment_ids: Vec::new(),
+            created_at: Utc::now() - chrono::Duration::days(1),
+        };
+        tokio::fs::write(dir.join(META_FILE), serde_json::to_vec(&meta).unwrap())
+            .await
+            .unwrap();
+        crate::services::media_scope::attribute(
+            &state.pool,
+            &format!("playback/{id}"),
+            &[camera_id.to_string()],
+            crate::services::media_scope::KIND_PLAYBACK_SESSION,
+        )
+        .await;
+        dir
+    }
+
+    /// The key a session is attributed under must be exactly the key the media guard derives from a
+    /// request for that session's playlist. If these ever drift, every scoped credential silently
+    /// 403s on a session it legitimately owns — and the guard's Unattributed branch makes that look
+    /// like a producer that forgot to register, not like a key mismatch.
+    #[test]
+    fn the_attribution_key_matches_what_the_guard_looks_up() {
+        let id = "pbs_deadbeef";
+        // What `create_session` writes.
+        let written = format!("playback/{id}");
+        // What the guard derives for every file the player fetches beneath that session.
+        for f in ["index.m3u8", "init.mp4", "seg_00042.m4s"] {
+            assert_eq!(
+                crate::services::media_scope::artifact_key(&format!("/media/playback/{id}/{f}"))
+                    .as_deref(),
+                Some(written.as_str()),
+                "guard key for {f} must equal the producer key"
+            );
+        }
+        // And the playlist URL handed to the client resolves to the same row.
+        let playlist_url = format!("/media/playback/{id}/index.m3u8");
+        assert_eq!(
+            crate::services::media_scope::artifact_key(&playlist_url).as_deref(),
+            Some(written.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn deleting_a_session_forgets_its_attribution() {
+        let dir = std::env::temp_dir().join(format!("heldar_pbs_{}", Uuid::new_v4().simple()));
+        let state = test_state_in(dir.clone()).await;
+        let id = "pbs_0123456789abcdef";
+        plant_session(&state, id, "cam_a").await;
+        let key = format!("playback/{id}");
+        assert_eq!(
+            crate::services::media_scope::owners(&state.pool, &key).await,
+            crate::services::media_scope::Owners::Cameras(vec!["cam_a".to_string()])
+        );
+
+        delete_session(&state, id).await.unwrap();
+
+        // The row must go with the artifact: a stale row would keep naming a camera for a directory
+        // that no longer exists, and a recycled id would inherit someone else's scope.
+        assert_eq!(
+            crate::services::media_scope::owners(&state.pool, &key).await,
+            crate::services::media_scope::Owners::Unattributed
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn the_expiry_sweeper_forgets_what_it_removes() {
+        // The sweeper runs in a background task that holds no Principal. It must still clean up the
+        // attribution row, or `media_artifacts` grows one orphan per expired session forever.
+        let dir = std::env::temp_dir().join(format!("heldar_pbs_{}", Uuid::new_v4().simple()));
+        let state = test_state_in(dir.clone()).await;
+        let id = "pbs_fedcba9876543210";
+        plant_session(&state, id, "cam_a").await; // created_at is a day ago -> already expired
+        let key = format!("playback/{id}");
+
+        sweep(&state).await.unwrap();
+
+        assert!(
+            !tokio::fs::try_exists(dir.join(id)).await.unwrap_or(true),
+            "the expired session dir should be gone"
+        );
+        assert_eq!(
+            crate::services::media_scope::owners(&state.pool, &key).await,
+            crate::services::media_scope::Owners::Unattributed
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// The dashboard's `to` comes from a minute-granular `datetime-local` control, so it must query
+    /// through the END of the selected minute. This locks the boundary that makes that necessary:
+    /// the overlap query is `start_time < to`, i.e. EXCLUSIVE, so footage recorded during the `to`
+    /// minute is invisible to a query bounded at :00. A camera that only just started recording has
+    /// ALL of its footage there, which is how this surfaced as "no recorded footage in the requested
+    /// range" on a healthy, actively-writing recorder.
+    #[tokio::test]
+    async fn footage_inside_the_to_minute_needs_the_next_minute_as_bound() {
+        let state = test_state().await;
+        insert_camera(&state.pool, "cam_minute").await;
+        let minute: DateTime<Utc> = "2026-06-18T00:05:00Z".parse().unwrap();
+        // Written 21s into 00:05 — the "current partial minute" case.
+        insert_segment(
+            &state.pool,
+            "cam_minute",
+            minute + chrono::Duration::seconds(21),
+            minute + chrono::Duration::seconds(26),
+        )
+        .await;
+        let from = minute - chrono::Duration::minutes(30);
+
+        // Bounded at the floor of the minute: the segment is excluded entirely.
+        match create_session(&state, "cam_minute", from, minute).await {
+            Err(AppError::NotFound(msg)) => {
+                assert_eq!(msg, "no recorded footage in the requested range")
+            }
+            other => panic!("expected the segment to be excluded at the :00 bound, got {other:?}"),
+        }
+
+        // Bounded at the next minute (what the dashboard now sends): the segment IS selected, so the
+        // call gets past selection. It still fails afterwards — the fixture path is not a real mp4,
+        // so HLS generation errors — but it must no longer be "no recorded footage".
+        let err = create_session(
+            &state,
+            "cam_minute",
+            from,
+            minute + chrono::Duration::minutes(1),
+        )
+        .await
+        .expect_err("fixture segment has no real media file, so the build must fail");
+        assert!(
+            !matches!(&err, AppError::NotFound(m) if m == "no recorded footage in the requested range"),
+            "footage in the `to` minute must be selected once the bound covers the whole minute, got {err:?}"
+        );
     }
 }

@@ -140,6 +140,81 @@ pub fn decrypt(key: Option<&[u8; 32]>, stored: &str) -> Result<String> {
     String::from_utf8(plain.to_vec()).context("decrypted secret is not valid UTF-8")
 }
 
+/// Seal the named string keys of a JSON config object in place, leaving everything else untouched.
+///
+/// Used for credential blobs (backup destinations) where only some keys are secret. Idempotent:
+/// already-sealed values are skipped, so re-saving a config does not double-encrypt. A no-op when no
+/// key is configured, exactly like [`encrypt_for_storage`].
+pub fn seal_json_keys(config: &mut serde_json::Value, keys: &[&str]) -> Result<()> {
+    let Some(obj) = config.as_object_mut() else {
+        return Ok(());
+    };
+    for key in keys {
+        let Some(plain) = obj.get(*key).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if plain.is_empty() || is_encrypted(plain) {
+            continue;
+        }
+        let sealed = encrypt_for_storage(plain)?;
+        obj.insert((*key).to_string(), serde_json::Value::String(sealed));
+    }
+    Ok(())
+}
+
+/// One-time migration: seal legacy-plaintext webhook signing secrets and backup destination
+/// credentials. Idempotent, and a no-op when no key is set — same contract as
+/// [`reencrypt_camera_passwords`]. Returns how many rows were sealed.
+///
+/// These were MASKED in API responses (`***`) but stored in the clear, so a stolen database or a
+/// copied DB backup handed over SFTP/FTP passwords, S3 secret keys and webhook HMAC keys — the masking
+/// only ever protected a shoulder-surfer, not the file.
+pub async fn reencrypt_stored_credentials(pool: &sqlx::SqlitePool) -> Result<usize> {
+    if !enabled() {
+        return Ok(0);
+    }
+    let mut n = 0usize;
+
+    let hooks: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, secret FROM webhook_subscriptions WHERE secret IS NOT NULL AND secret != ''",
+    )
+    .fetch_all(pool)
+    .await?;
+    for (id, secret) in hooks {
+        if is_encrypted(&secret) {
+            continue;
+        }
+        let sealed = encrypt_for_storage(&secret)?;
+        sqlx::query("UPDATE webhook_subscriptions SET secret = ? WHERE id = ?")
+            .bind(&sealed)
+            .bind(&id)
+            .execute(pool)
+            .await?;
+        n += 1;
+    }
+
+    let dests: Vec<(String, String)> = sqlx::query_as("SELECT id, config FROM backup_destinations")
+        .fetch_all(pool)
+        .await?;
+    for (id, raw) in dests {
+        let Ok(mut cfg) = serde_json::from_str::<serde_json::Value>(&raw) else {
+            continue; // unparseable config: leave it alone rather than corrupting it
+        };
+        let before = cfg.clone();
+        seal_json_keys(&mut cfg, crate::models::BACKUP_SECRET_KEYS)?;
+        if cfg == before {
+            continue;
+        }
+        sqlx::query("UPDATE backup_destinations SET config = ? WHERE id = ?")
+            .bind(serde_json::to_string(&cfg)?)
+            .bind(&id)
+            .execute(pool)
+            .await?;
+        n += 1;
+    }
+    Ok(n)
+}
+
 /// One-time migration: when a key is configured, seal any legacy-plaintext camera passwords. Idempotent
 /// (skips already-sealed rows). Returns how many rows were re-encrypted. No-op when no key is set.
 pub async fn reencrypt_camera_passwords(pool: &sqlx::SqlitePool) -> Result<usize> {
@@ -183,6 +258,43 @@ mod tests {
     /// and mirrored to the public repo, so a real credential used as a fixture is a disclosure —
     /// and a published crate version can only be yanked, never deleted.
     const FIXTURE_PASSWORD: &str = "test-camera-password-not-real";
+
+    /// Sealing a credential blob must be a ROUND TRIP: the value that comes back out is the one that
+    /// went in. If it is not, backups authenticate with ciphertext and webhooks sign with it.
+    #[test]
+    fn sealed_json_keys_round_trip_and_leave_other_fields_alone() {
+        init_key(Some(&B64.encode(key()))).unwrap();
+        let mut cfg = serde_json::json!({
+            "host": "backup.example",
+            "user": "heldar",
+            "pass": "not-a-real-password",
+            "port": 22
+        });
+        seal_json_keys(&mut cfg, &["pass"]).unwrap();
+
+        // The secret is no longer readable in the blob...
+        let sealed = cfg["pass"].as_str().unwrap();
+        assert!(is_encrypted(sealed), "pass must be sealed: {sealed}");
+        assert!(!sealed.contains("not-a-real-password"));
+        // ...but round-trips exactly.
+        assert_eq!(decrypt_stored(sealed).unwrap(), "not-a-real-password");
+        // Non-secret fields are untouched, including non-strings.
+        assert_eq!(cfg["host"], "backup.example");
+        assert_eq!(cfg["user"], "heldar");
+        assert_eq!(cfg["port"], 22);
+    }
+
+    /// Idempotent: re-saving a config must not double-seal, which would decrypt to ciphertext.
+    #[test]
+    fn sealing_twice_is_the_same_as_sealing_once() {
+        init_key(Some(&B64.encode(key()))).unwrap();
+        let mut cfg = serde_json::json!({ "secret_key": "s3-secret-not-real" });
+        seal_json_keys(&mut cfg, &["secret_key"]).unwrap();
+        let once = cfg["secret_key"].as_str().unwrap().to_string();
+        seal_json_keys(&mut cfg, &["secret_key"]).unwrap();
+        assert_eq!(cfg["secret_key"].as_str().unwrap(), once);
+        assert_eq!(decrypt_stored(&once).unwrap(), "s3-secret-not-real");
+    }
 
     #[test]
     fn round_trip_with_key() {

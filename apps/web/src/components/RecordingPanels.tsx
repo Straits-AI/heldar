@@ -16,6 +16,7 @@ import { hevcDecodeSupported, HEVC_UNSUPPORTED_NOTE } from "../lib/codec";
 import { useEffect, useRef, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import { api, ApiError } from "../lib/api";
+import { cameraSiteZone, scheduleClockLabel } from "../lib/format";
 import { usePoll } from "../lib/usePoll";
 import type {
   CameraUpdate,
@@ -31,7 +32,7 @@ import type {
 import { Button, Field, Input, Panel, Select, cx } from "./ui";
 import {
   formatBytes,
-  formatClock,
+  formatClockIn,
   formatDuration,
   isoToLocalInput,
   localInputToIso,
@@ -210,6 +211,8 @@ export function RecordingSettingsPanel({
 }) {
   // Initialised once per mount; CameraDetail remounts this with key={camera.id}, so navigating to a
   // different camera resets the form while polling the same camera preserves in-flight edits.
+  const sites = usePoll(() => api.listSites(), 60000);
+  const [siteId, setSiteId] = useState(camera.site_id ?? "");
   const [quotaGb, setQuotaGb] = useState(
     camera.storage_quota_bytes != null ? (camera.storage_quota_bytes / GIB).toFixed(2) : "",
   );
@@ -241,6 +244,11 @@ export function RecordingSettingsPanel({
       quotaBytes = Math.round(gb * GIB);
     }
     const body: CameraUpdate = {
+      // Explicit null DETACHES the camera from its site — absent would leave it where it is, and
+      // the two must stay distinguishable. Without this there is no way to move a camera off a
+      // wrong clock from the dashboard at all, which made `DELETE /api/v1/sites`'s "reassign them
+      // first" impossible to follow without curl.
+      site_id: siteId === "" ? null : siteId,
       storage_quota_bytes: quotaBytes,
       record_audio: recordAudio,
       record_mode: recordMode,
@@ -265,6 +273,31 @@ export function RecordingSettingsPanel({
   return (
     <Panel title="Recording Settings" subtitle="Capture configuration">
       <form onSubmit={save} className="space-y-4">
+        {/* WHICH SITE, AND THEREFORE WHICH CLOCK (#125). Changing this moves the hours this camera
+            records, so the consequence is stated next to the control rather than discovered. */}
+        <Field
+          label="Site"
+          htmlFor="rs-site"
+          hint={
+            cameraSiteZone(siteId, sites.data?.sites)
+              ? `Schedules follow ${cameraSiteZone(siteId, sites.data?.sites)}`
+              : "No site — schedules follow the box-wide clock"
+          }
+        >
+          <Select id="rs-site" value={siteId} onChange={(e) => setSiteId(e.target.value)}>
+            <option value="">No site</option>
+            {(sites.data?.sites ?? []).map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name} ({s.id}){s.timezone ? ` — ${s.timezone}` : ""}
+              </option>
+            ))}
+            {/* A site the credential cannot list (scoped, or since deleted) must still be
+                representable, or saving anything else would silently move the camera. */}
+            {camera.site_id && !(sites.data?.sites ?? []).some((s) => s.id === camera.site_id) ? (
+              <option value={camera.site_id}>{camera.site_id}</option>
+            ) : null}
+          </Select>
+        </Field>
         <Field
           label="Storage quota (GB)"
           htmlFor="rs-quota"
@@ -390,12 +423,24 @@ export function RecordingSettingsPanel({
 
 export function RecordingSchedulePanel({
   cameraId,
+  siteId,
   canManage,
 }: {
   cameraId: string;
+  /** The camera's site, whose timezone OVERRIDES the box-wide one for this camera's windows. */
+  siteId?: string | null;
   canManage: boolean;
 }) {
   const schedules = usePoll(() => api.listSchedules(cameraId), 20000, [cameraId]);
+  /* WHOSE 18:00 IS THIS? The bare "HH:MM" below is a wall-clock rule read in the camera's site
+   * timezone (#125), or the server's own clock when no zone is configured. Rendering it unlabelled
+   * is how an operator in Kuala Lumpur comes to believe they scheduled 6pm local on a box running
+   * UTC — and the recorder is then eight hours out, every day, with nothing on screen to say so. */
+  const tz = usePoll(() => api.getTimezone(), 60000);
+  const sites = usePoll(() => api.listSites(), 60000);
+  // The camera's SITE wins, matching `services/tz.rs`'s resolution order and, more importantly,
+  // what the recorder actually evaluates this window against.
+  const clock = scheduleClockLabel(tz.data, cameraSiteZone(siteId, sites.data?.sites));
 
   const [days, setDays] = useState<number[]>([0, 1, 2, 3, 4]);
   const [start, setStart] = useState("08:00");
@@ -462,11 +507,17 @@ export function RecordingSchedulePanel({
   return (
     <Panel
       title="Recording Schedule"
-      subtitle="Time-of-day windows"
+      subtitle={clock ? `Time-of-day windows — ${clock}` : "Time-of-day windows"}
       actions={
         <span className="font-mono text-[11px] tabular-nums text-fg-muted">{list.length}</span>
       }
     >
+      {tz.data && tz.data.source === "unset" && !cameraSiteZone(siteId, sites.data?.sites) ? (
+        <p className="mb-3 font-mono text-[11px] leading-relaxed text-fg-muted">
+          These times follow the server&apos;s clock ({tz.data.server_local_offset}) because no
+          timezone is set. Set one on the System page so they follow the site instead.
+        </p>
+      ) : null}
       {list.length === 0 ? (
         <p className="font-mono text-xs text-fg-muted">
           {schedules.error ?? "No windows. Add one below — the recorder runs only inside these windows."}
@@ -569,8 +620,11 @@ export function RecordingSchedulePanel({
 export function SnapshotSchedulesPanel({
   cameraId,
   canManage,
+  zone,
 }: {
   cameraId: string;
+  /** The camera page's resolved zone (#148); one clock per page. */
+  zone: string;
   canManage: boolean;
 }) {
   const schedules = usePoll(() => api.listSnapshotSchedules(cameraId), 20000, [cameraId]);
@@ -720,7 +774,7 @@ export function SnapshotSchedulesPanel({
         ) : (
           <div className="grid grid-cols-3 gap-2 sm:grid-cols-4">
             {snaps.map((snap) => (
-              <SnapshotThumb key={snap.id} snap={snap} />
+              <SnapshotThumb key={snap.id} snap={snap} zone={zone} />
             ))}
           </div>
         )}
@@ -729,18 +783,18 @@ export function SnapshotSchedulesPanel({
   );
 }
 
-function SnapshotThumb({ snap }: { snap: SnapshotView }) {
+function SnapshotThumb({ snap, zone }: { snap: SnapshotView; zone: string }) {
   return (
     <a
       href={snap.url}
       target="_blank"
       rel="noreferrer"
-      title={`${formatClock(snap.taken_at)} · ${formatBytes(snap.size_bytes)}`}
+      title={`${formatClockIn(snap.taken_at, zone)} · ${formatBytes(snap.size_bytes)}`}
       className="group relative block overflow-hidden rounded-md border border-line bg-black transition-colors duration-150 hover:border-accent"
     >
       <img
         src={snap.url}
-        alt={`Snapshot ${formatClock(snap.taken_at)}`}
+        alt={`Snapshot ${formatClockIn(snap.taken_at, zone)}`}
         loading="lazy"
         className="aspect-video w-full object-cover"
       />
@@ -970,8 +1024,11 @@ const GAP_TONE: Record<GapFillState, { color: string; label: string }> = {
 export function RecordingGapsPanel({
   cameraId,
   canManage,
+  zone,
 }: {
   cameraId: string;
+  /** The camera page's resolved zone (#148). A gap is a hole in THIS camera's footage. */
+  zone: string;
   canManage: boolean;
 }) {
   const gaps = usePoll(() => api.listRecordingGaps(cameraId, { limit: 30 }), 20000, [cameraId]);
@@ -1031,7 +1088,7 @@ export function RecordingGapsPanel({
                     </span>
                   </div>
                   <div className="mt-0.5 font-mono text-[10px] text-fg-muted">
-                    {formatClock(g.gap_start)} · {g.fill_attempts} attempt
+                    {formatClockIn(g.gap_start, zone)} · {g.fill_attempts} attempt
                     {g.fill_attempts === 1 ? "" : "s"}
                   </div>
                 </div>
@@ -1055,7 +1112,14 @@ export function RecordingGapsPanel({
 
 /* =========================== Playback session (VOD) ======================= */
 
-export function PlaybackSessionPanel({ cameraId }: { cameraId: string }) {
+export function PlaybackSessionPanel({
+  cameraId,
+  zone,
+}: {
+  cameraId: string;
+  /** The camera page's resolved zone (#148); one clock per page. */
+  zone: string;
+}) {
   const [from, setFrom] = useState(() =>
     isoToLocalInput(new Date(Date.now() - 3600_000).toISOString()),
   );
@@ -1140,7 +1204,7 @@ export function PlaybackSessionPanel({ cameraId }: { cameraId: string }) {
               <span className="tabular-nums">{session.segment_count} segments</span>
               <span className="text-fg-muted/60">·</span>
               <span className="tabular-nums">
-                {formatClock(session.from)} → {formatClock(session.to)}
+                {formatClockIn(session.from, zone)} → {formatClockIn(session.to, zone)}
               </span>
             </div>
           </>

@@ -690,6 +690,19 @@ impl ZoneEngine {
         let filename = format!("zoneevt_{id}.jpg");
         let dst = self.cfg.snapshots_dir.join(&filename);
         if tokio::fs::copy(&src, &dst).await.is_ok() {
+            // Attribute it, or the media guard cannot tell whose evidence this is and refuses it to
+            // the very credential scoped to THIS camera — a false deny on its own footage. The
+            // snapshots dir is flat, so the row is the only camera link a `/media/snapshots/…` GET has.
+            crate::services::media_scope::attribute(
+                &self.pool,
+                // MUST be the key `media_scope::artifact_key` derives from the URL
+                // (`snapshots/<file>`), not the bare filename — a mismatched key is a row the guard
+                // never finds, which is the same false deny it is here to prevent.
+                &format!("snapshots/{filename}"),
+                std::slice::from_ref(&camera_id.to_string()),
+                crate::services::media_scope::KIND_ZONE_EVIDENCE,
+            )
+            .await;
             Some(format!("/media/snapshots/{filename}"))
         } else {
             None

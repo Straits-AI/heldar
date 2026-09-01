@@ -243,313 +243,175 @@ which returns **403** (`role 'guard' is not permitted to …`) when denied.
 
 ---
 
-## 5. Authentication setup
-
-### 5.1 Default: open LAN appliance (`HELDAR_AUTH_ENABLED=false`)
-
-Auth is **off by default**. With `auth_enabled=false` the `Principal` extractor yields
-a synthetic **system admin** for every request, so the entire Stage 0–4 API behaves
-exactly as an unauthenticated single-tenant LAN appliance — existing tooling, the
-worker, and the web UI keep working with no credentials. This matches the Stage 0
-posture ("No auth on the API — local/LAN dev").
-
-### 5.2 Enabling auth (`HELDAR_AUTH_ENABLED=true`)
-
-When enabled, a router-level **authentication floor** rejects any unauthenticated request to the
-whole `/api/v1/*` surface before the handler runs — allowlisting only `/api/v1/auth/login` and
-`/api/v1/auth/logout`. A request with no token → **401 `authentication required`**; an
-invalid/expired token → **401 `invalid or expired credentials`**. So authentication is guaranteed
-for every endpoint (a handler can't accidentally ship public); each handler then enforces **roles**
-per §4 on top. `/healthz`, `/readyz`, and `/metrics` are outside `/api/v1` and unaffected.
-
-### 5.3 Bootstrap admin via env
-
-On first run with auth enabled and **no users yet**, `ensure_bootstrap` seeds one
-admin from the environment:
-
-```bash
-HELDAR_AUTH_ENABLED=true
-HELDAR_BOOTSTRAP_ADMIN_USER=admin
-HELDAR_BOOTSTRAP_ADMIN_PASSWORD=change-me-now   # must be >= 8 chars
-```
-
-If the password is shorter than 8 chars, **no admin is created** (logged as an error).
-If the vars are unset, the server logs a warning that login is impossible until a user
-is seeded — set them and restart. Bootstrap is a no-op once any user exists.
-
-### 5.4 Sessions (interactive users)
-
-`POST /api/v1/auth/login` exchanges `{username, password}` for an opaque bearer token
-prefixed **`vos_`** and its `expires_at`. The token is a random 256-bit value; only its
-SHA-256 is stored (a DB leak exposes no usable credential). Passwords are **argon2id**
-PHC hashes; login runs argon2 verification even for unknown/disabled users (against a
-dummy hash) so response latency can't reveal whether an account exists. Session
-lifetime is `HELDAR_SESSION_TTL_HOURS` (default 12). `POST /api/v1/auth/logout`
-revokes the presented token; disabling a user revokes all their sessions.
-
-Use it as a **Bearer** token:
-
-```http
-Authorization: Bearer vos_3f2a9c1b…
-```
-
-### 5.5 API keys (worker / integration)
-
-`POST /api/v1/api-keys` (admin only) mints a key prefixed **`vok_`**; the full key is
-returned **exactly once** (only its hash and a short `key_prefix` are stored). Give the
-worker an `integration`-role key (the default role for new keys) so it can `can_ingest`
-but cannot operate the gate or read the registry. Present it via either header:
-
-```http
-X-API-Key: vok_a1b2c3…
-# — or —
-Authorization: Bearer vok_a1b2c3…
-```
-
-`token_from_headers` accepts `Authorization: Bearer <t>` (or `bearer`) and falls back
-to `X-API-Key`. A key whose stored role is unparseable, or that is inactive, is denied
-(never failed-open to a capability-bearing default).
-
-> When auth is enabled, configure the AI worker with the key. The worker only needs
-> `can_ingest` (it just POSTs to `/ai/tasks` discovery + `/ai/events`); an
-> `integration` key is the least-privilege fit.
-
----
-
-## 6. Canonical entry-event JSON
-
-The `entry_events` row serializes to the canonical event model. Denormalized columns
-(`plate`, `auth_status`, `workflow_status`, `direction`, `timestamp`) back fast
-queries/reports; the rich `subject` / `authorization` / `evidence` / `workflow` /
-`audit` blocks are JSON. Example (ANPR-produced `vehicle_entry`):
-
-```json
-{
-  "id": "evt_8c1f2a9c1b4d4f6a8b0c1d2e3f405162",
-  "site_id": "campus_01",
-  "camera_id": "gate_a_01",
-  "event_type": "vehicle_entry",
-  "timestamp": "2026-06-13T08:15:31Z",
-  "direction": "inbound",
-  "plate": "ABC1234",
-  "plate_confidence": 0.92,
-  "subject": {
-    "type": "vehicle",
-    "plate": "ABC 1234",
-    "plate_confidence": 0.92,
-    "plate_valid": true,
-    "vehicle_type": "car",
-    "color": "white",
-    "make_model": null
-  },
-  "authorization": {
-    "status": "matched",
-    "source": "visitor_pass",
-    "pass_id": "pass_1023",
-    "alert": false
-  },
-  "auth_status": "matched",
-  "evidence": { "snapshot_path": "/media/snapshots/entryevt_evt_8c1f….jpg" },
-  "workflow_status": "auto",
-  "workflow": { "status": "auto" },
-  "audit": {
-    "created_by": "system",
-    "model_versions": { "anpr": "anpr_v0.1_paddleocr", "vehicle_attr": "heuristic_v0.1", "detector": "yolov8n.pt" }
-  },
-  "track_id": "t17",
-  "created_at": "2026-06-13T08:15:31Z"
-}
-```
-
-Mapping to the canonical event model and honest deltas as built:
-
-| Canonical field | As built |
-|---|---|
-| `event_id` | `id` (`evt_<uuid-simple>`) |
-| `tenant_id` | not on the event (site-scoped today; `tenants` table exists for later) |
-| `site_id`, `camera_id`, `event_type`, `timestamp` | columns; `event_type ∈ vehicle_entry, vehicle_exit, visitor_checkin, visitor_checkout` |
-| `subject.{plate, plate_confidence, vehicle_type, color, make_model}` | present; adds `plate_valid` (plausibility). `plate` is the raw read; the denormalized top-level `plate` is the **normalized** key. `make_model` is composed from make+model when present (the reference worker emits type+color, not make/model — so usually `null`) |
-| `location.{zone_id, direction}` | `direction` is a top-level column; `zone_id` is not attached to entry events |
-| `authorization.{status, source, pass_id, vehicle_id, …}` | present (+ `kind`/`reason`/`mismatches`/`alert`/`note`) |
-| `evidence.{snapshot_id, clip_id, recording_segment_ids}` | only `snapshot_path` today (the copied frame); clip/segment refs deferred |
-| `workflow.{status, assigned_to, resolved_by, resolved_at, note}` | `status` always; `resolved_by`/`resolved_by_id`/`resolved_at`/`note` on guard resolve |
-| `audit.{created_by, model_versions}` | present; `model_versions` is whatever the worker stamped |
-
----
-
-## 7. Reports
-
-All three are `GET` and require `can_view` (audit requires `manager+`). Time window:
-either `date=YYYY-MM-DD` (a UTC day, the default = today) **or** explicit
-`from`/`to` (RFC3339); `from`/`to` override `date`.
-
-### 7.1 Daily entry log — `GET /api/v1/reports/entry-log`
-
-Every entry event in the window plus an `auth_status` histogram.
-`?date=` | `?from=&to=` | `?limit=` (default 1000, ≤10000).
-
-```json
-{
-  "from": "2026-06-13T00:00:00Z",
-  "to":   "2026-06-14T00:00:00Z",
-  "total": 412,
-  "by_auth_status": { "matched": 380, "exception": 18, "unmatched": 12, "blocked": 2 },
-  "events": [ /* EntryEvent[] newest-first */ ]
-}
-```
-
-### 7.2 Exception report — `GET /api/v1/reports/exceptions`
-
-Everything that is **not** a clean automatic match:
-`auth_status IN ('blocked','exception','unmatched') OR workflow_status='rejected'`.
-Same window/limit params. Returns `{ from, to, total, events }`. This is the
-plate/vehicle-mismatch report (mismatches surface as `exception`s with a
-`mismatches` list in `authorization`).
-
-### 7.3 Audit report — `GET /api/v1/audit` (manager+)
-
-The immutable operator+system action log. Filters: `from`, `to`, `actor`, `action`,
-`limit` (default 200, ≤5000), newest-first. Every registry mutation, pass operation,
-user/key change, login, and entry confirm/reject appends a row
-(`actor`, `actor_name`, `role`, `action`, `target_type`, `target_id`, `detail`).
-
----
-
-## 7b. Barrier/gate actuation
-
-A `matched` entry can physically **open the barrier** by pulsing the alarm/relay
-output of the lane camera (most ANPR barrier cameras wire it to the boom). Configure
-per lane in the Entry module's **Gate** tab: auto-open on matched (on/off), relay
-output port, and pulse width; lanes start manual-only so wiring is verified with the
-guard's **Open gate** button first. A global **kill-switch** halts all actuation.
-Auto-actuation runs fire-and-forget *after* the entry event is recorded (a dead relay
-never stalls or loses an event); only `matched` auto-opens; manual open is guard+
-(`can_operate_gate`) and audited. Every actuation emits `gate_opened` /
-`gate_open_failed` to the kernel event log (webhook/email subscribable). External
-(non-camera) gate controllers instead subscribe a webhook to the entry events and
-actuate themselves. Full guide: [`CAMERA-CONTROLS.md`](CAMERA-CONTROLS.md) §4.
-
-## 8. Retention
-
-`HELDAR_ENTRY_RETENTION_DAYS` (default **365**) governs the Stage 4 sweep inside the
-Stage 0/1 retention loop. Older than the cutoff, it prunes: **entry events** (and their
-evidence JPEGs from `/media/snapshots`), **audit-log** rows, and the **mirrored
-`events`-log** rows; **expired sessions** are pruned every sweep regardless of the TTL.
-Recording segments keep their own per-camera age policy + size/disk caps + evidence
-lock (Stage 0/1) — Stage 4 retention only touches the entry domain.
-
----
-
-## 9. Stage 4 HTTP API reference
-
-All paths are under `/api/v1`. "Role required" is the minimum capability; reads are
-open to any authenticated principal. When `HELDAR_AUTH_ENABLED=false` every caller
-is the synthetic system admin (all rows below are satisfied).
-
-### Authentication & administration (`routes/auth.rs`)
-
-| Method | Path | Role required | Purpose |
-|---|---|---|---|
-| POST | `/auth/login` | none | Exchange `{username,password}` → `{token (vos_…), expires_at, user}` |
-| POST | `/auth/logout` | (bearer token) | Revoke the presented session → `204` |
-| GET | `/auth/me` | any authenticated | Report the caller `{id,name,role,kind}` |
-| GET | `/users` | admin | List users (`UserView[]`) |
-| POST | `/users` | admin | Create user (password ≥8) → `201` |
-| PATCH | `/users/{id}` | admin | Update role/password/display/active (last-admin guard) |
-| DELETE | `/users/{id}` | admin | Delete (no self-delete; last-admin guard) → `204` |
-| GET | `/api-keys` | admin | List API keys (hashes never returned) |
-| POST | `/api-keys` | admin | Mint a key → `201` `{…,key}` (**shown once**) |
-| DELETE | `/api-keys/{id}` | admin | Revoke a key → `204` |
-
-### Registry — vehicles (`routes/entry.rs`)
-
-| Method | Path | Role required | Purpose |
-|---|---|---|---|
-| GET | `/vehicles` | view | List/search (`plate`, `owner_type`, `q`, `limit≤2000`) |
-| POST | `/vehicles` | manage_registry | Register a vehicle → `201` |
-| GET | `/vehicles/{id}` | view | Read one |
-| PATCH | `/vehicles/{id}` | manage_registry | Partial update |
-| DELETE | `/vehicles/{id}` | manage_registry | Delete → `204` |
-
-`owner_type ∈ student\|staff\|resident\|contractor\|visitor`. `plate` is required and
-normalized to the unique `plate_norm` key.
-
-### Registry — visitor passes (`routes/entry.rs`)
-
-| Method | Path | Role required | Purpose |
-|---|---|---|---|
-| GET | `/passes` | view | List/search (`status`, `q`, `limit`) |
-| POST | `/passes` | operate_gate | Create a pass (auto `code` `V-XXXXXX`, default 24 h window) → `201` |
-| GET | `/passes/{id}` | view | Read one |
-| PATCH | `/passes/{id}` | operate_gate | Update (reinstating a `revoked` pass needs manage_registry) |
-| DELETE | `/passes/{id}` | manage_registry | Delete → `204` |
-| POST | `/passes/{id}/checkin` | operate_gate | Mark `checked_in` + write `visitor_checkin` entry event |
-| POST | `/passes/{id}/checkout` | operate_gate | Mark `checked_out` + write `visitor_checkout` entry event |
-
-`status ∈ active\|checked_in\|checked_out\|expired\|revoked`.
-
-### Registry — watchlist (`routes/entry.rs`)
-
-| Method | Path | Role required | Purpose |
-|---|---|---|---|
-| GET | `/watchlist` | view | List all entries (newest-first) |
-| POST | `/watchlist` | manage_registry | Add a plate → `201` |
-| PATCH | `/watchlist/{id}` | manage_registry | Update kind/reason/severity/active |
-| DELETE | `/watchlist/{id}` | manage_registry | Delete → `204` |
-
-`kind ∈ block\|vip\|alert`; `severity ∈ info\|warning\|critical`.
-
-### Entry events + guard workflow (`routes/entry.rs`)
-
-| Method | Path | Role required | Purpose |
-|---|---|---|---|
-| GET | `/entry-events` | view | Query (`from`,`to`,`plate`,`auth_status`,`workflow_status`,`event_type`,`limit≤5000`), newest-first |
-| GET | `/entry-events/{id}` | view | Read one canonical event |
-| POST | `/entry-events/{id}/confirm` | operate_gate | Guard confirm (optional `{note}`) → `workflow_status: confirmed` |
-| POST | `/entry-events/{id}/reject` | operate_gate | Guard reject (optional `{note}`) → `workflow_status: rejected` |
-
-### Reports + audit (`routes/entry.rs`)
-
-| Method | Path | Role required | Purpose |
-|---|---|---|---|
-| GET | `/reports/entry-log` | view | Daily log + `by_auth_status` counts (`date` or `from`/`to`) |
-| GET | `/reports/exceptions` | view | Blocked/exception/unmatched/rejected in the window |
-| GET | `/audit` | manage_registry | Immutable action log (`from`,`to`,`actor`,`action`,`limit≤5000`) |
-
-### Ingest (the worker's path into the engine — `routes/ai.rs`, Stage 2)
-
-| Method | Path | Role required | Purpose |
-|---|---|---|---|
-| POST | `/ai/events` | ingest | Post detections; `task_type:"anpr"` feeds `AnprEngine.process()` |
-
----
-
-### Gate actuation endpoints
-
-| Method + path | Role required | Purpose |
-| --- | --- | --- |
-| `GET /entry/gate` | viewer | Kill-switch state + all lane policies |
-| `PUT /entry/gate/settings` | manager | Flip the global kill-switch |
-| `PUT /entry/gate/policies/{camera_id}` | manager | Upsert a lane policy (enabled, output_port, pulse_ms) |
-| `DELETE /entry/gate/policies/{camera_id}` | manager | Remove a lane policy |
-| `POST /entry/gate/open/{camera_id}` | guard | Manual open: pulse the lane's relay now (audited) |
-
-## 10. Honest scope
-
-- **Direction is a per-camera config hint**, not a calibrated entry/exit *line*. The
-  worker's `direction: inbound\|outbound` task config sets the event direction; there
-  is no homography/line-crossing primitive yet (gate cameras are usually
-  single-direction). Deferred.
-- **OCR / make-model accuracy is not benchmarked.** The engineering — voting,
-  resolution, workflow, schema, API — is production-grade and unit-tested, but plate
-  OCR and vehicle attributes need evaluation on **local Malaysian gate footage**
-  before any hard claim. The reference worker emits **type + color**
-  (no make/model classifier), and the engine treats attributes as **review
-  exceptions, never auto-rejections**.
-- **Auth currently guards the Stage 4 (and ingest) surface.** Extending the
-  `Principal` guard to the legacy Stage 0–3 routes (cameras, recordings, zones, …) is
-  follow-up work; today those remain open even with auth enabled.
-
-See also: [`ARCHITECTURE.md`](../ARCHITECTURE.md) §17 (Stage 4 implementation),
-[`docs/AI-WORKERS.md`](AI-WORKERS.md) §12 (the ANPR analyzer), [`ROADMAP.md`](../ROADMAP.md)
-Stage 4.
+## 4b. Camera scope (per-credential camera restriction)
+
+A capability says *what* a credential may do. A **camera scope** says *which cameras*
+it may do it to. An API key created with a camera list is confined to those cameras;
+a key created without one is **fleet-wide**, which is the default and the only thing
+an interactive user session can be.
+
+Scope is enforced independently of role: it is **not** waived by `admin`. A scoped
+admin key is still scoped. Auth disabled (§5.1) yields the synthetic system principal,
+which is fleet-wide — scope changes nothing about the open LAN appliance.
+
+### What the scope covers
+
+Confining a credential to a camera means more than 403-ing that camera's routes, so
+enforcement has four shapes. The first is the obvious one; the other three exist
+because per-route checks cannot see the escapes:
+
+| Shape | Applies to | Behaviour for a scoped credential |
+|---|---|---|
+| **Per-route check** | anything keyed by a camera id (`…/cameras/{id}/…`, `{camera_id}`) | **403** on a camera outside the scope |
+| **Read confinement** | fleet-wide lists (camera list, health/status, events, search) | results **filtered** to the scope — never a complete inventory disclosure |
+| **Write confinement** | payloads carrying camera ids (backup policies, archive exports) | submitted ids are **intersected** with the scope before use, and re-applied when the policy later runs |
+| **Fleet-only refusal** | credential management, egress config, fleet cursors, `/metrics` | **403** outright — see below |
+
+### Capabilities that cannot be scoped
+
+`events:read` and `identity:read` read tables with **no camera column** — there is no
+predicate to filter them by — so pairing them with a camera scope would be a
+boundary that silently does not hold. The API **refuses to mint** that combination,
+and a stored key carrying it is **denied at authentication** (it predates the refusal
+or was inserted out of band; re-mint it). `admin` implies every capability, so an
+`admin` grant cannot carry a camera scope either.
+
+The practical consequence: a camera-scoped credential cannot reach `/api/v1/events`,
+the entry identity registry, or anything else gated on those capabilities. That is by
+design, not a gap — the route matrix reports such routes as UNREACHABLE rather than
+counting them as covered.
+
+### Surfaces that refuse a scoped credential outright
+
+Some surfaces have no coherent scoped answer, so they are refused rather than
+filtered:
+
+- **Credential management** (create/update/delete users and API keys). A scoped key
+  that can mint keys can mint an unscoped one — scope would be self-removable.
+- **Egress configuration** (backup destinations, webhooks). These send footage and
+  events *out*; repointing a destination exfiltrates other cameras' data without ever
+  reading them through a scoped route.
+- **The outbox cursor** (`GET /api/v1/outbox`). `seq` is a monotonic fleet cursor;
+  filtering it hands back a sequence with holes that the client reads as delivered.
+- **The entry identity registry** (vehicles, watchlist, visitor passes). These tables
+  have no camera column, and the ANPR pipeline matches them **by plate alone** before
+  it can auto-open a barrier — so a row written there acts on every camera on the box.
+  The direct gate actuators are scoped; this is the indirect path into the same relay.
+- **Box-level settings and the module registry** (`/api/v1/system/*` writes, database
+  status, module detail/unregister, plugin-registry refresh, backup destinations).
+  Nothing about them is per-camera, and several are applied **later** by loops that
+  hold no principal.
+- **`GET /metrics`.** The exposition carries `heldar_camera_up{camera=…}` and friends
+  for the whole fleet. A filtered scrape reads to Prometheus as cameras that ceased to
+  exist, writing staleness gaps indistinguishable from real outages into the fleet's
+  history. Scrape with a fleet-wide key.
+
+### The audit log (`GET /api/v1/audit`)
+
+Read confinement, but it could not be expressed the usual way. The owning camera is
+routinely recorded in the free-form `detail` JSON under a *non-camera* `target_type` —
+zones, AI tasks, record and snapshot schedules and recording gaps all do this — so a
+predicate over `target_id` masked gate rows and let every one of those through. One
+`?limit=5000` returned the fleet roster plus which cameras carry zones, AI tasks and
+schedules. `detail` is `Json<Value>` with no schema and new call sites add keys freely:
+it cannot be a scope boundary.
+
+So camera identity was promoted into an indexed `audit_log.subject_camera_id` column
+(kernel migration 0014), derived in `auth::audit` — the single writer — and backfilled
+for rows already on the box. A scoped credential sees a row iff its subject is non-NULL
+and in scope.
+
+This is **fail-closed**: NULL means fleet-level or about no camera at all, and those
+rows are hidden rather than shown. Multi-camera acts (an archive export, an API-key
+mint, the `'*'` bulk device-config write) resolve to NULL deliberately — attributing
+one to a single lane would both mislabel it and hand that lane's holder the other
+camera ids sitting in the same `detail`. Audit is a manager+ surface where a hidden row
+costs an accountability question and an extra row costs the roster, so hiding is the
+conservative direction. Unscoped credentials — every human role, and every key minted
+without a camera list — read the whole log unchanged.
+
+### The recorded-media plane (`/media/*`)
+
+`/media/*` serves the same footage the API gates, so it carries the same scope
+(`services/media_scope.rs`). Two subtrees name their camera in the path
+(`recordings/<camera_id>/…`, scheduled `snapshots/<camera_id>/…`) and are scoped by
+string alone. The rest — exported clips, playback sessions, evidence frames, archives,
+signed evidence bundles — are **flat**: their filenames carry no camera, so producers register each artifact
+in the `media_artifacts` sidecar (migration 0013) and the guard resolves ownership
+from it. Migration 0013 also carried existing zone and embedding evidence across;
+**entry** migration 0004 does the same for gate evidence, which lives in the app crate
+and was missed the first time — without it an upgraded box 403s a scoped credential on
+its own pre-upgrade gate frame while the byte-identical zone frame beside it serves.
+
+This fails closed in both directions: an artifact whose producer never registered it
+is `Unattributed`, which is a 403 for a scoped credential (and unchanged for everyone
+else), and a `/media/*` prefix the module does not recognise is refused for **every**
+credential rather than served ungated.
+
+Attribution rows are swept by the retention loop once their file leaves the disk — by
+**existence**, not by age, because the kinds do not share a retention horizon and a
+row dropped early would 403 a scoped credential on its own live evidence.
+
+### How long a scope decision lasts
+
+Scope is checked when a request arrives. Anything that reads that decision *later* — after the
+response, or on a second request — needs a stated lifetime, because a credential can be re-scoped or
+revoked in between (`PATCH /api/v1/api-keys/{id}`). Every surface that does so, and how long its
+decision survives:
+
+| Surface | When authorization is established | How long it lasts |
+|---|---|---|
+| Any `/api/v1` request | on the request | that request. `Principal` is resolved from the database every time; there is no principal cache |
+| `/media/*` — clips, playback sessions, archives, evidence | on **every** fetch | until the next fetch. Re-scope → 403, revoke → 401, mid-scrub. A media URL is not a bearer capability |
+| Backup / archive **job rows** | at trigger, confined into the job row | the job ships the confined list, never the policy's |
+| Backup **transfer** (detached, off-box) | at trigger, **re-checked while running** | ≤ ~5 s after the credential is withdrawn (kernel migration 0015) |
+| Archive export (`/api/v1/archive/export`) | on the request | the request — it runs inline and its `.zip` is re-guarded on every fetch |
+| Entry reports (`/api/v1/reports/*`) | on the request | the request. `date=` is a calendar day in the resolved site zone, and the response echoes which — a shifted total looks exactly like a correct one |
+| Site writes (`POST`/`PATCH`/`DELETE /api/v1/sites`) | on the request; fleet-only | the request. A site's timezone is what its cameras' schedules are read in, so changing it moves recording windows — the response reports how many cameras it moved, and a site with cameras cannot be deleted at all |
+| Evidence bundle (`/api/v1/evidence/exports`) | on the request, against the camera the export actually reads — derived from `incident_id` where one is given, not the id supplied | the request; the bundle is re-guarded on every fetch like any other artifact. Once downloaded it is a file in someone's possession and no later scope change reaches it — which is the point of signing it |
+| AI **leases** | on each acquire/renew (they are one call) | the lost camera stops being offered on the next renew; the stale row lapses on its TTL (≤ 300 s) and authorizes nothing on its own |
+| AI **frame tickets** | at frame pull, bound to key id + camera | ≤ ticket TTL, and ingest re-checks `require_camera` against the live principal anyway |
+| **Live view** token (MediaMTX) | at `/liveview`, **re-checked on every read** | HLS: seconds. WebRTC / RTSP readers: **immediately** when the change is made through the API, else within `HELDAR_LIVE_REAPER_INTERVAL_S` (default 15 s) |
+
+**The detached backup transfer.** `services/backup::spawn_job` answers 202 and keeps copying for up
+to `HELDAR_BACKUP_JOB_TIMEOUT_S` (default an hour), and for `sftp`/`ftp`/`s3` destinations the bytes
+leave the box entirely, where no later guard of ours can reach them. Revoking the key is the operator
+saying *this credential is compromised*; it used to do nothing to footage already in flight. The job
+row now records **who ordered it** (`created_by`, `created_by_kind`) and the transfer re-asks before
+the first byte and every few seconds after, aborting with the reason on the job. Withdrawal means
+revoked, deactivated, deleted, expired — or re-scoped off any camera the job covers. Jobs with no
+creator (the **scheduler**, which holds no principal, and pre-upgrade rows) and jobs created with auth
+disabled are never withdrawn; a mechanism about revoking credentials must not touch deployments that
+have none.
+
+**Live view: the token names its subject.** The browser streams direct from MediaMTX, which has no
+session to present, so `/internal/mediamtx-auth` authorizes on a signed, path-scoped URL token. That
+token used to name no credential and the callback looked none up, so a revoked or re-scoped key kept
+streaming to the TTL — measured at the time as `200 OK` on a replayed token. A `v2` token now carries
+its **subject** inside the signed payload (api key, user, or site) and the callback re-resolves it on
+every read: revoked, deactivated, deleted, expired, or re-scoped off that camera all stop the stream.
+
+A transport is re-authorized as often as it **re-presents** the token, and HLS does so per segment.
+WebRTC never re-presents — it negotiates once and then flows over the peer connection — and RTSP
+readers are the same, so for those the bound token alone changed nothing.
+
+Those are now ended from the other side. MediaMTX reports a session id on every auth callback and
+exposes `POST /v3/{webrtcsessions,rtspsessions}/kick/{id}`, so the callback records who opened each
+read (`live_sessions`, migration 0016) and withdrawal actually cuts the session: **immediately** when
+the revocation, deactivation, deletion or re-scope is made through the API, and otherwise within
+`HELDAR_LIVE_REAPER_INTERVAL_S` (default 15 s, `0` disables). The periodic sweep is the backstop for
+what no API call announces — a key reaching `expires_at`, a row edited out of band, a kick that failed
+and needs retrying.
+
+Withdrawal is re-asked **per session**, so narrowing a scope cuts the cameras it lost and leaves the
+ones it kept. Never cut: camera **publishes** (only the read arm is recorded, so the recorder is out of
+reach by construction), sessions this box cannot attribute (they predate the table or survived a
+database loss — kicking on ignorance would make a restart look like an outage), and `Site` subjects.
+
+Two subjects are deliberately never withdrawn: **site** (the WebRTC rendezvous drives `ensure_live`
+holding a site token, not a principal — and a remote viewer must not lose video because an unrelated
+key was revoked) and, for **users**, the check reads `users.active` only, never sessions, so an
+operator whose session idles out mid-watch keeps watching. A database read failure allows the read,
+loudly: the recorder shares that SQLite, and a busy timeout must not black out the wall.
+`HELDAR_LIVEVIEW_TOKEN_TTL_SECS` still bounds a token's life, and a kernel restart invalidates every
+outstanding token (the signing key is per boot).

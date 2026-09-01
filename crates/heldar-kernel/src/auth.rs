@@ -10,7 +10,9 @@
 //! synthetic admin so the existing open API and tooling keep working; when true it requires a valid
 //! token and 401s otherwise. Handlers then assert capabilities with [`Principal::require`].
 
+use std::collections::HashSet;
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use argon2::password_hash::{rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier};
 use argon2::{password_hash::SaltString, Argon2};
@@ -22,7 +24,7 @@ use rand_core::RngCore;
 use sha2::{Digest, Sha256};
 use sqlx::SqlitePool;
 
-use crate::config::Config;
+use crate::config::{Config, EnforcementTier};
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
@@ -110,6 +112,307 @@ impl Role {
     }
 }
 
+/// A single grantable capability.
+///
+/// Capabilities replace the old `Principal::can_view()`, which returned `true` UNCONDITIONALLY — so an
+/// integration key minted for an AI worker could read the vehicle registry, the watchlist, live video,
+/// clip export, the network scanner and every sidecar's reverse proxy. The split is drawn where the
+/// blast radius is, not where the router is: `video:live` (mints a MediaMTX token AND starts an ffmpeg
+/// publisher), `video:export` (transcodes and writes a file) and `ai:frames` (the live JPEG of faces and
+/// plates) are three different privileges even though the dashboard treats them as one "media" screen.
+///
+/// `Cap::Admin` is a super-capability: [`Principal::has`] answers true for everything when it is held.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, PartialOrd, Ord)]
+pub enum Cap {
+    /// Full administrative control; implies every other capability.
+    Admin,
+    /// Manage the identity registry: vehicles + watchlist (the old `can_manage_registry`).
+    RegistryManage,
+    /// Operate the gate: visitor check-in/out, create passes, confirm/reject entries.
+    GateOperate,
+    /// Read the camera inventory and per-camera device configuration.
+    CameraRead,
+    /// Open a live stream (mints a media read token and can START a transcoding publisher).
+    VideoLive,
+    /// Read recorded video: segments, timelines, playback sessions, snapshots.
+    VideoPlayback,
+    /// Export recorded video off the box: clip transcode + archive export.
+    VideoExport,
+    /// Read the event/detection surface: events, zones, incidents, search, movement, entry events.
+    EventsRead,
+    /// Read identifying records: vehicles, watchlist entries, visitor passes, gate configuration.
+    IdentityRead,
+    /// Read the AI task list (what to analyze, at what fps, on which stream).
+    AiTasks,
+    /// Read sampled camera frames (`/cameras/{id}/frame`) — the actual pixels.
+    AiFrames,
+    /// Post perception results into the ingest pipeline.
+    AiIngest,
+    /// Claim and answer embedding-query work (the operator's pending semantic-search text).
+    AiEmbedWork,
+    /// Read system/operational state: system info, metrics, backups, modules, plugin store.
+    SystemRead,
+    /// Actively scan the network for cameras (an outbound probe sweep, not a read).
+    NetScan,
+    /// Reach a registered sidecar through the kernel's reverse proxy at `/m/{id}/*`.
+    ModuleProxy,
+}
+
+impl Cap {
+    /// Every capability, in declaration order. The single source of truth for `CapSet::ALL`, the
+    /// auth-off sweep test, and the docs table.
+    pub const ALL: [Cap; 16] = [
+        Cap::Admin,
+        Cap::RegistryManage,
+        Cap::GateOperate,
+        Cap::CameraRead,
+        Cap::VideoLive,
+        Cap::VideoPlayback,
+        Cap::VideoExport,
+        Cap::EventsRead,
+        Cap::IdentityRead,
+        Cap::AiTasks,
+        Cap::AiFrames,
+        Cap::AiIngest,
+        Cap::AiEmbedWork,
+        Cap::SystemRead,
+        Cap::NetScan,
+        Cap::ModuleProxy,
+    ];
+
+    pub fn slug(self) -> &'static str {
+        match self {
+            Cap::Admin => "admin",
+            Cap::RegistryManage => "registry:manage",
+            Cap::GateOperate => "gate:operate",
+            Cap::CameraRead => "camera:read",
+            Cap::VideoLive => "video:live",
+            Cap::VideoPlayback => "video:playback",
+            Cap::VideoExport => "video:export",
+            Cap::EventsRead => "events:read",
+            Cap::IdentityRead => "identity:read",
+            Cap::AiTasks => "ai:tasks",
+            Cap::AiFrames => "ai:frames",
+            Cap::AiIngest => "ai:ingest",
+            Cap::AiEmbedWork => "ai:embedwork",
+            Cap::SystemRead => "system:read",
+            Cap::NetScan => "net:scan",
+            Cap::ModuleProxy => "module:proxy",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Cap> {
+        Cap::ALL.into_iter().find(|c| c.slug() == s)
+    }
+
+    const fn bit(self) -> u64 {
+        1u64 << (self as u64)
+    }
+}
+
+/// A set of capabilities, packed into a bitmask so a `Principal` stays cheap to clone per request.
+/// Capabilities that read CROSS-CAMERA tables. There is zero tenancy in the schema (no `site_id`
+/// predicate anywhere), so a camera scope cannot filter them and would be security theatre.
+///
+/// Enforced in TWO places that must not drift: `routes::auth::validate_grant` refuses the
+/// combination at mint time, and `Principal::from_api_key` ignores the scope of a STORED key that
+/// carries it. Mint-time alone was not enough — rows predating the check kept resolving.
+pub const UNSCOPABLE_CAPS: [Cap; 2] = [Cap::EventsRead, Cap::IdentityRead];
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct CapSet(u64);
+
+impl CapSet {
+    pub const NONE: CapSet = CapSet(0);
+
+    /// Every capability. `Principal::system_admin()` holds this, which is how constraint 1 (auth
+    /// disabled keeps working) holds BY CONSTRUCTION rather than by a special case in each handler.
+    pub const ALL: CapSet = {
+        let mut bits = 0u64;
+        let mut i = 0;
+        while i < Cap::ALL.len() {
+            bits |= Cap::ALL[i].bit();
+            i += 1;
+        }
+        CapSet(bits)
+    };
+
+    pub fn of(caps: &[Cap]) -> CapSet {
+        let mut bits = 0u64;
+        for c in caps {
+            bits |= c.bit();
+        }
+        CapSet(bits)
+    }
+
+    /// Raw membership: is this EXACT bit set? Does not account for `Cap::Admin` implying the rest.
+    ///
+    /// Prefer [`CapSet::expanded`] (or [`Principal::has`], which is built on it) for any AUTHORIZATION
+    /// decision. This stayed the sole test at grant-validation time while request time used the
+    /// Admin-implying form, and the two drifting apart is what let `admin` + `scope_kind: cameras`
+    /// mint past the `UNSCOPABLE_CAPS` refusal and then satisfy every capability check it had just
+    /// been refused. Use this only when you mean "was this bit literally granted".
+    pub fn contains(self, c: Cap) -> bool {
+        self.0 & c.bit() != 0
+    }
+
+    /// This set with `Cap::Admin`'s implications resolved — the set the caller EFFECTIVELY holds.
+    ///
+    /// The single definition of "admin implies everything". Every authorization decision, at mint
+    /// time and at request time, must go through here so the two cannot disagree about what a grant
+    /// means.
+    pub fn expanded(self) -> CapSet {
+        if self.contains(Cap::Admin) {
+            CapSet::ALL
+        } else {
+            self
+        }
+    }
+
+    /// Whether the caller effectively holds `c`, honouring `Cap::Admin`.
+    pub fn allows(self, c: Cap) -> bool {
+        self.expanded().contains(c)
+    }
+    pub fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+    pub fn with(self, c: Cap) -> CapSet {
+        CapSet(self.0 | c.bit())
+    }
+    pub fn union(self, other: CapSet) -> CapSet {
+        CapSet(self.0 | other.0)
+    }
+    /// Capabilities in `self` that are NOT in `other` — the deny-preview under `warn`.
+    pub fn minus(self, other: CapSet) -> CapSet {
+        CapSet(self.0 & !other.0)
+    }
+    pub fn iter(self) -> impl Iterator<Item = Cap> {
+        Cap::ALL.into_iter().filter(move |c| self.contains(*c))
+    }
+    pub fn slugs(self) -> Vec<&'static str> {
+        self.iter().map(|c| c.slug()).collect()
+    }
+}
+
+/// Every capability that the unconditional `can_view()` used to hand out. Kept as one constant because
+/// the legacy expansion's correctness argument is "this is exactly what `can_view()` unlocked", and that
+/// argument is only checkable if the set is written down once.
+const LEGACY_VIEW_CAPS: CapSet = CapSet::of_const(&[
+    Cap::CameraRead,
+    Cap::VideoLive,
+    Cap::VideoPlayback,
+    Cap::VideoExport,
+    Cap::EventsRead,
+    Cap::IdentityRead,
+    Cap::AiTasks,
+    Cap::AiFrames,
+    Cap::SystemRead,
+    Cap::NetScan,
+    Cap::ModuleProxy,
+]);
+
+impl CapSet {
+    /// `of` in a const context (used for the role tables).
+    pub const fn of_const(caps: &[Cap]) -> CapSet {
+        let mut bits = 0u64;
+        let mut i = 0;
+        while i < caps.len() {
+            bits |= caps[i].bit();
+            i += 1;
+        }
+        CapSet(bits)
+    }
+}
+
+/// Back-compat expansion for a credential with NO explicit capability grant (`capabilities IS NULL`).
+///
+/// This reproduces TODAY'S REACH EXACTLY, so no deployed key changes behaviour when 0012 lands. The
+/// argument, per role:
+///   * `can_view()` was unconditionally true  -> every role gets [`LEGACY_VIEW_CAPS`];
+///   * `can_operate_gate()` was admin|manager|guard;
+///   * `can_manage_registry()` was admin|manager;
+///   * `can_ingest()` was admin|integration — which is why manager does NOT get `ai:ingest` here even
+///     though it otherwise looks like "everything but admin".
+pub fn legacy_caps(role: Role) -> CapSet {
+    match role {
+        Role::Admin => CapSet::ALL,
+        Role::Manager => LEGACY_VIEW_CAPS
+            .with(Cap::GateOperate)
+            .with(Cap::RegistryManage),
+        Role::Guard => LEGACY_VIEW_CAPS.with(Cap::GateOperate),
+        Role::Viewer => LEGACY_VIEW_CAPS,
+        Role::Integration => LEGACY_VIEW_CAPS.with(Cap::AiIngest).with(Cap::AiEmbedWork),
+    }
+}
+
+/// Contained expansion for a legacy credential under `HELDAR_MACHINE_AUTH=enforce`.
+///
+/// Identical to [`legacy_caps`] for the four HUMAN roles — an operator's reach is not what hole (a) is
+/// about. `integration` (the machine role, and the only role a sidecar or worker key is ever minted
+/// with) narrows to what a real AI worker actually calls, losing identity:read, system:read, net:scan,
+/// module:proxy and all three video capabilities. No key is bricked and none needs re-minting.
+pub fn enforced_caps(role: Role) -> CapSet {
+    match role {
+        Role::Integration => CapSet::of(&[
+            Cap::AiTasks,
+            Cap::AiFrames,
+            Cap::AiIngest,
+            Cap::AiEmbedWork,
+            Cap::CameraRead,
+            Cap::EventsRead,
+        ]),
+        other => legacy_caps(other),
+    }
+}
+
+/// Tier selector: which expansion a capability-less credential gets.
+pub fn role_caps(role: Role, tier: EnforcementTier) -> CapSet {
+    match tier {
+        EnforcementTier::Off | EnforcementTier::Warn => legacy_caps(role),
+        EnforcementTier::Enforce => enforced_caps(role),
+    }
+}
+
+/// Parse a stored `capabilities` JSON array into a [`CapSet`] plus the slugs that were not recognized.
+///
+/// An unknown slug is DROPPED with a warning rather than denying the whole key. Dropping grants
+/// nothing, so it is still fail-closed, and it keeps a key minted by a newer kernel usable after a
+/// rollback. This deliberately differs from [`Role::parse`], where denying is correct because the
+/// fallback there would be a capability-BEARING default.
+pub fn parse_capability_slugs(slugs: &[String]) -> (CapSet, Vec<String>) {
+    let mut set = CapSet::NONE;
+    let mut unknown = Vec::new();
+    for s in slugs {
+        let trimmed = s.trim();
+        match Cap::parse(trimmed) {
+            Some(c) => set = set.with(c),
+            None if trimmed.is_empty() => {}
+            None => unknown.push(trimmed.to_string()),
+        }
+    }
+    (set, unknown)
+}
+
+/// Which cameras a credential may address.
+///
+/// `Cameras` exists for a key handed to one integrator covering one lane. There is ZERO tenancy in the
+/// schema (no `site_id` predicate anywhere), so it is refused at mint time in combination with
+/// `events:read` / `identity:read`, which read cross-camera tables it cannot filter.
+#[derive(Clone, Debug)]
+pub enum Scope {
+    All,
+    Cameras(Arc<HashSet<String>>),
+}
+
+impl Scope {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Scope::All => "all",
+            Scope::Cameras(_) => "cameras",
+        }
+    }
+}
+
 /// How a session's expiry behaves, resolved from config.
 ///
 /// `max_lifetime_hours == 0` keeps expiry ABSOLUTE — `expires_at` is fixed at login, so an operator
@@ -159,37 +462,71 @@ pub struct Principal {
     pub name: String,
     pub role: Role,
     pub kind: PrincipalKind,
+    /// What this caller may DO. For a user or a legacy API key this is the role expansion; for a key
+    /// minted with an explicit grant it is exactly that grant.
+    pub caps: CapSet,
+    /// Which cameras this caller may address.
+    pub scope: Scope,
 }
 
 impl Principal {
     /// The implicit principal used when auth is disabled.
+    ///
+    /// Holds [`CapSet::ALL`] and [`Scope::All`], so every `require_cap` / `require_camera` added
+    /// anywhere in the tree passes for it — the LAN-appliance default cannot be broken by adding a
+    /// capability, only by removing one from this constructor. (`auth_off_sweep_grants_every_cap`
+    /// pins that.)
     pub fn system_admin() -> Self {
         Principal {
             id: "system".into(),
             name: "system".into(),
             role: Role::Admin,
             kind: PrincipalKind::System,
+            caps: CapSet::ALL,
+            scope: Scope::All,
         }
     }
 
+    /// A principal whose capabilities come from its role (users, and API keys with no explicit grant).
+    pub fn from_role(
+        id: String,
+        name: String,
+        role: Role,
+        kind: PrincipalKind,
+        caps: CapSet,
+    ) -> Self {
+        Principal {
+            id,
+            name,
+            role,
+            kind,
+            caps,
+            scope: Scope::All,
+        }
+    }
+
+    /// Whether this caller holds `c`. `Cap::Admin` implies everything.
+    ///
+    /// Delegates to [`CapSet::allows`] so this and grant validation share ONE definition of what an
+    /// admin grant contains — see the note on [`CapSet::contains`] for what their disagreement cost.
+    pub fn has(&self, c: Cap) -> bool {
+        self.caps.allows(c)
+    }
+
     pub fn can_admin(&self) -> bool {
-        self.role == Role::Admin
+        self.caps.contains(Cap::Admin)
     }
     /// Manage the registry: vehicles + watchlist.
     pub fn can_manage_registry(&self) -> bool {
-        matches!(self.role, Role::Admin | Role::Manager)
+        self.has(Cap::RegistryManage)
     }
     /// Operate the gate: visitor check-in/out, create passes, confirm/reject entries.
     pub fn can_operate_gate(&self) -> bool {
-        matches!(self.role, Role::Admin | Role::Manager | Role::Guard)
+        self.has(Cap::GateOperate)
     }
     /// Post perception/ANPR events into the entry pipeline (machine clients + admins).
     pub fn can_ingest(&self) -> bool {
-        matches!(self.role, Role::Admin | Role::Integration)
-    }
-    /// Read the entry surface. Every authenticated principal can read.
-    pub fn can_view(&self) -> bool {
-        true
+        self.has(Cap::AiIngest)
     }
 
     /// Assert a capability, returning 403 with a useful message otherwise.
@@ -200,6 +537,47 @@ impl Principal {
             Err(AppError::Forbidden(format!(
                 "role `{}` is not permitted to {action}",
                 self.role.as_str()
+            )))
+        }
+    }
+
+    /// Assert a named capability. The message names the missing slug so an operator can fix the grant
+    /// without reading the source.
+    pub fn require_cap(&self, c: Cap, action: &str) -> AppResult<()> {
+        if self.has(c) {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden(format!(
+                "role `{}` is not permitted to {action} (missing capability `{}`)",
+                self.role.as_str(),
+                c.slug()
+            )))
+        }
+    }
+
+    /// The camera allowlist, or None when unrestricted — for building an `IN (...)` list predicate.
+    pub fn camera_scope(&self) -> Option<&HashSet<String>> {
+        match &self.scope {
+            Scope::All => None,
+            Scope::Cameras(set) => Some(set),
+        }
+    }
+
+    pub fn camera_allowed(&self, camera_id: &str) -> bool {
+        match &self.scope {
+            Scope::All => true,
+            Scope::Cameras(set) => set.contains(camera_id),
+        }
+    }
+
+    /// Assert camera scope. Deliberately checked BEFORE the camera row is loaded, so an out-of-scope id
+    /// answers 403 whether or not it exists — the boundary must not be an existence oracle.
+    pub fn require_camera(&self, camera_id: &str, action: &str) -> AppResult<()> {
+        if self.camera_allowed(camera_id) {
+            Ok(())
+        } else {
+            Err(AppError::Forbidden(format!(
+                "credential is not scoped to camera `{camera_id}` (cannot {action})"
             )))
         }
     }
@@ -360,45 +738,44 @@ async fn resolve_token(
     pool: &SqlitePool,
     token: &str,
     policy: SessionPolicy,
+    tier: EnforcementTier,
 ) -> AppResult<Option<Principal>> {
     let idle_minutes = policy.idle_minutes;
     let hash = token_hash(token);
     let now = Utc::now();
     if token.starts_with(APIKEY_PREFIX) {
-        let row: Option<(String, String, String, bool)> =
-            sqlx::query_as("SELECT id, name, role, active FROM api_keys WHERE key_hash = ?")
-                .bind(&hash)
-                .fetch_optional(pool)
-                .await?;
-        if let Some((id, name, role, active)) = row {
-            if !active {
-                return Ok(None);
-            }
-            // An unparseable stored role means a corrupt/tampered row — deny rather than fail open
-            // to a capability-bearing default.
-            let Some(role) = Role::parse(&role) else {
-                tracing::error!(api_key = %id, role = %role, "auth: api key has unparseable role; denying");
+        // The five capability columns ride the EXISTING single seek on `key_hash UNIQUE` — no second
+        // round trip. That is deliberate: the AI worker authenticates on every request, and an extra
+        // query here is paid at worker poll rate.
+        let row: Option<ApiKeyRow> = sqlx::query_as(&format!(
+            "SELECT {API_KEY_COLUMNS} FROM api_keys WHERE key_hash = ?"
+        ))
+        .bind(&hash)
+        .fetch_optional(pool)
+        .await?;
+        if let Some(r) = row {
+            let key_id = r.id.clone();
+            let Some(principal) = principal_from_key_row(r, tier, now) else {
                 return Ok(None);
             };
             // Best-effort last-used stamp (does not gate the request). Debounced to once a
             // minute per key: the AI worker authenticates every request with its key, and an
             // unconditional UPDATE put a write on SQLite's single writer for every poll —
             // observed live stalling 1–2s each under recorder/ingest write load.
+            //
+            // Outside `principal_from_key_row` on purpose: that function answers "what is this key
+            // entitled to", and [`api_key_principal_now`] asks it about a key that is NOT making a
+            // request. Stamping there would record a background re-check as usage.
             let _ = sqlx::query(
                 "UPDATE api_keys SET last_used_at = ?
                  WHERE id = ? AND (last_used_at IS NULL OR last_used_at < ?)",
             )
             .bind(now)
-            .bind(&id)
+            .bind(&key_id)
             .bind(now - Duration::minutes(1))
             .execute(pool)
             .await;
-            return Ok(Some(Principal {
-                id,
-                name,
-                role,
-                kind: PrincipalKind::ApiKey,
-            }));
+            return Ok(Some(principal));
         }
         return Ok(None);
     }
@@ -497,14 +874,241 @@ async fn resolve_token(
                 "auth: could not persist session last_used_at; liveness held in memory only"
             );
         }
-        return Ok(Some(Principal {
-            id: r.uid,
-            name: r.display_name.unwrap_or_default(),
+        return Ok(Some(Principal::from_role(
+            r.uid,
+            r.display_name.unwrap_or_default(),
             role,
-            kind: PrincipalKind::User,
-        }));
+            PrincipalKind::User,
+            role_caps(role, tier),
+        )));
     }
     Ok(None)
+}
+
+/// The api-key row as the auth path reads it — one seek, every column the principal needs.
+#[derive(sqlx::FromRow)]
+struct ApiKeyRow {
+    id: String,
+    name: String,
+    role: String,
+    active: bool,
+    capabilities: Option<String>,
+    scope_kind: String,
+    scope_cameras: Option<String>,
+    expires_at: Option<DateTime<Utc>>,
+    revoked_at: Option<DateTime<Utc>>,
+}
+
+/// The columns [`principal_from_key_row`] needs. One string so the token seek and the by-id re-check
+/// cannot select different sets and then disagree about what a key is.
+const API_KEY_COLUMNS: &str =
+    "id, name, role, active, capabilities, scope_kind, scope_cameras, expires_at, revoked_at";
+
+/// What a stored api-key row is entitled to, or `None` to DENY it.
+///
+/// The single definition of that question. It used to live inline in [`resolve_token`], which was
+/// fine while a bearer token was the only way to ask — but authorization that outlives its request
+/// (the detached backup transfer in `services::backup`) has to ask it again LATER, about a key id
+/// rather than a token, and a second implementation of "is this key still good" is exactly the kind
+/// of duplicate this file has already watched drift apart once (`CapSet::contains` vs `allows`).
+///
+/// Deliberately side-effect free: no `last_used_at` stamp, no logging of "usage". A background
+/// re-check is not a request.
+fn principal_from_key_row(
+    r: ApiKeyRow,
+    tier: EnforcementTier,
+    now: DateTime<Utc>,
+) -> Option<Principal> {
+    if !r.active {
+        return None;
+    }
+    if let Some(revoked) = r.revoked_at {
+        tracing::debug!(api_key = %r.id, %revoked, "auth: api key is revoked; denying");
+        return None;
+    }
+    if let Some(exp) = r.expires_at {
+        if exp <= now {
+            tracing::debug!(api_key = %r.id, %exp, "auth: api key has expired; denying");
+            return None;
+        }
+    }
+    // An unparseable stored role means a corrupt/tampered row — deny rather than fail open
+    // to a capability-bearing default.
+    let Some(role) = Role::parse(&r.role) else {
+        tracing::error!(api_key = %r.id, role = %r.role, "auth: api key has unparseable role; denying");
+        return None;
+    };
+    // A malformed capabilities blob is a corrupt/tampered row, and unlike an unknown slug there is
+    // no safe subset to fall back to — deny, same as an unparseable role.
+    let caps = resolve_key_caps(&r.id, r.capabilities.as_deref(), role, tier)?;
+    let scope = resolve_key_scope(&r.id, &r.scope_kind, r.scope_cameras.as_deref());
+    // A camera scope combined with a capability that reads CROSS-CAMERA tables is a boundary
+    // that cannot hold — those tables carry no camera predicate to filter on. `validate_grant`
+    // refuses the combination at MINT time, but a refusal that only runs at mint is no
+    // refusal at all: rows written before it existed (every box upgraded through 56ef0b4, and
+    // anything inserted out of band) are still resolved here on every request. Enforce it on
+    // the READ path too, which is the one every request actually walks.
+    //
+    // DENY the key. The two alternatives both fail open, which is why neither is here:
+    // dropping the SCOPE promotes the key to fleet-wide, handing it strictly more than it had
+    // (a remediation that escalates privilege is worse than the leak it patches); and
+    // stripping the unscopable CAPS does nothing when the grant is `admin`, because
+    // `CapSet::allows` re-derives them from Admin. Denying is the only outcome that cannot
+    // end with the caller holding more than the operator intended.
+    //
+    // The blast radius is bounded: this shape is unmintable, so a stored one is either a row
+    // written before the mint-time refusal existed or an out-of-band insert. The fix is to
+    // re-mint — without the unscopable capabilities, or without the camera scope.
+    if matches!(scope, Scope::Cameras(_)) && UNSCOPABLE_CAPS.iter().any(|u| caps.allows(*u)) {
+        tracing::error!(
+            target: "heldar::security",
+            api_key = %r.id,
+            caps = %UNSCOPABLE_CAPS
+                .iter()
+                .filter(|u| caps.allows(**u))
+                .map(|c| c.slug())
+                .collect::<Vec<_>>()
+                .join(","),
+            "auth: DENYING api key — it carries a camera scope alongside capabilities that \
+             read cross-camera tables, which the scope cannot filter. The API refuses to mint \
+             this combination; re-mint the key without those capabilities, or without the \
+             camera scope."
+        );
+        return None;
+    }
+    Some(Principal {
+        id: r.id,
+        name: r.name,
+        role,
+        kind: PrincipalKind::ApiKey,
+        caps,
+        scope,
+    })
+}
+
+/// Re-resolve an api key BY ID: what it is entitled to RIGHT NOW, not when it last authenticated.
+///
+/// For work that outlives the request that authorized it. `Ok(None)` is the operator's answer — the
+/// key was deleted, deactivated, revoked or has expired (or its stored grant is one the read path
+/// refuses) — and is what a caller must treat as "stop". `Err` is a DATABASE read failure and says
+/// nothing about the key; a caller aborting real work on it would be turning a transient SQLite busy
+/// into a security decision, so the two are kept distinguishable here rather than flattened.
+///
+/// The token seek in [`resolve_token`] and this share [`principal_from_key_row`] and
+/// [`API_KEY_COLUMNS`], so "revoked" cannot come to mean one thing at the door and another an hour
+/// into a transfer.
+pub async fn api_key_principal_now(
+    pool: &SqlitePool,
+    key_id: &str,
+    tier: EnforcementTier,
+) -> sqlx::Result<Option<Principal>> {
+    let row: Option<ApiKeyRow> = sqlx::query_as(&format!(
+        "SELECT {API_KEY_COLUMNS} FROM api_keys WHERE id = ?"
+    ))
+    .bind(key_id)
+    .fetch_optional(pool)
+    .await?;
+    Ok(row.and_then(|r| principal_from_key_row(r, tier, Utc::now())))
+}
+
+/// Resolve an api key's capability set. `None` means "deny this key" (corrupt row).
+///
+/// An explicit grant is used verbatim. A NULL grant is the LEGACY case and expands from the role under
+/// the current tier — which is what contains already-deployed keys without anyone re-minting them.
+fn resolve_key_caps(
+    key_id: &str,
+    capabilities: Option<&str>,
+    role: Role,
+    tier: EnforcementTier,
+) -> Option<CapSet> {
+    let Some(raw) = capabilities else {
+        // Legacy key. Under `warn`, tell the operator exactly what `enforce` would take away — a tier
+        // flip is otherwise a blind switch.
+        if tier == EnforcementTier::Warn {
+            let would_lose = legacy_caps(role).minus(enforced_caps(role));
+            if !would_lose.is_empty() && should_log_deny_preview(key_id) {
+                tracing::warn!(
+                    target: "heldar::security",
+                    api_key = %key_id,
+                    role = %role.as_str(),
+                    would_be_denied = %would_lose.slugs().join(","),
+                    "HELDAR_MACHINE_AUTH=warn: this key has no explicit capability grant; under \
+                     `enforce` it would LOSE these capabilities. Re-mint it with an explicit \
+                     `capabilities` list before switching."
+                );
+            }
+        }
+        return Some(role_caps(role, tier));
+    };
+    let slugs: Vec<String> = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(
+                api_key = %key_id, error = %e,
+                "auth: api key has an unparseable `capabilities` blob; denying"
+            );
+            return None;
+        }
+    };
+    let (set, unknown) = parse_capability_slugs(&slugs);
+    if !unknown.is_empty() {
+        tracing::warn!(
+            api_key = %key_id, unknown = %unknown.join(","),
+            "auth: dropping unrecognized capability slug(s) on api key (granting nothing for them)"
+        );
+    }
+    Some(set)
+}
+
+/// Resolve an api key's camera scope. Anything we cannot read as an explicit, well-formed allowlist
+/// fails CLOSED (an empty allowlist), never open.
+fn resolve_key_scope(key_id: &str, scope_kind: &str, scope_cameras: Option<&str>) -> Scope {
+    match scope_kind {
+        "all" => Scope::All,
+        "cameras" => {
+            let ids: Vec<String> = scope_cameras
+                .and_then(|raw| match serde_json::from_str(raw) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        tracing::error!(
+                            api_key = %key_id, error = %e,
+                            "auth: api key has an unparseable `scope_cameras` blob; scoping to NO cameras"
+                        );
+                        None
+                    }
+                })
+                .unwrap_or_default();
+            Scope::Cameras(Arc::new(ids.into_iter().collect()))
+        }
+        other => {
+            tracing::error!(
+                api_key = %key_id, scope_kind = %other,
+                "auth: api key has an unrecognized `scope_kind`; scoping to NO cameras"
+            );
+            Scope::Cameras(Arc::new(HashSet::new()))
+        }
+    }
+}
+
+/// Rate-limit the `warn`-tier deny preview to once per key per hour: it fires on the auth path, which
+/// the AI worker walks on every request.
+fn should_log_deny_preview(key_id: &str) -> bool {
+    static SEEN: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, i64>>> =
+        std::sync::OnceLock::new();
+    let now = Utc::now().timestamp();
+    let Ok(mut map) = SEEN.get_or_init(Default::default).lock() else {
+        return false;
+    };
+    match map.get(key_id) {
+        Some(last) if now - *last < 3600 => false,
+        _ => {
+            if map.len() > 1024 {
+                map.retain(|_, last| now - *last < 3600);
+            }
+            map.insert(key_id.to_string(), now);
+            true
+        }
+    }
 }
 
 /// A session joined to its user, for token resolution.
@@ -536,6 +1140,7 @@ async fn resolve_request_principal(
                     ttl_hours: st.cfg.session_ttl_hours,
                     max_lifetime_hours: st.cfg.session_max_lifetime_hours,
                 },
+                st.cfg.machine_auth,
             )
             .await?
             {
@@ -658,7 +1263,66 @@ pub async fn ensure_bootstrap(pool: &SqlitePool, cfg: &Config) -> anyhow::Result
     Ok(())
 }
 
+/// The `target_id` a fleet-wide act files itself under when its target_type is still `camera`.
+///
+/// `routes/camera_config.rs::bulk` reboots or reconfigures N cameras and records ONE row: `"*"` as
+/// the target and only a count in `detail`. Read literally that is a camera named `*`, and a scoped
+/// credential holding such a camera would inherit every bulk row on the box. No real id can collide:
+/// `util::slugify` rewrites every non-alphanumeric byte to `_`, so `*` is unreachable as a camera id
+/// and unambiguous as a wildcard.
+const WILDCARD_TARGET: &str = "*";
+
+/// The camera an audit row is ABOUT, or `None` when the row is fleet-level or names no camera.
+///
+/// This is what `audit_log.subject_camera_id` (migration 0014) stores, and it is derived HERE rather
+/// than at the ~100 call sites so that no writer can forget it and every future writer inherits it.
+///
+/// Two shapes count, and only two:
+/// - `target_type = "camera"`, where the subject is the target itself (gate policy edits, manual
+///   opens, camera registry writes);
+/// - a STRING `detail.camera_id` under any other target_type — the shape zones, ai_task,
+///   camera_schedule, snapshot_schedule and recording_gap all emit, and precisely the channel that
+///   leaked the roster while the filter could only see `target_id`.
+///
+/// A MULTI-camera row (`detail.camera_ids` on an archive export, `detail.scope_cameras` on an API key
+/// mint) resolves to `None` and is treated as fleet-level. Taking its first element would mislabel a
+/// fleet-level act AND make the row visible to the holder of that one lane, handing them the other
+/// cameras in the same JSON — the exact disclosure this column exists to stop.
+///
+/// `WILDCARD_TARGET` is the same case wearing a camera target_type, and is the only id treated
+/// specially here — see the constant.
+fn subject_camera(
+    target_type: &str,
+    target_id: &str,
+    detail: &serde_json::Value,
+) -> Option<String> {
+    if target_type == "camera" && !target_id.is_empty() && target_id != WILDCARD_TARGET {
+        return Some(target_id.to_string());
+    }
+    if let Some(id) = detail
+        .get("camera_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+    {
+        return Some(id.to_string());
+    }
+    // A one-element `camera_ids` names exactly one subject and is NOT a fleet act. Treating the
+    // plural key as always-fleet hid a scoped caller's own single-camera archive export from its own
+    // audit trail — the multi-camera-is-fleet rule is right, but only from two elements up.
+    match detail.get("camera_ids").and_then(|v| v.as_array()) {
+        Some(ids) if ids.len() == 1 => ids[0]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(str::to_string),
+        _ => None,
+    }
+}
+
 /// Append an immutable audit-log entry (best-effort; never fails the caller).
+///
+/// Returns the row's id, or `None` if the write failed. Evidence bundles (#118) put it in the signed
+/// manifest so a bundle points back at the appliance's own trail — which means the id has to be
+/// known BEFORE the export runs, not derived afterwards by searching for a matching row.
 pub async fn audit(
     pool: &SqlitePool,
     actor: &Principal,
@@ -666,12 +1330,20 @@ pub async fn audit(
     target_type: &str,
     target_id: &str,
     detail: serde_json::Value,
-) {
+) -> Option<String> {
+    // Derived before `detail` is moved into the bind: the subject has to live in its own column
+    // because `detail` is free-form `Json<Value>` that no SQL predicate can be trusted to read.
+    let subject = subject_camera(target_type, target_id, &detail);
+    let audit_id = format!("aud_{}", uuid::Uuid::new_v4().simple());
+    // The correlation id of the request being served, or NULL when nothing is — a background sweep,
+    // a scheduled job, a test. Read from the task-local rather than threaded through every one of
+    // `audit()`'s hundred-plus call sites; see `request_id::CURRENT` for why that seam, not a parameter.
+    let request_id = crate::request_id::current();
     let res = sqlx::query(
-        "INSERT INTO audit_log (id, actor, actor_name, role, action, target_type, target_id, detail, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO audit_log (id, actor, actor_name, role, action, target_type, target_id, detail, subject_camera_id, request_id, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind(format!("aud_{}", uuid::Uuid::new_v4().simple()))
+    .bind(&audit_id)
     .bind(&actor.id)
     .bind(&actor.name)
     .bind(actor.role.as_str())
@@ -679,16 +1351,58 @@ pub async fn audit(
     .bind(target_type)
     .bind(target_id)
     .bind(sqlx::types::Json(detail))
+    .bind(subject)
+    .bind(request_id)
     .bind(Utc::now())
     .execute(pool)
     .await;
     if let Err(e) = res {
         tracing::error!(error = %e, action, "audit: failed to write audit log entry");
+        return None;
     }
+    Some(audit_id)
 }
 
 #[cfg(test)]
 mod tests {
+    /// The mint-time and request-time views of a grant must agree for EVERY capability. They did not:
+    /// grant validation tested raw bits while `Principal::has` implied Admin, so an `admin` grant was
+    /// simultaneously "does not contain EventsRead" (at mint) and "contains EventsRead" (at request).
+    /// That disagreement is what defeated the `UNSCOPABLE_CAPS` refusal, so pin it for all of Cap::ALL.
+    #[test]
+    fn the_two_capability_views_of_an_admin_grant_agree() {
+        let admin_only = CapSet::of(&[Cap::Admin]);
+        let p = Principal {
+            caps: admin_only,
+            ..Principal::system_admin()
+        };
+        for c in Cap::ALL {
+            assert!(
+                admin_only.expanded().contains(c),
+                "an admin grant must EFFECTIVELY contain {:?} at mint time",
+                c
+            );
+            assert_eq!(
+                admin_only.allows(c),
+                p.has(c),
+                "mint-time and request-time views disagree about {:?}",
+                c
+            );
+        }
+        // The raw test must stay raw — callers that genuinely mean "was this bit listed" rely on it.
+        assert!(!admin_only.contains(Cap::EventsRead));
+        assert!(admin_only.contains(Cap::Admin));
+    }
+
+    /// A non-admin grant is unchanged by the expansion: it must not silently widen.
+    #[test]
+    fn expansion_widens_nothing_without_admin() {
+        let set = CapSet::of(&[Cap::CameraRead, Cap::VideoPlayback]);
+        for c in Cap::ALL {
+            assert_eq!(set.allows(c), set.contains(c), "{:?} changed meaning", c);
+        }
+    }
+
     use super::*;
 
     fn test_policy(idle_minutes: i64) -> SessionPolicy {
@@ -811,7 +1525,7 @@ mod tests {
             ttl_hours: 24,
             max_lifetime_hours: 168,
         };
-        assert!(resolve_token(&pool, &token, policy)
+        assert!(resolve_token(&pool, &token, policy, EnforcementTier::Warn)
             .await
             .unwrap()
             .is_some());
@@ -843,7 +1557,9 @@ mod tests {
                 .await
                 .unwrap();
 
-        let p = resolve_token(&pool, &token, test_policy(45)).await.unwrap();
+        let p = resolve_token(&pool, &token, test_policy(45), EnforcementTier::Warn)
+            .await
+            .unwrap();
         assert!(p.is_some(), "a 10-minute-old session must still resolve");
 
         let after: DateTime<Utc> =
@@ -869,7 +1585,7 @@ mod tests {
         mark_session_seen(&sid, Utc::now(), 45);
 
         assert!(
-            resolve_token(&pool, &token, test_policy(45))
+            resolve_token(&pool, &token, test_policy(45), EnforcementTier::Warn)
                 .await
                 .unwrap()
                 .is_some(),
@@ -885,7 +1601,7 @@ mod tests {
         forget_session_seen(&sid);
 
         assert!(
-            resolve_token(&pool, &token, test_policy(45))
+            resolve_token(&pool, &token, test_policy(45), EnforcementTier::Warn)
                 .await
                 .unwrap()
                 .is_none(),
@@ -932,21 +1648,51 @@ mod tests {
 
     #[test]
     fn capability_matrix() {
-        let admin = Principal {
-            role: Role::Admin,
+        // Build each principal from its ROLE EXPANSION, not from `system_admin()`. Capabilities are
+        // no longer derived from `role`, so `Principal { role, ..system_admin() }` carries CapSet::ALL
+        // and every negative assertion below would silently pass on a principal that can do
+        // everything — a test that reads as a matrix check while pinning nothing.
+        let with = |role: Role, caps: CapSet| Principal {
+            role,
+            caps,
             ..Principal::system_admin()
         };
-        let guard = Principal {
-            role: Role::Guard,
-            ..Principal::system_admin()
-        };
-        let integ = Principal {
-            role: Role::Integration,
-            ..Principal::system_admin()
-        };
+        let admin = with(Role::Admin, legacy_caps(Role::Admin));
+        let guard = with(Role::Guard, legacy_caps(Role::Guard));
+        let integ = with(Role::Integration, legacy_caps(Role::Integration));
+
         assert!(admin.can_admin() && admin.can_ingest() && admin.can_manage_registry());
         assert!(guard.can_operate_gate() && !guard.can_manage_registry() && !guard.can_admin());
         assert!(integ.can_ingest() && !integ.can_operate_gate());
+        // The hole this whole change exists to close: an integration credential must not be an admin
+        // and must not manage the registry, under EITHER expansion.
+        for caps in [
+            legacy_caps(Role::Integration),
+            enforced_caps(Role::Integration),
+        ] {
+            let p = with(Role::Integration, caps);
+            assert!(!p.can_admin(), "integration must never be admin");
+            assert!(
+                !p.can_manage_registry(),
+                "integration must not manage the registry"
+            );
+            assert!(p.can_ingest(), "an AI worker must still be able to ingest");
+        }
+        // `enforce` must actually take reach away from a machine credential, or the tier is cosmetic.
+        let legacy = legacy_caps(Role::Integration);
+        let enforced = enforced_caps(Role::Integration);
+        assert_ne!(
+            legacy, enforced,
+            "enforced_caps must narrow the integration role"
+        );
+        // ...and must not touch the human roles.
+        for role in [Role::Admin, Role::Manager, Role::Guard, Role::Viewer] {
+            assert_eq!(
+                legacy_caps(role),
+                enforced_caps(role),
+                "enforce must not change {role:?}"
+            );
+        }
     }
 
     // ---- require_api_auth middleware (issue #52) --------------------------------------------
@@ -974,6 +1720,7 @@ mod tests {
             modules: std::sync::Arc::new(Vec::new()),
             catalog: std::sync::Arc::new(crate::services::registry::CatalogService::new(&cfg)),
             http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
             started_at: Utc::now(),
             pool,
             cfg,
@@ -1062,6 +1809,191 @@ mod tests {
         assert_eq!(
             status_of(&app_open, "/api/v1/naked", None).await,
             axum::http::StatusCode::OK
+        );
+    }
+
+    /// `subject_camera_id` of the most recently written audit row.
+    async fn newest_subject(pool: &SqlitePool) -> Option<String> {
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT subject_camera_id FROM audit_log ORDER BY rowid DESC LIMIT 1",
+        )
+        .fetch_one(pool)
+        .await
+        .expect("audit_log must carry a subject_camera_id column")
+    }
+
+    /// The write half of the audit-log camera leak.
+    ///
+    /// `detail` is free-form `Json<Value>` and most writers name their camera in it under a NON-camera
+    /// target_type (zone, ai_task, camera_schedule, snapshot_schedule, recording_gap). While the only
+    /// filterable camera identity was `target_id`, every one of those rows was invisible to the scope
+    /// predicate and `GET /api/v1/audit?limit=5000` returned the fleet roster. `audit()` is the single
+    /// writer, so the subject is derived here and lands in a column no call site has to remember.
+    #[tokio::test]
+    async fn audit_lifts_the_subject_camera_out_of_free_form_detail() {
+        let pool = mem_pool_migrated().await;
+        let actor = Principal::system_admin();
+
+        // The shape that leaked: the camera appears ONLY in `detail`.
+        audit(
+            &pool,
+            &actor,
+            "create_zone",
+            "zone",
+            "zone_1",
+            serde_json::json!({ "camera_id": "cam_a", "name": "dock" }),
+        )
+        .await;
+        assert_eq!(newest_subject(&pool).await.as_deref(), Some("cam_a"));
+
+        // A camera-targeted row keeps resolving to its target, as the old `target_id` filter did.
+        audit(
+            &pool,
+            &actor,
+            "gate_manual_open",
+            "camera",
+            "cam_b",
+            serde_json::json!({ "pulse_ms": 1000 }),
+        )
+        .await;
+        assert_eq!(newest_subject(&pool).await.as_deref(), Some("cam_b"));
+
+        // A row about no camera at all stays NULL — read as fleet-level, hidden from scoped callers.
+        audit(
+            &pool,
+            &actor,
+            "delete_pass",
+            "pass",
+            "pass_1",
+            serde_json::json!({}),
+        )
+        .await;
+        assert_eq!(newest_subject(&pool).await, None);
+    }
+
+    /// A row naming SEVERAL cameras must stay fleet-level rather than adopt one of them.
+    ///
+    /// An archive export over four lanes, or an API key mint listing its scope, is one act about the
+    /// fleet. Taking the first element would make the row visible to whoever holds that lane — and the
+    /// row's own `detail` would then hand them the other three camera ids, which is the disclosure the
+    /// column exists to stop. It would also mislabel the act itself.
+    #[tokio::test]
+    async fn an_audit_row_naming_several_cameras_stays_fleet_level() {
+        let pool = mem_pool_migrated().await;
+        let actor = Principal::system_admin();
+        audit(
+            &pool,
+            &actor,
+            "create_archive_export",
+            "backup_job",
+            "bkp_1",
+            serde_json::json!({ "camera_ids": ["cam_a", "cam_b"], "trim": false }),
+        )
+        .await;
+        assert_eq!(newest_subject(&pool).await, None);
+        audit(
+            &pool,
+            &actor,
+            "create_api_key",
+            "api_key",
+            "key_1",
+            serde_json::json!({ "scope_kind": "cameras", "scope_cameras": ["cam_a"] }),
+        )
+        .await;
+        assert_eq!(newest_subject(&pool).await, None);
+        // A non-string `camera_id` is not a camera id; guessing one would attribute a row wrongly.
+        audit(
+            &pool,
+            &actor,
+            "weird",
+            "thing",
+            "t_1",
+            serde_json::json!({ "camera_id": 7 }),
+        )
+        .await;
+        assert_eq!(newest_subject(&pool).await, None);
+        // The bulk device-config write (`routes/camera_config.rs::bulk`) is the one multi-camera act
+        // that files itself under `target_type = "camera"`, with `"*"` standing in for the fleet and
+        // only a COUNT in `detail`. Read literally it becomes a camera named `*`, which is a subject
+        // this box can never have: `util::slugify` maps every non-alphanumeric to `_`, so no real
+        // camera id contains `*`. It is a wildcard, and a wildcard is fleet-level.
+        audit(
+            &pool,
+            &actor,
+            "camera_config_bulk",
+            "camera",
+            "*",
+            serde_json::json!({ "action": "reboot", "targets": 9, "succeeded": 9, "failed": 0 }),
+        )
+        .await;
+        assert_eq!(newest_subject(&pool).await, None);
+    }
+
+    /// The UPGRADE path: rows written before migration 0014 must be classified too.
+    ///
+    /// A box that has been running for a year holds the entire leak in history. If only new rows
+    /// carried a subject, the fail-closed read would hide a scoped manager's own lane's past — and,
+    /// worse, an operator checking the fix would see a short log and assume it worked.
+    #[tokio::test]
+    async fn migration_0014_backfills_the_log_a_running_box_already_has() {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        // Stop one short of 0014: this is the schema an upgrading box is actually sitting on.
+        crate::db::run_migrations_up_to(&pool, 13).await.unwrap();
+        for (id, target_type, target_id, detail) in [
+            ("aud_zone", "zone", "zone_1", r#"{"camera_id":"cam_a"}"#),
+            ("aud_cam", "camera", "cam_b", r#"{}"#),
+            ("aud_pass", "pass", "pass_1", r#"{}"#),
+            (
+                "aud_bkp",
+                "backup_job",
+                "bkp_1",
+                r#"{"camera_ids":["cam_a","cam_b"]}"#,
+            ),
+            // A `detail` that is not an object at all, and one that is not JSON — neither may abort
+            // the upgrade, which is why the backfill's json_valid test is inside a CASE.
+            ("aud_arr", "thing", "t_1", r#"[1,2,3]"#),
+            ("aud_junk", "thing", "t_2", "not json at all"),
+            // The bulk device-config write: fleet-wide, but filed under target_type 'camera' with
+            // `'*'` for the target. History must classify it exactly as `auth::subject_camera` now
+            // does, or one row means two different things either side of the upgrade.
+            ("aud_bulk", "camera", "*", r#"{"targets":9}"#),
+        ] {
+            sqlx::query(
+                "INSERT INTO audit_log (id, actor, action, target_type, target_id, detail, created_at)
+                 VALUES (?, 'u1', 'act', ?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(target_type)
+            .bind(target_id)
+            .bind(detail)
+            .bind(Utc::now())
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        crate::db::run_migrations(&pool).await.unwrap();
+
+        let got: Vec<(String, Option<String>)> =
+            sqlx::query_as("SELECT id, subject_camera_id FROM audit_log ORDER BY id")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            got,
+            vec![
+                ("aud_arr".into(), None),
+                ("aud_bkp".into(), None), // multi-camera stays fleet-level, as at write time
+                ("aud_bulk".into(), None), // the `'*'` wildcard is fleet-level, not a camera
+                ("aud_cam".into(), Some("cam_b".into())),
+                ("aud_junk".into(), None),
+                ("aud_pass".into(), None),
+                ("aud_zone".into(), Some("cam_a".into())),
+            ]
         );
     }
 }

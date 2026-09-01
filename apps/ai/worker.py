@@ -8,21 +8,34 @@ implementing a single `Analyzer` subclass — nothing else has to change.
 
 The contract (served by the kernel; see crates/heldar-kernel/src/routes/ai.rs)
 -------------------------------------------------------
-1. Discover work:
+1. Discover work — LEASE it:
+       POST {API}/api/v1/ai/leases   { "worker_id", "ttl_secs" }
+   -> { lease_id, worker_id, expires_at,
+        tasks: [{ id, camera_id, task_type, stream_profile, fps, width,
+                  config, frame_url }] }
+   Acquire and renew are the SAME call, so the poll loop below just calls it
+   every tick. A lease is what makes step 2 hand out frame tickets.
+
+   A 404 means an OLD kernel with no lease endpoint: the worker falls back to
        GET  {API}/api/v1/ai/tasks
-   -> [{ id, camera_id, task_type, stream_profile, fps, width,
-         config, frame_url }]
+   which still works exactly as before and returns the same task shape.
 
 2. Pull the latest sampled frame for a task (JPEG bytes):
-       GET  {API}{frame_url}     (frame_url is "/api/v1/cameras/{cam}/frame")
+       GET  {API}{frame_url}
+       (frame_url is "/api/v1/cameras/{cam}/frame?profile=...&task=<task id>")
    Response headers of interest:
        x-frame-captured-at  RFC3339 timestamp of the frame
        x-frame-age-ms       age in milliseconds
+       x-frame-ticket       server-issued, single-frame ingest ticket —
+                            present only when this worker holds a live lease
+                            on `task`. Opaque: carry it, never parse it.
    A 404 means "no frame sampled yet" — not an error, just skip the cycle.
 
 3. Post results back:
        POST {API}/api/v1/ai/events
        {
+         "frame_ticket": "<x-frame-ticket from step 2>",   # required under
+                                                           # enforce
          "camera_id":  "...",
          "task_type":  "...",
          "timestamp":  "<RFC3339>",
@@ -31,6 +44,16 @@ The contract (served by the kernel; see crates/heldar-kernel/src/routes/ai.rs)
          "event":      { "event_type", "severity", "payload" }   # optional
        }
    `bbox` is [x, y, w, h] normalized to 0..1.
+
+   Under a ticket the kernel DERIVES camera_id, task_type and frame_id from
+   the ticket; the values above are only cross-checked (409 on disagreement).
+   Keep sending them — they are a useful consistency check and they are what
+   an older, ticketless kernel needs.
+
+   Two attribute keys are SERVER-OWNED and stripped from anything posted
+   here: `attributes.source` and `attributes._prov`. Provenance is written by
+   the kernel from the credential and lease, so a worker cannot claim to be
+   the camera's on-board engine. Do not set them; they will be discarded.
 
 4. Semantic retrieval (issue #38) — the "embedding" task type indexes CLIP
    vectors of tracked detection crops, and a fast side-channel answers query
@@ -50,12 +73,15 @@ The contract (served by the kernel; see crates/heldar-kernel/src/routes/ai.rs)
        { "vec": [f32...], "model": "...", "dim": N }    # or {"error": "..."}
    A 404 on either endpoint means an old kernel: the worker logs once and
    disables that path — it never crash-loops against a core that predates it.
+   Embedding batches carry `frame_ticket` on the same terms as step 3.
 
 Design
 ------
-* One supervisor thread polls /ai/tasks every `poll_interval` seconds and
-  reconciles a set of per-task worker threads (start new, stop removed,
-  restart changed).
+* One supervisor thread renews the task lease every `poll_interval` seconds
+  (falling back to /ai/tasks against an older kernel) and reconciles a set of
+  per-task worker threads (start new, stop removed, restart changed).
+  The lease is deliberately NOT part of `Task.signature()`: renewing a lease
+  must never restart a running analyzer.
 * Each task thread runs its own loop at the task's `fps`: pull frame ->
   run its `Analyzer` -> POST results.
 * A separate daemon thread (EmbedQueryWorker) fast-polls /ai/embed-queries
@@ -122,6 +148,10 @@ class Settings:
     # every task. Defaults to "<hostname>:<pid>", so two workers on one host get distinct ids and split
     # the load automatically; a single worker gets the whole set.
     worker_id: str
+    # Lifetime requested for the task lease, in seconds (kernel clamps to 15..=300). Must comfortably
+    # exceed the poll interval — the supervisor renews once per poll, and a lease that lapses between
+    # renewals stops frame tickets being issued.
+    lease_ttl: int
     # Semantic retrieval (issue #38): the /ai/embed-queries poll cadence and the CLIP checkpoint the
     # query worker answers with — it must match what the "embedding" tasks index with, or the
     # kernel's cosine scores compare vectors from different spaces.
@@ -203,6 +233,13 @@ def parse_settings(argv: Optional[List[str]] = None) -> Settings:
         "(env HELDAR_AI_WORKER_ID; default <hostname>:<pid>).",
     )
     parser.add_argument(
+        "--lease-ttl",
+        type=int,
+        default=int(_env("HELDAR_AI_LEASE_TTL", "60")),
+        help="Requested task-lease lifetime in seconds; the kernel clamps it to 15..=300 "
+        "(env HELDAR_AI_LEASE_TTL).",
+    )
+    parser.add_argument(
         "--embed-poll-interval",
         type=float,
         default=float(_env("HELDAR_AI_EMBED_POLL_INTERVAL", "1.0")),
@@ -234,6 +271,9 @@ def parse_settings(argv: Optional[List[str]] = None) -> Settings:
         log_format=ns.log_format,
         api_key=ns.api_key.strip() or None,
         worker_id=ns.worker_id.strip() or _default_worker_id(),
+        # Keep the lease comfortably longer than the poll interval so a renewal is never racing its
+        # own expiry; the kernel clamps into 15..=300 regardless.
+        lease_ttl=max(int(max(1.0, ns.poll_interval) * 3), ns.lease_ttl),
         # Floor at 0.2s: this endpoint is polled forever by design, so a 0/negative interval
         # (env typo) would hammer Core in a tight loop.
         embed_poll_interval=max(0.2, ns.embed_poll_interval),
@@ -355,6 +395,11 @@ class FrameContext:
     raw: bytes
     captured_at: Optional[str]
     age_ms: Optional[int]
+    # Server-issued, single-frame ingest ticket from `x-frame-ticket`. Opaque — carry it back on the
+    # POST that describes THIS frame and never parse, cache or reuse it. Lives here rather than on
+    # `Task` on purpose: `Task.signature()` decides whether a runner restarts, and a lease renewal
+    # must not restart a running analyzer.
+    frame_ticket: Optional[str] = None
 
     def image(self) -> Image.Image:
         return Image.open(io.BytesIO(self.raw))
@@ -1499,7 +1544,27 @@ class WorkerShutdown(Exception):
 class WorkerHTTPError(Exception):
     def __init__(self, status: Optional[int], detail: str, url: str):
         self.status = status
+        self.detail = detail
         super().__init__(f"HTTP {status} for {url}: {detail}")
+
+    def is_ticket_problem(self) -> bool:
+        """Whether this is the kernel saying "your frame ticket / lease is not good here".
+
+        Two shapes: 401 `frame_ticket_required` (this kernel enforces provenance and we posted
+        without a usable ticket — usually because our lease lapsed), and 409 (the body disagreed
+        with the ticket, i.e. the lease moved under us). Both are fixed by re-acquiring the lease
+        and pulling a fresh frame, never by resending the same body.
+        """
+        if self.status == 409:
+            return True
+        return self.status == 401 and (
+            "frame_ticket" in self.detail or "lease" in self.detail
+        )
+
+
+# Set by a task runner when the kernel rejects a post on ticket/lease grounds; watched by the
+# supervisor so the lease is re-acquired on the next tick instead of at the end of the poll interval.
+LEASE_RENEW = threading.Event()
 
 
 class CoreClient:
@@ -1507,6 +1572,8 @@ class CoreClient:
 
     def __init__(self, settings: Settings):
         self.s = settings
+        # Set by acquire_lease; used only to release early on shutdown.
+        self.lease_id: Optional[str] = None
         self.session = requests.Session()
         self.session.headers["User-Agent"] = "heldar-ai-worker/1.0"
         # When Core auth is enabled, the worker authenticates with an integration API key. Harmless
@@ -1570,6 +1637,43 @@ class CoreClient:
             )
             self._sleep(delay)
 
+    def acquire_lease(self) -> Optional[List[Task]]:
+        """Acquire — or renew, it is the same call — this worker's task lease.
+
+        A lease binds (credential, worker_id) to a set of tasks, which is what makes the kernel hand
+        out per-frame ingest tickets. Returns the leased tasks, or ``None`` when the kernel has no
+        lease endpoint (a core that predates this contract) so the caller falls back to /ai/tasks.
+        """
+        url = f"{self.s.api}/api/v1/ai/leases"
+        body = {"worker_id": self.s.worker_id, "ttl_secs": self.s.lease_ttl}
+        resp = self._request("POST", url, json=body, allow_404=True)
+        if resp is None:
+            return None
+        payload = resp.json()
+        tasks = [Task.from_json(d) for d in payload.get("tasks", [])]
+        self.lease_id = payload.get("lease_id")
+        log.debug(
+            "lease %s holds %d task(s) until %s",
+            self.lease_id,
+            len(tasks),
+            payload.get("expires_at"),
+        )
+        return tasks
+
+    def release_lease(self) -> None:
+        """Best-effort early release on shutdown, so a restart does not wait out the TTL."""
+        lease_id = getattr(self, "lease_id", None)
+        if not lease_id:
+            return
+        try:
+            self._request(
+                "DELETE",
+                f"{self.s.api}/api/v1/ai/leases/{quote(str(lease_id), safe='')}",
+                allow_404=True,
+            )
+        except (WorkerHTTPError, WorkerShutdown):
+            pass  # shutdown path: the lease expires on its own within the TTL
+
     def fetch_tasks(self) -> List[Task]:
         # Send worker_id so the kernel shards the task set across co-located workers (and treats this
         # poll as our liveness heartbeat). A single worker gets the whole set; N workers split it.
@@ -1587,6 +1691,10 @@ class CoreClient:
         if not fu.startswith("/") or "://" in fu or ".." in fu:
             log.error("rejecting unsafe frame_url %r for task %s", fu, task.id)
             return None
+        # A newer kernel already puts `&task=` in frame_url; add it for an older one that does not,
+        # where it is simply an ignored query parameter.
+        if "task=" not in fu:
+            fu = f"{fu}{'&' if '?' in fu else '?'}task={quote(task.id, safe='')}"
         resp = self._request("GET", f"{self.s.api}{fu}", allow_404=True)
         if resp is None:
             return None
@@ -1596,10 +1704,15 @@ class CoreClient:
             raw=resp.content,
             captured_at=resp.headers.get("x-frame-captured-at") or None,
             age_ms=int(age) if age and age.isdigit() else None,
+            frame_ticket=resp.headers.get("x-frame-ticket") or None,
         )
 
     def post_results(
-        self, task: Task, result: AnalysisResult, frame_id: Optional[str] = None
+        self,
+        task: Task,
+        result: AnalysisResult,
+        frame_id: Optional[str] = None,
+        frame_ticket: Optional[str] = None,
     ) -> int:
         # Bound the batch to the kernel's per-request cap (MAX_INGEST_DETECTIONS = 1000): an
         # over-cap POST is rejected wholesale (400), losing everything. Truncating keeps the bulk and
@@ -1618,8 +1731,14 @@ class CoreClient:
         }
         # Idempotency key: lets Core dedup an at-least-once redelivery of this exact frame's batch
         # (e.g. a retry after a committed-but-unacked POST) so consumer side effects don't double-fire.
+        # A ticketed kernel derives the same value itself and ignores ours; an older one uses it.
         if frame_id is not None:
             body["frame_id"] = frame_id
+        # Provenance: proves this batch describes a frame the kernel actually handed us. Omitted when
+        # the kernel issued no ticket (no lease, or a core that predates the contract) — which a
+        # kernel in `warn` accepts exactly as before.
+        if frame_ticket is not None:
+            body["frame_ticket"] = frame_ticket
         if result.event is not None:
             body["event"] = result.event.to_json()
         url = f"{self.s.api}/api/v1/ai/events"
@@ -1636,7 +1755,11 @@ class CoreClient:
     EMBED_BATCH_MAX = 128
 
     def post_embeddings(
-        self, task: Task, items: List[EmbeddingItem], frame_id: Optional[str] = None
+        self,
+        task: Task,
+        items: List[EmbeddingItem],
+        frame_id: Optional[str] = None,
+        frame_ticket: Optional[str] = None,
     ) -> Optional[int]:
         """POST embedding vectors for one frame, split into <=128-item batches (kernel cap).
 
@@ -1656,6 +1779,8 @@ class CoreClient:
             }
             if frame_id is not None:
                 body["frame_id"] = frame_id
+            if frame_ticket is not None:
+                body["frame_ticket"] = frame_ticket
             resp = self._request("POST", url, json=body, allow_404=True)
             if resp is None:
                 return None
@@ -1756,7 +1881,12 @@ class TaskRunner(threading.Thread):
         # Detections/events and embeddings travel on separate endpoints; an embedding task
         # returns ONLY embeddings, so each POST happens iff there is something to say.
         if result.detections or result.event is not None:
-            ingested = self.client.post_results(self.task, result, frame_id=frame_id)
+            ingested = self.client.post_results(
+                self.task,
+                result,
+                frame_id=frame_id,
+                frame_ticket=frame.frame_ticket,
+            )
             self.log.info(
                 "posted %d detection(s)%s",
                 len(result.detections),
@@ -1764,13 +1894,21 @@ class TaskRunner(threading.Thread):
             )
             self.log.debug("server ingested=%d", ingested)
         if result.embeddings:
-            self._post_embeddings(result, frame_id)
+            self._post_embeddings(result, frame_id, frame.frame_ticket)
 
-    def _post_embeddings(self, result: AnalysisResult, frame_id: Optional[str]) -> None:
+    def _post_embeddings(
+        self,
+        result: AnalysisResult,
+        frame_id: Optional[str],
+        frame_ticket: Optional[str] = None,
+    ) -> None:
         if self._embeddings_unsupported:
             return
         ingested = self.client.post_embeddings(
-            self.task, result.embeddings, frame_id=frame_id
+            self.task,
+            result.embeddings,
+            frame_id=frame_id,
+            frame_ticket=frame_ticket,
         )
         if ingested is None:
             self._embeddings_unsupported = True
@@ -1797,7 +1935,20 @@ class TaskRunner(threading.Thread):
             except WorkerShutdown:
                 break
             except WorkerHTTPError as exc:
-                self.log.error("ingest/frame error: %s", exc)
+                if exc.is_ticket_problem():
+                    # Our lease lapsed or moved. Resending the same body under a fresh ticket would
+                    # be a lie (the ticket names a specific captured frame), so DROP this batch,
+                    # forget the de-dup marker so the next frame is re-analyzed, and ask the
+                    # supervisor to re-acquire now rather than at the end of its poll interval.
+                    self._last_captured = None
+                    LEASE_RENEW.set()
+                    self.log.warning(
+                        "ingest refused on lease/ticket grounds (%s); dropping this frame and "
+                        "re-acquiring the lease",
+                        exc,
+                    )
+                else:
+                    self.log.error("ingest/frame error: %s", exc)
             except Exception:  # noqa: BLE001 - one bad frame must not kill the loop
                 self.log.exception("unexpected error in cycle")
             elapsed = time.monotonic() - start
@@ -1817,6 +1968,8 @@ class Supervisor:
         self.client = client
         self.s = settings
         self.runners: Dict[str, TaskRunner] = {}
+        # None until the first poll decides; True once the kernel 404s /ai/leases (an old core).
+        self._leases_unsupported = False
 
     def _reconcile(self, tasks: List[Task]) -> None:
         by_id = {t.id: t for t in tasks}
@@ -1850,11 +2003,46 @@ class Supervisor:
             if not self.runners[tid].is_alive():
                 del self.runners[tid]
 
+    def _poll_tasks(self) -> List[Task]:
+        """Renew the lease and take the tasks it covers, falling back to /ai/tasks on an old kernel.
+
+        Acquire and renew are one call, so this is simply "what am I supposed to be running now?".
+        """
+        if not self._leases_unsupported:
+            tasks = self.client.acquire_lease()
+            if tasks is not None:
+                return tasks
+            self._leases_unsupported = True
+            log.warning(
+                "kernel has no /ai/leases endpoint (predates task leases); falling back to "
+                "/ai/tasks — ingest will be unticketed, which a kernel enforcing "
+                "HELDAR_INGEST_PROVENANCE will refuse"
+            )
+        return self.client.fetch_tasks()
+
+    def _wait_next_poll(self) -> bool:
+        """Sleep until the next poll. Returns True when shutdown was requested.
+
+        Wakes early when a task runner sets LEASE_RENEW, so a lapsed lease is repaired in about a
+        second instead of at the end of the poll interval.
+        """
+        deadline = time.monotonic() + self.s.poll_interval
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            if SHUTDOWN.wait(min(0.5, remaining)):
+                return True
+            if LEASE_RENEW.is_set():
+                LEASE_RENEW.clear()
+                log.info("re-acquiring the task lease early (a runner reported a ticket problem)")
+                return False
+
     def run(self) -> None:
         log.info("supervisor polling %s every %.0fs", self.s.api, self.s.poll_interval)
         while not SHUTDOWN.is_set():
             try:
-                tasks = self.client.fetch_tasks()
+                tasks = self._poll_tasks()
                 self._reconcile(tasks)
                 log.debug("active tasks: %d", len(self.runners))
             except WorkerShutdown:
@@ -1863,9 +2051,10 @@ class Supervisor:
                 log.error("failed to fetch tasks: %s", exc)
             except Exception:  # noqa: BLE001
                 log.exception("unexpected error while polling tasks")
-            if SHUTDOWN.wait(self.s.poll_interval):
+            if self._wait_next_poll():
                 break
         self._shutdown_all()
+        self.client.release_lease()
 
     def _shutdown_all(self) -> None:
         if not self.runners:

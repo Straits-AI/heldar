@@ -10,7 +10,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
 
-use crate::auth::{self, Principal};
+use crate::auth::{self, Cap, Principal};
 use crate::error::AppResult;
 use crate::registry::RegistryView;
 use crate::services;
@@ -23,18 +23,46 @@ pub fn router() -> Router<AppState> {
 }
 
 /// The merged store view: bundled + remote catalogs, each entry cross-referenced for installed state.
-async fn list(State(st): State<AppState>, principal: Principal) -> AppResult<Json<RegistryView>> {
-    principal.require(principal.can_view(), "view the plugin store")?;
+///
+/// Offline-safe: it serves what is already cached and makes no outbound request. Use
+/// `POST /api/v1/registry/refresh` to re-fetch.
+#[utoipa::path(
+    get, path = "/api/v1/registry", tag = "system",
+    operation_id = "listRegistry",
+    responses(
+        (status = 200, description = "Merged catalog: sources plus entries with their installed state"),
+        (status = 403, description = "Missing `system:read`", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list(
+    State(st): State<AppState>,
+    principal: Principal,
+) -> AppResult<Json<RegistryView>> {
+    principal.require_cap(Cap::SystemRead, "view the plugin store")?;
     let registrations = services::modules::list_registered(&st.pool).await?;
     Ok(Json(st.catalog.view(&st.modules, &registrations)))
 }
 
-/// Re-fetch the remote registries now (admin; performs outbound requests). Returns the refreshed view.
-async fn refresh(
+/// Re-fetch the remote registries now (admin, audited; performs outbound requests).
+///
+/// Returns the refreshed view. Box-level and therefore refused to a camera-scoped credential. A
+/// remote source that fails to fetch does not fail the call — it is reported in the returned
+/// `sources`.
+#[utoipa::path(
+    post, path = "/api/v1/registry/refresh", tag = "system",
+    operation_id = "refreshRegistry",
+    responses(
+        (status = 200, description = "The catalog as it stands after the refresh"),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn refresh(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<RegistryView>> {
     principal.require(principal.can_admin(), "refresh the plugin registry")?;
+    // Box-level catalogue refresh — nothing about it is per-camera.
+    crate::routes::cameras::require_fleet_scope(&principal, "refresh the plugin registry")?;
     st.catalog.refresh().await;
     auth::audit(
         &st.pool,
@@ -85,6 +113,7 @@ mod tests {
             modules: Arc::new(modules),
             catalog: Arc::new(CatalogService::new(&cfg)),
             http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
             started_at: chrono::Utc::now(),
             pool,
             cfg,

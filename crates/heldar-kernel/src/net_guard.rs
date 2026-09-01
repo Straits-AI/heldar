@@ -15,6 +15,11 @@
 //! rejected regardless of policy. Loopback + RFC1918/ULA are gated behind [`EgressPolicy::allow_lan`],
 //! which cloud-only egress (e.g. a hosted control-plane) sets to `false`.
 //!
+//! `allow_lan == false` is an ALLOWLIST, not a deny-list: the target must be positively classified as
+//! globally routable unicast ([`is_globally_routable`]). Spelling it as "not loopback and not RFC1918"
+//! silently admitted whole non-public classes — CGNAT/shared space (100.64.0.0/10), multicast, the
+//! benchmarking and documentation ranges, 240/4 — each of which can reach a real host on some networks.
+//!
 //! DNS is validated *and pinned*, not out of scope. [`validate_egress_url`] stays the cheap
 //! store-time UX check (it inspects only literal-IP hosts and never resolves), but every actual
 //! outbound sink calls [`resolve_validate_pin`] right before it sends: that resolves ALL of the host's
@@ -24,7 +29,7 @@
 //! IP that was checked is the exact IP that gets connected to (closing the TOCTOU re-resolution window).
 //! Redirect-following stays disabled on every egress client as a second layer.
 
-use std::net::{IpAddr, SocketAddr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::time::Duration;
 
 /// How strict to be about the egress target for a given sink.
@@ -47,7 +52,8 @@ impl EgressPolicy {
         require_https: false,
     };
 
-    /// A public-internet sink: https only, reject every non-public literal address.
+    /// A public-internet sink: https only, and the target must be a GLOBALLY ROUTABLE unicast address
+    /// (see [`is_globally_routable`]) — not merely "not RFC1918".
     pub const PUBLIC: EgressPolicy = EgressPolicy {
         allow_lan: false,
         require_https: true,
@@ -57,8 +63,9 @@ impl EgressPolicy {
 /// Validate a server-initiated egress URL against `policy`, returning the parsed URL on success.
 ///
 /// Checks the scheme allowlist (`http`/`https`, `http` only when `!require_https`) and, when the host
-/// is a literal IP, rejects the forbidden ranges. Hostnames are accepted (DNS-rebinding is out of
-/// scope — pair with [`egress_client`] so redirects can't reach a forbidden address).
+/// is a literal IP, rejects the forbidden ranges. Hostnames are accepted here and resolved later —
+/// always pair this with [`resolve_validate_pin`] at send time, which is what actually protects the
+/// connection.
 pub fn validate_egress_url(url: &str, policy: &EgressPolicy) -> Result<reqwest::Url, String> {
     let parsed = reqwest::Url::parse(url.trim()).map_err(|e| format!("bad url: {e}"))?;
     match parsed.scheme() {
@@ -86,13 +93,7 @@ pub fn validate_egress_url(url: &str, policy: &EgressPolicy) -> Result<reqwest::
 /// (`::ffff:169.254.169.254`) is canonicalized to v4 first so it can't smuggle a forbidden v4 past
 /// the v6 arm.
 pub fn reject_forbidden_ip(ip: IpAddr, policy: &EgressPolicy) -> Result<(), String> {
-    let ip = match ip {
-        IpAddr::V6(v6) => v6
-            .to_ipv4_mapped()
-            .map(IpAddr::V4)
-            .unwrap_or(IpAddr::V6(v6)),
-        v4 => v4,
-    };
+    let ip = canonicalize(ip);
     // Never a legitimate target on any deployment: link-local (169.254/16 incl. the cloud metadata
     // endpoint 169.254.169.254; fe80::/10) and the unspecified/broadcast addresses.
     let always_forbidden = match ip {
@@ -104,39 +105,90 @@ pub fn reject_forbidden_ip(ip: IpAddr, policy: &EgressPolicy) -> Result<(), Stri
             "{ip} is a link-local/metadata or unspecified address and is never a valid egress target"
         ));
     }
-    if !policy.allow_lan {
-        let is_lan = match ip {
-            IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
-            IpAddr::V6(v6) => v6.is_loopback() || v6.is_unique_local(),
-        };
-        if is_lan {
-            return Err(format!(
-                "{ip} is a private/loopback address; only public targets are allowed"
-            ));
-        }
+    // `allow_lan == false` means "public internet only". That is an ALLOWLIST of globally routable
+    // unicast addresses, not a deny-list of the private ranges: the old `is_loopback() || is_private()`
+    // test let CGNAT/shared space, multicast, the benchmarking and documentation blocks and the whole
+    // 240/4 reserved range through as if they were public.
+    if !policy.allow_lan && !is_globally_routable(ip) {
+        return Err(format!(
+            "{ip} is not a globally routable public address; only public targets are allowed"
+        ));
     }
     Ok(())
 }
 
-/// Build a reqwest client for server-initiated egress with redirect-following DISABLED. Following
-/// redirects is the SSRF bypass that defeats a target check (a public host 302s to an internal or
-/// metadata URL), so no egress client should follow them. Falls back to a default client only if the
-/// builder somehow fails.
+/// Is `ip` a globally routable unicast address — i.e. can it legitimately be a public-internet peer?
 ///
-/// UNSAFE ON ITS OWN: this client disables redirects but never resolves or validates the target, so a
-/// hostname with an A record pointing at loopback/RFC1918/the metadata endpoint still connects. Every
-/// in-tree sink now uses [`resolve_validate_pin`] instead. Retained (deprecated rather than deleted)
-/// because removing a `pub` item from a published crate is a semver break.
-#[deprecated(
-    since = "0.3.2",
-    note = "does not validate DNS resolution; use `resolve_validate_pin` for a resolved-validated-pinned client"
-)]
-pub fn egress_client(timeout: Duration) -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .unwrap_or_default()
+/// This is the allowlist [`EgressPolicy::PUBLIC`] enforces: anything not positively classified as
+/// globally routable is rejected. `Ipv4Addr::is_global`/`Ipv6Addr::is_global` express exactly this but
+/// are UNSTABLE on stable Rust (and this crate builds on stable with `-D warnings`), so every class is
+/// spelled out below against the IANA special-purpose address registries (RFC 6890 and successors).
+///
+/// Note this says nothing about [`EgressPolicy::LAN`] sinks — those deliberately reach RFC1918/loopback
+/// cameras and localhost sidecars and never consult this function.
+pub fn is_globally_routable(ip: IpAddr) -> bool {
+    match canonicalize(ip) {
+        IpAddr::V4(v4) => is_globally_routable_v4(v4),
+        IpAddr::V6(v6) => is_globally_routable_v6(v6),
+    }
+}
+
+/// IPv4 has no single contiguous "global unicast" block, so the allowlist is expressed as "belongs to
+/// none of the IANA special-purpose registries". Every entry that can reach a non-public destination is
+/// enumerated; anything left over is a routable public address.
+fn is_globally_routable_v4(v4: Ipv4Addr) -> bool {
+    let [a, b, c, _d] = v4.octets();
+    let special_purpose = v4.is_loopback()                 // 127.0.0.0/8
+        || v4.is_private()                                 // 10/8, 172.16/12, 192.168/16
+        || v4.is_link_local()                              // 169.254.0.0/16 (cloud metadata)
+        || v4.is_multicast()                               // 224.0.0.0/4
+        || v4.is_broadcast()                               // 255.255.255.255
+        || a == 0                                          // 0.0.0.0/8 "this network" (incl. unspecified)
+        || (a == 100 && (64..=127).contains(&b))           // 100.64.0.0/10 shared address space (CGNAT)
+        || (a == 192 && b == 0 && c == 0)                  // 192.0.0.0/24 IETF protocol assignments
+        || (a == 192 && b == 0 && c == 2)                  // 192.0.2.0/24 documentation (TEST-NET-1)
+        || (a == 198 && b == 51 && c == 100)               // 198.51.100.0/24 documentation (TEST-NET-2)
+        || (a == 203 && b == 0 && c == 113)                // 203.0.113.0/24 documentation (TEST-NET-3)
+        || (a == 198 && (b == 18 || b == 19))              // 198.18.0.0/15 benchmarking
+        || (a == 192 && b == 88 && c == 99)                // 192.88.99.0/24 6to4 relay anycast (deprecated)
+        || a >= 240; // 240.0.0.0/4 reserved (incl. 255.0.0.0/8)
+    !special_purpose
+}
+
+/// IPv6 *does* have one global unicast block — 2000::/3 — so the allowlist is a positive prefix test,
+/// which rejects `::/8` (loopback + unspecified + v4-compatible), `0100::/8` (discard-only),
+/// `64:ff9b::/96` (NAT64), `fc00::/7` (unique-local), `fe80::/10` (link-local) and `ff00::/8`
+/// (multicast) by construction. Only the special-purpose carve-outs *inside* 2000::/3 need naming.
+fn is_globally_routable_v6(v6: Ipv6Addr) -> bool {
+    let s = v6.segments();
+    if s[0] & 0xe000 != 0x2000 {
+        return false; // outside global unicast 2000::/3
+    }
+    let carved_out = match s[0] {
+        // 2001::/23 IETF protocol assignments (Teredo 2001::/32, ORCHIDv2 2001:20::/28, AMT,
+        // AS112-v6, the PCP/TURN anycasts) plus 2001:db8::/32 documentation.
+        0x2001 => s[1] < 0x0200 || s[1] == 0x0db8,
+        // 6to4 (RFC 7526-deprecated) embeds an arbitrary IPv4 address in the prefix, so a 2002::/16
+        // target is a way to smuggle an RFC1918/metadata v4 destination past a v6 check on any host
+        // with a 6to4 tunnel. Never a legitimate public target today.
+        0x2002 => true,
+        // 3fff::/20 documentation (RFC 9637).
+        0x3fff => s[1] & 0xf000 == 0,
+        _ => false,
+    };
+    !carved_out
+}
+
+/// v4-mapped/compat IPv6 (`::ffff:169.254.169.254`) collapses to its IPv4 form so it cannot smuggle a
+/// forbidden v4 address past the v6 arm of a classification.
+fn canonicalize(ip: IpAddr) -> IpAddr {
+    match ip {
+        IpAddr::V6(v6) => v6
+            .to_ipv4_mapped()
+            .map(IpAddr::V4)
+            .unwrap_or(IpAddr::V6(v6)),
+        v4 => v4,
+    }
 }
 
 /// Validate a slice of already-resolved socket addresses against `policy`. Pure (does no DNS itself), so
@@ -177,17 +229,22 @@ pub async fn resolve_and_validate(
 /// time, closing the TOCTOU window a plain resolve-then-connect leaves open (a name could rebind to a
 /// forbidden IP between the check and the connection). The URL keeps `host` as its name, so TLS SNI and
 /// the `Host` header stay correct.
+///
+/// FAILS CLOSED. This used to end in `.unwrap_or_default()`: if the builder ever failed, the caller
+/// silently received a `reqwest::Client::default()` that has NEITHER the redirect-none policy NOR the
+/// DNS pin — i.e. the exact client the guard exists to prevent, handed out at the moment the guard
+/// broke. A build failure is now an error the caller must handle.
 pub fn pinned_egress_client(
     timeout: Duration,
     host: &str,
     addrs: &[SocketAddr],
-) -> reqwest::Client {
+) -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .timeout(timeout)
         .redirect(reqwest::redirect::Policy::none())
         .resolve_to_addrs(host, addrs)
         .build()
-        .unwrap_or_default()
+        .map_err(|e| format!("could not build a pinned egress client for `{host}`: {e}"))
 }
 
 /// Request-time egress guard: resolve `url`'s host, reject if it resolves to nothing or to any forbidden
@@ -212,7 +269,7 @@ pub async fn resolve_validate_pin(
         .and_then(|h| h.strip_suffix(']'))
         .unwrap_or(host);
     let addrs = resolve_and_validate(host, port, policy).await?;
-    Ok(pinned_egress_client(timeout, host, &addrs))
+    pinned_egress_client(timeout, host, &addrs)
 }
 
 #[cfg(test)]
@@ -296,6 +353,124 @@ mod tests {
         // LAN permits loopback, but PUBLIC does not — even mixed with a public record.
         assert!(validate_resolved_addrs(&[loopback], &EgressPolicy::LAN).is_ok());
         assert!(validate_resolved_addrs(&[public, loopback], &EgressPolicy::PUBLIC).is_err());
+    }
+
+    fn ip(s: &str) -> IpAddr {
+        s.parse().expect("test ip literal")
+    }
+
+    /// The PUBLIC allowlist: every non-globally-routable class is rejected, not just RFC1918/loopback.
+    /// Each of these passed the old `is_loopback() || is_private()` deny-list.
+    #[test]
+    fn public_policy_rejects_every_non_global_class() {
+        let p = EgressPolicy::PUBLIC;
+        let non_global_v4 = [
+            "100.64.0.1",      // shared address space / CGNAT, 100.64.0.0/10
+            "100.100.50.7",    // ...mid-range
+            "100.127.255.254", // ...last usable
+            "198.18.0.1",      // benchmarking, 198.18.0.0/15
+            "198.19.255.255",  // ...upper half
+            "192.0.2.5",       // documentation TEST-NET-1
+            "198.51.100.5",    // documentation TEST-NET-2
+            "203.0.113.5",     // documentation TEST-NET-3
+            "192.0.0.8",       // IETF protocol assignments
+            "192.88.99.1",     // deprecated 6to4 relay anycast
+            "224.0.0.1",       // multicast
+            "239.255.255.250", // ...SSDP
+            "240.0.0.1",       // reserved 240/4
+            "255.255.255.254", // reserved 255/8 (below the broadcast address)
+            "0.1.2.3",         // 0.0.0.0/8 "this network"
+            "127.0.0.1",       // loopback (still rejected)
+            "10.1.2.3",        // RFC1918 (still rejected)
+            "172.20.0.1",      // RFC1918 (still rejected)
+        ];
+        for a in non_global_v4 {
+            assert!(
+                reject_forbidden_ip(ip(a), &p).is_err(),
+                "{a} must be rejected under PUBLIC"
+            );
+        }
+
+        let non_global_v6 = [
+            "fc00::1",           // unique-local
+            "fd12:3456::1",      // ...
+            "ff02::1",           // multicast
+            "2001:db8::1",       // documentation
+            "2001::1",           // IETF protocol assignments (Teredo) 2001::/23
+            "2001:20::1",        // ORCHIDv2, inside 2001::/23
+            "3fff::1",           // documentation (RFC 9637)
+            "2002:c0a8:0101::1", // 6to4 embedding 192.168.1.1
+            "100::1",            // discard-only
+            "64:ff9b::1",        // NAT64
+        ];
+        for a in non_global_v6 {
+            assert!(
+                reject_forbidden_ip(ip(a), &p).is_err(),
+                "{a} must be rejected under PUBLIC"
+            );
+        }
+
+        // ...and genuinely public unicast still passes, in both families.
+        for a in ["8.8.8.8", "93.184.216.34", "1.1.1.1", "2606:4700::1111"] {
+            assert!(
+                reject_forbidden_ip(ip(a), &p).is_ok(),
+                "{a} must be allowed under PUBLIC"
+            );
+        }
+    }
+
+    /// The tightened PUBLIC classification must not leak into LAN: a Heldar box's whole job is reaching
+    /// RFC1918 cameras, loopback sidecars and the local MediaMTX. Only the metadata/link-local +
+    /// unspecified/broadcast set is off-limits under LAN.
+    #[test]
+    fn lan_policy_unchanged_by_globally_routable_tightening() {
+        let p = EgressPolicy::LAN;
+        for a in [
+            "127.0.0.1",
+            "10.0.0.5",
+            "172.16.0.9",
+            "192.168.1.50",
+            "100.64.0.1", // CGNAT: a Tailscale/overlay peer is a legitimate LAN-ish target
+            "198.18.0.1", // benchmarking range is reachable on a lab LAN
+            "8.8.8.8",    // a public target is fine under LAN too
+            "::1",        // v6 loopback
+            "fd00::1",    // unique-local
+            "2001:db8::1", // documentation range is routable on a lab LAN
+        ] {
+            assert!(
+                reject_forbidden_ip(ip(a), &p).is_ok(),
+                "{a} must still be reachable under LAN"
+            );
+        }
+        // Never, under any policy.
+        for a in [
+            "169.254.169.254",
+            "0.0.0.0",
+            "255.255.255.255",
+            "fe80::1",
+            "::",
+        ] {
+            assert!(
+                reject_forbidden_ip(ip(a), &p).is_err(),
+                "{a} must be rejected even under LAN"
+            );
+        }
+    }
+
+    /// The classifier itself, independent of policy — including the v4-mapped-v6 canonicalization that
+    /// stops `::ffff:100.64.0.1` from being classified as an opaque (and thus "global") v6 address.
+    #[test]
+    fn globally_routable_classification() {
+        assert!(is_globally_routable(ip("8.8.8.8")));
+        assert!(is_globally_routable(ip("2606:4700::1111")));
+        assert!(!is_globally_routable(ip("100.64.0.1")));
+        assert!(!is_globally_routable(ip("::ffff:100.64.0.1")));
+        assert!(!is_globally_routable(ip("::ffff:169.254.169.254")));
+        // 2000::/3 boundaries: 1fff:: is below it, 4000:: is above it.
+        assert!(!is_globally_routable(ip("1fff::1")));
+        assert!(!is_globally_routable(ip("4000::1")));
+        assert!(is_globally_routable(ip("2000::1")));
+        assert!(is_globally_routable(ip("3ffe::1"))); // inside 2000::/3, outside 3fff::/20
     }
 
     #[test]

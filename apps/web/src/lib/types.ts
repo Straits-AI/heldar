@@ -1,3 +1,19 @@
+import type * as Contract from "./contract";
+
+// Shapes the server publishes are ALIASED from the generated contract, not re-declared here.
+// Re-declaring them is what let five real drifts through: a field the server returns that the
+// dashboard had never heard of, caught by a test only after the fact. An alias cannot drift.
+//
+// Types below that are NOT aliased are dashboard-only — view models, discriminated unions the
+// UI builds, and shapes for routes the contract does not yet describe.
+//
+// A few aliases REFINE the contract with `Omit<...> & { ... }`. Those are places the published
+// schema is genuinely less precise than the server's behaviour: a Rust `String` that only ever holds
+// four values arrives as `string`, and a `Vec<Vec<f64>>` that is always pairs arrives as
+// `number[][]`. The shape still comes from the contract — only the named field is narrowed — so a
+// field added or removed by the server still surfaces here. Tightening the schema itself is the real
+// fix and is filed as #156; each refinement disappears when it lands.
+
 // TypeScript mirror of the Heldar HTTP API contract (serde JSON).
 // Field names match the Rust structs in crates/heldar-kernel/src/{models.rs,routes/*} (kernel)
 // and crates/heldar-entry/src/{models.rs,routes.rs} (access-control app).
@@ -15,72 +31,24 @@ export type RecordStream = "main" | "sub";
 /** When the recorder runs for a camera: `continuous` (always), `scheduled` (time-of-day window),
  * `event` (records only during a trigger window: a zone/breach event or a manual record-trigger
  * extends it to now + post_roll_seconds), or `scheduled_event` (windows AND triggers). */
-export type RecordMode = "continuous" | "scheduled" | "event" | "scheduled_event";
+export type RecordMode = Contract.RecordMode;
 
 /** Known vendors with auto-built RTSP URLs, plus the catch-all. */
 export type Vendor = "hikvision" | "dahua" | "generic" | (string & {});
 
 export type Severity = "info" | "warning" | "critical";
 
-export interface CameraView {
-  id: string;
-  site_id?: string | null;
-  name: string;
-  vendor: string;
-  model?: string | null;
-  address?: string | null;
-  rtsp_port: number;
-  username?: string | null;
-  has_password: boolean;
-  record_stream: RecordStream;
-  /** Effective RTSP URL for the recorded stream, credentials masked. */
-  record_url_masked?: string | null;
-  codec?: string | null;
-  resolution_main?: string | null;
-  resolution_sub?: string | null;
-  fps_main?: number | null;
-  fps_sub?: number | null;
-  capabilities: Record<string, unknown>;
-  record_enabled: boolean;
-  segment_seconds: number;
-  retention_hours: number;
-  /** Per-camera storage quota in bytes; null means no per-camera cap. */
-  storage_quota_bytes?: number | null;
-  /** Record the camera's audio stream (pass-through) instead of dropping it. */
-  record_audio: boolean;
-  /** When the recorder runs (continuous | scheduled | event | scheduled_event). */
-  record_mode: RecordMode;
-  /** Event recording: footage desired BEFORE a trigger (best-effort; honored only from recent
-   * completed segments — no always-on ring buffer for idle event cameras). Clamped 0..300. */
-  pre_roll_seconds: number;
-  /** Event recording: how long the recorder keeps writing after a trigger (the window). 0..3600. */
-  post_roll_seconds: number;
-  /** Run a SECOND ffmpeg pipeline writing identical segments to HELDAR_MIRROR_RECORDINGS_DIR
-   * (redundant DVR copy). No-op unless the mirror dir is configured server-side. */
-  mirror_enabled: boolean;
-  /** Let the ANR loop re-fetch missed footage from the camera's onboard storage to fill gaps. */
-  anr_enabled: boolean;
-  /** Replay URL template for ANR re-fill ({start}/{end} placeholders, Hikvision time format);
-   * null = default Hikvision RTSP playback built from address+credentials. */
-  anr_replay_url_template?: string | null;
-  /** Ingest plate reads from the camera's ON-BOARD ANPR engine (kernel ISAPI poller) instead of
-   * relying solely on the AI worker's server-side OCR. */
-  native_anpr_enabled: boolean;
-  /** Ingest the camera's ON-BOARD smart events (motion/line-crossing/intrusion via its alert
-   * stream) into the kernel event machinery (event log, webhooks, event-mode recording). */
-  native_events_enabled: boolean;
-  enabled: boolean;
-  /** Keep the live H.264 preview publisher running persistently (instant live view) instead of
-   * on-demand-with-idle-reaping. */
-  live_warm: boolean;
-  created_at: string;
-  updated_at: string;
-}
+export type CameraView = Contract.CameraView;
 
 export interface CameraCreate {
   id?: string;
   name: string;
-  site_id?: string;
+  /** The camera's site, which carries the timezone its recording schedule is read in (#125).
+   *
+   *  On CREATE: omit or `null` for no site. On UPDATE (`CameraUpdate` is a `Partial` of this),
+   *  absent LEAVES the camera where it is and explicit `null` DETACHES it — the two are different
+   *  requests, and the server distinguishes them. */
+  site_id?: string | null;
   vendor?: string;
   model?: string;
   address?: string;
@@ -112,12 +80,7 @@ export type CameraUpdate = Partial<Omit<CameraCreate, "id">>;
 
 /* ---- Camera device control (capability-driven Device panel) ---- */
 
-/** One alarm/relay output port reported by the device. */
-export interface IoOutput {
-  id: number;
-  name?: string | null;
-  default_state?: string | null;
-}
+export type IoOutput = Contract.IoOutput;
 
 /** Normalized per-camera device-control capability map (persisted by the kernel probe). */
 export interface DeviceControlCapabilities {
@@ -137,59 +100,19 @@ export interface DeviceControlCapabilities {
   probed_at?: string;
 }
 
-/** One line-crossing rule slot on the device (coordinates normalized 0..1). */
-export interface SmartLine {
-  id: number;
-  enabled: boolean;
-  /** 1-100 */
-  sensitivity: number;
-  /** any | left-right | right-left */
-  direction: string;
-  /** Exactly two endpoints. */
-  points: [number, number][];
-}
+export type SmartLine = Contract.SmartLine;
 
-export interface LineCrossingConfig {
-  enabled: boolean;
-  lines: SmartLine[];
-}
+export type LineCrossingConfig = Contract.LineCrossingConfig;
 
-/** One intrusion region slot (empty points = slot unconfigured). */
-export interface SmartRegion {
-  id: number;
-  enabled: boolean;
-  sensitivity: number;
-  /** Seconds a target must stay inside before the alarm fires. */
-  time_threshold: number;
-  points: [number, number][];
-}
+export type SmartRegion = Contract.SmartRegion;
 
-export interface IntrusionConfig {
-  enabled: boolean;
-  regions: SmartRegion[];
-}
+export type IntrusionConfig = Contract.IntrusionConfig;
 
-export interface MotionConfig {
-  enabled: boolean;
-  sensitivity?: number | null;
-}
+export type MotionConfig = Contract.MotionConfig;
 
-/** Day/night (IR-cut filter) configuration. */
-export interface DayNightConfig {
-  /** auto | day | night | schedule */
-  mode: string;
-  sensitivity?: number | null;
-}
+export type DayNightConfig = Contract.DayNightConfig;
 
-/** A camera's barrier-gate actuation policy (entry app, issue #44). */
-export interface GatePolicy {
-  camera_id: string;
-  /** Auto-open on `matched` entry events (manual guard-open works whenever a policy exists). */
-  enabled: boolean;
-  output_port: number;
-  pulse_ms: number;
-  updated_at: string;
-}
+export type GatePolicy = Contract.GatePolicy;
 
 /** Global gate state: kill-switch + every configured lane policy. */
 export interface GateState {
@@ -197,20 +120,7 @@ export interface GateState {
   policies: GatePolicy[];
 }
 
-/** Image/lighting configuration; absent fields are not exposed by the device. */
-export interface ImageConfig {
-  brightness?: number | null;
-  contrast?: number | null;
-  saturation?: number | null;
-  wdr_mode?: string | null;
-  wdr_level?: number | null;
-  blc_enabled?: boolean | null;
-  supplement_light_mode?: string | null;
-  white_light_brightness?: number | null;
-  ir_light_brightness?: number | null;
-  /** auto | manual — brightness sliders apply in manual. */
-  supplement_brightness_mode?: string | null;
-}
+export type ImageConfig = Contract.ImageConfig;
 
 /** Result of POST /api/v1/cameras/{id}/record-trigger (manual event-recording trigger, manager+). */
 export interface RecordTriggerResult {
@@ -253,14 +163,7 @@ export interface SegmentView {
   url: string;
 }
 
-/** Roll-up of segments tagged to one incident (GET /api/v1/incidents). */
-export interface IncidentSummary {
-  incident_id: string;
-  segment_count: number;
-  total_bytes: number;
-  oldest_start: string;
-  newest_end: string;
-}
+export type IncidentSummary = Contract.IncidentSummary;
 
 export interface TimelineRange {
   start: string;
@@ -343,17 +246,7 @@ export interface VisionEvent {
   created_at: string;
 }
 
-export interface DiscoverOptions {
-  /** CIDR ("192.168.0.0/24"), range ("192.168.0.2-192.168.0.12"), single IP, or comma list. */
-  targets: string;
-  username?: string;
-  password?: string;
-  /** Probe each candidate with ffprobe + credentials to confirm a working stream. */
-  verify?: boolean;
-  /** Register verified, not-yet-known devices as cameras (recording disabled by default). */
-  auto_add?: boolean;
-  rtsp_port?: number;
-}
+export type DiscoverOptions = Contract.DiscoverOptions;
 
 export interface DiscoveredDevice {
   address: string;
@@ -415,6 +308,8 @@ export interface OverlayStatus {
 export interface SystemInfo {
   name: string;
   version: string;
+  /** The API CONTRACT version (#120) — not the build version. Pin generated clients to this. */
+  api_version: string;
   started_at: string;
   uptime_seconds: number;
   recorder_enabled: boolean;
@@ -439,48 +334,28 @@ export interface SystemInfo {
   live_transcode_engine: string;
 }
 
-/** Recording disk-limit policy the retention sweeper enforces (effective values; `*_overridden` flags
- *  whether each is an operator override vs the env default). */
-export interface RetentionLimits {
-  max_recordings_gb: number;
-  max_recordings_bytes: number;
-  max_overridden: boolean;
-  min_free_disk_gb: number;
-  min_free_disk_bytes: number;
-  min_free_overridden: boolean;
-}
-export interface RetentionUpdate {
-  max_recordings_gb?: number;
-  min_free_disk_gb?: number;
-}
+export type RetentionLimits = Contract.RetentionLimits;
+export type RetentionUpdate = Contract.RetentionUpdate;
 
 /** Live-preview transcode engine (effective value + detected hardware encoders). */
-export interface TranscodeSettings {
-  engine: "software" | "vaapi" | "nvenc" | string;
-  overridden: boolean;
-  env_default: string;
-  vaapi_available: boolean;
-  nvenc_available: boolean;
-}
-export interface TranscodeUpdate {
-  engine: string;
+export type TimezoneSettings = Contract.TimezoneSettings;
+export type TimezoneUpdate = Contract.TimezoneUpdate;
+
+/** A site, and the timezone its cameras' schedules are read in. */
+export interface Site {
+  id: string;
+  name: string;
+  /** null means no zone chosen — NOT UTC. The box-wide default applies. */
+  timezone: string | null;
+  created_at: string;
 }
 
-/** Metadata-DB (heldar.db) status + size cap. `incremental` = auto_vacuum=INCREMENTAL (the cap can
- *  reclaim freed space); `max_overridden` flags an operator override vs the env default. */
-export interface DbStatus {
-  db_bytes: number;
-  max_db_gb: number;
-  max_db_bytes: number;
-  max_overridden: boolean;
-  incremental: boolean;
-}
-export interface DbLimitUpdate {
-  max_db_gb?: number;
-}
-export interface DbConvertResult {
-  status: string; // "already-incremental" | "started"
-}
+export type TranscodeSettings = Contract.TranscodeSettings;
+export type TranscodeUpdate = Contract.TranscodeUpdate;
+
+export type DbStatus = Contract.DbStatus;
+export type DbLimitUpdate = Contract.DbLimitUpdate;
+export type DbConvertResult = Contract.DbConvertResult;
 
 // ---- Webhook subscriptions (the generic event-delivery substrate; supersedes single-URL alerting) ----
 
@@ -502,52 +377,15 @@ export interface WebhookSubscription {
   updated_at: string;
 }
 
-/** Create a webhook subscription (POST /api/v1/webhooks). */
-export interface WebhookSubscriptionCreate {
-  name: string;
-  url: string;
-  /** Omitted/empty = all types (`["*"]`). */
-  event_types?: string[];
-  min_severity?: Severity;
-  /** Optional HMAC-SHA256 signing secret. */
-  secret?: string;
-  enabled?: boolean;
-}
+export type WebhookSubscriptionCreate = Contract.WebhookSubscriptionCreate;
 
-/** Partial update (PATCH /api/v1/webhooks/{id}). An ABSENT field is unchanged; `secret` is three-state:
- * omit = unchanged, null/"" = clear, a value = set. */
-export interface WebhookSubscriptionUpdate {
-  name?: string;
-  url?: string;
-  event_types?: string[];
-  min_severity?: Severity;
-  secret?: string | null;
-  enabled?: boolean;
-}
+export type WebhookSubscriptionUpdate = Contract.WebhookSubscriptionUpdate;
 
 export type WebhookDeliveryStatus = "delivered" | "failed";
 
-/** One webhook delivery attempt (GET /api/v1/webhooks/{id}/deliveries). */
-export interface WebhookDelivery {
-  id: string;
-  subscription_id: string;
-  /** Source event id; null for synthetic /test deliveries. */
-  event_id?: string | null;
-  event_type?: string | null;
-  status: WebhookDeliveryStatus;
-  attempts: number;
-  response_code?: number | null;
-  error?: string | null;
-  created_at: string;
-  delivered_at?: string | null;
-}
+export type WebhookDelivery = Contract.WebhookDelivery;
 
-/** Result of POST /api/v1/webhooks/{id}/test — one synthetic signed delivery to the subscription. */
-export interface WebhookTestResult {
-  ok: boolean;
-  status?: number | null;
-  error?: string | null;
-}
+export type WebhookTestResult = Contract.WebhookTestResult;
 
 /** One known event type plus a one-line description (GET /api/v1/events/types). */
 export interface EventTypeInfo {
@@ -588,18 +426,7 @@ export interface ModuleManifest {
   health?: string;
 }
 
-/** Body to register a sidecar plugin (POST /api/v1/modules, admin). */
-export interface ModuleRegisterRequest {
-  id: string;
-  name: string;
-  version?: string;
-  publisher?: string;
-  description?: string;
-  base_url: string;
-  nav?: ModuleNavEntry[];
-  subscribes?: string[];
-  role?: "viewer" | "integration";
-}
+export type ModuleRegisterRequest = Contract.ModuleRegisterRequest;
 
 /** Admin detail for a registered sidecar. */
 export interface ModuleDetail {
@@ -762,7 +589,8 @@ export interface RecordingGap {
 
 /** A recurring per-camera recording window, applied when `record_mode` is `scheduled` or
  * `scheduled_event`. `days` are weekday ints 0=Mon..6=Sun; `time_start`/`time_end` are "HH:MM" 24h
- * in the SERVER's local timezone (start > end means an overnight window). */
+ * read in the CAMERA'S SITE timezone (#125), falling back to the server's local zone when no zone is
+ * configured anywhere (start > end means an overnight window). */
 export interface RecordSchedule {
   id: string;
   camera_id: string;
@@ -774,33 +602,15 @@ export interface RecordSchedule {
   updated_at: string;
 }
 
-export interface RecordScheduleCreate {
-  days: number[];
-  time_start: string;
-  time_end: string;
-  enabled?: boolean;
-}
+export type RecordScheduleCreate = Contract.RecordScheduleCreate;
 
 export type RecordScheduleUpdate = Partial<RecordScheduleCreate>;
 
 // ---- Scheduled interval snapshots ----
 
-/** A per-camera schedule that captures a live JPEG every `interval_seconds`. */
-export interface SnapshotSchedule {
-  id: string;
-  camera_id: string;
-  interval_seconds: number;
-  enabled: boolean;
-  /** Last time the scheduler fired this schedule (null until it first fires). */
-  last_fired_at?: string | null;
-  created_at: string;
-  updated_at: string;
-}
+export type SnapshotSchedule = Contract.SnapshotSchedule;
 
-export interface SnapshotScheduleCreate {
-  interval_seconds?: number;
-  enabled?: boolean;
-}
+export type SnapshotScheduleCreate = Contract.SnapshotScheduleCreate;
 
 export type SnapshotScheduleUpdate = Partial<SnapshotScheduleCreate>;
 
@@ -847,14 +657,7 @@ export interface AiTask {
   updated_at: string;
 }
 
-export interface AiTaskCreate {
-  task_type: string;
-  fps?: number;
-  width?: number;
-  stream_profile?: StreamProfile;
-  config?: Record<string, unknown>;
-  enabled?: boolean;
-}
+export type AiTaskCreate = Contract.AiTaskCreate;
 
 export type AiTaskUpdate = Partial<AiTaskCreate>;
 
@@ -922,16 +725,7 @@ export interface Zone {
   updated_at: string;
 }
 
-export interface ZoneCreate {
-  name: string;
-  polygon: ZonePoint[];
-  kind?: string;
-  dwell_seconds?: number;
-  labels?: string[];
-  severity?: Severity;
-  config?: Record<string, unknown>;
-  enabled?: boolean;
-}
+export type ZoneCreate = Contract.ZoneCreate;
 
 export type ZoneUpdate = Partial<ZoneCreate>;
 
@@ -962,15 +756,7 @@ export interface Principal {
   kind: "user" | "api_key" | "system";
 }
 
-export interface UserView {
-  id: string;
-  username: string;
-  role: Role;
-  display_name?: string | null;
-  active: boolean;
-  created_at: string;
-  updated_at: string;
-}
+export type UserView = Contract.UserView;
 
 export interface LoginResult {
   token: string;
@@ -978,13 +764,7 @@ export interface LoginResult {
   user: UserView;
 }
 
-export interface UserCreate {
-  username: string;
-  password: string;
-  role?: Role;
-  display_name?: string;
-  active?: boolean;
-}
+export type UserCreate = Contract.UserCreate;
 
 export type UserUpdate = Partial<Omit<UserCreate, "username">>;
 
@@ -1008,80 +788,17 @@ export interface ApiKeyCreated {
 
 export type OwnerType = "student" | "staff" | "resident" | "contractor" | "visitor";
 
-export interface Vehicle {
-  id: string;
-  plate: string;
-  plate_norm: string;
-  owner_name?: string | null;
-  owner_type: OwnerType;
-  owner_ref?: string | null;
-  site_id?: string | null;
-  vehicle_type?: string | null;
-  make?: string | null;
-  model?: string | null;
-  color?: string | null;
-  notes?: string | null;
-  active: boolean;
-  valid_from?: string | null;
-  valid_until?: string | null;
-  created_at: string;
-  updated_at: string;
-}
+export type Vehicle = Contract.Vehicle;
 
-export interface VehicleCreate {
-  plate: string;
-  owner_name?: string;
-  owner_type?: OwnerType;
-  owner_ref?: string;
-  site_id?: string;
-  vehicle_type?: string;
-  make?: string;
-  model?: string;
-  color?: string;
-  notes?: string;
-  active?: boolean;
-  valid_from?: string;
-  valid_until?: string;
-}
+export type VehicleCreate = Contract.VehicleCreate;
 
 export type VehicleUpdate = Partial<VehicleCreate>;
 
-export type PassStatus = "active" | "checked_in" | "checked_out" | "expired" | "revoked";
+export type PassStatus = Contract.PassStatus;
 
-export interface VisitorPass {
-  id: string;
-  code: string;
-  visitor_name: string;
-  phone?: string | null;
-  company?: string | null;
-  host?: string | null;
-  purpose?: string | null;
-  plate?: string | null;
-  plate_norm?: string | null;
-  vehicle_desc?: string | null;
-  site_id?: string | null;
-  valid_from: string;
-  valid_until: string;
-  status: PassStatus;
-  checked_in_at?: string | null;
-  checked_out_at?: string | null;
-  created_by?: string | null;
-  created_at: string;
-  updated_at: string;
-}
+export type VisitorPass = Contract.VisitorPass;
 
-export interface VisitorPassCreate {
-  visitor_name: string;
-  phone?: string;
-  company?: string;
-  host?: string;
-  purpose?: string;
-  plate?: string;
-  vehicle_desc?: string;
-  site_id?: string;
-  valid_from?: string;
-  valid_until?: string;
-}
+export type VisitorPassCreate = Contract.VisitorPassCreate;
 
 export type VisitorPassUpdate = Partial<VisitorPassCreate> & { status?: PassStatus };
 
@@ -1100,13 +817,7 @@ export interface WatchlistEntry {
   updated_at: string;
 }
 
-export interface WatchlistCreate {
-  plate: string;
-  kind?: WatchKind;
-  reason?: string;
-  severity?: Severity;
-  active?: boolean;
-}
+export type WatchlistCreate = Contract.WatchlistCreate;
 
 export type WatchlistUpdate = Partial<Omit<WatchlistCreate, "plate">>;
 
@@ -1233,23 +944,7 @@ export interface PlateSearchResult {
 
 // ---- Stage 7: Semantic search ----
 
-export interface QueryPlan {
-  from?: string | null;
-  to?: string | null;
-  hour_min?: number | null;
-  hour_max?: number | null;
-  cameras?: string[];
-  sources?: string[];
-  plate?: string | null;
-  color?: string | null;
-  vehicle_type?: string | null;
-  subject_type?: string | null;
-  auth_status?: string[];
-  event_type?: string | null;
-  zone_kind?: string | null;
-  text?: string | null;
-  limit?: number | null;
-}
+export type QueryPlan = Contract.QueryPlan;
 
 export interface SearchHit {
   source: string;
@@ -1266,10 +961,21 @@ export interface SearchHit {
   claim_level: string;
 }
 
+/** Which clock a search was answered on (#125). Hour filters and relative dates are read in this
+ *  zone; every timestamp in the response is UTC. */
+export interface SearchInterpretation {
+  timezone: string;
+  timezone_source: string;
+  hour_filter_read_in: string;
+  note: string;
+}
+
 export interface SearchResponse {
   query?: string | null;
   planner: string;
   plan: QueryPlan;
+  /** Absent on responses from a server older than #125 — treat as UTC, unlabelled. */
+  interpretation?: SearchInterpretation;
   count: number;
   hits: SearchHit[];
   proof: {
@@ -1339,107 +1045,29 @@ export interface SemanticSearchResponse {
 // ---- Backup subsystem: destinations, policies, jobs, archive export ----
 
 /** Transport for a backup destination. `local` copies via fs (NAS mounts); the rest use rclone. */
-export type BackupKind = "local" | "sftp" | "ftp" | "s3";
+export type BackupKind = Contract.BackupKind;
 
 /** Lifecycle of a backup job. */
-export type BackupJobStatus = "pending" | "running" | "completed" | "error";
+export type BackupJobStatus = Contract.BackupJobStatus;
 
-/** A backup destination as returned to clients — secret config values are masked to `***`. */
-export interface BackupDestinationView {
-  id: string;
-  name: string;
-  kind: BackupKind;
-  /** Kind-specific config blob with secret values (pass/secret_key/…) replaced by `***`. */
-  config: Record<string, unknown>;
-  /** Whether at least one secret credential is configured (the masked value hides whether it is set). */
-  has_credentials: boolean;
-  enabled: boolean;
-  created_at: string;
-  updated_at: string;
-}
+export type BackupDestinationView = Contract.BackupDestinationView;
 
-export interface BackupDestinationCreate {
-  name: string;
-  kind: BackupKind;
-  /** local: {path}; sftp/ftp: {host,port,user,pass,path}; s3: {bucket,prefix,access_key,secret_key,endpoint,region}. */
-  config?: Record<string, unknown>;
-  enabled?: boolean;
-}
+export type BackupDestinationCreate = Contract.BackupDestinationCreate;
 
 /** Partial update; to keep an existing secret, send it back as the `***` placeholder (or omit it). */
 export type BackupDestinationUpdate = Partial<BackupDestinationCreate>;
 
-/** Result of POST /api/v1/backup/destinations/{id}/test. */
-export interface BackupTestResult {
-  ok: boolean;
-  error?: string | null;
-  latency_ms: number;
-}
+export type BackupTestResult = Contract.BackupTestResult;
 
-/** A scheduled backup policy: ship a camera selection's recent footage to a destination on an interval. */
-export interface BackupPolicy {
-  id: string;
-  name: string;
-  destination_id: string;
-  /** Camera ids to include; empty array means all cameras. */
-  camera_ids: string[];
-  incident_lock_only: boolean;
-  schedule_interval_s: number;
-  /** How far back each run reaches (0 = everything up to now). */
-  lookback_hours: number;
-  last_run_at?: string | null;
-  last_job_id?: string | null;
-  enabled: boolean;
-  created_at: string;
-  updated_at: string;
-}
+export type BackupPolicy = Contract.BackupPolicy;
 
-export interface BackupPolicyCreate {
-  name: string;
-  destination_id: string;
-  camera_ids?: string[];
-  incident_lock_only?: boolean;
-  schedule_interval_s?: number;
-  lookback_hours?: number;
-  enabled?: boolean;
-}
+export type BackupPolicyCreate = Contract.BackupPolicyCreate;
 
 export type BackupPolicyUpdate = Partial<BackupPolicyCreate>;
 
-/** A single backup run (scheduled, manually triggered, or an on-demand archive export). */
-export interface BackupJob {
-  id: string;
-  policy_id?: string | null;
-  destination_id?: string | null;
-  /** `policy` | `on_demand_archive`. */
-  kind: string;
-  camera_ids: string[];
-  from_time?: string | null;
-  to_time?: string | null;
-  incident_lock_only: boolean;
-  status: BackupJobStatus;
-  files_total: number;
-  files_copied: number;
-  bytes_copied: number;
-  error?: string | null;
-  output_path?: string | null;
-  /** Browser-fetchable URL of the produced archive (under /media/archives/...), if any. */
-  output_url?: string | null;
-  started_at?: string | null;
-  finished_at?: string | null;
-  created_at: string;
-}
+export type BackupJob = Contract.BackupJob;
 
-/** Request body for POST /api/v1/archive/export. */
-export interface ArchiveExportRequest {
-  /** Camera ids to include; empty/omitted means all cameras. */
-  camera_ids?: string[];
-  from?: string;
-  to?: string;
-  incident_lock_only?: boolean;
-  /** Trim each segment to the [from, to] window (re-mux with -c copy); requires both bounds. */
-  trim?: boolean;
-}
+export type ArchiveExportRequest = Contract.ArchiveExportRequest;
 
 // ---- ONVIF (Profile S MVP): discovery, device profile, PTZ ----
 
@@ -1521,85 +1149,24 @@ export interface PtzGotoPresetRequest {
 
 // ---- Camera configuration (HikVision ISAPI): device, video, clock/NTP, ONVIF, OSD, bulk ----
 
-/** Device identity from GET /api/v1/cameras/{id}/config/device_info. */
-export interface DeviceInfo {
-  device_name?: string | null;
-  model?: string | null;
-  firmware_version?: string | null;
-  serial_number?: string | null;
-}
+export type DeviceInfo = Contract.DeviceInfo;
 
-/** A streaming channel's video-encoding configuration. `fps` is centi-fps as the device reports it
- * (2000 = 20fps); `bitrate`/`vbr_upper_cap` are kbps. */
-export interface VideoConfig {
-  channel_id: number;
-  channel_name?: string | null;
-  codec: string;
-  width: number;
-  height: number;
-  fps: number;
-  quality_control: string;
-  bitrate: number;
-  vbr_upper_cap: number;
-  gop: number;
-}
+export type VideoConfig = Contract.VideoConfig;
 
-/** Partial update to a VideoConfig (read-modify-write); every field is optional. */
-export interface VideoConfigPatch {
-  codec?: string;
-  width?: number;
-  height?: number;
-  fps?: number;
-  quality_control?: string;
-  bitrate?: number;
-  vbr_upper_cap?: number;
-  gop?: number;
-}
+export type VideoConfigPatch = Contract.VideoConfigPatch;
 
-/** Device clock configuration (GET/PUT /api/v1/cameras/{id}/config/time). */
-export interface TimeConfig {
-  /** `manual` or `NTP`. */
-  time_mode: string;
-  /** ISO8601 local time with tz offset. */
-  local_time: string;
-  /** e.g. `CST-8:00:00`. */
-  time_zone: string;
-}
+export type TimeConfig = Contract.TimeConfig;
 
-/** NTP server configuration (GET/PUT /api/v1/cameras/{id}/config/time/ntp). */
-export interface NtpConfig {
-  /** `hostname` or `ipaddress`. */
-  addressing_format: string;
-  host_name: string;
-  port: number;
-}
+export type NtpConfig = Contract.NtpConfig;
 
-/** ONVIF + ISAPI integration toggles (GET/PUT /api/v1/cameras/{id}/config/onvif). */
-export interface OnvifSettings {
-  onvif_enabled: boolean;
-  isapi_enabled: boolean;
-}
+export type OnvifSettings = Contract.OnvifSettings;
 
-/** On-screen-display overlay configuration (GET/PUT /api/v1/cameras/{id}/config/osd). */
-export interface OsdConfig {
-  datetime_enabled: boolean;
-  channel_name_enabled: boolean;
-  date_style?: string | null;
-  time_style?: string | null;
-  display_week?: boolean | null;
-}
+export type OsdConfig = Contract.OsdConfig;
 
 /** ONVIF user role; the device's verbatim `userType` values. */
 export type OnvifUserType = "administrator" | "operator" | "mediaUser";
 
-/** Request to ensure a dedicated ONVIF user exists on the device (create-if-absent). */
-export interface EnsureOnvifUserRequest {
-  /** Defaults server-side to `heldar_onvif` when omitted. */
-  username?: string;
-  password: string;
-  /** Defaults server-side to `operator` (least-privilege Profile S). */
-  user_type?: OnvifUserType;
-}
+export type EnsureOnvifUserRequest = Contract.EnsureOnvifUserRequest;
 
 /** Per-camera HikVision ISAPI state cache row (GET reads refresh it). */
 export interface CameraIsapi {
@@ -1615,10 +1182,7 @@ export interface CameraIsapi {
   fetched_at: string;
 }
 
-/** Reboot request body (DISRUPTIVE; the kernel refuses unless `confirm` is true). */
-export interface RebootRequest {
-  confirm: boolean;
-}
+export type RebootRequest = Contract.RebootRequest;
 
 /** Result of POST /api/v1/cameras/{id}/config/onvif/ensure_user. */
 export interface EnableOnvifResult {
@@ -1644,22 +1208,8 @@ export type BulkAction =
       patch: VideoConfigPatch;
     };
 
-/** Apply a BulkAction to a set of cameras (`camera_ids` null/omitted = every enabled camera). */
-export interface BulkConfigRequest {
-  camera_ids?: string[] | null;
-  action: BulkAction;
-}
+export type BulkConfigRequest = Contract.BulkConfigRequest;
 
-/** Per-camera outcome of a bulk action. */
-export interface BulkCameraResult {
-  camera_id: string;
-  ok: boolean;
-  error?: string | null;
-}
+export type BulkCameraResult = Contract.BulkCameraResult;
 
-/** Aggregate result of a bulk action across all targeted cameras. */
-export interface BulkConfigResponse {
-  results: BulkCameraResult[];
-  succeeded: number;
-  failed: number;
-}
+export type BulkConfigResponse = Contract.BulkConfigResponse;

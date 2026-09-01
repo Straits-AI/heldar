@@ -154,6 +154,116 @@ mod tests {
         .execute(pool).await.unwrap();
     }
 
+    /// FAN-OUT REPLAY CONTROL. The provenance rewrite lives in `perception_ingest`, BELOW the HTTP
+    /// handler, precisely so the crash-replay path carries it: this drainer rebuilds a batch from the
+    /// persisted `detections` rows and never touches a route. Move the rewrite up into the handler
+    /// and a replayed batch would present whatever the client originally sent.
+    #[tokio::test]
+    async fn a_replayed_batch_presents_the_server_authored_provenance() {
+        use crate::models::Provenance;
+        use std::sync::Mutex;
+
+        struct Capture {
+            seen: Arc<Mutex<Vec<String>>>,
+        }
+        #[async_trait::async_trait]
+        impl DetectionConsumer for Capture {
+            fn name(&self) -> &'static str {
+                "test-capture"
+            }
+            fn interested_in(&self, _t: &str) -> bool {
+                true
+            }
+            async fn consume(&self, batch: &DetectionBatch<'_>) {
+                let mut seen = self.seen.lock().unwrap();
+                for d in batch.detections {
+                    seen.push(
+                        d.attributes
+                            .as_ref()
+                            .and_then(|a| a.get("source"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("<none>")
+                            .to_string(),
+                    );
+                }
+            }
+        }
+
+        let pool = mem_pool().await;
+        let cfg = Arc::new(crate::config::Config::from_env());
+        sqlx::query(
+            "INSERT INTO cameras (id, name, enabled, created_at, updated_at) VALUES ('cam1','cam1',1,?,?)",
+        )
+        .bind(Utc::now())
+        .bind(Utc::now())
+        .execute(&pool)
+        .await
+        .unwrap();
+        let st = crate::state::AppState {
+            recorder: crate::services::recorder::RecorderManager::new(pool.clone(), cfg.clone()),
+            sampler: crate::services::sampler::SamplerManager::new(pool.clone(), cfg.clone()),
+            live: crate::services::live_publisher::LivePublisherManager::new(
+                pool.clone(),
+                cfg.clone(),
+                reqwest::Client::new(),
+            ),
+            mirror: None,
+            // No consumers at ingest time, so the batch is committed but never inline-fanned —
+            // exactly the crash window the drainer exists for.
+            consumers: Arc::new(Vec::new()),
+            modules: Arc::new(Vec::new()),
+            catalog: Arc::new(crate::services::registry::CatalogService::new(&cfg)),
+            http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
+            started_at: Utc::now(),
+            pool: pool.clone(),
+            cfg,
+        };
+        crate::services::perception_ingest::ingest_batch(
+            &st,
+            &crate::models::AiIngest {
+                camera_id: "cam1".into(),
+                task_type: "anpr".into(),
+                timestamp: None,
+                frame_id: Some("replayme".into()),
+                detections: vec![crate::models::DetectionIngest {
+                    label: Some("vehicle".into()),
+                    confidence: Some(0.9),
+                    bbox: None,
+                    track_id: None,
+                    // The client asserts it is the camera's own engine.
+                    attributes: Some(serde_json::json!({ "source": "camera_native" })),
+                }],
+                event: None,
+                frame_ticket: None,
+            },
+            &Provenance::Worker {
+                api_key_id: "key_a".into(),
+                task_id: Some("ai_1".into()),
+                worker_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        // Age it past the replay grace and drain.
+        sqlx::query("UPDATE outbox SET created_at = ?, fanned_out_at = NULL")
+            .bind(Utc::now() - chrono::Duration::seconds(60))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let consumers: Vec<Arc<dyn DetectionConsumer>> =
+            vec![Arc::new(Capture { seen: seen.clone() })];
+        drain(&pool, &consumers).await.unwrap();
+
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            ["worker"],
+            "the REPLAYED batch must carry the server-authored source, not the client's claim"
+        );
+    }
+
     #[tokio::test]
     async fn drain_replays_unfanned_batch_exactly_once() {
         let pool = mem_pool().await;
