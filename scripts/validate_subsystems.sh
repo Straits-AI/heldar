@@ -27,7 +27,7 @@ hr(){ log ""; log "== $* =="; }
 
 cleanup(){
   hr cleanup
-  for pid in "${SYNTH_PID:-}" "${CORE_PID:-}" "${MTX_PID:-}"; do
+  for pid in "${ANALYZER_PID:-}" "${SYNTH_PID:-}" "${SYNTH2_PID:-}" "${CORE_PID:-}" "${MTX_PID:-}"; do
     [ -n "$pid" ] && kill "$pid" 2>/dev/null
   done
   sleep 3   # let the recorder's ffmpeg children go with it
@@ -67,12 +67,54 @@ SYNTH_PID=$!
 sleep 3
 kill -0 "$SYNTH_PID" 2>/dev/null || { log "SYNTHETIC CAMERA DIED"; tail -n 10 "$LOGDIR/subsys-synth.log" | tee -a "$REPORT"; exit 1; }
 
+# A SECOND streaming camera (#113 criterion 1). Cross-camera movement was proven over two cameras
+# of which only one existed as a stream — the other was a row created through the API with no
+# publisher behind it. A transit between a real camera and a row is not a transit.
+hr "start second synthetic camera"
+ffmpeg -nostdin -hide_banner -loglevel warning -re \
+  -f lavfi -i "testsrc=size=640x360:rate=10" \
+  -c:v libx264 -preset ultrafast -tune zerolatency -g 20 -pix_fmt yuv420p \
+  -f rtsp -rtsp_transport tcp rtsp://127.0.0.1:8554/cam_test_b >"$LOGDIR/subsys-synth-b.log" 2>&1 &
+SYNTH2_PID=$!
+sleep 2
+kill -0 "$SYNTH2_PID" 2>/dev/null || { log "SECOND SYNTHETIC CAMERA DIED"; tail -n 10 "$LOGDIR/subsys-synth-b.log" | tee -a "$REPORT"; exit 1; }
+
 hr "register $CAM"
 curl -fsS -X POST "$API/api/v1/cameras" -H 'content-type: application/json' -d "{
   \"id\":\"$CAM\",\"name\":\"Synthetic Subsystem Camera\",\"vendor\":\"generic\",
   \"main_stream_url\":\"rtsp://127.0.0.1:8554/cam_test\",\"record_stream\":\"main\",
   \"segment_seconds\":5,\"retention_hours\":24
 }" | tee -a "$REPORT"; echo | tee -a "$REPORT"
+
+hr "register ${CAM}_b"
+curl -fsS -X POST "$API/api/v1/cameras" -H 'content-type: application/json' -d "{
+  \"id\":\"${CAM}_b\",\"name\":\"Synthetic Subsystem Camera B\",\"vendor\":\"generic\",
+  \"main_stream_url\":\"rtsp://127.0.0.1:8554/cam_test_b\",\"record_stream\":\"main\",
+  \"segment_seconds\":5,\"retention_hours\":24
+}" | tee -a "$REPORT"; echo | tee -a "$REPORT"
+
+# A WORKER PROCESS in the stack (#113 criterion 1), not a validator pretending to be one.
+#
+# Deterministic by construction — a fixed detection, no model — so a failure here means the pipeline
+# changed rather than that a detector saw something different. It leases, pulls ticketed frames and
+# posts attributable detections for the whole run, which is what makes the stack COMPLETE rather than
+# a recorder with an API in front of it.
+# Its own AI task, on its own camera. A lease is EXCLUSIVE, so a worker left unconfined takes every
+# eligible task and starves `validate_ai.sh`'s chain assertions — which is how this first went red for
+# a reason that had nothing to do with the product.
+curl -fsS -X POST "$API/api/v1/cameras/${CAM}_b/ai-tasks" -H 'content-type: application/json' \
+  -d '{"task_type":"motion","fps":2,"width":320,"enabled":true,"config":{"model":"mock"}}' \
+  | tee -a "$REPORT"; echo | tee -a "$REPORT"
+
+hr "start mock AI worker"
+# `motion`, so the lease filter keeps it off the `detection` task validate_ai.sh creates and leases
+# for its own chain assertions. Confining a worker by camera is not possible — the lease API filters
+# by task type, and filtering the RESULT leaves the tasks leased-but-unworked, which is worse.
+python3 "$ROOT/scripts/mock_analyzer.py" "$API" --task-types motion --interval 3 \
+  >"$LOGDIR/subsys-analyzer.log" 2>&1 &
+ANALYZER_PID=$!
+sleep 2
+kill -0 "$ANALYZER_PID" 2>/dev/null || { log "MOCK ANALYZER DIED"; tail -n 10 "$LOGDIR/subsys-analyzer.log" | tee -a "$REPORT"; exit 1; }
 
 # Each script owns its own assertions; this only reports which subsystem failed and keeps going, so
 # one broken subsystem does not hide the state of the other three.
@@ -109,6 +151,30 @@ for s in zones entry movement search ai; do
     rc=1
   fi
 done
+
+# THE WORKER MUST HAVE WORKED. Starting a process and never checking it did anything is how a stack
+# grows a component that has been dead for months — the same "it ran, so it passed" this gate refuses
+# from the validators.
+#
+# `ticketed=True` is what is demanded, not merely a 200: under the default `warn` tier an unticketed
+# ingest is still accepted, so a worker whose frame pulls stopped carrying tickets would keep posting
+# happily and prove nothing about provenance.
+hr "mock AI worker"
+if kill -0 "$ANALYZER_PID" 2>/dev/null; then
+  log "OK   the worker is still running"
+else
+  log "FAIL the mock analyzer exited during the run"
+  tail -n 20 "$LOGDIR/subsys-analyzer.log" | tee -a "$REPORT"
+  rc=1
+fi
+TICKETED=$(grep -c 'ticketed=True' "$LOGDIR/subsys-analyzer.log" 2>/dev/null || echo 0)
+log "worker ticketed ingests: $TICKETED"
+if [ "$TICKETED" -lt 1 ] 2>/dev/null; then
+  log "FAIL the worker never completed a ticketed ingest — the lease -> frame -> ticket -> ingest \
+path is broken, or no AI task existed for it to lease"
+  tail -n 20 "$LOGDIR/subsys-analyzer.log" | tee -a "$REPORT"
+  rc=1
+fi
 
 hr "result"
 log "subsystem gate rc=$rc"
