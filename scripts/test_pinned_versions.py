@@ -35,6 +35,13 @@ CASES = [
         "differs between the dev stack",
     ),
     (
+        "the drift merging #78 actually left: requirements moved, the recipe did not",
+        "apps/ai/Dockerfile",
+        '"lap>=0.5.13"',
+        '"lap>=0.5"',
+        "tells operators to install lap>=0.5",
+    ),
+    (
         "the guard's own parser drifting from the file it reads",
         "scripts/setup_caddy.sh",
         'VERSION="${CADDY_VERSION:-2.11.4}"',
