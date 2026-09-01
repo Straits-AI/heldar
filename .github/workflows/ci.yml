@@ -180,6 +180,47 @@ jobs:
       # assertion catches it.
       - run: python3 apps/ai/test_ocr_backend.py
 
+  # NO PR JOB BUILT ANY DOCKERFILE until this one. `docker-open.yml` triggers on `push: tags: v*` or
+  # manual dispatch, so a base-image bump first executed AT RELEASE TIME — which is how #98 (python
+  # 3.13 -> 3.14) and #144 (node 22 -> 26) both arrived unverifiable: reviewable on paper, with the
+  # decisive "does it build and run" unanswerable by anything in CI.
+  #
+  # Scoped to PRs that TOUCH a Dockerfile or its requirements, so it costs nothing on the other 95%
+  # of changes. amd64 only — buildx cross-builds are slow on a runner, and the base images are
+  # multi-arch indexes whose arm64 half differs only in the wheels pip resolves.
+  images:
+    name: container images build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - id: changed
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha || 'HEAD~1' }}"
+          if git diff --name-only "$base"...HEAD | grep -qE '(Dockerfile|requirements.*\.txt|package(-lock)?\.json)$'; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "no image inputs changed — skipping"
+          fi
+      - name: build the AI worker image
+        if: steps.changed.outputs.run == 'true'
+        run: docker build -f apps/ai/Dockerfile -t heldar-ai:ci apps/ai
+      # The image is only useful if the worker actually starts in it. `--help` exercises argparse and
+      # main(); importing worker.py exercises every module-level dependency, which is where a base
+      # bump breaks (a wheel missing for the new Python, an ABI change).
+      - name: the worker runs in it
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint python heldar-ai:ci -c "import worker; print('worker imports OK')"
+          docker run --rm heldar-ai:ci --help > /dev/null
+          docker run --rm -v "$PWD/apps/ai/test_ocr_backend.py:/app/test_ocr_backend.py:ro" \
+            --entrypoint python heldar-ai:ci test_ocr_backend.py
+      - name: build the dashboard image
+        if: steps.changed.outputs.run == 'true'
+        run: docker build -f apps/web/Dockerfile -t heldar-web:ci apps/web
+
   web:
     name: web (build)
     runs-on: ubuntu-latest
