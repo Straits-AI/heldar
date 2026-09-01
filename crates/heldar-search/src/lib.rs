@@ -26,6 +26,7 @@
 //! Open-vocabulary VLM interpretation over retrieved moments remains a documented future seam.
 
 pub mod config;
+pub mod openapi;
 pub mod planner;
 pub mod proof;
 pub mod query;

@@ -35,7 +35,7 @@ pub struct ClipResult {
 }
 
 /// A span within a requested clip window for which no recorded footage exists.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Clone, utoipa::ToSchema)]
 pub struct ClipGap {
     pub from: DateTime<Utc>,
     pub to: DateTime<Utc>,
@@ -47,7 +47,11 @@ const GAP_TOLERANCE_MS: i64 = 1000;
 
 /// Compute covered seconds + the recording gaps within `[from, to]` from the (start-ordered)
 /// overlapping segments. A gap is a span longer than [`GAP_TOLERANCE_MS`] with no footage.
-fn coverage_and_gaps(
+///
+/// Shared with the evidence bundle (#118) so a bundle's signed coverage claim and a clip's reported
+/// coverage are the same computation — two implementations would eventually disagree, and the one
+/// inside a signed document is the one nobody can correct after the fact.
+pub(crate) fn coverage_and_gaps(
     segments: &[Segment],
     from: DateTime<Utc>,
     to: DateTime<Utc>,
@@ -124,6 +128,10 @@ pub async fn export_clip(
     tokio::fs::create_dir_all(&state.cfg.clips_dir)
         .await
         .map_err(|e| AppError::Other(e.into()))?;
+
+    // A clip export transcodes and writes a file; hold a media-job permit so exports cannot pile up
+    // and starve the recorder. Taken before any file is created so a rejected job leaves nothing behind.
+    let _permit = state.media_jobs.acquire("clip_export").await?;
 
     let id = format!("clip_{}", Uuid::new_v4().simple());
     let filename = format!("{id}.mp4");
@@ -212,6 +220,20 @@ pub async fn export_clip(
 
     // `_read_lock` releases on drop (here or on any early return above). Surface any export error.
     let size_bytes = size_outcome?;
+
+    // Attribute the export to its source camera. `clips/<uuid>.mp4` carries no camera anywhere on
+    // disk, so without this row `/media/clips/<file>` is unscopable and a camera-scoped credential
+    // holding VideoExport reads every camera's exports. Written only once the file exists, so an
+    // attribution never outlives a failed export. Infallible by construction: a dropped row leaves
+    // the clip Unattributed, which is a 403 for scoped credentials and unchanged for everyone else —
+    // never a failed export.
+    crate::services::media_scope::attribute(
+        &state.pool,
+        &format!("clips/{filename}"),
+        &[camera_id.to_string()],
+        crate::services::media_scope::KIND_CLIP,
+    )
+    .await;
 
     // Report coverage honestly: the concat bridges any recording gaps in the window (that footage
     // does not exist), so disclose them rather than presenting bridged video as continuous.
@@ -307,6 +329,7 @@ mod tests {
             modules: std::sync::Arc::new(Vec::new()),
             catalog: std::sync::Arc::new(crate::services::registry::CatalogService::new(&cfg)),
             http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
             started_at: Utc::now(),
             pool,
             cfg,
@@ -323,6 +346,39 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
+    }
+
+    /// The key an export is attributed under must be exactly the key the media guard derives from a
+    /// request for the URL the export hands back. A drift here is invisible in review and silent in
+    /// production: the guard's Unattributed branch 403s a scoped credential on its own clip and
+    /// reads as "a producer forgot to register", not as a key mismatch.
+    #[test]
+    fn the_attribution_key_matches_what_the_guard_looks_up() {
+        let filename = "clip_deadbeef.mp4";
+        // What `export_clip` writes, and the URL it returns alongside it.
+        let written = format!("clips/{filename}");
+        let url = format!("/media/clips/{filename}");
+        assert_eq!(
+            crate::services::media_scope::artifact_key(&url).as_deref(),
+            Some(written.as_str())
+        );
+        // And that URL must be gated as a flat ARTIFACT (attribution-resolved), not waved through.
+        assert_eq!(
+            crate::services::media_scope::requirement(&url),
+            Some((
+                crate::auth::Cap::VideoExport,
+                crate::services::media_scope::MediaKind::Artifact
+            ))
+        );
+        // The sibling concat list written next to it holds absolute recording paths for the source
+        // camera and is never a viewer surface — it must be refused, for every credential.
+        assert_eq!(
+            crate::services::media_scope::requirement("/media/clips/clip_deadbeef.txt"),
+            Some((
+                crate::auth::Cap::VideoExport,
+                crate::services::media_scope::MediaKind::Denied
+            ))
+        );
     }
 
     #[tokio::test]

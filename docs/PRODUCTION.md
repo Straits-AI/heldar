@@ -14,6 +14,215 @@ mode, short sessions) on top of the private full image — `docker compose -f de
 deploy/compose.prod.yml up -d` after `docker login ghcr.io`. Put `HELDAR_SECRET_KEY` +
 `HELDAR_CORS_ORIGINS` in `.env`. A flashed DVR/appliance uses native systemd instead (not Docker).
 
+**Pin the release (#112).** Every tagged release ships `heldar-release-manifest.json`, which records
+the source commit, the migration ceiling those binaries actually carry, the image digests and the
+sha256 of every deployment file. Download it from the release — not from `main` — and verify before
+and after an upgrade:
+
+```bash
+gh release download "$V" -p heldar-release-manifest.json
+gh attestation verify heldar-release-manifest.json --repo Straits-AI/heldar   # it is signed too
+HELDAR_DB=/var/lib/heldar/heldar.db ./scripts/verify_release_manifest.py heldar-release-manifest.json
+```
+
+The verifier fails closed on a modified deployment file and — the one that matters on an upgrade — on
+a database written by a NEWER release than the binaries you are about to run. Migrations only go
+forward, so an older binary opening a newer schema is not a clean refusal, it is a binary reading a
+database it does not understand. Check this **before** stopping services, not after.
+
+The floating quickstart (`latest`, files from `main`) stays exactly as it is; it is the right thing
+for evaluation and the wrong thing for a recorder.
+
+**Keep secrets out of the environment (#126).** Every deployment secret resolves from the first
+source that supplies it:
+
+| Order | Source | Notes |
+|---|---|---|
+| 1 | `NAME` | the environment variable, unchanged — nothing moves on upgrade |
+| 2 | `NAME_FILE` | a path whose contents are the secret; what Docker/Compose/Kubernetes secrets already produce |
+| 3 | `$CREDENTIALS_DIRECTORY/NAME` | a systemd credential, via `LoadCredential=` — 0400 in tmpfs, readable only by the service |
+
+Applies to `HELDAR_SECRET_KEY`, `HELDAR_SECRET_KEY_OLD`, `HELDAR_BOOTSTRAP_ADMIN_PASSWORD` and
+`HELDAR_SMTP_PASSWORD` — the variables that hold a secret VALUE.
+
+`HELDAR_CP_TLS_CLIENT_KEY` is deliberately **not** in that list: it holds a *path*, and `_FILE`
+resolution would substitute the key's contents where a filename belongs. A systemd credential is
+already a path (`$CREDENTIALS_DIRECTORY/NAME`), which that variable accepts as-is.
+
+```yaml
+# compose: the master key as a file rather than an env var
+services:
+  core:
+    environment:
+      HELDAR_SECRET_KEY_FILE: /run/secrets/heldar_master_key
+    secrets: [heldar_master_key]
+secrets:
+  heldar_master_key:
+    file: ./secrets/master.key      # (umask 077; openssl rand -base64 32 > secrets/master.key)
+```
+
+```ini
+# systemd: no secret in the unit file, and none in the environment
+[Service]
+LoadCredential=HELDAR_SECRET_KEY:/etc/heldar/master.key
+```
+
+**Why bother, precisely.** An environment variable is readable from `/proc/<pid>/environ` by anyone
+who can read it, and appears in `docker inspect` output, shell history and crash dumps. A file
+narrows that to whoever can read a file the service user owns — so create it with `umask 077`, or
+the default umask leaves it world-readable and you have moved the exposure rather than closed it.
+
+**What this does not fix.** It does not hide anything from root, and nothing at this layer can. It
+also does **not** stop a child process reading the secret: `HELDAR_SECRET_KEY_FILE` is itself
+inherited, and a same-uid child can simply open the path. The credentials-in-ffmpeg-argv exposure is
+a separate problem and is still open — see #126.
+
+**A named source that cannot be read is fatal at boot**, deliberately. An operator who set
+`HELDAR_SECRET_KEY_FILE` asked for encryption at rest; falling through to "no key" would store every
+camera credential in plaintext while the deployment believed they were sealed, and the failure would
+stay invisible until someone read the database. The trailing newline your editor adds is trimmed;
+an empty file is an error, not a choice to use no key.
+
+**No HTTP secret provider, on purpose.** A recorder must not become synchronously dependent on a
+remote service after boot — a network blip during a reconnect would stop recording. A sidecar that
+writes the secret to a path is already supported by source (2), and that is the integration shape
+for Vault, cloud secret stores or a customer KMS.
+
+**Rotating the master key.** Stop the server, then:
+
+```bash
+HELDAR_SECRET_KEY_OLD_FILE=/run/secrets/old.key \
+HELDAR_SECRET_KEY_FILE=/run/secrets/new.key \
+  heldar-core rekey-secrets
+```
+
+Both keys go through the same source chain, so rotating does **not** force the old key back into the
+environment — which would undo the point of moving it out.
+
+**It is one transaction, and that is the guarantee.** Either every sealed secret is under the new key
+or the database is untouched. A crash, a full disk or an undecryptable row rolls the whole thing
+back. A *mixed* database is not a partial success: decrypting with the wrong key is a hard error by
+design (the kernel never feeds ciphertext to ffmpeg), so every camera on the wrong side of a split
+stops recording while the operator believes only the rotation failed.
+
+Re-running after success is a no-op, so if you are unsure what state a box is in, run it again.
+
+**If the key is lost, the sealed values are gone.** There is no recovery path and there is not
+supposed to be one — that is what encryption at rest means. What you can do:
+
+```bash
+# Confirm what is actually sealed (no key needed — the marker is a prefix):
+sqlite3 /var/lib/heldar/heldar.db \
+  "SELECT id FROM cameras WHERE password LIKE 'enc:v1:%';"
+```
+
+Those cameras need their passwords re-entered from your own records or the devices themselves;
+everything else on the box is intact. Back the key up separately from the database — a backup
+containing both is a backup of neither.
+
+**Check the posture you actually have.**
+
+```bash
+curl -sH "Authorization: Bearer $ADMIN_KEY" \
+  http://localhost:8000/api/v1/system/posture | jq '.findings[] | select(.status != "ok")'
+```
+
+Admin + fleet-scope only: the findings describe the *host*, which is precisely the reconnaissance an
+attacker with a narrow foothold would want. They never carry a secret or a camera URL, so the output
+is safe to paste into a support ticket.
+
+| Finding | What it answers |
+|---|---|
+| `secret_key_source` | is the master key in the environment, a file, or a systemd credential |
+| `process_visibility` | can another local user read ffmpeg's argv — i.e. the camera credentials |
+| `service_user` | is the recorder running as root |
+| `recording_volume_encryption` | is the footage on an encrypted volume, where that is detectable |
+| `rtsp_transport` | how many enabled cameras stream over plain `rtsp://` |
+| `plaintext_credentials` | how many camera passwords predate the master key |
+
+**`unknown` is not a pass.** It means the control could not be assessed from inside the container —
+provider-side volume encryption is invisible from in here, and so is `/proc` on a non-Linux host.
+Treat it as unverified, not as satisfied. Reporting "ok" for something we could not check is the
+kind of unearned assurance this endpoint exists to replace.
+
+**`plaintext_credentials` is the one that surprises people.** Encryption applies on *write*. Setting
+`HELDAR_SECRET_KEY` does not seal rows that already exist — re-save each camera, or the finding will
+keep counting them.
+
+**Camera credentials in ffmpeg's argv.** They are there, and Heldar does not claim otherwise —
+RTSP authenticates from the URL, so the recorder hands ffmpeg `rtsp://user:pass@host/...` as one
+argument, which lands in `/proc/<pid>/cmdline`. Encrypting credentials at rest does not touch this:
+the point of storing them is to hand them to ffmpeg.
+
+What a deployment can do is make that file unreadable, and then be *held to it*:
+
+```bash
+# The host or runtime sets this — Heldar can only observe it.
+mount -o remount,hidepid=2 /proc
+
+# Then the box refuses to start if the claim is not true:
+HELDAR_REQUIRE_CREDENTIAL_ISOLATION=true
+```
+
+Off by default: a sealed single-operator appliance does not need it, and a box that refuses to record
+is worse than one with a documented exposure. Turning it on is the operator saying *hold me to this*
+— and an **unverifiable** posture is refused too, because "we could not check" is not evidence the
+claim holds.
+
+`GET /api/v1/system/posture` reports the same finding without refusing, so you can see where a box
+stands before committing to the flag. The full evaluation — including the loopback-restream option
+and why it is deferred — is in
+[ADR 0006](adr/0006-rtsp-credential-exposure.md).
+
+**Plan a change before making it.** The retention cap is the sharpest mutation on a box: the value
+lands in settings and the sweeper reads it *later*, evicting oldest-first fleet-wide. Shrinking it is
+deciding how much footage to destroy, whether or not you realise it.
+
+```bash
+# What would this do?
+curl -sX PUT $H/api/v1/system/retention -H "$AUTH" -H 'content-type: application/json' \
+  -d '{"max_recordings_gb": 500, "dry_run": true}'
+# -> { "plan_hash": "…", "confirmation_required": true,
+#      "effect": { "recorded_bytes": …, "would_evict_bytes": …, "evidence_locked_bytes": … } }
+
+# Commit exactly that plan:
+curl -sX PUT $H/api/v1/system/retention -H "$AUTH" -H 'content-type: application/json' \
+  -d '{"max_recordings_gb": 500, "plan_hash": "…"}'
+```
+
+Supplying the hash makes the commit **refuse with 409** if anything the plan depended on has moved —
+another operator changed a setting, or more footage was recorded. Without it, a confirm-after-plan
+flow confirms a plan that no longer describes reality, which is worse than no plan at all because the
+operator believes they checked.
+
+Omitting `plan_hash` commits directly, deliberately: it is a safety belt for automation, not a way to
+stop a human with an admin key changing a setting — making it mandatory would push people to script
+around it.
+
+**Evidence-locked segments are never evicted**, so a cap below `evidence_locked_bytes` cannot be met.
+The plan reports that figure so you can see it before committing rather than discovering it from a
+sweeper that never converges.
+
+**Container hardening:** add `deploy/compose.hardened.yml` as a third overlay —
+`-f compose.yml -f compose.prod.yml -f compose.hardened.yml`. `compose.prod.yml` hardens the
+*application* posture (auth, cookies, sessions); this hardens the *container*: read-only root
+filesystems, all capabilities dropped, `no-new-privileges`, PID/CPU/memory ceilings, bounded logs and
+explicit tmpfs mounts. The stack runs `network_mode: host` for camera discovery, multicast and WebRTC,
+which removes the network namespace as a boundary and makes these process-level ones matter more.
+
+Two services are deliberately **not** read-only. MediaMTX
+generates a self-signed TLS keypair into its working directory at startup, and the AI worker
+downloads model weights on first use — the MediaMTX and nginx exceptions come from observed boot
+failures; the AI one is reasoned from how that image resolves `HOME` and has not been exercised
+through a real model download. nginx keeps exactly three capabilities (`CHOWN`, `SETUID`,
+`SETGID`) because its entrypoint chowns its cache dirs before dropping to the worker user — not
+`NET_BIND_SERVICE`, since it listens on :8080.
+
+Verified by booting mediamtx, core and web: core healthy with a read-only rootfs and `/data` still
+writable, rootfs writes refused, the dashboard served, and the web→core proxy answering. The `ai`
+profile was not booted — it is opt-in and pulls model weights — so treat its settings as reasoned
+rather than proven.
+
 The kernel **fails loud** to stop you shipping an unsafe internet deployment. It treats the box as
 internet-exposed when **any** remote path is configured — the WebRTC rendezvous
 (`HELDAR_REMOTE_RENDEZVOUS_URL`), an overlay network (`HELDAR_OVERLAY_ENABLED`), or control-plane
@@ -172,6 +381,13 @@ looks too short. Generate each secret with `openssl rand -base64 32`.
   Schedule it with the bundled systemd timer (`infra/systemd/heldar-db-backup.{service,timer}`). Store the
   copy encrypted and **separately from `HELDAR_SECRET_KEY`** — the key is what keeps the sealed credentials
   in it useless to a thief.
+
+- **Back up the evidence-signing key** (`$HELDAR_DATA_DIR/evidence-signing-key.pkcs8`, #118) with the
+  appliance. Bundles already exported stay verifiable by anyone who recorded the key id, but a box
+  that loses this key can no longer sign under the identity recipients have already pinned — and it
+  will generate a NEW one on next boot, so the next bundle verifies against a key nobody expects.
+  Unlike `HELDAR_SECRET_KEY` it is not interchangeable: it *is* the appliance's identity, not a
+  configured secret. See [`docs/EVIDENCE.md`](EVIDENCE.md).
 
 - **Rotating `HELDAR_SECRET_KEY`.** Losing or changing the key bricks recording (camera passwords fail to
   decrypt — fail-closed, by design), and restoring a DB onto a box with a different key does the same. To

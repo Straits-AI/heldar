@@ -265,12 +265,115 @@ fn orphan_is_reclaimable(
     !known.contains(path) && age.map(|a| a >= min_age).unwrap_or(false)
 }
 
+/// The camera that should give up footage next, when the box is over its size cap.
+///
+/// Eviction used to take the globally oldest deletable segment, which let ONE camera's authorised
+/// state destroy another camera's recordings. Both routes were executed against a seeded box:
+///
+///   * a camera-scoped credential PATCHes `retention_hours` on its OWN camera (allowed, 200) so its
+///     footage stops aging out; the cap is still exceeded, and the sweeper deletes the next-oldest
+///     segments — which belong to a camera the caller never had access to. Observed: 100% of the
+///     other camera's footage gone, files unlinked, ~30s after an authorised request.
+///   * a camera-scoped credential evidence-locks its OWN segments (allowed, 200). `protected_bytes`
+///     was summed FLEET-WIDE and subtracted from the shared budget, so the locks starved every other
+///     camera's budget to zero.
+///
+/// Neither is a missing guard — every guard answered correctly. The damage happened afterwards, in a
+/// loop that holds no principal and therefore has no scope to enforce. The fix has to be in the
+/// eviction POLICY: the disk is genuinely shared, so something must go when it fills, but a camera
+/// must only be able to spend its OWN share of it.
+///
+/// Each camera's share is the cap split across the cameras holding footage (weighted by
+/// `storage_quota_bytes` where an operator has set one). A camera's protected (evidence-locked) bytes
+/// count against ITS OWN share rather than everyone's, so locking evidence can no longer externalise
+/// cost. The camera furthest over its share, and that still has something deletable, pays first.
+///
+/// Returns `None` when no camera is over its share — the caller then falls back to oldest-first,
+/// which is correct precisely because nobody is behaving unfairly.
+#[derive(Debug, PartialEq, Eq)]
+enum ShareVerdict {
+    /// This camera is furthest over its share and has deletable footage — take from it.
+    Evict(String),
+    /// Someone is over their share but ALL of it is evidence-locked. Deleting anything else would
+    /// take footage from a camera that is behaving, to pay for one that is not, which is the exact
+    /// cross-camera destruction this policy exists to prevent. Warn and stop instead — the same
+    /// fail-safe the cap already takes when locked footage alone exceeds it.
+    OverButProtected(String),
+    /// Nobody is over their share: the box is simply full, and oldest-first is fair.
+    Balanced,
+}
+
+async fn most_over_share(pool: &SqlitePool, cap: i64) -> ShareVerdict {
+    let rows: Vec<(String, i64, i64, Option<i64>)> = sqlx::query_as(
+        "SELECT c.id,
+                COALESCE(SUM(CASE WHEN s.evidence_locked = 1 THEN s.size_bytes ELSE 0 END), 0),
+                COALESCE(SUM(CASE WHEN s.locked = 0 AND s.evidence_locked = 0 THEN s.size_bytes ELSE 0 END), 0),
+                c.storage_quota_bytes
+           FROM cameras c JOIN segments s ON s.camera_id = c.id
+          GROUP BY c.id",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+    if rows.is_empty() {
+        return ShareVerdict::Balanced;
+    }
+    // Weights: an operator-set quota expresses the intended split; otherwise every camera is equal.
+    let total_weight: f64 = rows
+        .iter()
+        .map(|(_, _, _, q)| q.filter(|v| *v > 0).map(|v| v as f64).unwrap_or(1.0))
+        .sum();
+    let mut worst: Option<(String, f64, bool)> = None;
+    for (id, protected, deletable, quota) in &rows {
+        let weight = quota.filter(|v| *v > 0).map(|v| v as f64).unwrap_or(1.0);
+        let share = (cap as f64) * (weight / total_weight.max(1.0));
+        let over = (*protected + *deletable) as f64 - share;
+        if over <= 0.0 {
+            continue;
+        }
+        // Track the worst offender REGARDLESS of whether it has deletable bytes, so that a camera
+        // which is over its share entirely in evidence locks is reported rather than skipped over in
+        // favour of punishing someone else.
+        if worst.as_ref().map(|(_, w, _)| over > *w).unwrap_or(true) {
+            worst = Some((id.clone(), over, *deletable > 0));
+        }
+    }
+    match worst {
+        Some((id, _, true)) => ShareVerdict::Evict(id),
+        Some((id, _, false)) => ShareVerdict::OverButProtected(id),
+        None => ShareVerdict::Balanced,
+    }
+}
+
 async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
     // 0) Reclaim on-disk artifacts that carry NO DB row, so they can't quietly fill the volume and
     //    (worse) drive the disk-free floor below to evict real recordings to make room for them. This
     //    runs FIRST so the freed space is reflected before the floor decides how much footage to prune.
     //    (a) Exported clips: `clip_<uuid>.mp4`/`.txt` in clips_dir, older than CLIP_RETENTION.
     let clips_pruned = prune_tree_older_than(&cfg.clips_dir, CLIP_RETENTION).await;
+    // Idempotency keys are bounded the same way everything else here is: they are a replay window,
+    // not a second copy of the API's history.
+    let keys_pruned = crate::idempotency::prune(pool).await;
+    if keys_pruned > 0 {
+        tracing::info!(keys_pruned, "retention: pruned expired idempotency keys");
+    }
+
+    // Forget the attribution rows whose artifact is gone. Runs AFTER the prunes above and before
+    // the snapshot/archive prunes below purely to bound growth; correctness does not depend on the
+    // order, because the sweep only drops rows whose file has already left the disk.
+    let forgotten = crate::services::media_scope::sweep_orphans(
+        pool,
+        cfg,
+        // Well clear of any in-flight export: producers attribute before the bytes land.
+        chrono::Duration::hours(1),
+    )
+    .await;
+    if forgotten > 0 {
+        tracing::info!(
+            forgotten,
+            "retention: forgot media attribution rows for deleted artifacts"
+        );
+    }
     if clips_pruned > 0 {
         tracing::info!(
             deleted = clips_pruned,
@@ -482,11 +585,49 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
             if unlocked_total <= budget {
                 break;
             }
-            let batch: Vec<(String, String, i64)> = sqlx::query_as(
-                "SELECT id, path, size_bytes FROM segments WHERE locked = 0 AND evidence_locked = 0 ORDER BY end_time ASC LIMIT 20",
-            )
-            .fetch_all(pool)
-            .await?;
+            // Whose footage goes. Oldest-first WITHIN the camera that is furthest over its share,
+            // so one camera's retention setting or evidence locks cannot spend another's budget.
+            // Re-evaluated every batch: as a camera drops back to its share the target moves on.
+            let batch: Vec<(String, String, i64)> = match most_over_share(pool, max).await {
+                ShareVerdict::OverButProtected(cam) => {
+                    tracing::warn!(
+                        camera_id = %cam,
+                        "retention: over the size cap, but the camera over its share holds only \
+                         evidence-locked footage; refusing to delete OTHER cameras' recordings to \
+                         pay for it"
+                    );
+                    let _ = repo::log_event(
+                        pool,
+                        Some(&cam),
+                        "disk_pressure",
+                        "critical",
+                        json!({ "reason": "over_share_all_protected", "max_bytes": max }),
+                    )
+                    .await;
+                    break;
+                }
+                ShareVerdict::Evict(cam) => {
+                    sqlx::query_as(
+                        "SELECT id, path, size_bytes FROM segments
+                          WHERE locked = 0 AND evidence_locked = 0 AND camera_id = ?
+                          ORDER BY end_time ASC LIMIT 20",
+                    )
+                    .bind(&cam)
+                    .fetch_all(pool)
+                    .await?
+                }
+                // Nobody is over their share, so there is no unfairness to correct — the box is
+                // simply full. Oldest-first across the fleet is the right answer here.
+                ShareVerdict::Balanced => {
+                    sqlx::query_as(
+                        "SELECT id, path, size_bytes FROM segments
+                          WHERE locked = 0 AND evidence_locked = 0
+                          ORDER BY end_time ASC LIMIT 20",
+                    )
+                    .fetch_all(pool)
+                    .await?
+                }
+            };
             if batch.is_empty() {
                 break;
             }
@@ -584,12 +725,50 @@ async fn sweep(pool: &SqlitePool, cfg: &Config) -> anyhow::Result<()> {
                 let before = prev.free_bytes;
                 let deficit = floor.saturating_sub(before);
                 let want = (deficit / avg_seg).clamp(20, 256) as i64;
-                let batch: Vec<(String, String)> = sqlx::query_as(
-                    "SELECT id, path FROM segments WHERE locked = 0 AND evidence_locked = 0 ORDER BY end_time ASC LIMIT ?",
-                )
-                .bind(want)
-                .fetch_all(pool)
-                .await?;
+                // Same fair-share policy as the size cap: the floor is a shared resource too, and
+                // pruning the globally oldest here would reopen the identical cross-camera hole.
+                let batch: Vec<(String, String)> = match most_over_share(pool, max).await {
+                    ShareVerdict::OverButProtected(cam) => {
+                        tracing::error!(
+                            camera_id = %cam,
+                            free_bytes = before,
+                            floor,
+                            "retention: below the disk-free floor, but the camera over its share is \
+                             entirely evidence-locked; refusing to delete other cameras' footage. \
+                             Operator action required."
+                        );
+                        let _ = repo::log_event(
+                            pool,
+                            Some(&cam),
+                            "disk_pressure",
+                            "critical",
+                            json!({ "reason": "floor_blocked_by_protected_share", "min_free_bytes": floor }),
+                        )
+                        .await;
+                        break;
+                    }
+                    ShareVerdict::Evict(cam) => {
+                        sqlx::query_as(
+                            "SELECT id, path FROM segments
+                              WHERE locked = 0 AND evidence_locked = 0 AND camera_id = ?
+                              ORDER BY end_time ASC LIMIT ?",
+                        )
+                        .bind(&cam)
+                        .bind(want)
+                        .fetch_all(pool)
+                        .await?
+                    }
+                    ShareVerdict::Balanced => {
+                        sqlx::query_as(
+                            "SELECT id, path FROM segments
+                              WHERE locked = 0 AND evidence_locked = 0
+                              ORDER BY end_time ASC LIMIT ?",
+                        )
+                        .bind(want)
+                        .fetch_all(pool)
+                        .await?
+                    }
+                };
                 if batch.is_empty() {
                     tracing::warn!(
                         free_bytes = before,
@@ -1514,6 +1693,183 @@ mod tests {
         assert_eq!(
             audit_after, audit_before,
             "audit_log must be untouched by the DB size-cap step"
+        );
+    }
+}
+
+#[cfg(test)]
+mod fair_share_tests {
+    use super::*;
+    use chrono::Utc;
+
+    async fn pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        pool
+    }
+
+    async fn cam(pool: &SqlitePool, id: &str, retention_hours: i64) {
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO cameras (id, name, retention_hours, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(id)
+        .bind(id)
+        .bind(retention_hours)
+        .bind(now)
+        .bind(now)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    async fn seg(pool: &SqlitePool, id: &str, camera: &str, age_h: i64, size: i64, ev_lock: i64) {
+        let end = Utc::now() - chrono::Duration::hours(age_h);
+        sqlx::query(
+            "INSERT INTO segments
+                (id, camera_id, path, start_time, end_time, duration_s, size_bytes, locked,
+                 evidence_locked, created_at)
+             VALUES (?, ?, ?, ?, ?, 60.0, ?, 0, ?, ?)",
+        )
+        .bind(id)
+        .bind(camera)
+        .bind(format!("/nonexistent/{id}.mp4"))
+        .bind(end - chrono::Duration::minutes(1))
+        .bind(end)
+        .bind(size)
+        .bind(ev_lock)
+        .bind(Utc::now())
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// THE CRITICAL ONE. A camera-scoped credential PATCHes `retention_hours` on its OWN camera —
+    /// fully authorised, 200 OK — so its footage stops aging out. The box is still over its cap, and
+    /// eviction used to take the globally OLDEST segments, which by then belong to a camera the
+    /// caller has no access to. Executed against a seeded box, that deleted 100% of the other
+    /// camera's recordings, files unlinked, seconds after an authorised request.
+    ///
+    /// The guard is not the defect and never was: the sweeper holds no principal. The invariant this
+    /// pins is that a camera can only spend its OWN share of the disk.
+    #[tokio::test]
+    async fn a_cameras_own_retention_setting_cannot_evict_another_cameras_footage() {
+        let p = pool().await;
+        // camera_a opted out of age-pruning (the authorised write); camera_b is behaving.
+        cam(&p, "camera_a", 87_600).await;
+        cam(&p, "camera_b", 87_600).await;
+        // camera_a hogs: 6 old segments. camera_b: 3 NEWER ones, well inside any fair share.
+        for i in 1..=6 {
+            seg(&p, &format!("a{i}"), "camera_a", 100 - i, 1000, 0).await;
+        }
+        for i in 1..=3 {
+            seg(&p, &format!("b{i}"), "camera_b", 10 - i, 1000, 0).await;
+        }
+        // camera_b's segments are the NEWEST, so oldest-first would eat camera_a first here; make
+        // camera_b's the OLDEST to reproduce the real attack, where the hog's footage is protected by
+        // its own retention setting and the victim's is simply older.
+        for i in 1..=3 {
+            sqlx::query("UPDATE segments SET end_time = ? WHERE id = ?")
+                .bind(Utc::now() - chrono::Duration::hours(200 + i))
+                .bind(format!("b{i}"))
+                .execute(&p)
+                .await
+                .unwrap();
+        }
+
+        let mut cfg = Config::from_env();
+        cfg.max_recordings_bytes = 5000;
+        cfg.min_free_disk_bytes = 0;
+        cfg.recordings_dir = std::env::temp_dir();
+        cfg.snapshot_retention_hours = 0;
+        cfg.archive_retention_hours = 0;
+        sweep(&p, &cfg).await.unwrap();
+
+        let b_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM segments WHERE camera_id = 'camera_b'")
+                .fetch_one(&p)
+                .await
+                .unwrap();
+        let a_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM segments WHERE camera_id = 'camera_a'")
+                .fetch_one(&p)
+                .await
+                .unwrap();
+        assert_eq!(
+            b_left, 3,
+            "camera_b lost footage to pay for camera_a's retention setting (a_left={a_left})"
+        );
+        assert!(
+            a_left < 6,
+            "the cap was never enforced at all — the test proves nothing (a_left={a_left})"
+        );
+    }
+
+    /// The same shape through evidence locks: `protected_bytes` was summed FLEET-WIDE and subtracted
+    /// from the shared budget, so a camera locking its OWN footage starved everyone else's.
+    #[tokio::test]
+    async fn evidence_locks_are_charged_to_the_locking_camera_not_the_fleet() {
+        let p = pool().await;
+        cam(&p, "camera_a", 87_600).await;
+        cam(&p, "camera_b", 87_600).await;
+        // camera_a locks nearly the whole cap; camera_b holds a little, and it is OLDER.
+        for i in 1..=4 {
+            seg(&p, &format!("a{i}"), "camera_a", 50 - i, 1000, 1).await;
+        }
+        seg(&p, "a_del", "camera_a", 60, 1000, 0).await;
+        for i in 1..=3 {
+            seg(&p, &format!("b{i}"), "camera_b", 300 + i, 500, 0).await;
+        }
+
+        let mut cfg = Config::from_env();
+        cfg.max_recordings_bytes = 5000;
+        cfg.min_free_disk_bytes = 0;
+        cfg.recordings_dir = std::env::temp_dir();
+        cfg.snapshot_retention_hours = 0;
+        cfg.archive_retention_hours = 0;
+        sweep(&p, &cfg).await.unwrap();
+
+        let b_left: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM segments WHERE camera_id = 'camera_b'")
+                .fetch_one(&p)
+                .await
+                .unwrap();
+        assert_eq!(
+            b_left, 3,
+            "camera_a's evidence locks consumed camera_b's budget and deleted its footage"
+        );
+    }
+
+    /// The policy must not become "nobody ever gets pruned". When every camera is within its share
+    /// the box is simply full, and oldest-first across the fleet is the fair answer.
+    #[tokio::test]
+    async fn a_balanced_box_still_prunes_oldest_first() {
+        let p = pool().await;
+        cam(&p, "camera_a", 87_600).await;
+        cam(&p, "camera_b", 87_600).await;
+        for i in 1..=4 {
+            seg(&p, &format!("a{i}"), "camera_a", 100 - i, 1000, 0).await;
+            seg(&p, &format!("b{i}"), "camera_b", 100 - i, 1000, 0).await;
+        }
+        let mut cfg = Config::from_env();
+        cfg.max_recordings_bytes = 4000;
+        cfg.min_free_disk_bytes = 0;
+        cfg.recordings_dir = std::env::temp_dir();
+        cfg.snapshot_retention_hours = 0;
+        cfg.archive_retention_hours = 0;
+        sweep(&p, &cfg).await.unwrap();
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM segments")
+            .fetch_one(&p)
+            .await
+            .unwrap();
+        assert!(
+            total < 8,
+            "the cap must still be enforced on a balanced box; nothing was pruned"
         );
     }
 }

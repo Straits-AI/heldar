@@ -31,18 +31,12 @@ test("synchronized playback opens a session per selected camera", async ({ page,
   await page.goto("/playback");
   await expect(page.getByRole("heading", { name: "Synchronized Playback" })).toBeVisible();
 
-  // Extend the page's default window ([now − 30 min, now]) a few minutes into the future. The `To`
-  // control is a datetime-local input, so it has MINUTE precision: a `To` of "now" floors to :00 and
-  // excludes anything recorded during the current partial minute. On a freshly-booted stack that is
-  // all of the footage, and the open fails with "no recorded footage in the requested range". Computed
-  // in-page so it uses the browser's own clock and timezone, and stays inside the 2h playback cap.
-  const windowEnd = await page.evaluate(() => {
-    const d = new Date(Date.now() + 5 * 60 * 1000);
-    const pad = (n: number) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  });
-  await page.getByRole("textbox", { name: "To" }).fill(windowEnd);
-
+  // REGRESSION: use the page's OWN default window ([now − 30 min, now]) and do not widen it. The
+  // `To` control is minute-granular, so the default `To` renders as the current minute with no
+  // seconds. On a freshly booted stack every segment was written during that partial minute, so a
+  // query bounded at :00 matches nothing and the open used to fail with "no recorded footage in the
+  // requested range" while the recorder was actively writing. The page now queries through the END
+  // of the `to` minute, so the newest footage is reachable from the default window.
   await page.getByTestId("pb-cam-cam_e2e_1").click();
   await page.getByTestId("pb-cam-cam_e2e_2").click();
   await page.getByTestId("pb-open").click();

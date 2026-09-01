@@ -13,10 +13,11 @@ use chrono::Utc;
 use serde_json::{json, Value};
 use uuid::Uuid;
 
-use crate::auth::{self, Principal, Role};
+use crate::auth::{self, Cap, CapSet, Principal, Role};
 use crate::error::{AppError, AppResult};
 use crate::models::{
-    ApiKey, ApiKeyCreate, ApiKeyView, LoginRequest, User, UserCreate, UserUpdate, UserView,
+    ApiKey, ApiKeyCreate, ApiKeyUpdate, ApiKeyView, LoginRequest, User, UserCreate, UserUpdate,
+    UserView,
 };
 use crate::state::AppState;
 
@@ -34,13 +35,41 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/api-keys", get(list_api_keys).post(create_api_key))
         .route(
             "/api/v1/api-keys/{id}",
-            axum::routing::delete(delete_api_key),
+            axum::routing::patch(update_api_key).delete(delete_api_key),
         )
 }
 
 const MIN_PASSWORD_LEN: usize = 8;
 
-async fn login(
+/// Capabilities that may only be minted onto a key with an explicit `confirm_privileged: true`.
+///
+/// Before this, `POST /api/v1/api-keys` accepted all five roles silently, so an `admin`-role key — a
+/// non-expiring, non-rotating credential with full control of the box — was one unremarkable JSON field
+/// away and left no distinguishable trace.
+const PRIVILEGED_CAPS: [Cap; 3] = [Cap::Admin, Cap::RegistryManage, Cap::GateOperate];
+
+/// Capabilities that read CROSS-CAMERA tables — defined in `auth.rs` beside `Cap` so the mint-time
+/// refusal here and the read-path enforcement in `Principal::from_api_key` share ONE list. They were
+/// briefly enforced by two different tests of the same idea, and that is precisely how the mint-time
+/// refusal came to be defeated by construction.
+use crate::auth::UNSCOPABLE_CAPS;
+
+/// Exchange a username and password for a session token.
+///
+/// The token is also set as an HttpOnly session cookie, which is what a browser should rely on — the
+/// copy in the body is for non-browser clients. Every failure is the SAME 401: a wrong password, an
+/// unknown username, a disabled account and one locked out by repeated failures are deliberately
+/// indistinguishable, and the argon2 verification runs even for a missing user so the latency is too.
+#[utoipa::path(
+    post, path = "/api/v1/auth/login", tag = "auth",
+    operation_id = "login",
+    request_body = LoginRequest,
+    responses(
+        (status = 200, description = "The session token, its expiry and the caller's user record; the token is also returned as an HttpOnly `Set-Cookie`"),
+        (status = 401, description = "Invalid credentials — also what a disabled or locked-out account gets, deliberately", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn login(
     State(st): State<AppState>,
     Json(body): Json<LoginRequest>,
 ) -> AppResult<impl IntoResponse> {
@@ -88,15 +117,16 @@ async fn login(
     }
 
     let (token, expires_at) = auth::issue_session(&st.pool, &st.cfg, &user.id).await?;
-    let principal = Principal {
-        id: user.id.clone(),
-        name: user
-            .display_name
+    let role = Role::parse(&user.role).unwrap_or(Role::Viewer);
+    let principal = Principal::from_role(
+        user.id.clone(),
+        user.display_name
             .clone()
             .unwrap_or_else(|| user.username.clone()),
-        role: Role::parse(&user.role).unwrap_or(Role::Viewer),
-        kind: crate::auth::PrincipalKind::User,
-    };
+        role,
+        crate::auth::PrincipalKind::User,
+        auth::role_caps(role, st.cfg.machine_auth),
+    );
     auth::audit(&st.pool, &principal, "login", "user", &user.id, json!({})).await;
     // Set the session as an HttpOnly cookie (browser auth: not JS-readable, so XSS can't exfiltrate
     // it; the media plane gets it automatically since the SPA is same-origin). The token is still in
@@ -141,12 +171,14 @@ async fn register_login_failure(
     .ok()
     .flatten();
     if new_count == Some(cfg.login_max_failures) {
-        let principal = Principal {
-            id: u.id.clone(),
-            name: u.display_name.clone().unwrap_or_else(|| u.username.clone()),
-            role: Role::parse(&u.role).unwrap_or(Role::Viewer),
-            kind: auth::PrincipalKind::User,
-        };
+        let role = Role::parse(&u.role).unwrap_or(Role::Viewer);
+        let principal = Principal::from_role(
+            u.id.clone(),
+            u.display_name.clone().unwrap_or_else(|| u.username.clone()),
+            role,
+            auth::PrincipalKind::User,
+            auth::role_caps(role, cfg.machine_auth),
+        );
         auth::audit(
             pool,
             &principal,
@@ -159,7 +191,21 @@ async fn register_login_failure(
     }
 }
 
-async fn logout(State(st): State<AppState>, headers: HeaderMap) -> AppResult<impl IntoResponse> {
+/// Revoke the caller's session token and clear the session cookie.
+///
+/// Unauthenticated and idempotent on purpose: an already-expired session still gets a clean
+/// cookie-clearing 204 rather than a 401, so a client can always reach a logged-out state.
+#[utoipa::path(
+    post, path = "/api/v1/auth/logout", tag = "auth",
+    operation_id = "logout",
+    responses(
+        (status = 204, description = "Session revoked (if any) and the cookie cleared"),
+    ),
+)]
+pub async fn logout(
+    State(st): State<AppState>,
+    headers: HeaderMap,
+) -> AppResult<impl IntoResponse> {
     if let Some(tok) = auth::token_from_headers(&headers) {
         auth::revoke_session(&st.pool, &tok).await?;
     }
@@ -171,7 +217,20 @@ async fn logout(State(st): State<AppState>, headers: HeaderMap) -> AppResult<imp
     ))
 }
 
-async fn me(principal: Principal) -> AppResult<Json<Value>> {
+/// The caller this credential resolves to: id, display name, role, and whether it is a user, an API
+/// key or the system principal.
+///
+/// It reports no capabilities and no camera scope — role is not the grant. A key minted with an
+/// explicit capability list holds what that list says, which `GET /api/v1/api-keys` shows.
+#[utoipa::path(
+    get, path = "/api/v1/auth/me", tag = "auth",
+    operation_id = "getCurrentPrincipal",
+    responses(
+        (status = 200, description = "The resolved caller"),
+        (status = 401, description = "No credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn me(principal: Principal) -> AppResult<Json<Value>> {
     Ok(Json(json!({
         "id": principal.id,
         "name": principal.name,
@@ -184,23 +243,59 @@ async fn me(principal: Principal) -> AppResult<Json<Value>> {
     })))
 }
 
-async fn list_users(
+/// Every operator account on the box.
+///
+/// Refused outright to a camera-scoped credential rather than filtered: the operator roster has no
+/// camera to filter it by, so an empty list would be a lie and a full one a disclosure.
+#[utoipa::path(
+    get, path = "/api/v1/users", tag = "auth",
+    operation_id = "listUsers",
+    responses(
+        (status = 200, description = "Every user, ordered by username", body = [UserView]),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_users(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<UserView>>> {
     principal.require(principal.can_admin(), "manage users")?;
+    // Same rule as the key listing and as this file's create/update/delete: a camera-scoped
+    // credential must not touch the credential surface AT ALL, read included. The operator roster is
+    // not camera-scopable — there is no camera to filter it by — so refusal is the only coherent
+    // answer.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage users")?;
     let users = sqlx::query_as::<_, User>("SELECT * FROM users ORDER BY username ASC")
         .fetch_all(&st.pool)
         .await?;
     Ok(Json(users.into_iter().map(UserView::from).collect()))
 }
 
-async fn create_user(
+/// Create an operator account. Passwords must be at least 8 characters; `role` defaults to `viewer`.
+#[utoipa::path(
+    post, path = "/api/v1/users", tag = "auth",
+    operation_id = "createUser",
+    request_body = UserCreate,
+    responses(
+        (status = 201, description = "The created user", body = UserView),
+        (status = 400, description = "Empty username, a password under 8 characters, or an unknown role", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 409, description = "That username already exists", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn create_user(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<UserCreate>,
 ) -> AppResult<(StatusCode, Json<UserView>)> {
     principal.require(principal.can_admin(), "create users")?;
+    // A camera-scoped credential must not touch the credential surface AT ALL. Minting a key, or
+    // widening its own, escapes camera scope in ONE request without going near a camera-keyed route —
+    // and a new key is returned with its plaintext token. Users are worse: they carry Scope::All by
+    // construction. Refusing the whole surface is the containment; a subset check would still let a
+    // scoped key mint a peer with a DIFFERENT camera, and there is no camera to scope this route by.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage users")?;
+
     let username = body.username.trim();
     if username.is_empty() {
         return Err(AppError::BadRequest("`username` is required".into()));
@@ -249,13 +344,33 @@ async fn create_user(
     Ok((StatusCode::CREATED, Json(UserView::from(user))))
 }
 
-async fn update_user(
+/// Amend a user: role, display name, active flag, or password. Omitted fields are left alone.
+///
+/// Disabling the account or resetting its password revokes every live session it holds and tears
+/// down its streams immediately — a password reset is the remediation for a compromised account, so
+/// a stolen token must not outlive it. The last active admin cannot be demoted or disabled.
+#[utoipa::path(
+    patch, path = "/api/v1/users/{id}", tag = "auth",
+    operation_id = "updateUser",
+    params(("id" = String, Path, description = "User id")),
+    request_body = UserUpdate,
+    responses(
+        (status = 200, description = "The updated user", body = UserView),
+        (status = 400, description = "Unknown role, a password under 8 characters, or a change that would demote or disable the last active admin", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown user", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn update_user(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
     Json(body): Json<UserUpdate>,
 ) -> AppResult<Json<UserView>> {
     principal.require(principal.can_admin(), "modify users")?;
+    // See create_user: users carry Scope::All by construction, so a camera-scoped credential editing
+    // one is a scope escape with extra steps.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage users")?;
     let cur = sqlx::query_as::<_, User>("SELECT * FROM users WHERE id = ?")
         .bind(&id)
         .fetch_optional(&st.pool)
@@ -345,17 +460,34 @@ async fn update_user(
         .bind(&id)
         .fetch_one(&st.pool)
         .await?;
+    // Deactivation is the operator act that withdraws a user (the live check reads `users.active`,
+    // never sessions). Apply it to their streams at once rather than at the next tick.
+    crate::services::live_reaper::withdraw_now(&st, "user", id.clone());
     Ok(Json(UserView::from(user)))
 }
 
 /// Admin-only: clear a user's brute-force lockout (reset the failure counter + unlock immediately),
 /// without otherwise editing the account. Auto-unlock still happens on its own once the window passes.
-async fn unlock_user(
+#[utoipa::path(
+    post, path = "/api/v1/users/{id}/unlock", tag = "auth",
+    operation_id = "unlockUser",
+    params(("id" = String, Path, description = "User id")),
+    responses(
+        (status = 200, description = "The unlocked user", body = UserView),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown user", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn unlock_user(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<Json<UserView>> {
     principal.require(principal.can_admin(), "unlock users")?;
+    // The ninth credential-surface handler; the other eight already refuse. Undoing a brute-force
+    // lockout on an arbitrary account is a credential-surface write, and the 200-vs-404 is an id
+    // oracle that returns the full UserView on a hit.
+    crate::routes::cameras::require_fleet_scope(&principal, "unlock users")?;
     let res =
         sqlx::query("UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE id = ?")
             .bind(&id)
@@ -372,12 +504,34 @@ async fn unlock_user(
     Ok(Json(UserView::from(user)))
 }
 
-async fn delete_user(
+/// Delete an operator account.
+///
+/// You cannot delete your own account, and the last active admin cannot be deleted — both are 400,
+/// not 403. Deleting a user withdraws their live streams at once.
+#[utoipa::path(
+    delete, path = "/api/v1/users/{id}", tag = "auth",
+    operation_id = "deleteUser",
+    params(("id" = String, Path, description = "User id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 400, description = "Your own account, or the last active admin", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown user", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_user(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
     principal.require(principal.can_admin(), "delete users")?;
+    // A camera-scoped credential must not touch the credential surface AT ALL. Minting a key, or
+    // widening its own, escapes camera scope in ONE request without going near a camera-keyed route —
+    // and a new key is returned with its plaintext token. Users are worse: they carry Scope::All by
+    // construction. Refusing the whole surface is the containment; a subset check would still let a
+    // scoped key mint a peer with a DIFFERENT camera, and there is no camera to scope this route by.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage users")?;
+
     if principal.id == id {
         return Err(AppError::BadRequest(
             "cannot delete your own account".into(),
@@ -412,26 +566,207 @@ async fn delete_user(
         ));
     }
     auth::audit(&st.pool, &principal, "delete_user", "user", &id, json!({})).await;
+    // A deleted user cannot stand; withdraw their streams immediately.
+    crate::services::live_reaper::withdraw_now(&st, "user", id.clone());
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn list_api_keys(
+/// Render a stored key for the admin UI, resolving a legacy (NULL-capability) row to the capabilities
+/// it EFFECTIVELY holds under the running tier. Showing `null` there would hide the whole point of the
+/// tier ladder from the one screen an operator uses to audit credentials.
+fn api_key_view(k: ApiKey, tier: crate::config::EnforcementTier) -> ApiKeyView {
+    let role = Role::parse(&k.role);
+    let (caps, unknown, legacy) = match k.capabilities.as_deref() {
+        Some(raw) => match serde_json::from_str::<Vec<String>>(raw) {
+            Ok(slugs) => {
+                let (set, unknown) = auth::parse_capability_slugs(&slugs);
+                (set, unknown, false)
+            }
+            // A corrupt blob denies the key on the auth path; say so here rather than silently
+            // rendering an empty grant that looks intentional.
+            Err(_) => (CapSet::NONE, vec!["<unparseable>".to_string()], false),
+        },
+        None => (
+            role.map(|r| auth::role_caps(r, tier))
+                .unwrap_or(CapSet::NONE),
+            Vec::new(),
+            true,
+        ),
+    };
+    let scope_cameras: Vec<String> = k
+        .scope_cameras
+        .as_deref()
+        .and_then(|raw| serde_json::from_str(raw).ok())
+        .unwrap_or_default();
+    ApiKeyView {
+        id: k.id,
+        name: k.name,
+        key_prefix: k.key_prefix,
+        role: k.role,
+        active: k.active,
+        last_used_at: k.last_used_at,
+        created_at: k.created_at,
+        capabilities: caps.slugs().into_iter().map(str::to_string).collect(),
+        legacy_role_expansion: legacy,
+        unknown_capabilities: unknown,
+        scope_kind: k.scope_kind,
+        scope_cameras,
+        expires_at: k.expires_at,
+        revoked_at: k.revoked_at,
+    }
+}
+
+/// Parse and validate a requested capability grant + camera scope.
+///
+/// Returns `(capability slugs to store, scope_kind, scope camera ids)`. Shared by mint and PATCH so the
+/// two guards cannot drift — a guard enforced only at mint is trivially bypassed by minting then
+/// patching.
+fn validate_grant(
+    capabilities: &[String],
+    scope_kind: &str,
+    scope_cameras: &[String],
+    confirm_privileged: bool,
+) -> AppResult<(Vec<String>, String, Vec<String>)> {
+    let (set, unknown) = auth::parse_capability_slugs(capabilities);
+    if !unknown.is_empty() {
+        return Err(AppError::BadRequest(format!(
+            "unknown capability slug(s): {}. Valid: {}",
+            unknown.join(", "),
+            Cap::ALL
+                .iter()
+                .map(|c| c.slug())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )));
+    }
+    if set.is_empty() {
+        return Err(AppError::BadRequest(
+            "`capabilities` must not be empty — omit the field entirely to fall back to role expansion"
+                .into(),
+        ));
+    }
+    let privileged: Vec<&str> = PRIVILEGED_CAPS
+        .iter()
+        .filter(|c| set.contains(**c))
+        .map(|c| c.slug())
+        .collect();
+    if !privileged.is_empty() && !confirm_privileged {
+        return Err(AppError::BadRequest(format!(
+            "granting {} to a machine credential requires `confirm_privileged: true`",
+            privileged.join(", ")
+        )));
+    }
+    let scope_kind = match scope_kind {
+        "all" => "all",
+        "cameras" => "cameras",
+        other => {
+            return Err(AppError::BadRequest(format!(
+                "`scope_kind` must be `all` or `cameras` (got `{other}`)"
+            )))
+        }
+    };
+    if scope_kind == "cameras" {
+        // `expanded()`, not `contains()`: `Cap::Admin` implies every capability at REQUEST time, so a
+        // grant of `admin` is a grant of the unscopable caps whether or not their bits were listed.
+        // Testing the raw bits here let `{"capabilities":["admin"],"scope_kind":"cameras"}` mint
+        // cleanly and then satisfy the very checks this refusal exists to prevent — the refusal was
+        // defeated by construction. Both sides now read the same expansion.
+        let effective = set.expanded();
+        let unscopable: Vec<&str> = UNSCOPABLE_CAPS
+            .iter()
+            .filter(|c| effective.contains(**c))
+            .map(|c| c.slug())
+            .collect();
+        if !unscopable.is_empty() {
+            return Err(AppError::BadRequest(format!(
+                "`scope_kind: cameras` cannot be combined with {} — those capabilities read \
+                 cross-camera tables that carry no camera predicate, so the scope would not hold",
+                unscopable.join(", ")
+            )));
+        }
+        if scope_cameras.is_empty() {
+            return Err(AppError::BadRequest(
+                "`scope_cameras` must list at least one camera when `scope_kind` is `cameras`"
+                    .into(),
+            ));
+        }
+        // An empty id is not a camera. It would sit in the allowlist matching nothing while making
+        // the scope look populated, and it is the value the audit derivation treats as "no subject".
+        if scope_cameras.iter().any(|c| c.trim().is_empty()) {
+            return Err(AppError::BadRequest(
+                "`scope_cameras` must not contain an empty camera id".into(),
+            ));
+        }
+    }
+    Ok((
+        set.slugs().into_iter().map(str::to_string).collect(),
+        scope_kind.to_string(),
+        scope_cameras.to_vec(),
+    ))
+}
+
+/// Every API key on the box, newest first, with the capabilities each one EFFECTIVELY holds.
+///
+/// A legacy key stored without an explicit grant is rendered as the expansion of its role under the
+/// running enforcement tier, flagged `legacy_role_expansion: true`, rather than as `null`. Slugs this
+/// kernel does not recognise are surfaced in `unknown_capabilities` and grant nothing.
+#[utoipa::path(
+    get, path = "/api/v1/api-keys", tag = "auth",
+    operation_id = "listApiKeys",
+    responses(
+        (status = 200, description = "Every key, newest first, with `key_prefix` but never the key itself"),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn list_api_keys(
     State(st): State<AppState>,
     principal: Principal,
 ) -> AppResult<Json<Vec<ApiKeyView>>> {
     principal.require(principal.can_admin(), "manage API keys")?;
+    // The READ is as much of the credential surface as the writes its siblings guard: `api_key_view`
+    // serialises `scope_cameras`, so this listing hands a camera-scoped caller every other
+    // integrator's camera allowlist — the fleet roster, and the exact ids every camera-keyed route
+    // takes as input. It was the one member of the create/update/delete batch left unguarded.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage API keys")?;
     let keys = sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys ORDER BY created_at DESC")
         .fetch_all(&st.pool)
         .await?;
-    Ok(Json(keys.into_iter().map(ApiKeyView::from).collect()))
+    Ok(Json(
+        keys.into_iter()
+            .map(|k| api_key_view(k, st.cfg.machine_auth))
+            .collect(),
+    ))
 }
 
-async fn create_api_key(
+/// Mint an API key. The plaintext key is in this response and nowhere else — only its hash is stored.
+///
+/// Omitting `capabilities` falls back to expanding `role`, reported back as
+/// `legacy_role_expansion: true`. Granting `admin`, `registry:manage` or `gate:operate` requires
+/// `confirm_privileged: true`, and `scope_kind: "cameras"` is refused for any grant that reads
+/// cross-camera tables — `admin` included, because it implies them at request time.
+#[utoipa::path(
+    post, path = "/api/v1/api-keys", tag = "auth",
+    operation_id = "createApiKey",
+    request_body = ApiKeyCreate,
+    responses(
+        (status = 201, description = "The created key, carrying the plaintext `key` exactly once"),
+        (status = 400, description = "Empty name, unknown role, unknown or empty capability list, a privileged grant without `confirm_privileged`, or a camera scope on capabilities that cannot carry one", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn create_api_key(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<ApiKeyCreate>,
 ) -> AppResult<(StatusCode, Json<Value>)> {
     principal.require(principal.can_admin(), "create API keys")?;
+    // A camera-scoped credential must not touch the credential surface AT ALL. Minting a key, or
+    // widening its own, escapes camera scope in ONE request without going near a camera-keyed route —
+    // and a new key is returned with its plaintext token. Users are worse: they carry Scope::All by
+    // construction. Refusing the whole surface is the containment; a subset check would still let a
+    // scoped key mint a peer with a DIFFERENT camera, and there is no camera to scope this route by.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage API keys")?;
+
     if body.name.trim().is_empty() {
         return Err(AppError::BadRequest("`name` is required".into()));
     }
@@ -441,12 +776,33 @@ async fn create_api_key(
             "`role` must be admin|manager|guard|viewer|integration".into(),
         ));
     }
+    // Omitting `capabilities` still falls back to role expansion, so the dashboard's existing mint
+    // form and every script that posts `{name, role}` keep working — but the response and the audit row
+    // say so explicitly, because a grant nobody chose is exactly the thing that should be visible.
+    let scope_cameras = body.scope_cameras.clone().unwrap_or_default();
+    let grant = match &body.capabilities {
+        Some(caps) => Some(validate_grant(
+            caps,
+            body.scope_kind.as_deref().unwrap_or("all"),
+            &scope_cameras,
+            body.confirm_privileged,
+        )?),
+        None => {
+            if body.scope_kind.as_deref().is_some_and(|s| s != "all") {
+                return Err(AppError::BadRequest(
+                    "`scope_kind` requires an explicit `capabilities` list".into(),
+                ));
+            }
+            None
+        }
+    };
     let key = auth::random_token(auth::APIKEY_PREFIX);
     let prefix: String = key.chars().take(12).collect();
     let id = format!("key_{}", Uuid::new_v4().simple());
     sqlx::query(
-        "INSERT INTO api_keys (id, name, key_hash, key_prefix, role, active, created_at)
-         VALUES (?,?,?,?,?,1,?)",
+        "INSERT INTO api_keys (id, name, key_hash, key_prefix, role, active, created_at,
+                               capabilities, scope_kind, scope_cameras, expires_at)
+         VALUES (?,?,?,?,?,1,?,?,?,?,?)",
     )
     .bind(&id)
     .bind(body.name.trim())
@@ -454,30 +810,212 @@ async fn create_api_key(
     .bind(&prefix)
     .bind(role)
     .bind(Utc::now())
+    .bind(
+        grant
+            .as_ref()
+            .map(|(caps, _, _)| serde_json::to_string(caps).unwrap_or_else(|_| "[]".into())),
+    )
+    .bind(
+        grant
+            .as_ref()
+            .map(|(_, kind, _)| kind.clone())
+            .unwrap_or_else(|| "all".into()),
+    )
+    .bind(grant.as_ref().and_then(|(_, kind, cams)| {
+        (kind == "cameras").then(|| serde_json::to_string(cams).unwrap_or_else(|_| "[]".into()))
+    }))
+    .bind(body.expires_at)
     .execute(&st.pool)
     .await?;
+    let detail = json!({
+        "role": role,
+        "capabilities": grant.as_ref().map(|(c, _, _)| c.clone()),
+        "legacy_role_expansion": grant.is_none(),
+        "scope_kind": grant.as_ref().map(|(_, k, _)| k.clone()).unwrap_or_else(|| "all".into()),
+        "scope_cameras": grant.as_ref().map(|(_, _, c)| c.clone()).unwrap_or_default(),
+        "expires_at": body.expires_at,
+        "confirm_privileged": body.confirm_privileged,
+    });
     auth::audit(
         &st.pool,
         &principal,
         "create_api_key",
         "api_key",
         &id,
-        json!({ "role": role }),
+        detail.clone(),
     )
     .await;
     // The full key is returned exactly once; only its hash is stored.
     Ok((
         StatusCode::CREATED,
-        Json(json!({ "id": id, "name": body.name.trim(), "role": role, "key": key })),
+        Json(json!({
+            "id": id,
+            "name": body.name.trim(),
+            "role": role,
+            "key": key,
+            "capabilities": grant.as_ref().map(|(c, _, _)| c.clone()),
+            "legacy_role_expansion": grant.is_none(),
+            "scope_kind": grant.as_ref().map(|(_, k, _)| k.clone()).unwrap_or_else(|| "all".into()),
+            "scope_cameras": grant.as_ref().map(|(_, _, c)| c.clone()).unwrap_or_default(),
+            "expires_at": body.expires_at,
+        })),
     ))
 }
 
-async fn delete_api_key(
+/// Amend a key in place: narrow its grant, re-scope it, set an expiry, or SOFT-REVOKE it.
+///
+/// Revocation was previously only a hard `DELETE`, which destroys the audit linkage for everything the
+/// key ever did — precisely when an incident responder needs it. `revoked_at` denies the credential on
+/// the next request while leaving the row (and its `audit_log` references) intact.
+#[utoipa::path(
+    patch, path = "/api/v1/api-keys/{id}", tag = "auth",
+    operation_id = "updateApiKey",
+    params(("id" = String, Path, description = "API key id")),
+    request_body = ApiKeyUpdate,
+    responses(
+        (status = 200, description = "The amended key, with its effective capabilities"),
+        (status = 400, description = "The WHOLE resulting grant is re-validated, not just the fields sent: same refusals as minting, plus sending `scope_kind` for a key that has no explicit capability list", body = crate::openapi::ErrorBody),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown key", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn update_api_key(
+    State(st): State<AppState>,
+    principal: Principal,
+    Path(id): Path<String>,
+    Json(body): Json<ApiKeyUpdate>,
+) -> AppResult<Json<ApiKeyView>> {
+    principal.require(principal.can_admin(), "modify API keys")?;
+    // A camera-scoped credential must not touch the credential surface AT ALL. Minting a key, or
+    // widening its own, escapes camera scope in ONE request without going near a camera-keyed route —
+    // and a new key is returned with its plaintext token. Users are worse: they carry Scope::All by
+    // construction. Refusing the whole surface is the containment; a subset check would still let a
+    // scoped key mint a peer with a DIFFERENT camera, and there is no camera to scope this route by.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage API keys")?;
+
+    let cur = sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&st.pool)
+        .await?
+        .ok_or_else(|| AppError::NotFound(format!("api key {id} not found")))?;
+
+    // Re-validate the WHOLE resulting grant, not just the changed field: patching a scope onto an
+    // existing events:read grant must be refused the same way minting the pair is.
+    let (capabilities, scope_kind, scope_cameras) = match (&body.capabilities, &body.scope_kind) {
+        (None, None) if body.scope_cameras.is_none() => {
+            (cur.capabilities.clone(), cur.scope_kind.clone(), None)
+        }
+        _ => {
+            let caps: Vec<String> = match &body.capabilities {
+                Some(c) => c.clone(),
+                None => match cur.capabilities.as_deref() {
+                    Some(raw) => serde_json::from_str(raw).unwrap_or_default(),
+                    None => {
+                        return Err(AppError::BadRequest(
+                            "this key has no explicit capability grant; send `capabilities` \
+                             together with `scope_kind`"
+                                .into(),
+                        ))
+                    }
+                },
+            };
+            let kind = body
+                .scope_kind
+                .clone()
+                .unwrap_or_else(|| cur.scope_kind.clone());
+            let cams = body.scope_cameras.clone().unwrap_or_else(|| {
+                cur.scope_cameras
+                    .as_deref()
+                    .and_then(|raw| serde_json::from_str(raw).ok())
+                    .unwrap_or_default()
+            });
+            let (caps, kind, cams) = validate_grant(&caps, &kind, &cams, body.confirm_privileged)?;
+            (
+                Some(serde_json::to_string(&caps).unwrap_or_else(|_| "[]".into())),
+                kind.clone(),
+                (kind == "cameras")
+                    .then(|| serde_json::to_string(&cams).unwrap_or_else(|_| "[]".into())),
+            )
+        }
+    };
+    let scope_cameras = scope_cameras.or_else(|| {
+        (scope_kind == "cameras")
+            .then(|| cur.scope_cameras.clone())
+            .flatten()
+    });
+    let active = body.active.unwrap_or(cur.active);
+    let expires_at = body.expires_at.or(cur.expires_at);
+    let revoked_at = body.revoked_at.or(cur.revoked_at);
+
+    sqlx::query(
+        "UPDATE api_keys SET active=?, capabilities=?, scope_kind=?, scope_cameras=?,
+                             expires_at=?, revoked_at=? WHERE id=?",
+    )
+    .bind(active)
+    .bind(&capabilities)
+    .bind(&scope_kind)
+    .bind(&scope_cameras)
+    .bind(expires_at)
+    .bind(revoked_at)
+    .bind(&id)
+    .execute(&st.pool)
+    .await?;
+    auth::audit(
+        &st.pool,
+        &principal,
+        "update_api_key",
+        "api_key",
+        &id,
+        json!({
+            "active": active,
+            "capabilities": capabilities,
+            "scope_kind": scope_kind,
+            "scope_cameras": scope_cameras,
+            "expires_at": expires_at,
+            "revoked_at": revoked_at,
+        }),
+    )
+    .await;
+    let k = sqlx::query_as::<_, ApiKey>("SELECT * FROM api_keys WHERE id = ?")
+        .bind(&id)
+        .fetch_one(&st.pool)
+        .await?;
+    // Revoked, deactivated or re-scoped — whichever it was, any live stream this key opened may no
+    // longer stand. The reaper would catch it within its interval; doing it here makes an operator's
+    // revocation take effect at the moment they press the button. Spawned, so MediaMTX being slow
+    // cannot hold up this response.
+    crate::services::live_reaper::withdraw_now(&st, "api_key", id.clone());
+    Ok(Json(api_key_view(k, st.cfg.machine_auth)))
+}
+
+/// Hard-delete a key.
+///
+/// Prefer soft revocation (`PATCH` with `revoked_at`): deleting the row destroys the audit linkage
+/// for everything the key ever did, which is exactly what an incident responder needs. Either way
+/// the key's live streams are withdrawn immediately.
+#[utoipa::path(
+    delete, path = "/api/v1/api-keys/{id}", tag = "auth",
+    operation_id = "deleteApiKey",
+    params(("id" = String, Path, description = "API key id")),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown key", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn delete_api_key(
     State(st): State<AppState>,
     principal: Principal,
     Path(id): Path<String>,
 ) -> AppResult<StatusCode> {
     principal.require(principal.can_admin(), "delete API keys")?;
+    // A camera-scoped credential must not touch the credential surface AT ALL. Minting a key, or
+    // widening its own, escapes camera scope in ONE request without going near a camera-keyed route —
+    // and a new key is returned with its plaintext token. Users are worse: they carry Scope::All by
+    // construction. Refusing the whole surface is the containment; a subset check would still let a
+    // scoped key mint a peer with a DIFFERENT camera, and there is no camera to scope this route by.
+    crate::routes::cameras::require_fleet_scope(&principal, "manage API keys")?;
+
     let res = sqlx::query("DELETE FROM api_keys WHERE id = ?")
         .bind(&id)
         .execute(&st.pool)
@@ -494,12 +1032,38 @@ async fn delete_api_key(
         json!({}),
     )
     .await;
+    // A deleted key is the strongest withdrawal there is; do not make its streams wait for a tick.
+    crate::services::live_reaper::withdraw_now(&st, "api_key", id.clone());
     Ok(StatusCode::NO_CONTENT)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `UNSCOPABLE_CAPS` refusal was defeated by construction: it tested the RAW bits, so a grant
+    /// of `admin` — which implies every capability at request time — sailed past a check aimed at
+    /// exactly that combination, then satisfied `require_cap` for the caps it had just been refused.
+    #[test]
+    fn an_admin_grant_cannot_carry_a_camera_scope() {
+        let err =
+            validate_grant(&["admin".into()], "cameras", &["cam_a".into()], true).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(
+            msg.contains("events:read") || msg.contains("identity:read"),
+            "an admin grant must be refused a camera scope, naming the unscopable caps; got {msg}"
+        );
+        // Spelling the cap out was already refused; the point is that `admin` now is too.
+        assert!(
+            validate_grant(&["events:read".into()], "cameras", &["cam_a".into()], false).is_err()
+        );
+        // And the combinations that were always legitimate still are.
+        assert!(validate_grant(&["admin".into()], "all", &[], true).is_ok());
+        assert!(
+            validate_grant(&["camera:read".into()], "cameras", &["cam_a".into()], false).is_ok()
+        );
+    }
+
     use crate::config::Config;
     use crate::services::recorder::RecorderManager;
     use crate::services::sampler::SamplerManager;
@@ -530,6 +1094,7 @@ mod tests {
             modules: Arc::new(Vec::new()),
             catalog: Arc::new(crate::services::registry::CatalogService::new(&cfg)),
             http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
             started_at: chrono::Utc::now(),
             pool,
             cfg,
@@ -537,12 +1102,13 @@ mod tests {
     }
 
     fn viewer() -> Principal {
-        Principal {
-            id: "usr_viewer".into(),
-            name: "vee".into(),
-            role: Role::Viewer,
-            kind: auth::PrincipalKind::User,
-        }
+        Principal::from_role(
+            "usr_viewer".into(),
+            "vee".into(),
+            Role::Viewer,
+            auth::PrincipalKind::User,
+            auth::legacy_caps(Role::Viewer),
+        )
     }
 
     #[tokio::test]
@@ -685,6 +1251,7 @@ mod tests {
             Json(ApiKeyCreate {
                 name: "k".into(),
                 role: None,
+                ..Default::default()
             }),
         )
         .await
@@ -763,6 +1330,7 @@ mod tests {
             modules: std::sync::Arc::new(Vec::new()),
             catalog: std::sync::Arc::new(crate::services::registry::CatalogService::new(&cfg)),
             http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
             started_at: chrono::Utc::now(),
             pool,
             cfg,
@@ -858,6 +1426,7 @@ mod tests {
             Json(ApiKeyCreate {
                 name: "  ".into(),
                 role: None,
+                ..Default::default()
             }),
         )
         .await
@@ -872,6 +1441,7 @@ mod tests {
             Json(ApiKeyCreate {
                 name: "  cam-bridge  ".into(),
                 role: None,
+                ..Default::default()
             }),
         )
         .await
@@ -983,6 +1553,7 @@ mod tests {
             modules: Arc::new(Vec::new()),
             catalog: Arc::new(crate::services::registry::CatalogService::new(&cfg)),
             http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
             started_at: chrono::Utc::now(),
             pool,
             cfg,

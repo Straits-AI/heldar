@@ -11,6 +11,11 @@
 //! the per-event attempts in that ledger reach [`MAX_ATTEMPTS`], after which the event is given up on
 //! and the cursor advances so one bad endpoint cannot wedge the queue forever.
 //!
+//! A CONFIGURED signing secret that cannot be unsealed **halts** that subscription: nothing is sent,
+//! a halt row is written to the ledger, a `critical` event is raised, and the cursor is held. An
+//! authenticated channel is never silently downgraded to an unauthenticated one — see
+//! [`unseal_secret`] and [`deliver_subscription`].
+//!
 //! `run()` NEVER returns: with no enabled subscriptions it idles the cycle. The supervisor in `main`
 //! therefore spawns it unconditionally and never tight-loops respawning it.
 
@@ -36,6 +41,14 @@ const BATCH: i64 = 100;
 const MAX_ATTEMPTS: i64 = 5;
 /// Per-delivery request timeout (also the pinned egress client's timeout).
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
+/// `webhook_deliveries.event_type` marking the subscription-level "signing secret unusable" record.
+/// A distinct sentinel (with `event_id` NULL) so the halt is visible in the delivery ledger the
+/// operator already reads, without being mistaken for a per-event delivery attempt.
+pub const SIGNING_SECRET_UNUSABLE: &str = "webhook.signing_secret_unusable";
+/// How often a halted subscription re-records the halt. The delivery loop ticks every few seconds and
+/// the halt persists until an operator fixes the key, so throttle the ledger row + critical event to
+/// once an hour rather than writing one per tick.
+const HALT_NOTICE_INTERVAL_MIN: i64 = 60;
 
 pub async fn run(pool: SqlitePool, cfg: Arc<Config>) {
     let mut tick = tokio::time::interval(Duration::from_secs(cfg.notifier_interval_s.max(5)));
@@ -89,6 +102,38 @@ async fn deliver_subscription(pool: &SqlitePool, sub: &WebhookSubscription) -> a
         return Ok(());
     };
 
+    // Resolve the signing key ONCE per subscription, before a single event is fetched, and FAIL
+    // CLOSED if a CONFIGURED key cannot be unsealed.
+    //
+    // This used to drop the signature and deliver anyway. That silently downgrades a channel the
+    // operator explicitly authenticated: the receiver is configured to verify `X-Heldar-Signature`,
+    // so either it rejects everything (alerts lost, and the sender reports 4xx it will give up on) or
+    // — the dangerous case — it accepts unsigned bodies, and the box has just taught it that an
+    // unsigned webhook is acceptable. Either way the operator's guarantee is gone with only a log
+    // line to say so. A key that will not unseal is an operator-fixable configuration fault, so we
+    // halt this subscription instead: nothing is sent, nothing is signed with the wrong key, and the
+    // cursor stays put so every event delivers in order once the key is fixed. Note this deliberately
+    // does NOT consume the per-event MAX_ATTEMPTS budget — that budget exists so one dead ENDPOINT
+    // cannot wedge the queue, and giving up here would discard events over a fault that will be
+    // fixed. Subscriptions with no secret configured are untouched.
+    let secret = match unseal_secret(sub.secret.as_deref()) {
+        Ok(s) => s,
+        Err(e) => {
+            let reason = format!("signing secret could not be decrypted: {e}");
+            tracing::error!(
+                target: "heldar::security",
+                subscription = %sub.id,
+                error = %e,
+                "webhooks: HALTED — a configured signing secret will not decrypt (wrong or absent \
+                 HELDAR_SECRET_KEY?). Delivery is stopped for this subscription rather than sent \
+                 UNSIGNED; the cursor is held, so nothing is lost. Fix the key (or clear the \
+                 subscription's secret) to resume."
+            );
+            record_halt(pool, &sub.id, &reason).await;
+            return Ok(());
+        }
+    };
+
     loop {
         let events = fetch_events(pool, cursor, &sub.min_severity).await?;
         if events.is_empty() {
@@ -104,7 +149,7 @@ async fn deliver_subscription(pool: &SqlitePool, sub: &WebhookSubscription) -> a
                 advanced = true;
                 continue;
             }
-            match try_deliver(pool, sub, &ev).await {
+            match try_deliver(pool, sub, &ev, secret.as_deref()).await {
                 DeliverOutcome::Advance => {
                     cursor = ev.created_at;
                     advanced = true;
@@ -155,8 +200,73 @@ enum DeliverOutcome {
     Retry,
 }
 
-/// Attempt to deliver one event, recording the attempt in the `webhook_deliveries` ledger.
-async fn try_deliver(pool: &SqlitePool, sub: &WebhookSubscription, ev: &Event) -> DeliverOutcome {
+/// Unseal a subscription's stored HMAC key.
+///
+/// The key is stored encrypted at rest, so signing with the stored value directly would sign with
+/// ciphertext and every downstream verifier would reject the signature. Returns `Ok(None)` when no
+/// secret is configured (an unsigned channel by choice — nothing to downgrade), and `Err` when a
+/// CONFIGURED secret cannot be unsealed. Callers must treat that `Err` as fatal to the delivery:
+/// there is no correct way to send on an authenticated channel without its key.
+pub fn unseal_secret(stored: Option<&str>) -> anyhow::Result<Option<String>> {
+    match stored.filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(sealed) => crate::services::secrets::decrypt_stored(sealed).map(Some),
+    }
+}
+
+/// Record (at most once per [`HALT_NOTICE_INTERVAL_MIN`]) that a subscription is halted: one row in
+/// the delivery ledger the operator already reads, and one `critical` event so it reaches the alert
+/// path. Best-effort — a failure to record must not turn into a delivery.
+async fn record_halt(pool: &SqlitePool, sub_id: &str, reason: &str) {
+    let last: Option<DateTime<Utc>> = sqlx::query_scalar(
+        "SELECT MAX(created_at) FROM webhook_deliveries
+          WHERE subscription_id = ? AND event_id IS NULL AND event_type = ?",
+    )
+    .bind(sub_id)
+    .bind(SIGNING_SECRET_UNUSABLE)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(None);
+    if let Some(at) = last {
+        if Utc::now() - at < chrono::Duration::minutes(HALT_NOTICE_INTERVAL_MIN) {
+            return;
+        }
+    }
+    let delivery_id = format!("whd_{}", Uuid::new_v4().simple());
+    record_delivery(
+        pool,
+        &delivery_id,
+        sub_id,
+        None,
+        Some(SIGNING_SECRET_UNUSABLE),
+        false,
+        1,
+        None,
+        Some(reason),
+    )
+    .await;
+    if let Err(e) = crate::repo::log_event(
+        pool,
+        None,
+        "webhook_signing_secret_unusable",
+        "critical",
+        json!({ "subscription_id": sub_id, "reason": reason }),
+    )
+    .await
+    {
+        tracing::error!(error = %e, subscription = %sub_id, "webhooks: failed to raise the halt event");
+    }
+}
+
+/// Attempt to deliver one event, recording the attempt in the `webhook_deliveries` ledger. `secret`
+/// is the already-unsealed signing key (`None` = this subscription is unsigned by configuration);
+/// a configured-but-unusable key never reaches here — [`deliver_subscription`] halts first.
+async fn try_deliver(
+    pool: &SqlitePool,
+    sub: &WebhookSubscription,
+    ev: &Event,
+    secret: Option<&str>,
+) -> DeliverOutcome {
     let prior_failures: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM webhook_deliveries
           WHERE subscription_id = ? AND event_id = ? AND status = 'failed'",
@@ -170,14 +280,7 @@ async fn try_deliver(pool: &SqlitePool, sub: &WebhookSubscription, ev: &Event) -
 
     let delivery_id = format!("whd_{}", Uuid::new_v4().simple());
     let body = event_body(ev);
-    let res = send_event(
-        &sub.url,
-        &delivery_id,
-        &ev.event_type,
-        sub.secret.as_deref(),
-        &body,
-    )
-    .await;
+    let res = send_event(&sub.url, &delivery_id, &ev.event_type, secret, &body).await;
 
     record_delivery(
         pool,
@@ -399,6 +502,158 @@ mod tests {
         // info (and any unknown value) admits all severities.
         assert_eq!(min_severity_sql("info"), "1 = 1");
         assert_eq!(min_severity_sql("whatever"), "1 = 1");
+    }
+
+    async fn test_pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let now = Utc::now();
+        sqlx::query(
+            "INSERT INTO webhook_subscriptions (id, name, url, created_at, updated_at)
+             VALUES ('whs_1', 'test', 'https://example.invalid/hook', ?, ?)",
+        )
+        .bind(now)
+        .bind(now)
+        .execute(&pool)
+        .await
+        .unwrap();
+        pool
+    }
+
+    #[tokio::test]
+    async fn a_halt_is_recorded_once_and_then_throttled() {
+        // The delivery loop ticks every few seconds and a key fault persists until an operator fixes
+        // it, so the halt must be visible in the ledger + as a critical event WITHOUT writing a row
+        // per tick. This also exercises the timestamp read the throttle depends on — a decode failure
+        // there would silently degrade to "record every cycle".
+        let pool = test_pool().await;
+        record_halt(
+            &pool,
+            "whs_1",
+            "signing secret could not be decrypted: nope",
+        )
+        .await;
+        record_halt(
+            &pool,
+            "whs_1",
+            "signing secret could not be decrypted: nope",
+        )
+        .await;
+        record_halt(
+            &pool,
+            "whs_1",
+            "signing secret could not be decrypted: nope",
+        )
+        .await;
+
+        let ledger: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM webhook_deliveries
+              WHERE subscription_id = 'whs_1' AND event_id IS NULL AND event_type = ?",
+        )
+        .bind(SIGNING_SECRET_UNUSABLE)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(ledger, 1, "the halt notice must be throttled, not per-tick");
+
+        let events: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM events WHERE event_type = 'webhook_signing_secret_unusable'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(events, 1);
+        // It is recorded as a FAILURE, not a delivery: an operator reading the ledger must not see a
+        // halted subscription as healthy.
+        let status: String = sqlx::query_scalar(
+            "SELECT status FROM webhook_deliveries WHERE subscription_id = 'whs_1'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(status, "failed");
+    }
+
+    #[tokio::test]
+    async fn an_unusable_secret_halts_delivery_and_holds_the_cursor() {
+        // End-to-end on the decision that matters: nothing is delivered, and the cursor does not
+        // move — so once the key is fixed every held event still delivers, in order.
+        let pool = test_pool().await;
+        let cursor = Utc::now() - chrono::Duration::hours(1);
+        sqlx::query(
+            "UPDATE webhook_subscriptions SET cursor_at = ?, secret = ? WHERE id = 'whs_1'",
+        )
+        .bind(cursor)
+        .bind("enc:v1:not-valid-ciphertext")
+        .execute(&pool)
+        .await
+        .unwrap();
+        // One matching event sitting after the cursor: it must NOT be skipped past.
+        crate::repo::log_event(&pool, None, "zone_enter", "info", json!({}))
+            .await
+            .unwrap();
+
+        let sub = load_enabled(&pool).await.unwrap().pop().unwrap();
+        // `send_event` is never reached (the URL is unroutable on purpose), so a pass here would be
+        // a delivery ATTEMPT recorded against the event — which is what we assert did not happen.
+        deliver_subscription(&pool, &sub).await.unwrap();
+
+        let after: Option<DateTime<Utc>> =
+            sqlx::query_scalar("SELECT cursor_at FROM webhook_subscriptions WHERE id = 'whs_1'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            after,
+            Some(cursor),
+            "the cursor must not advance while halted"
+        );
+        let attempts: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM webhook_deliveries WHERE event_id IS NOT NULL",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            attempts, 0,
+            "nothing may be sent without the configured key"
+        );
+    }
+
+    #[test]
+    fn an_unsigned_subscription_stays_unsigned_and_is_not_an_error() {
+        // No secret configured is a deliberate choice, not a fault: it must not halt delivery.
+        assert!(matches!(unseal_secret(None), Ok(None)));
+        assert!(matches!(unseal_secret(Some("")), Ok(None)));
+    }
+
+    #[test]
+    fn a_plaintext_legacy_secret_still_signs() {
+        // Secrets written before encryption-at-rest are passed through unchanged by
+        // `decrypt_stored`, so an existing subscription keeps signing with the same key.
+        assert_eq!(
+            unseal_secret(Some("legacy-plaintext")).unwrap().as_deref(),
+            Some("legacy-plaintext")
+        );
+    }
+
+    #[test]
+    fn a_configured_secret_that_will_not_decrypt_is_an_error_not_a_none() {
+        // THE REGRESSION THIS PINS: this used to collapse to `None`, i.e. "deliver UNSIGNED", which
+        // silently downgrades a channel the operator authenticated. It must be an Err so the caller
+        // is forced to decide — and `deliver_subscription` decides to halt.
+        //
+        // `enc:v1:` is the sealed-value marker; a body that is not valid sealed ciphertext cannot be
+        // mistaken for a legacy plaintext passthrough.
+        let err = unseal_secret(Some("enc:v1:not-valid-ciphertext"));
+        assert!(
+            err.is_err(),
+            "an unusable configured secret must not degrade to unsigned"
+        );
     }
 
     #[test]

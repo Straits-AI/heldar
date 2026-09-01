@@ -38,8 +38,20 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 axum = { version = "0.8", features = ["macros"] }
 tower-http = { version = "0.6", features = ["cors", "trace", "fs"] }
 chrono = { version = "0.4", features = ["serde"] }
+serde_json = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 anyhow = "1.0.104"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 dotenvy = "0.15"
+
+[dev-dependencies]
+utoipa = "5.5.0"
+heldar-testkit = { path = "../heldar-testkit" }
+# The matrix drives the COMPOSED router, so it needs the app crates the server merges.
+# The route-scope matrix drives the COMPOSED router (kernel + app crates) in-process.
+tower = "0.5"
+base64 = "0.23"
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = "0.4"
