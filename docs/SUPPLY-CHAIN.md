@@ -23,7 +23,7 @@ a reader can see the version at a glance.
 |-------|-------|-----------|
 | `Dockerfile` (builder) | `rust:1.98.0-bookworm` | tag + `@sha256` |
 | `Dockerfile` (runtime) | `debian:bookworm-slim` | codename tag + `@sha256` |
-| `apps/web/Dockerfile` (builder) | `node:22.23.2-bookworm-slim` | tag + `@sha256` |
+| `apps/web/Dockerfile` (builder) | `node:24.20.0-bookworm-slim` | tag + `@sha256` |
 | `apps/web/Dockerfile` (runtime) | `nginx:1.31.4-alpine` | tag + `@sha256` |
 | `apps/ai/Dockerfile` | `python:3.14.7-slim` | tag + `@sha256` |
 | `deploy/compose.tls.yml` | `caddy:2.11.4` | tag + `@sha256` |
