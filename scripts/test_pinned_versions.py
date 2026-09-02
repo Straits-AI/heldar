@@ -56,6 +56,24 @@ CASES = [
         "parser has drifted",
     ),
     (
+        "what #144 proposed: the image on node 26, CI still testing on 22",
+        "apps/web/Dockerfile",
+        "FROM node:22.23.2-bookworm-slim@",
+        "FROM node:26.8.1-bookworm-slim@",
+        "different toolchains",
+    ),
+    (
+        # Three occurrences, and the guard reads all of them — so the control changes all three and
+        # SAYS it means three. The harness refuses an ambiguous anchor rather than mutating one at
+        # random, which is how a control ends up proving nothing.
+        "the node parser drifting (CI stops quoting the version)",
+        ".github/workflows/ci.yml",
+        'node-version: "22"',
+        "node-version: 22",
+        "parser has drifted",
+        3,
+    ),
+    (
         "the guard's own parser drifting from the file it reads",
         "scripts/setup_caddy.sh",
         'VERSION="${CADDY_VERSION:-2.11.4}"',
@@ -71,11 +89,20 @@ def run():
 
 def main():
     bad = 0
-    for name, rel, old, new, want in CASES:
+    for case in CASES:
+        name, rel, old, new, want = case[:5]
+        expect_n = case[5] if len(case) > 5 else None
         path = os.path.join(ROOT, rel)
         src = open(path).read()
-        if src.count(old) != 1:
-            print(f"  VACUOUS {name}: anchor appears {src.count(old)} times in {rel}")
+        n = src.count(old)
+        if n == 0 or (expect_n is not None and n != expect_n):
+            print(f"  VACUOUS {name}: anchor appears {n} times in {rel}"
+                  + (f" (expected {expect_n})" if expect_n is not None else ""))
+            bad += 1
+            continue
+        if expect_n is None and n != 1:
+            print(f"  VACUOUS {name}: anchor appears {n} times in {rel} and no count was declared — "
+                  f"say how many you mean to change")
             bad += 1
             continue
         shutil.copy(path, path + ".bak")

@@ -138,7 +138,33 @@ if policy:
                 f"image. The policy document is describing a version the tree has moved past."
             )
 
-print(f"checked {4} pinned-in-two-places dependencies")
+# --- the Node that BUILDS the dashboard vs the Node that TESTS it ------------------------------
+# apps/web/Dockerfile's builder stage runs `npm install && npm run build` to produce the dist that
+# ships; ci.yml runs the same install and build on `actions/setup-node`. If those majors differ, the
+# tested artifact and the shipped artifact were produced by different toolchains — and nothing would
+# report it, because `docker-open.yml` only builds the image on a release tag.
+#
+# Dependabot #144 proposed exactly that (image -> node 26, CI left on 22). This does not forbid the
+# bump; it requires both halves to move together, which is the whole point of the pairing.
+web_dockerfile = read("apps/web/Dockerfile")
+ci = read(".github/workflows/ci.yml")
+if web_dockerfile and ci:
+    img = one(r"FROM\s+node:(\d+)\.[^\s@]*@sha256:", web_dockerfile, "pinned node builder image",
+              "apps/web/Dockerfile")
+    ci_majors = set(re.findall(r'node-version:\s*"(\d+)"', ci))
+    if not ci_majors:
+        problems.append(
+            ".github/workflows/ci.yml: found no `node-version:` pins — this check's parser has "
+            "drifted and would pass vacuously"
+        )
+    elif img and ci_majors != {img}:
+        problems.append(
+            f"apps/web/Dockerfile builds the shipped dashboard on node {img}, but ci.yml tests it on "
+            f"node {', '.join(sorted(ci_majors))}. The tested artifact and the shipped artifact "
+            f"would come from different toolchains; bump both together."
+        )
+
+print(f"checked {5} pinned-in-two-places dependencies")
 if problems:
     print(f"\n{len(problems)} problem(s):")
     for p in problems:
