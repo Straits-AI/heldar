@@ -75,7 +75,34 @@ if root_compose and deploy_compose:
             f"appliance ({b}, deploy/compose.yml)"
         )
 
-print(f"checked {2} pinned-in-two-places dependencies")
+# --- the derive-your-own-image recipe vs the requirements it copies ---------------------------
+# apps/ai/Dockerfile documents how to add the heavy model stacks:
+#
+#   RUN pip install --no-cache-dir "ultralytics>=X" "lap>=Y"
+#
+# Those floors are copied from requirements.txt, and Dependabot updates requirements files but never
+# comments. Merging #78 (lap >=0.5 -> >=0.5.13) left that line telling operators to install a floor
+# the project had already moved past — an instruction that is wrong in the file that teaches it.
+dockerfile = read("apps/ai/Dockerfile")
+reqs = read("apps/ai/requirements.txt")
+if dockerfile and reqs:
+    for pkg in ("ultralytics", "lap"):
+        in_docs = re.search(rf'"{pkg}>=([0-9][^"]*)"', dockerfile)
+        in_reqs = re.search(rf"^{pkg}>=([0-9]\S*)", reqs, re.M)
+        if not in_docs or not in_reqs:
+            problems.append(
+                f"could not find a {pkg} floor in both apps/ai/Dockerfile and "
+                f"apps/ai/requirements.txt — this check's parser has drifted"
+            )
+            continue
+        if in_docs.group(1) != in_reqs.group(1):
+            problems.append(
+                f"apps/ai/Dockerfile tells operators to install {pkg}>={in_docs.group(1)}, but "
+                f"apps/ai/requirements.txt declares >={in_reqs.group(1)}. The documented recipe is "
+                f"the one people actually run."
+            )
+
+print(f"checked {3} pinned-in-two-places dependencies")
 if problems:
     print(f"\n{len(problems)} problem(s):")
     for p in problems:
