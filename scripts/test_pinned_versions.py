@@ -42,6 +42,20 @@ CASES = [
         "tells operators to install lap>=0.5",
     ),
     (
+        "the drift this check was written for: a base image bumped, the policy table left behind",
+        "apps/ai/Dockerfile",
+        "FROM python:3.14.7-slim@",
+        "FROM python:3.15.0-slim@",
+        "does not pin that image",
+    ),
+    (
+        "the policy table's parser drifting (the heading it anchors on is renamed)",
+        "docs/SUPPLY-CHAIN.md",
+        "## What is pinned",
+        "## Pinned images",
+        "parser has drifted",
+    ),
+    (
         "the guard's own parser drifting from the file it reads",
         "scripts/setup_caddy.sh",
         'VERSION="${CADDY_VERSION:-2.11.4}"',
