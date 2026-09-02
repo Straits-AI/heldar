@@ -56,9 +56,9 @@ CASES = [
         "parser has drifted",
     ),
     (
-        "what #144 proposed: the image on node 26, CI still testing on 22",
+        "the shape #144 proposed: the builder image moved, CI left behind",
         "apps/web/Dockerfile",
-        "FROM node:22.23.2-bookworm-slim@",
+        "FROM node:24.20.0-bookworm-slim@",
         "FROM node:26.8.1-bookworm-slim@",
         "different toolchains",
     ),
@@ -68,8 +68,8 @@ CASES = [
         # random, which is how a control ends up proving nothing.
         "the node parser drifting (CI stops quoting the version)",
         ".github/workflows/ci.yml",
-        'node-version: "22"',
-        "node-version: 22",
+        'node-version: "24"',
+        "node-version: 24",
         "parser has drifted",
         3,
     ),
