@@ -102,7 +102,43 @@ if dockerfile and reqs:
                 f"the one people actually run."
             )
 
-print(f"checked {3} pinned-in-two-places dependencies")
+# --- the supply-chain policy table vs the files it describes -----------------------------------
+# docs/SUPPLY-CHAIN.md lists every pinned base image by concrete tag. That makes it a document which
+# goes stale precisely when someone merges the bump it describes — and it is the document that tells
+# people how to bump safely, so a reader following it is following a version the project left behind.
+#
+# Four of its six rows were wrong when this check was written, three from one afternoon of
+# dependency merges.
+policy = read("docs/SUPPLY-CHAIN.md")
+if policy:
+    table = re.search(r"^## What is pinned\n\n(\|.*?\n)\n", policy, re.S | re.M)
+    rows = re.findall(r"^\|\s*([^|]+?)\s*\|\s*`([^`]+)`\s*\|", table.group(1), re.M) if table else []
+    rows = [(w, p) for w, p in rows if ":" in p or "/" in p]
+    if len(rows) < 5:
+        problems.append(
+            f"docs/SUPPLY-CHAIN.md: parsed only {len(rows)} pinned images from the policy table — "
+            f"this check's parser has drifted and would pass vacuously"
+        )
+    for where, pin in rows:
+        files = [f.strip().strip("`") for f in where.split(",")]
+        files = [f.split(" ")[0].strip("`") for f in files]
+        found = False
+        looked = []
+        for f in files:
+            txt = read(f)
+            if txt is None:
+                continue
+            looked.append(f)
+            if re.search(rf"(?:FROM|image:)\s+{re.escape(pin)}[@\s]", txt):
+                found = True
+                break
+        if looked and not found:
+            problems.append(
+                f"docs/SUPPLY-CHAIN.md names {pin} for {', '.join(looked)}, which does not pin that "
+                f"image. The policy document is describing a version the tree has moved past."
+            )
+
+print(f"checked {4} pinned-in-two-places dependencies")
 if problems:
     print(f"\n{len(problems)} problem(s):")
     for p in problems:

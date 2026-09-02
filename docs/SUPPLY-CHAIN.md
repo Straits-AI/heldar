@@ -21,12 +21,18 @@ a reader can see the version at a glance.
 
 | Where | Image | Pin style |
 |-------|-------|-----------|
-| `Dockerfile` (builder) | `rust:1.85.1-bookworm` | tag + `@sha256` |
+| `Dockerfile` (builder) | `rust:1.98.0-bookworm` | tag + `@sha256` |
 | `Dockerfile` (runtime) | `debian:bookworm-slim` | codename tag + `@sha256` |
 | `apps/web/Dockerfile` (builder) | `node:22.23.2-bookworm-slim` | tag + `@sha256` |
-| `apps/web/Dockerfile` (runtime) | `nginx:1.27.5-alpine` | tag + `@sha256` |
-| `apps/ai/Dockerfile` | `python:3.13.14-slim` | tag + `@sha256` |
-| `deploy/compose.yml`, `docker-compose.yml` | `bluenviron/mediamtx:1.20.0` | tag + `@sha256` |
+| `apps/web/Dockerfile` (runtime) | `nginx:1.31.4-alpine` | tag + `@sha256` |
+| `apps/ai/Dockerfile` | `python:3.14.7-slim` | tag + `@sha256` |
+| `deploy/compose.tls.yml` | `caddy:2.11.4` | tag + `@sha256` |
+| `deploy/compose.yml`, `docker-compose.yml` | `bluenviron/mediamtx:1.20.1` | tag + `@sha256` |
+
+`scripts/check_pinned_versions.py` holds this table to the tree in CI. It is a policy document that
+names concrete versions, so it goes stale exactly when someone merges the bump it describes — four of
+these six rows were wrong before that check existed, three of them from a single afternoon of
+dependency merges.
 
 The Rust builder tag tracks the workspace MSRV (`rust-version = "1.85"` in `crates/*/Cargo.toml`);
 keep the builder at or above that.
