@@ -187,14 +187,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release upload "$TAG" openapi.json --clobber
+        run: ./scripts/release_upload.sh "$TAG" openapi.json
 
       - name: Upload the manifest
         if: matrix.arch == 'x86_64'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release upload "$TAG" heldar-release-manifest.json --clobber
+        run: ./scripts/release_upload.sh "$TAG" heldar-release-manifest.json
 
       # A release must not ship a sizing document whose camera counts no run supports (#119). The
       # gate recomputes each cited run's verdict from its raw measurements and refuses a claim whose
@@ -230,7 +230,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         shell: bash
-        run: gh release upload "$TAG" "heldar-skills-$TAG.tar.gz" "heldar-skills-$TAG.tar.gz.sha256" --clobber
+        run: ./scripts/release_upload.sh "$TAG" "heldar-skills-$TAG.tar.gz" "heldar-skills-$TAG.tar.gz.sha256"
 
       - name: Upload to the Release
         env:
@@ -248,7 +248,7 @@ jobs:
           for v in ASSET CLI MCP; do
             test -n "${!v}" || { echo "::error::$v is empty — check the composite action's outputs"; exit 1; }
           done
-          gh release upload "$TAG" "$ASSET" "$ASSET.sha256" "$ASSET.spdx.json" --clobber
+          ./scripts/release_upload.sh "$TAG" "$ASSET" "$ASSET.sha256" "$ASSET.spdx.json"
           # heldarctl and heldar-mcp ship for every architecture the core does (#122, #123).
-          gh release upload "$TAG" "$CLI" "$CLI.sha256" --clobber
-          gh release upload "$TAG" "$MCP" "$MCP.sha256" --clobber
+          ./scripts/release_upload.sh "$TAG" "$CLI" "$CLI.sha256"
+          ./scripts/release_upload.sh "$TAG" "$MCP" "$MCP.sha256"
