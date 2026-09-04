@@ -85,6 +85,57 @@ pub(crate) fn coverage_and_gaps(
     ((requested - gap_secs).max(0.0), gaps)
 }
 
+/// Every segment the export is about to hand ffmpeg still exists, as a row AND as a file.
+///
+/// Called under the read lock, which is what makes it authoritative: after the lock the sweeper's
+/// `DELETE ... WHERE locked = 0` cannot remove these rows, so what this reads stays true for the
+/// export. Before the lock it would be another point-in-time check with the same race after it.
+///
+/// Two failure shapes, both of which reached ffmpeg as a 500 before (#183):
+///
+///   * The ROW is gone. `SegReadLock` locks by id and `set_segments_locked` updates zero rows for one
+///     that was already deleted, saying nothing — so the lock cannot protect what it did not find.
+///   * The row survives and the FILE is gone. `services/retention.rs` deletes the row first and then
+///     unlinks, deliberately: the reverse risks orphaning protected evidence. So an interrupted
+///     sweep leaves exactly this, and ffmpeg's concat demuxer reports it as "Impossible to open".
+///
+/// `NotFound`, not 500: footage past its retention horizon is an expected condition on a recorder,
+/// and a 500 tells a monitor the box is broken while telling the caller nothing it can act on. Same
+/// reasoning as #168 for snapshots.
+pub async fn ensure_still_present(pool: &sqlx::SqlitePool, segments: &[Segment]) -> AppResult<()> {
+    if segments.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<&str> = segments.iter().map(|s| s.id.as_str()).collect();
+    let sql = format!(
+        "SELECT COUNT(*) FROM segments WHERE id IN ({})",
+        ids.iter().map(|_| "?").collect::<Vec<_>>().join(",")
+    );
+    let mut q = sqlx::query_scalar::<_, i64>(&sql).persistent(false);
+    for id in &ids {
+        q = q.bind(*id);
+    }
+    let survivors = q.fetch_one(pool).await? as usize;
+    if survivors != segments.len() {
+        return Err(AppError::NotFound(format!(
+            "{} of {} segments covering this window were pruned by retention while the export was \
+             being prepared; that footage is no longer on this box",
+            segments.len() - survivors,
+            segments.len()
+        )));
+    }
+    for seg in segments {
+        if tokio::fs::metadata(&seg.path).await.is_err() {
+            return Err(AppError::NotFound(format!(
+                "footage for this window is no longer on disk (segment {} is indexed but its file \
+                 is gone); it was most likely pruned by retention",
+                seg.id
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub async fn export_clip(
     state: &AppState,
     camera_id: &str,
@@ -125,6 +176,23 @@ pub async fn export_clip(
         ));
     }
 
+    // Read-lock the source segments so the retention sweeper cannot delete them out from under
+    // ffmpeg (TOCTOU). The sweeper honours it: `DELETE ... WHERE locked = 0 AND evidence_locked = 0`.
+    // The RAII guard releases on EVERY outcome — normal return, `?` error, timeout, AND
+    // cancellation/panic, where a manual unlock would be skipped and leak the lock.
+    //
+    // TAKEN BEFORE THE MEDIA-JOB PERMIT, which is a semaphore and can BLOCK. Acquiring the permit
+    // between the SELECT above and this lock left a window as long as the export queue was deep —
+    // not the microseconds "TOCTOU" suggests. That is the window #183 was reproduced in.
+    let seg_ids: Vec<String> = segments.iter().map(|s| s.id.clone()).collect();
+    let _read_lock = crate::repo::SegReadLock::acquire(&state.pool, seg_ids.clone()).await;
+
+    // ...and re-read UNDER the lock, because the lock cannot protect rows that were already gone
+    // when it was taken. `set_segments_locked` updates 0 rows for a segment the sweeper deleted and
+    // says nothing, so without this the export proceeds with a path ffmpeg cannot open and fails as
+    // a 500. After this point deletion is prevented, so this read is authoritative.
+    ensure_still_present(&state.pool, &segments).await?;
+
     tokio::fs::create_dir_all(&state.cfg.clips_dir)
         .await
         .map_err(|e| AppError::Other(e.into()))?;
@@ -137,12 +205,6 @@ pub async fn export_clip(
     let filename = format!("{id}.mp4");
     let out_path = state.cfg.clips_dir.join(&filename);
     let list_path = state.cfg.clips_dir.join(format!("{id}.txt"));
-
-    // Read-lock the source segments so the retention sweeper can't delete them out from under ffmpeg
-    // mid-export (TOCTOU). The RAII guard releases on EVERY outcome — normal return, `?` error,
-    // timeout, AND cancellation/panic (where a manual unlock would be skipped, leaking the lock).
-    let seg_ids: Vec<String> = segments.iter().map(|s| s.id.clone()).collect();
-    let _read_lock = crate::repo::SegReadLock::acquire(&state.pool, seg_ids).await;
 
     let size_outcome: AppResult<u64> = async {
         let mut list = String::new();
