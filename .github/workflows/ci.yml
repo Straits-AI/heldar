@@ -81,6 +81,8 @@ jobs:
           # image and left scripts/setup_caddy.sh behind, so the required TLS e2e check went green
           # having installed the OLD Caddy — a passing check about a version the change was not
           # making.
+          # A release asset must not be silently replaced under a tag consumers have pinned.
+          ./scripts/test_release_upload.sh
           python3 scripts/test_pinned_versions.py
           python3 scripts/check_pinned_versions.py
           python3 scripts/bench/test_doc_drift.py

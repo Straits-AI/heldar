@@ -132,11 +132,37 @@ at right now — exactly the substitution these attestations exist to detect. Re
 Image attestations are pushed to the registry as OCI referrers (`push-to-registry: true`), so they
 travel with the image and can be checked from a mirror.
 
+### Immutability of a published tag
+
+A tag is immutable to everyone who already pinned it, so re-running a release must not change the
+bytes under one. Every upload goes through `scripts/release_upload.sh`, which compares the local
+digest against what is already published and **refuses a change**:
+
+```
+::error::heldar-core-v0.6.0-x86_64-linux-musl is already published under v0.6.0 with DIFFERENT bytes.
+::error::  published: 9f2c…
+::error::  building:  4ab1…
+```
+
+An *identical* re-upload stays a no-op, deliberately: a release workflow that cannot be re-run after
+an infrastructure flake is its own hazard. An existing asset that cannot be fetched to compare is a
+refusal, not a pass.
+
+`gh release upload --clobber` did the opposite — it replaced silently — and
+`crates/heldar-server/tests/supply_chain.rs` now fails if any raw upload reappears in the workflow,
+because adding one more upload line is the easiest way to reopen this and would look normal in review.
+
 ### Still open
 
 - **Offline verification.** `gh attestation verify` reaches Sigstore's transparency log. An appliance
   with no egress needs the trust material cached first (`gh attestation trusted-root`); we do not yet
   ship that bundle or a verifier that uses it. Tracked in #115.
+- **The release job does not verify its own attestations.** It creates provenance and SBOM
+  attestations but never runs `gh attestation verify` against the artifacts before completing the
+  release, so a broken attestation would publish successfully. #115 asks for this explicitly.
+- **No negative test proves verification fails on a modified artifact.** #115 asks for one; the
+  digest guard above covers replacement at upload time, which is a different thing from proving the
+  published verification path rejects tampering.
 - **Private/full images** built outside this repository are not covered here; the same three steps
   belong in whatever workflow publishes them.
 

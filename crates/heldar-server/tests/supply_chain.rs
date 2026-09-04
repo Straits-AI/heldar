@@ -70,6 +70,39 @@ fn images_are_attested_by_digest_not_by_tag() {
 
 /// The whole reason for keyless signing: a private key in repository secrets forges everything a
 /// signature is meant to prevent, and #115 asks explicitly for it not to exist.
+/// No release asset is published with a raw `gh release upload`.
+///
+/// `--clobber` silently replaces an asset under an existing tag with different bytes, which is
+/// exactly what #115 forbids: consumers who pinned the tag keep a digest and an attestation that
+/// describe artifacts no longer there. `scripts/release_upload.sh` compares first and refuses a
+/// change, while still letting an identical re-upload succeed — a release that cannot be re-run
+/// after an infrastructure flake is its own hazard.
+///
+/// Asserted here rather than trusted, because adding one more upload line is the easiest possible
+/// way to reopen this, and it would look entirely normal in review.
+#[test]
+fn every_release_upload_goes_through_the_digest_guard() {
+    let wf = workflow("release.yml");
+    let raw: Vec<&str> = wf
+        .lines()
+        .filter(|l| l.contains("gh release upload"))
+        // A `#` line is documentation. One of them quotes the command it is warning about, and
+        // counting it as a call made this check fail on prose the first time it was written.
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect();
+    assert!(
+        raw.is_empty(),
+        "these upload release assets directly instead of through scripts/release_upload.sh, so they \
+         can replace a published artifact with different bytes under a tag consumers have pinned:\n{}",
+        raw.join("\n")
+    );
+    assert!(
+        wf.contains("scripts/release_upload.sh"),
+        "release.yml no longer calls the guarded upload at all — if the uploads moved, this check \
+         has stopped checking anything"
+    );
+}
+
 #[test]
 fn no_long_lived_signing_key_is_referenced() {
     for f in ["release.yml", "docker-open.yml"] {
