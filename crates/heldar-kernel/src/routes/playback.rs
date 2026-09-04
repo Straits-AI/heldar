@@ -41,7 +41,7 @@ pub struct ClipRequest {
         (status = 200, description = "The exported clip, with its coverage and gaps"),
         (status = 400, description = "Bad range, or longer than the one-hour ceiling", body = crate::openapi::ErrorBody),
         (status = 403, description = "Missing `video:export`", body = crate::openapi::ErrorBody),
-        (status = 404, description = "Unknown camera, or no footage in the range", body = crate::openapi::ErrorBody),
+        (status = 404, description = "Unknown camera, no footage in the range, or footage that was pruned by retention while the export was being prepared (#183) — not retryable, the footage is gone", body = crate::openapi::ErrorBody),
         (status = 503, description = "Media job concurrency limit reached", body = crate::openapi::ErrorBody),
     ),
 )]
