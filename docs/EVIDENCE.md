@@ -66,6 +66,22 @@ once sites are manageable) — see [#125](https://github.com/Straits-AI/heldar/i
 This field is inside the signature, which is the point: an unsigned zone beside a signed timestamp
 could be changed to relabel when the footage was taken.
 
+### What produced it
+
+The manifest's `producer` block names the release, the **ffmpeg build** and the applied schema
+version. The ffmpeg entry used to be `ffmpeg_bin` — the *configured path*, which defaults to the bare
+string `ffmpeg`. That identified no build to anyone verifying a bundle later on another machine,
+while being signed as though it did. The path is still recorded (it is a fact about the appliance),
+but `ffmpeg_version` is what identifies the encoder.
+
+`ffmpeg_version` is **null** when the appliance could not ask the binary, and the verifier prints
+`unidentified ffmpeg` rather than omitting the line. An unknown producer is a fact about the
+evidence; a guessed one would be a signed falsehood, which is the mistake `#125` exists to remember.
+
+`schema_version` is the highest applied migration. Two appliances on the same release can hold
+different columns mid-upgrade, so a reader parsing `metadata/events.jsonl` needs to know which shape
+they are looking at.
+
 ## Verifying — offline
 
 ```bash

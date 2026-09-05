@@ -30,6 +30,67 @@ pub fn check_media_binaries(cfg: &crate::config::Config) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// How the configured ffmpeg identifies itself, e.g. `ffmpeg version 6.1.1-3ubuntu5`.
+///
+/// Evidence bundles record this. The manifest is SIGNED, so what goes in it has to be a fact the
+/// appliance can stand behind: the manifest previously recorded `ffmpeg_bin`, which is a
+/// *configured path* and defaults to the bare string `"ffmpeg"`. That identifies no build to anyone
+/// verifying a bundle six months later on another machine, while being signed as though it did.
+///
+/// Returns `None` when the binary cannot be run or says nothing recognisable, and the manifest then
+/// records null. An unknown producer is a fact about the evidence; a guessed one is a signed
+/// falsehood, and #125 is the standing reminder of what those cost.
+///
+/// Cached per binary path: ffmpeg does not change underneath a running process, and an export
+/// should not pay for a subprocess to re-learn the same string.
+pub async fn ffmpeg_version(bin: &str) -> Option<String> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static CACHE: OnceLock<Mutex<HashMap<String, Option<String>>>> = OnceLock::new();
+
+    if let Ok(cache) = CACHE.get_or_init(Default::default).lock() {
+        if let Some(hit) = cache.get(bin) {
+            return hit.clone();
+        }
+    }
+
+    let probed = probe_ffmpeg_version(bin).await;
+    if let Ok(mut cache) = CACHE.get_or_init(Default::default).lock() {
+        cache.insert(bin.to_string(), probed.clone());
+    }
+    probed
+}
+
+async fn probe_ffmpeg_version(bin: &str) -> Option<String> {
+    let out = tokio::time::timeout(
+        Duration::from_secs(5),
+        Command::new(bin)
+            .arg("-version")
+            .stdin(Stdio::null())
+            .stderr(Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_ffmpeg_version(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// First line of `ffmpeg -version`, trimmed. Split out so it can be tested without ffmpeg present.
+fn parse_ffmpeg_version(stdout: &str) -> Option<String> {
+    let line = stdout.lines().next()?.trim();
+    // Only accept something that actually looks like a version banner. A binary that prints
+    // anything else is not identified, and saying so beats signing whatever it happened to emit.
+    if !line.to_ascii_lowercase().starts_with("ffmpeg version") {
+        return None;
+    }
+    // Cap the length: this string is signed and shown to a human, not a place for a wall of text.
+    Some(line.chars().take(200).collect())
+}
+
 /// Subset of media properties extracted via ffprobe.
 #[derive(Debug, Clone)]
 pub struct ProbeInfo {
@@ -247,5 +308,78 @@ mod tests {
     fn parse_rfc3339_accepts_trailing_z() {
         let t = parse_rfc3339("2026-06-13T05:02:19Z").unwrap();
         assert_eq!(t.to_rfc3339(), "2026-06-13T05:02:19+00:00");
+    }
+}
+
+#[cfg(test)]
+mod ffmpeg_version_tests {
+    use super::parse_ffmpeg_version;
+
+    /// The manifest is signed, so this parser's job is to be UNSURE loudly rather than confident
+    /// wrongly. Every case below is about which of those two it does.
+    #[test]
+    fn a_real_banner_is_taken_verbatim() {
+        for (stdout, want) in [
+            (
+                "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers\n\
+                 built with gcc 13\n",
+                "ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers",
+            ),
+            (
+                "ffmpeg version n7.0.2 Copyright (c) 2000-2024\n",
+                "ffmpeg version n7.0.2 Copyright (c) 2000-2024",
+            ),
+            // Static builds and distro rebuilds say all sorts of things after the number; the whole
+            // first line is the identification, so it is kept rather than parsed down to a semver.
+            (
+                "ffmpeg version 2026-01-01-git-abcdef1234-full_build-www.gyan.dev\n",
+                "ffmpeg version 2026-01-01-git-abcdef1234-full_build-www.gyan.dev",
+            ),
+        ] {
+            assert_eq!(parse_ffmpeg_version(stdout).as_deref(), Some(want));
+        }
+    }
+
+    #[test]
+    fn anything_that_is_not_a_banner_is_unknown_rather_than_recorded() {
+        // A wrapper script, a busybox applet, a shell error on stdout — none of these identify an
+        // ffmpeg build, and signing them would assert something false about the evidence.
+        for stdout in [
+            "",
+            "\n",
+            "bash: ffmpeg: command not found\n",
+            "usage: ffmpeg [options]\n",
+            "avconv version 11.4\n",
+            "Version: 6.1\n",
+            "some wrapper that prints nothing useful\n",
+        ] {
+            assert_eq!(parse_ffmpeg_version(stdout), None, "stdout = {stdout:?}");
+        }
+    }
+
+    #[test]
+    fn the_banner_match_is_case_insensitive_but_still_anchored() {
+        assert!(parse_ffmpeg_version("FFmpeg version 6.1\n").is_some());
+        assert!(parse_ffmpeg_version("FFMPEG VERSION 6.1\n").is_some());
+        // ...but a line that merely mentions ffmpeg somewhere is not a banner.
+        assert_eq!(
+            parse_ffmpeg_version("built against ffmpeg version 6.1\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_pathological_first_line_cannot_bloat_the_signed_manifest() {
+        let huge = format!("ffmpeg version {}\n", "x".repeat(10_000));
+        let got = parse_ffmpeg_version(&huge).expect("still a banner");
+        assert_eq!(got.chars().count(), 200);
+    }
+
+    #[test]
+    fn leading_whitespace_does_not_hide_the_banner() {
+        assert_eq!(
+            parse_ffmpeg_version("   ffmpeg version 6.1   \n").as_deref(),
+            Some("ffmpeg version 6.1")
+        );
     }
 }

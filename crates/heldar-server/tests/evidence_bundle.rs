@@ -504,6 +504,65 @@ async fn a_doctored_convenience_hash_file_is_not_tolerated() {
 /// concatenated across an outage and reported nothing would produce continuous-looking video of a
 /// discontinuous night.
 #[tokio::test]
+async fn the_signed_manifest_identifies_what_produced_the_media() {
+    require("ffmpeg");
+    require("zip");
+    let dir = scratch("producer");
+    let st = state(&dir).await;
+    let (from, to) = seed(&st, "cam_a").await;
+
+    let p = heldar_kernel::auth::Principal::system_admin();
+    let r = evidence::export(&st, &p, "cam_a", from, to, None, None, None)
+        .await
+        .expect("export");
+    let bundle = st.cfg.evidence_dir.join(&r.filename);
+
+    let o = Command::new("python3")
+        .arg("-c")
+        .arg(
+            "import sys,zipfile,json;z=zipfile.ZipFile(sys.argv[1]);\
+              m=json.loads(z.read([n for n in z.namelist() if n.endswith('manifest.json')][0]));\
+              pr=m['producer'];\
+              print(json.dumps([pr.get('heldar_version'), pr.get('ffmpeg_version'), \
+                                pr.get('schema_version')]))",
+        )
+        .arg(&bundle)
+        .output()
+        .unwrap();
+    let parsed: Vec<serde_json::Value> =
+        serde_json::from_slice(&o.stdout).expect("manifest producer block");
+    let (heldar, ffmpeg, schema) = (&parsed[0], &parsed[1], &parsed[2]);
+
+    // NOT compared against this test crate's CARGO_PKG_VERSION: the manifest reports the KERNEL's
+    // version and heldar-server carries its own, so that assertion compares two unrelated numbers
+    // and fails for a reason that has nothing to do with the bundle.
+    let hv = heldar.as_str().expect("heldar_version must be present");
+    assert!(
+        hv.split('.').count() >= 2 && hv.chars().next().is_some_and(|c| c.is_ascii_digit()),
+        "the bundle must name the release that produced it, as a version: {hv:?}"
+    );
+
+    // The point of #118: `ffmpeg_bin` used to stand in for this, and it is a CONFIGURED PATH that
+    // defaults to the bare string "ffmpeg". Somebody verifying this bundle on another machine in six
+    // months learns nothing from that, while it is signed as though they had.
+    let v = ffmpeg
+        .as_str()
+        .expect("ffmpeg_version must be present, even if null-valued");
+    assert!(
+        v.to_ascii_lowercase().starts_with("ffmpeg version"),
+        "the manifest must record the ffmpeg BUILD, not its path: {v:?}"
+    );
+    assert_ne!(v, "ffmpeg", "that is the configured path, not a version");
+
+    // Two appliances on the same release can hold different columns mid-upgrade, so a verifier
+    // reading the metadata files needs to know which shape they are.
+    assert!(
+        schema.as_i64().is_some_and(|n| n > 0),
+        "the manifest must record the applied schema version: {schema:?}"
+    );
+}
+
+#[tokio::test]
 async fn the_signed_manifest_states_the_gaps_rather_than_hiding_them() {
     require("ffmpeg");
     require("zip");

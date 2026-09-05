@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **An evidence bundle now says which ffmpeg produced it.** The signed manifest recorded
+  `ffmpeg_bin` — the *configured path*, defaulting to the bare string `ffmpeg` — where #118 asks
+  which ffmpeg **version** produced the media. That identified no build to anyone verifying a bundle
+  six months later on another machine, while the appliance signed it as though it had. The manifest
+  now carries `ffmpeg_version` (the binary's own banner) and `schema_version` (the highest applied
+  migration, since two appliances on one release can hold different columns mid-upgrade and a reader
+  parsing `metadata/events.jsonl` needs to know which shape it is).
+
+  `ffmpeg_version` is **null** when the appliance could not ask the binary, and the offline verifier
+  prints `unidentified ffmpeg` rather than dropping the line. An unknown producer is a fact about the
+  evidence; a guessed one is a signed falsehood — the same mistake the file's own `#125` comment
+  exists to remember, two lines above where this one was.
+
 - **The frame-ticket policy is now enforced by tests, not just described in seven places.**
   `HELDAR_DEPLOYMENT_MODE=production*` promotes `HELDAR_MACHINE_AUTH` and deliberately does **not**
   promote `HELDAR_INGEST_PROVENANCE` — a client-protocol requirement that 401s every worker not yet

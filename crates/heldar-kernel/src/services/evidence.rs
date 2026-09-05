@@ -533,6 +533,18 @@ async fn build_bundle(
         }
     };
 
+    // Asked once per export, cached per binary. Never fails the export: a bundle whose producer
+    // could not be identified is still evidence, and saying so is the honest record.
+    let ffmpeg_version = crate::util::ffmpeg_version(&st.cfg.ffmpeg_bin).await;
+
+    // Highest applied migration. A read failure records null rather than a number we did not read —
+    // this string is signed.
+    let schema_version: Option<i64> =
+        sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap_or(None);
+
     let manifest = json!({
         "format": FORMAT,
         "bundle_id": id,
@@ -575,9 +587,21 @@ async fn build_bundle(
             "audit_id": audit_id,
             "request_id": request_id,
         },
+        // WHAT PRODUCED THIS, not where it was configured from. `ffmpeg_bin` used to be recorded
+        // here — a configured path that defaults to the bare string "ffmpeg", identifying no build
+        // to anyone verifying the bundle later on another machine, while being signed as though it
+        // did. #118 asks which ffmpeg VERSION produced the media; that is now what is recorded, and
+        // null when the binary could not be asked. An unknown producer is a fact about the
+        // evidence. A guessed one is a signed falsehood, which is what #125 was about.
+        //
+        // `schema_version` is the highest applied migration: two appliances on the same release can
+        // hold different columns mid-upgrade, and a verifier reading `events.jsonl` needs to know
+        // which shape it is looking at.
         "producer": {
             "heldar_version": env!("CARGO_PKG_VERSION"),
+            "ffmpeg_version": ffmpeg_version,
             "ffmpeg_bin": st.cfg.ffmpeg_bin,
+            "schema_version": schema_version,
         },
         "files": files,
         "attestation": {
