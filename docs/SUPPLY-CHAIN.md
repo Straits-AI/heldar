@@ -179,6 +179,29 @@ The vulnerable fixture pins four packages rather than one. Any single advisory c
 withdrawn; four carry roughly 48 between them. **If the self-test ever reports that fixture clean,
 the fixture has gone stale — add an older package, do not delete the check.**
 
+### The weekly scan files an issue when it goes red
+
+The Monday cron re-scans unchanged code. It is the only mechanism that catches an advisory published
+*after* a release — there is no PR for that finding, because nothing was merged to cause it.
+
+Which was also the problem: a scheduled run reports to nobody. No PR turns red, no author gets
+notified, and a failing cron sat in the Actions tab until somebody happened to look. The one class of
+finding nothing else could catch was the one nothing surfaced.
+
+`advisory-report` now opens an issue when the weekly run fails, **updates** that same issue on
+subsequent failures rather than filing a fresh one each Monday, and closes it once a later run is
+clean. It matches its own issue by an HTML marker in the body, not by title or label alone, so it
+cannot adopt — and later close — an issue somebody wrote by hand.
+
+`scripts/check_weekly_report.py` enforces coverage rather than configuration: **every** job in
+`security.yml` must be in the reporter's `needs`. Add a fifth scanner without listing it and its
+failures become invisible again, which is exactly the state this fixed. Anything that is not
+`success` counts as failing, cancelled and skipped included — a skipped scan has cleared nothing.
+
+Note the interaction with the release gate above: while this issue is open, **releasing that commit
+is refused**, because publishing requires a green security run. That is intended, and the issue body
+says so.
+
 ### Publishing requires a green security run for that exact commit
 
 `release.yml` and `docker-open.yml` both begin with a `security-gate` job
