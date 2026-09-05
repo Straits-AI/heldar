@@ -719,6 +719,12 @@ pub async fn get_db_status(
 pub struct DbLimitUpdate {
     /// New metadata-DB size cap in GB (> 0). Omit to leave unchanged.
     max_db_gb: Option<f64>,
+    /// Compute the effect and change nothing (#121).
+    #[serde(default)]
+    dry_run: bool,
+    /// The `plan_hash` from a dry run. Supplying it makes the commit refuse if anything the plan
+    /// depended on has moved since. Omit to commit without planning.
+    plan_hash: Option<String>,
 }
 
 /// Set the metadata-DB size cap at runtime (admin only) — the retention sweeper picks it up on its
@@ -732,16 +738,20 @@ pub struct DbLimitUpdate {
     operation_id = "setDbLimit",
     request_body = DbLimitUpdate,
     responses(
-        (status = 200, description = "The new effective DB cap", body = DbStatus),
+        (status = 200, description = "The new effective DB cap, or the PLAN when `dry_run` is set — \
+                                      current size, the new cap, how far over it would be, and a \
+                                      `plan_hash` to present on commit"),
         (status = 400, description = "`max_db_gb` <= 0", body = crate::openapi::ErrorBody),
         (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+        (status = 409, description = "The supplied `plan_hash` no longer describes current state — \
+                                      the database moved between planning and committing", body = crate::openapi::ErrorBody),
     ),
 )]
 pub async fn put_db_limit(
     State(st): State<AppState>,
     principal: Principal,
     Json(body): Json<DbLimitUpdate>,
-) -> AppResult<Json<DbStatus>> {
+) -> AppResult<Json<serde_json::Value>> {
     principal.require(principal.can_admin(), "change database size cap")?;
     // Same deferred-execution shape as the recording cap: written now, enforced later by a sweep
     // that has no principal.
@@ -752,6 +762,57 @@ pub async fn put_db_limit(
                 "`max_db_gb` must be greater than 0".into(),
             ));
         }
+    }
+
+    // WHAT THIS WOULD SHED, before it sheds it (#121). This handler's own comment already called it
+    // "the same deferred-execution shape as the recording cap" — and the recording cap got a dry run
+    // and a plan hash while this one, which deletes rows on the same sweep, got neither.
+    let status = db_status(&st).await?;
+    let new_cap_bytes = body
+        .max_db_gb
+        .map(|gb| (gb * BYTES_PER_GB) as i64)
+        .unwrap_or(status.max_db_bytes);
+    let would_shed = (status.db_bytes - new_cap_bytes).max(0);
+
+    let request = json!({ "max_db_gb": body.max_db_gb });
+    // The state the EFFECT depends on — the file size and the cap it is measured against. Not a
+    // timestamp and not the whole database: a hash over everything changes constantly and trains
+    // people to retry without reading.
+    let state = json!({ "db_bytes": status.db_bytes, "max_db_bytes": status.max_db_bytes });
+    let plan_hash = crate::services::plan::hash(&request, &state);
+
+    if body.dry_run {
+        return Ok(Json(json!({
+            "plan_hash": plan_hash,
+            "confirmation_required": would_shed > 0,
+            "effect": {
+                "db_bytes": status.db_bytes,
+                "new_cap_bytes": new_cap_bytes,
+                "would_shed_bytes": would_shed,
+            },
+            // Named in the order enforce_db_cap sheds them, because which one goes first is the
+            // difference between losing a search index and losing the detections themselves.
+            "sheds_in_order": ["embed_queries", "embeddings", "detections"],
+            "protected": ["events", "audit_log"],
+            "note": if would_shed > 0 {
+                "Committing this puts the database over its cap, so the next retention pass will \
+                 shed rows — embed-query results first, then CLIP embeddings, then detections. \
+                 Events and the audit log are never shed. Row counts are not predicted here: the \
+                 sweep first reclaims pages freed by ordinary row retention, so how much it has to \
+                 delete depends on what that pass frees."
+            } else {
+                "Committing this sheds nothing now."
+            },
+        })));
+    }
+
+    // A supplied hash is checked; an absent one is allowed. A plan hash is a safety belt for
+    // automation, not a way to stop a human with an admin key changing a setting directly.
+    if let Err(refusal) = crate::services::plan::check(body.plan_hash.as_deref(), &plan_hash) {
+        return Err(AppError::Conflict(refusal.message()));
+    }
+
+    if let Some(gb) = body.max_db_gb {
         settings::set_i64(&st.pool, settings::DB_MAX_BYTES, (gb * BYTES_PER_GB) as i64).await?;
     }
     crate::auth::audit(
@@ -763,7 +824,13 @@ pub async fn put_db_limit(
         json!({ "max_db_gb": body.max_db_gb }),
     )
     .await;
-    Ok(Json(db_status(&st).await?))
+    // The commit answer keeps the DbStatus shape it always had, now as a value so the dry run can
+    // return a plan from the same handler. An existing client reading db_bytes/max_db_gb sees
+    // exactly what it saw before.
+    let status = db_status(&st).await?;
+    Ok(Json(
+        serde_json::to_value(status).map_err(|e| AppError::Other(e.into()))?,
+    ))
 }
 
 #[derive(Debug, Serialize, utoipa::ToSchema)]

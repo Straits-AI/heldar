@@ -322,7 +322,9 @@ pub struct DbConvertResult {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DbLimitUpdate {
+    pub dry_run: Option<bool>,
     pub max_db_gb: Option<f64>,
+    pub plan_hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

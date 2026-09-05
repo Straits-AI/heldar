@@ -251,6 +251,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Setting the metadata-DB cap now shows what it would delete, before it deletes it** (#121).
+  `PUT /api/v1/system/db` writes a value the retention sweeper enforces later — shedding embed-query
+  results, then CLIP embeddings, then detections — and its own doc comment already called this "the
+  same deferred-execution shape as the recording cap". The recording cap got a dry run and a plan
+  hash; this one, which deletes rows on the very same sweep, got neither.
+
+  `dry_run` now reports the current size, the new cap, how far over it would be, and **which rows go
+  in what order** — the difference between losing a search index and losing the detections
+  themselves. Events and the audit log are never shed, and the plan says so. It deliberately does not
+  predict row counts: the sweep first reclaims pages freed by ordinary row retention, so how much it
+  must delete depends on what that pass frees, and a confident number there would be invented.
+
+  Supplying the returned `plan_hash` on commit refuses with 409 if the database moved in between.
+  Omitting it still commits — a plan hash is a safety belt for automation, not a way to stop a human
+  with an admin key. The commit response keeps its existing shape.
+
 - **A backup job now records the request that started it** (#121), completing the correlation chain
   begun for `audit_log` (0020) and events (0021). Jobs are the one an operator is most likely to ask
   about, because a transfer is long-lived and side-effectful and outlives the call that asked for it.
