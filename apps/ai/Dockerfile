@@ -22,11 +22,24 @@ WORKDIR /app
 
 # Install deps first for better layer caching.
 COPY requirements-core.txt .
-# The base image ships setuptools, and pip vendors msgpack; the first image scan (#114)
-# found a fixable HIGH in each. Neither is used at runtime — the worker imports requests,
-# pillow and numpy — but they are present, so they are upgraded rather than left behind.
-RUN pip install --no-cache-dir --upgrade pip setuptools \
- && pip install --no-cache-dir -r requirements-core.txt
+# The first image scan (#114) found a fixable HIGH in setuptools (CVE-2025-47273) and in the
+# msgpack pip vendors (GHSA-6v7p-g79w-8964). `pip install --upgrade` does NOT clear either: the
+# setuptools Trivy sees is a bundled WHEEL under ensurepip/_bundled, and msgpack lives inside
+# pip's own _vendor tree. Upgrading leaves both files exactly where they were.
+#
+# The container's entrypoint is `python worker.py`. It installs nothing at runtime, so pip and
+# ensurepip are build-time tools that only ship risk — removed once the dependencies are in.
+# This also shrinks the image. If a future change needs pip at runtime, that is the thing to
+# reconsider, not this deletion.
+# Deleted rather than `pip uninstall`ed: `A && B || true && C` parses as `((A && B) || true) && C`,
+# so a `|| true` here would swallow a FAILED dependency install and still build the image. rm is
+# deterministic and needs no error handling.
+RUN pip install --no-cache-dir -r requirements-core.txt \
+ && rm -rf /usr/local/lib/python3.14/ensurepip \
+           /usr/local/lib/python3.14/site-packages/pip \
+           /usr/local/lib/python3.14/site-packages/pip-*.dist-info \
+           /usr/local/lib/python3.14/site-packages/setuptools \
+           /usr/local/lib/python3.14/site-packages/setuptools-*.dist-info
 
 COPY worker.py .
 

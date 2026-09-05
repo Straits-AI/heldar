@@ -14,6 +14,14 @@ RUN npm run build
 
 # Pinned runtime base: concrete minor.patch tag + multi-arch index @sha256 digest.
 FROM nginx:1.31.5-alpine@sha256:72ba65eb42c10344912a84ff42408db7d34f2feb642204570ab8fc5ffd29f1d3
+# util-linux in this base still carries six fixable HIGHs (TOCTOU in mount, nosuid/noexec bypass)
+# that the image scan flags. The nginx tag is digest-pinned, so the STARTING point stays exactly
+# reproducible; this floats only Alpine's security patches forward from it, which is the one thing
+# a pin should not freeze. Upstream rebuilds these tags on its own schedule — 1.31.4-alpine sat
+# unrebuilt for two weeks — so waiting for one means shipping known-vulnerable packages meanwhile.
+# What actually shipped is still recorded exactly, by the SBOM and provenance attestation.
+RUN apk upgrade --no-cache
+
 COPY --from=builder /app/dist /usr/share/nginx/html
 # Rendered by the image's envsubst entrypoint step into /etc/nginx/conf.d/default.conf at start, so
 # the listen address is deployment-settable (loopback-only behind the TLS overlay). The filter keeps
