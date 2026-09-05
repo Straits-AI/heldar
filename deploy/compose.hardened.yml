@@ -74,7 +74,7 @@ services:
       # boot, so a read-only rootfs kills it before it serves anything:
       #   20-envsubst-on-templates.sh: can't create /etc/nginx/conf.d/default.conf: Read-only file system
       # Masking conf.d costs nothing — the only file in it is the one being regenerated.
-      - /etc/nginx/conf.d:rw,nosuid,nodev,size=8m
+      - /etc/nginx/conf.d:rw,noexec,nosuid,nodev,size=8m
     logging: *bounded_logs
     deploy:
       resources:

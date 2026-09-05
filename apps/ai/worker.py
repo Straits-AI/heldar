@@ -115,6 +115,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import quote
@@ -156,6 +157,7 @@ class Settings:
     # query worker answers with — it must match what the "embedding" tasks index with, or the
     # kernel's cosine scores compare vectors from different spaces.
     embed_poll_interval: float
+    heartbeat_file: str
     clip_model: str
     clip_pretrained: str
 
@@ -184,6 +186,14 @@ def parse_settings(argv: Optional[List[str]] = None) -> Settings:
         type=float,
         default=float(_env("HELDAR_AI_POLL_INTERVAL", "10")),
         help="Seconds between /ai/tasks re-polls (env HELDAR_AI_POLL_INTERVAL).",
+    )
+    parser.add_argument(
+        "--heartbeat-file",
+        default=_env("HELDAR_AI_HEARTBEAT_FILE", ""),
+        help=(
+            "Touch this path once per supervisor cycle so a container health check can tell a "
+            "LIVE worker from a wedged one (env HELDAR_AI_HEARTBEAT_FILE). Empty disables it."
+        ),
     )
     parser.add_argument(
         "--http-timeout",
@@ -277,6 +287,7 @@ def parse_settings(argv: Optional[List[str]] = None) -> Settings:
         # Floor at 0.2s: this endpoint is polled forever by design, so a 0/negative interval
         # (env typo) would hammer Core in a tight loop.
         embed_poll_interval=max(0.2, ns.embed_poll_interval),
+        heartbeat_file=ns.heartbeat_file.strip(),
         clip_model=ns.clip_model.strip() or "ViT-B-32-quickgelu",
         clip_pretrained=ns.clip_pretrained.strip() or "openai",
     )
@@ -2035,6 +2046,8 @@ class Supervisor:
         self.runners: Dict[str, TaskRunner] = {}
         # None until the first poll decides; True once the kernel 404s /ai/leases (an old core).
         self._leases_unsupported = False
+        # Log an unwritable heartbeat path once, not once per cycle.
+        self._heartbeat_warned = False
 
     def _reconcile(self, tasks: List[Task]) -> None:
         by_id = {t.id: t for t in tasks}
@@ -2103,9 +2116,33 @@ class Supervisor:
                 log.info("re-acquiring the task lease early (a runner reported a ticket problem)")
                 return False
 
+    def _beat(self) -> None:
+        """Record that this loop is still turning.
+
+        LIVENESS, not readiness — written every cycle whether the poll succeeded or not. The worker
+        exposes no HTTP surface, so without this a container health check has nothing to probe and
+        a wedged process is indistinguishable from an idle one. A kernel it cannot reach is the
+        kernel's health check to report, not this one's; conflating the two would mark the worker
+        unhealthy for someone else's outage.
+
+        Best-effort: a full or read-only volume must never take down a working worker over its own
+        health reporting.
+        """
+        if not self.s.heartbeat_file:
+            return
+        try:
+            path = Path(self.s.heartbeat_file)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{time.time():.0f}\n")
+        except OSError as exc:
+            if not self._heartbeat_warned:
+                self._heartbeat_warned = True
+                log.warning("cannot write heartbeat to %s: %s", self.s.heartbeat_file, exc)
+
     def run(self) -> None:
         log.info("supervisor polling %s every %.0fs", self.s.api, self.s.poll_interval)
         while not SHUTDOWN.is_set():
+            self._beat()
             try:
                 tasks = self._poll_tasks()
                 self._reconcile(tasks)

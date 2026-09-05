@@ -120,6 +120,38 @@ jobs:
           # the reporter's `needs` and its failures go invisible again.
           python3 scripts/test_weekly_report.py
           python3 scripts/check_weekly_report.py
+          # deploy/compose.hardened.yml was booted and checked by hand ONCE and nothing has
+          # re-checked it since. Container hardening rots quietly: a capability added back to fix a
+          # crash, a service that gains a writable path — the stack keeps working, which is exactly
+          # why nobody notices.
+          python3 scripts/test_hardened_profile.py
+      - name: the hardened profile still hardens
+        # Reads a RENDERED config rather than the overlay files: re-implementing Compose's merge
+        # semantics would mean auditing a posture Compose might not actually produce. `config`
+        # needs no daemon.
+        run: |
+          set -euo pipefail
+          cd deploy
+          docker compose -f compose.yml -f compose.prod.yml -f compose.hardened.yml \
+            --profile ai config > /tmp/hardened.yml
+          docker compose -f compose.yml --profile ai config > /tmp/base.yml
+          cd ..
+
+          echo "::group::hardened stack (must pass)"
+          python3 scripts/check_hardened_profile.py --config /tmp/hardened.yml
+          echo "::endgroup::"
+
+          # The check that proves the check. Without the overlay the same stack must be REJECTED —
+          # otherwise a checker that silently passes everything would look identical to a hardened
+          # deployment, which is the failure this whole thing exists to prevent.
+          echo "::group::base stack without the overlay (must FAIL)"
+          if python3 scripts/check_hardened_profile.py --config /tmp/base.yml > /tmp/base.out 2>&1; then
+            echo "::error::the profile checker PASSED an unhardened stack — it is not checking anything"
+            cat /tmp/base.out
+            exit 1
+          fi
+          echo "correctly rejected: $(grep -c '^::error::' /tmp/base.out) blocking finding(s)"
+          echo "::endgroup::"
       - name: read-seam lint (cross-app reads go through *_read views)
         run: ./scripts/check-read-seam.sh
       # A generated client that COMPILES is a stronger statement about the contract than any prose:
