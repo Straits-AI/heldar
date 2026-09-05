@@ -931,7 +931,7 @@ async fn resolve_binding(
             .map(str::to_string)
             .ok_or_else(|| AppError::BadRequest("`camera_id` is required".into()))?;
         principal.require_camera(&camera_id, "ingest for this camera")?;
-        note_unleased_ingest(st, &key_id, &camera_id).await;
+        note_unleased_ingest(st, &key_id, &camera_id, body_task_type).await;
         return Ok(IngestBinding {
             camera_id,
             task_type: body_task_type.unwrap_or_default().to_string(),
@@ -1013,7 +1013,12 @@ async fn resolve_binding(
 /// Record a ticketless ingest under the `warn` tier: one log line and one `ingest_unleased` event per
 /// credential per hour, so an operator gets the list of clients that would break under `enforce`
 /// WITHOUT the ingest path writing an event per frame.
-async fn note_unleased_ingest(st: &AppState, key_id: &str, camera_id: &str) {
+async fn note_unleased_ingest(
+    st: &AppState,
+    key_id: &str,
+    camera_id: &str,
+    task_type: Option<&str>,
+) {
     if st.cfg.ingest_provenance != EnforcementTier::Warn {
         return;
     }
@@ -1039,9 +1044,10 @@ async fn note_unleased_ingest(st: &AppState, key_id: &str, camera_id: &str) {
     if !fire {
         return;
     }
+    let task_type = task_type.unwrap_or("").trim();
     tracing::warn!(
         target: "heldar::security",
-        credential = %key_id, camera_id,
+        credential = %key_id, camera_id, task_type,
         "ingest: batch posted with no frame ticket; accepted under \
          HELDAR_INGEST_PROVENANCE=warn. Under `enforce` this would be 401 \
          frame_ticket_required — the client must acquire a lease and pull frames with `?task=`."
@@ -1051,7 +1057,11 @@ async fn note_unleased_ingest(st: &AppState, key_id: &str, camera_id: &str) {
         Some(camera_id),
         "ingest_unleased",
         "warning",
-        json!({ "credential": key_id, "tier": "warn" }),
+        // task_type is recorded so the readiness report can say WHICH kind of worker is still
+        // ticketless, not just which credential — a fleet usually has one credential and several
+        // task types, so the credential alone rarely identifies what to upgrade. Empty when the
+        // client sent none, which is itself a useful signal about how old that worker is.
+        json!({ "credential": key_id, "tier": "warn", "task_type": task_type }),
     )
     .await;
 }

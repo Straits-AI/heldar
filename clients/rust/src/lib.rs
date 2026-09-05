@@ -2012,6 +2012,12 @@ pub const REQUIREMENTS: &[(&str, &str, Option<&str>, &str)] = &[
     ("GET", "/api/v1/system/posture", None, "fleet-only"),
     (
         "GET",
+        "/api/v1/system/provenance-readiness",
+        None,
+        "fleet-only",
+    ),
+    (
+        "GET",
         "/api/v1/system/retention",
         Some("system:read"),
         "scope-neutral",

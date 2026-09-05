@@ -34,6 +34,10 @@ pub fn router() -> Router<AppState> {
             get(get_timezone).put(put_timezone),
         )
         .route("/api/v1/system/posture", get(get_posture))
+        .route(
+            "/api/v1/system/provenance-readiness",
+            get(get_provenance_readiness),
+        )
 }
 
 /// This box's security posture as machine-readable findings (#126).
@@ -76,6 +80,163 @@ pub async fn get_posture(
         "unknown": unknown,
         "note": "`unknown` is not a pass — it means the control could not be assessed from inside \
                  this container. Treat it as unverified, not as satisfied.",
+    })))
+}
+
+/// The rollout bar from docs/AI-WORKERS.md §5.0: a full hour with nobody named.
+const QUIET_PERIOD_SECS: i64 = 3600;
+/// How far back the readiness report looks for ticketless ingest.
+const WINDOW_HOURS: i64 = 24;
+
+/// Decide the readiness verdict from the tier and how long it has been quiet.
+///
+/// Pure and separate from the handler so every branch is testable without a database — including
+/// the two that are easy to get wrong in the flattering direction, and which decide whether an
+/// operator turns on a switch that can silently stop all detection.
+fn readiness_verdict(
+    tier: crate::config::EnforcementTier,
+    quiet_for: Option<i64>,
+) -> (&'static str, Option<bool>, &'static str) {
+    use crate::config::EnforcementTier;
+    match tier {
+        EnforcementTier::Enforce => (
+            "already_enforced",
+            None,
+            "Frame tickets are required. A ticketless batch is rejected with 401 \
+             frame_ticket_required.",
+        ),
+        // `off` writes nothing, so an empty list says nothing. Never `ready`.
+        EnforcementTier::Off => (
+            "unknown",
+            None,
+            "HELDAR_INGEST_PROVENANCE=off records nothing, so this box cannot tell you who would \
+             break. Set it to `warn` and let a full hour pass before reading this again — an empty \
+             list from a tier that never writes to the list is not evidence.",
+        ),
+        EnforcementTier::Warn => match quiet_for {
+            Some(secs) if secs < QUIET_PERIOD_SECS => (
+                "not_ready",
+                Some(false),
+                "At least one credential posted a ticketless batch within the last hour. Setting \
+                 `enforce` now would 401 it. Upgrade the clients listed below first.",
+            ),
+            Some(_) => (
+                "likely_ready",
+                Some(true),
+                "No ticketless ingest for over an hour, but some was seen in the last day. Confirm \
+                 the clients listed below were upgraded rather than merely stopped, then set \
+                 HELDAR_INGEST_PROVENANCE=enforce.",
+            ),
+            // Silence is ambiguous: a fleet that all mints tickets and a fleet that has stopped
+            // posting entirely look exactly the same from here. Say so rather than say "ready".
+            None => (
+                "likely_ready",
+                Some(true),
+                "No ticketless ingest recorded in the last 24h. Note this looks identical to a box \
+                 where no worker has posted at all — confirm your workers are actually running \
+                 before setting HELDAR_INGEST_PROVENANCE=enforce.",
+            ),
+        },
+    }
+}
+
+/// Can this box turn on `HELDAR_INGEST_PROVENANCE=enforce` without breaking its own workers?
+///
+/// The documented rollout (docs/AI-WORKERS.md §5.0) is: stay on `warn`, read the once-per-hour log
+/// until it stops naming anyone, then enforce. That is a correct procedure and an unreasonable one
+/// to ask an operator to run by grepping logs across a fleet, so this answers it directly.
+///
+/// Three things here are deliberately not flattering, because a readiness report that overstates
+/// itself is worse than none — it is the thing that gets `enforce` set on a fleet that then stops
+/// detecting:
+///
+///   * Under `off` NOTHING is recorded (`note_unleased_ingest` returns early), so the verdict is
+///     `unknown`, never `ready`. An empty list from a tier that never writes to the list is not
+///     evidence of anything.
+///   * The count is of hourly NOTICES, not batches — the emitter is rate-limited to one per
+///     credential per hour by design. A thousand ticketless batches from one credential is one
+///     notice. Named `notice_count` so nobody reads it as traffic.
+///   * Silence is reported as `likely_ready`, not `ready`. A box where no worker has posted at all
+///     looks identical to one where every worker mints tickets, and this endpoint cannot tell them
+///     apart. The operator can.
+#[utoipa::path(
+    get, path = "/api/v1/system/provenance-readiness", tag = "system",
+    operation_id = "getProvenanceReadiness",
+    responses(
+        (status = 200, description = "Whether HELDAR_INGEST_PROVENANCE=enforce can be turned on \
+            without 401ing this box's own workers: effective tier, verdict, which credentials, \
+            cameras and task types are still posting ticketless, and when one last did"),
+        (status = 403, description = "Not an admin, or a camera-scoped credential", body = crate::openapi::ErrorBody),
+    ),
+)]
+pub async fn get_provenance_readiness(
+    State(st): State<AppState>,
+    principal: Principal,
+) -> AppResult<Json<serde_json::Value>> {
+    principal.require(principal.can_admin(), "read AI ingest provenance readiness")?;
+    crate::routes::cameras::require_fleet_scope(&principal, "read provenance readiness")?;
+
+    use crate::config::EnforcementTier;
+    let tier = st.cfg.ingest_provenance;
+
+    let cutoff = Utc::now() - chrono::Duration::hours(WINDOW_HOURS);
+    let rows: Vec<(String, Option<String>, String)> = sqlx::query_as(
+        "SELECT timestamp, camera_id, payload FROM events
+          WHERE event_type = 'ingest_unleased' AND timestamp >= ?
+          ORDER BY timestamp DESC",
+    )
+    .bind(cutoff)
+    .fetch_all(&st.pool)
+    .await?;
+
+    let mut credentials: std::collections::BTreeSet<String> = Default::default();
+    let mut cameras: std::collections::BTreeSet<String> = Default::default();
+    let mut task_types: std::collections::BTreeSet<String> = Default::default();
+    for (_, camera_id, payload) in &rows {
+        if let Some(cam) = camera_id {
+            cameras.insert(cam.clone());
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(payload) {
+            if let Some(c) = v.get("credential").and_then(|x| x.as_str()) {
+                credentials.insert(c.to_string());
+            }
+            match v.get("task_type").and_then(|x| x.as_str()) {
+                Some(t) if !t.is_empty() => task_types.insert(t.to_string()),
+                // Recorded before task_type was captured, or a client that sent none. Either way it
+                // is a real ticketless worker; dropping it would undercount what enforce breaks.
+                _ => task_types.insert("(unreported)".to_string()),
+            };
+        }
+    }
+
+    let last_seen = rows
+        .first()
+        .and_then(|(ts, _, _)| crate::util::parse_rfc3339(ts));
+    let quiet_for = last_seen.map(|t| (Utc::now() - t).num_seconds());
+
+    let (verdict, ready, detail) = readiness_verdict(tier, quiet_for);
+
+    Ok(Json(json!({
+        "effective_tier": tier.as_str(),
+        "frame_tickets_required": tier == EnforcementTier::Enforce,
+        "reporting": tier == EnforcementTier::Warn,
+        "verdict": verdict,
+        "ready_to_enforce": ready,
+        "detail": detail,
+        "window_hours": WINDOW_HOURS,
+        "quiet_period_seconds": QUIET_PERIOD_SECS,
+        "quiet_for_seconds": quiet_for,
+        "last_ticketless_at": last_seen,
+        "ticketless": {
+            "notice_count": rows.len(),
+            "notice_count_note": "Hourly NOTICES, not batches: the emitter is rate-limited to one \
+                                  per credential per hour, so a thousand ticketless batches from \
+                                  one credential appear here once.",
+            "credentials": credentials,
+            "cameras": cameras,
+            "camera_count": cameras.len(),
+            "task_types": task_types,
+        },
     })))
 }
 
@@ -966,4 +1127,95 @@ pub async fn system_info(
         live_transcode_engine: crate::services::mediamtx::effective_engine(&st.pool, &st.cfg).await,
         enforcement: enforcement_posture(&st),
     }))
+}
+
+/// The readiness verdict decides whether an operator flips a switch that can silently stop all AI
+/// detection, so its two dishonest failure modes are pinned here.
+#[cfg(test)]
+mod provenance_readiness_tests {
+    use super::*;
+    use crate::config::EnforcementTier;
+
+    #[test]
+    fn off_is_never_ready_because_it_records_nothing() {
+        // The trap this exists for: `off` makes note_unleased_ingest return early, so the event
+        // list is empty NO MATTER how many ticketless workers there are. Reporting that as ready
+        // would send an operator straight into 401ing their whole fleet.
+        for quiet in [None, Some(0), Some(86_400)] {
+            let (verdict, ready, detail) = readiness_verdict(EnforcementTier::Off, quiet);
+            assert_eq!(verdict, "unknown", "quiet_for={quiet:?}");
+            assert_eq!(ready, None, "`off` must not claim a boolean it cannot know");
+            assert!(detail.contains("records nothing"), "{detail}");
+        }
+    }
+
+    #[test]
+    fn recent_ticketless_ingest_is_not_ready() {
+        for secs in [0, 1, 60, QUIET_PERIOD_SECS - 1] {
+            let (verdict, ready, _) = readiness_verdict(EnforcementTier::Warn, Some(secs));
+            assert_eq!(verdict, "not_ready", "{secs}s of quiet is inside the hour");
+            assert_eq!(ready, Some(false));
+        }
+    }
+
+    #[test]
+    fn the_quiet_period_boundary_is_inclusive_of_the_documented_hour() {
+        // docs/AI-WORKERS.md says "until a full hour passes with the list empty". Exactly one hour
+        // therefore qualifies; one second less does not.
+        assert_eq!(
+            readiness_verdict(EnforcementTier::Warn, Some(QUIET_PERIOD_SECS - 1)).0,
+            "not_ready"
+        );
+        assert_eq!(
+            readiness_verdict(EnforcementTier::Warn, Some(QUIET_PERIOD_SECS)).0,
+            "likely_ready"
+        );
+    }
+
+    #[test]
+    fn silence_is_likely_ready_and_says_why_it_is_only_likely() {
+        // A fleet that all mints tickets and a fleet that has stopped posting look identical from
+        // here. Calling that "ready" would be the report overstating what it can see.
+        let (verdict, ready, detail) = readiness_verdict(EnforcementTier::Warn, None);
+        assert_eq!(verdict, "likely_ready");
+        assert_eq!(ready, Some(true));
+        assert!(
+            detail.contains("no worker has posted at all"),
+            "the caveat must be stated, not implied: {detail}"
+        );
+    }
+
+    #[test]
+    fn quiet_but_seen_recently_warns_that_stopped_is_not_upgraded() {
+        let (verdict, ready, detail) =
+            readiness_verdict(EnforcementTier::Warn, Some(QUIET_PERIOD_SECS * 5));
+        assert_eq!(verdict, "likely_ready");
+        assert_eq!(ready, Some(true));
+        assert!(
+            detail.contains("upgraded rather than merely stopped"),
+            "{detail}"
+        );
+    }
+
+    #[test]
+    fn enforce_reports_itself_and_claims_no_readiness() {
+        let (verdict, ready, _) = readiness_verdict(EnforcementTier::Enforce, Some(0));
+        assert_eq!(verdict, "already_enforced");
+        assert_eq!(ready, None, "readiness is meaningless once it is on");
+    }
+
+    #[test]
+    fn no_tier_ever_reports_a_bare_ready() {
+        // "ready" would read as a guarantee this endpoint cannot make. Every affirmative verdict is
+        // hedged, and that is deliberate rather than an accident of wording.
+        for tier in [
+            EnforcementTier::Off,
+            EnforcementTier::Warn,
+            EnforcementTier::Enforce,
+        ] {
+            for quiet in [None, Some(0), Some(10_000)] {
+                assert_ne!(readiness_verdict(tier, quiet).0, "ready");
+            }
+        }
+    }
 }
