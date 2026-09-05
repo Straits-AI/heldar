@@ -97,6 +97,14 @@ jobs:
           # would be the first time this code ran — on the day someone is unblocking a release.
           python3 scripts/test_security_exceptions.py
           python3 scripts/check_security_exceptions.py
+          # The Trivy gate did not block for a long time — `exit-code` was unset, so it reported
+          # findings and returned 0. It blocks now and self-tests itself against a seeded fixture;
+          # this guard is what stops the self-test rotting into a test of a config nobody ships.
+          # Needs a real YAML parser: the step/`with`/`id` nesting it inspects is exactly where a
+          # hand-rolled one would go quietly wrong, which is the failure it exists to prevent.
+          python3 -m pip install --quiet --disable-pip-version-check pyyaml
+          python3 scripts/test_trivy_gate.py
+          python3 scripts/check_trivy_gate.py
       - name: read-seam lint (cross-app reads go through *_read views)
         run: ./scripts/check-read-seam.sh
       # A generated client that COMPILES is a stronger statement about the contract than any prose:

@@ -151,6 +151,34 @@ findings are Docusaurus's own build-time transitives, which never reach the depl
 
 Revisit both the day a finding lands on a runtime path.
 
+### The gate self-tests, because it once did not block at all
+
+`exit-code: "1"` was **absent** for a long stretch. The job produced SARIF, findings accumulated on
+the code-scanning dashboard, and every PR reported success. From the outside a gate that never fires
+and a gate that cannot fire look identical, and this one's failure path had never executed.
+
+So before the real scan, the workflow runs the same action, at the same version, with the same
+verdict-affecting inputs, against two fixtures in `scripts/fixtures/trivy-gate/` whose answer is
+known:
+
+| fixture | expected | proves |
+| --- | --- | --- |
+| `vulnerable/` | scan **fails** | the gate blocks on a real finding |
+| `clean/` | scan **passes** | the gate is not simply red on everything |
+
+The clean fixture is not decoration. A Trivy with a broken DB download or a bad flag fails on
+everything, and would satisfy "the vulnerable fixture failed" while proving nothing.
+
+`scripts/check_trivy_gate.py` keeps the arrangement from rotting: it compares the self-test's inputs
+against the real scan rather than holding its own copy, so the self-test cannot drift into exercising
+a configuration nobody ships. It also asserts `scripts/fixtures` stays in `skip-dirs` — those pins
+are knowingly vulnerable, and without the exclusion they would fail every unrelated PR until someone
+reasonably deleted them, taking the self-test along.
+
+The vulnerable fixture pins four packages rather than one. Any single advisory can be re-scored or
+withdrawn; four carry roughly 48 between them. **If the self-test ever reports that fixture clean,
+the fixture has gone stale — add an older package, do not delete the check.**
+
 ## Verifiable outputs: SBOMs, signatures and provenance
 
 Pinning answers "what did we build from". These answer "is this the thing we built", which a sha256

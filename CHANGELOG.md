@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The Trivy gate now proves it can fail.** `exit-code: "1"` was absent for a long stretch: the scan
+  produced SARIF, findings piled up on the code-scanning dashboard, and every PR showed green. The
+  flag is set now — but nothing demonstrated it was still set and still doing something, and a gate
+  whose failure path has never executed is a gate nobody has tested.
+
+  The workflow now scans two fixtures with the same action, version and verdict-affecting inputs as
+  the real scan: a deliberately vulnerable one that must fail, and a clean one that must pass. The
+  second is what makes the first mean anything — a scanner red on everything would otherwise satisfy
+  the test. `scripts/check_trivy_gate.py` compares the self-test's configuration against the real
+  scan rather than keeping its own copy, so it cannot drift into testing a gate nobody ships, and it
+  requires `scripts/fixtures` to stay in `skip-dirs` so the seeded pins never fail an unrelated PR.
+
+  The vulnerable fixture pins four old packages, not one: a single advisory can be re-scored below
+  HIGH and quietly retire the check. If it ever scans clean, the fixture has gone stale.
+
 - **The blocking dependency gate now covers the AI stacks that actually ship.** `pip-audit` examined
   `requirements-core.txt` and nothing else, so torch, opencv, the CUDA wheels and PaddleOCR — by a
   wide margin the largest and fastest-moving native trees in the product — were outside it entirely.

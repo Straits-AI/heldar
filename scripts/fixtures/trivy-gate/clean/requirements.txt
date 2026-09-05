@@ -1,0 +1,5 @@
+# The control for the control. If Trivy fails on THIS, the self-test's "vulnerable fixture failed"
+# result means nothing — a scanner that is red on everything would satisfy it too.
+# Deliberately current; bump if it ever picks up an advisory.
+requests==2.34.2
+urllib3==2.7.0
