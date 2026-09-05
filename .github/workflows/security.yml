@@ -47,14 +47,56 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7
         with:
+          # The locks are compiled for this interpreter and for linux x86_64 (see
+          # scripts/lock_ai_profiles.sh). Auditing them on a different platform resolves a different
+          # tree — on macOS the nvidia-* CUDA wheels disappear entirely — so this must match.
           python-version: "3.12"
       - run: python -m pip install --upgrade pip pip-audit
-      # Only the core AI worker runtime is audited here. The heavy optional model stacks (torch,
-      # opencv, YOLO/OCR in requirements.txt / requirements-anpr.txt / requirements-embed.txt) are
-      # imported lazily by worker.py and are intentionally NOT baked into the container image, so they
-      # are out of scope for this gate. Add them here only if/when they ship in the image.
-      - name: pip-audit (requirements-core.txt)
-        run: pip-audit -r apps/ai/requirements-core.txt
+
+      # The gate used to audit requirements-core.txt and nothing else, so torch, opencv, the CUDA
+      # wheels and PaddleOCR — the largest and fastest-moving native trees in the product — were
+      # outside it (#114). Auditing the requirements files directly would not have fixed that: they
+      # carry open floors, so the answer changes with the resolver's mood. We audit committed locks,
+      # and these two checks are what keep those locks meaningful.
+      - name: AI profile locks are present, pinned and current
+        run: python3 scripts/check_ai_locks.py
+      - name: exceptions register is valid and nothing has expired
+        run: python3 scripts/check_security_exceptions.py
+
+      # Every documented profile, not just the first that fails: a release blocked on `detect`
+      # should already know whether `anpr` and `embed` are also affected.
+      - name: pip-audit every shippable AI profile
+        run: |
+          set -uo pipefail
+          # An empty register is the normal case, so every array expansion below has to survive a
+          # zero-length array under `set -u`. Note "${arr[@]}" and NOT "${arr[@]:-}": the latter
+          # expands an empty array to one EMPTY STRING argument, which pip-audit takes as a
+          # positional and rejects. Bash 5 (every GitHub runner) expands the former to nothing.
+          ignore_args=()
+          while IFS= read -r id; do
+            [ -n "$id" ] && ignore_args+=(--ignore-vuln "$id")
+          done < <(python3 scripts/check_security_exceptions.py --ignore-ids --ecosystem pip)
+          if [ ${#ignore_args[@]} -gt 0 ]; then
+            echo "suppressing $(( ${#ignore_args[@]} / 2 )) accepted advisory/advisories from the register"
+          fi
+
+          failed=()
+          while IFS=$'\t' read -r profile _inputs; do
+            echo "::group::pip-audit — $profile"
+            if pip-audit --no-deps -r "apps/ai/constraints/${profile}.lock" "${ignore_args[@]}"; then
+              echo "$profile: clean"
+            else
+              failed+=("$profile")
+            fi
+            echo "::endgroup::"
+          done < <(python3 scripts/check_ai_locks.py --profiles)
+
+          if [ ${#failed[@]} -gt 0 ]; then
+            echo "::error::vulnerable dependencies in AI profile(s): ${failed[*]}"
+            echo "Fix by upgrading, or accept explicitly in security/dependency-exceptions.json" >&2
+            exit 1
+          fi
+          echo "all AI profiles clean"
 
   gitleaks:
     name: secret scan (gitleaks)
