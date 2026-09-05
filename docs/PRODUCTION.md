@@ -218,6 +218,58 @@ through a real model download. nginx keeps exactly three capabilities (`CHOWN`, 
 `SETGID`) because its entrypoint chowns its cache dirs before dropping to the worker user — not
 `NET_BIND_SERVICE`, since it listens on :8080.
 
+**Verifying the posture you think you have.** The overlay was booted and checked by hand once.
+Nothing about a container's posture is visible from the outside, and hardening rots in a way that
+looks like nothing: a capability added back to fix a crash, a service that gains a writable path, an
+overlay quietly dropped from the deploy command — the stack keeps working perfectly, which is exactly
+why nobody notices.
+
+```bash
+cd deploy
+docker compose -f compose.yml -f compose.prod.yml -f compose.hardened.yml --profile ai config \
+  | python3 ../scripts/check_hardened_profile.py --config -
+```
+
+It reads the **rendered** configuration rather than the overlay files, so what it audits is what
+Compose will actually produce. Findings use `heldarctl doctor`'s shape — `--format json` gives
+`code` / `severity` / `resource` / `detail` / `remediation` for the same tooling. Exit is non-zero
+only for `blocking`: a warning still records footage, and an `info` records something that could not
+be checked, since treating "unverified" as a failure is as wrong as treating it as a pass.
+
+Exemptions are **declared, not missing** — the two writable-root services and MediaMTX's absent
+health check are listed in the script with their reasons, so a service losing `read_only` by accident
+still fails. CI runs it against the hardened stack *and* against the base stack without the overlay,
+requiring the second to be rejected: a checker that passed everything would otherwise be
+indistinguishable from a hardened deployment.
+
+**Health checks.** `core` probes `/readyz`; `web` probes its own nginx with busybox `wget` (the
+alpine image has no curl, and a health check that cannot execute reports unhealthy forever). The AI
+worker serves no HTTP, so it writes `HELDAR_AI_HEARTBEAT_FILE` several times per supervisor cycle
+and the check asks only whether the deadline in that file has passed — **liveness, not readiness**.
+
+The deadline is **computed by the worker from its own settings**, not hardcoded in the compose file,
+because a fixed threshold is wrong in both directions and review caught both. Too tight: one
+retry-exhausted poll costs `(retries + 1) × timeout` plus backoff — ~79 s at the defaults — so a 90 s
+bar left 0.6 s of margin, and what consumes it is a kernel the worker cannot reach, i.e. precisely the
+outage this check is supposed to stay silent about. Too loose: `HELDAR_AI_POLL_INTERVAL` has no
+ceiling, so raising it past a fixed bar would mark a perfectly healthy worker unhealthy on every
+cycle. Publishing the deadline means the check tracks configuration rather than contradicting it — if
+someone sets long timeouts it becomes honestly less sensitive instead of lying either way.
+
+The worker also beats *inside* the reconcile loop, not only at the top of the cycle: a fleet-wide
+config change stops and joins each runner in turn, which is ordinary work that used to stack up
+behind a single beat and read as a wedge.
+
+MediaMTX has **no** in-container health check and cannot have one: the image is a single layer whose
+entrypoint is the bare binary, with no shell and no HTTP client for a `test:` to exec. Its liveness is
+observed from outside, by core reaching its API on `127.0.0.1:9997` and reporting through `/readyz`.
+
+**Administrative ports.** MediaMTX's control API is bound to `127.0.0.1:9997` and the checker fails
+if that changes. With host networking there is no namespace between that port and the camera VLAN, so
+an API on `0.0.0.0` would let anything that can reach the box reconfigure paths and read stream
+credentials. Container settings do not replace the host firewall — see the segmentation and firewall
+notes below.
+
 Verified by booting mediamtx, core and web: core healthy with a read-only rootfs and `/data` still
 writable, rootfs writes refused, the dashboard served, and the web→core proxy answering. The `ai`
 profile was not booted — it is opt-in and pulls model weights — so treat its settings as reasoned

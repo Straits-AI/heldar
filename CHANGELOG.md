@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The hardened container profile is now verified rather than assumed, and every service reports
+  health.** `deploy/compose.hardened.yml` was booted and checked by hand once; nothing re-checked it
+  afterwards. Container hardening rots in a way that looks like nothing — a capability added back to
+  fix a crash, a service that gains a writable path, an overlay dropped from the deploy command — and
+  the stack keeps working perfectly, which is exactly why nobody notices.
+
+  `scripts/check_hardened_profile.py` audits the **rendered** Compose configuration (not the overlay
+  files, so what it checks is what Compose actually produces) for dropped capabilities,
+  `no-new-privileges`, read-only roots, tmpfs flags and bounds, log limits, CPU/memory/PID ceilings,
+  health checks, and MediaMTX's admin port staying on loopback. Output is `heldarctl doctor`'s Finding
+  shape. Exemptions are declared with their reasons, so a service losing `read_only` by accident still
+  fails. CI runs it against the hardened stack *and* the base stack without the overlay, requiring the
+  second to be **rejected** — a checker that passed everything would otherwise look identical to a
+  hardened deployment.
+
+  Health checks added for `web` (busybox `wget`; the alpine image has no curl) and for the AI worker,
+  which serves no HTTP and now publishes a heartbeat with its own staleness deadline — liveness, not
+  readiness. The deadline is computed by the worker from its timeout, retry and poll settings rather
+  than hardcoded, because a fixed bar is wrong in both directions: 90 s left 0.6 s of margin against a
+  retry-exhausted poll (which is what a kernel outage causes, the very thing the check should stay
+  quiet about), while an operator raising the uncapped poll interval past it would mark a healthy
+  worker unhealthy forever. MediaMTX cannot have a check at all: its image is a single layer whose
+  entrypoint is the bare binary, with no shell to exec. That is recorded as a declared exemption
+  rather than left as an apparent oversight.
+
+  The profile checker also refuses `privileged: true`, host PID/IPC/cgroup/user namespaces, and
+  bind-mounts of the Docker socket or host root — each of which makes every other control in the
+  overlay meaningless — and treats a `0` CPU/memory/PID limit as the absence of a ceiling that Docker
+  understands it to be. It reads tmpfs mounts in both Compose syntaxes. All found by adversarial
+  review of the first version, which reported a privileged, docker-socket-mounted, host-root-mounted
+  service as fully hardened.
+
+  Also added `noexec` to the nginx `conf.d` tmpfs, which the new check found missing.
+
 - **Container images are scanned before they are published, not after.** The filesystem scan reads
   the source tree and says nothing about the base image the product ships on, so a digest bump could
   drag in a fixable HIGH and hand it to everyone pulling `latest` with nothing looking wrong.

@@ -120,6 +120,67 @@ jobs:
           # the reporter's `needs` and its failures go invisible again.
           python3 scripts/test_weekly_report.py
           python3 scripts/check_weekly_report.py
+          # deploy/compose.hardened.yml was booted and checked by hand ONCE and nothing has
+          # re-checked it since. Container hardening rots quietly: a capability added back to fix a
+          # crash, a service that gains a writable path — the stack keeps working, which is exactly
+          # why nobody notices.
+          python3 scripts/test_hardened_profile.py
+      - name: the hardened profile still hardens
+        # Reads a RENDERED config rather than the overlay files: re-implementing Compose's merge
+        # semantics would mean auditing a posture Compose might not actually produce. `config`
+        # needs no daemon.
+        run: |
+          set -euo pipefail
+          cd deploy
+          docker compose -f compose.yml -f compose.prod.yml -f compose.hardened.yml \
+            --profile ai config > /tmp/hardened.yml
+          docker compose -f compose.yml --profile ai config > /tmp/base.yml
+          cd ..
+
+          # Exit codes are asserted EXACTLY and findings counted from JSON, not grepped from text.
+          # A review found the first version of this could not tell a real verdict from a broken
+          # checker: a config with no services exits 2 while printing a line that starts with
+          # ::error::, and an uncaught exception exits 1 with a traceback. Both satisfied a bare
+          # "non-zero means correctly rejected" test, so a checker that crashed on every service
+          # would have been reported as a passing gate.
+          echo "::group::hardened stack (must pass, exit exactly 0)"
+          set +e
+          python3 scripts/check_hardened_profile.py --config /tmp/hardened.yml --format json > /tmp/hard.json 2>/tmp/hard.err
+          hard_rc=$?
+          set -e
+          cat /tmp/hard.err || true
+          hard_blocking=$(jq '[.findings[] | select(.severity == "blocking")] | length' /tmp/hard.json 2>/dev/null || echo -1)
+          if [ "$hard_rc" -ne 0 ]; then
+            echo "::error::hardened stack rejected (exit $hard_rc, $hard_blocking blocking finding(s))"
+            exit 1
+          fi
+          echo "hardened: clean"
+          echo "::endgroup::"
+
+          # The check that proves the check. Without the overlay the same stack must be REJECTED,
+          # with exit code EXACTLY 1 and real findings to show for it.
+          echo "::group::base stack without the overlay (must FAIL with real findings)"
+          set +e
+          python3 scripts/check_hardened_profile.py --config /tmp/base.yml --format json > /tmp/base.json 2>/tmp/base.err
+          base_rc=$?
+          set -e
+          base_blocking=$(jq '[.findings[] | select(.severity == "blocking")] | length' /tmp/base.json 2>/dev/null || echo -1)
+          if [ "$base_rc" -eq 0 ]; then
+            echo "::error::the profile checker PASSED an unhardened stack — it is not checking anything"
+            exit 1
+          fi
+          if [ "$base_rc" -ne 1 ]; then
+            echo "::error::checker exited $base_rc on the base stack, not 1 — a broken checker, not a verdict"
+            cat /tmp/base.err || true
+            exit 1
+          fi
+          if [ "$base_blocking" -lt 5 ]; then
+            echo "::error::base stack produced only $base_blocking blocking finding(s) — expected many more"
+            cat /tmp/base.err || true
+            exit 1
+          fi
+          echo "correctly rejected: $base_blocking blocking finding(s), exit exactly 1"
+          echo "::endgroup::"
       - name: read-seam lint (cross-app reads go through *_read views)
         run: ./scripts/check-read-seam.sh
       # A generated client that COMPILES is a stronger statement about the contract than any prose:
