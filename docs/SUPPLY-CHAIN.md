@@ -179,6 +179,31 @@ The vulnerable fixture pins four packages rather than one. Any single advisory c
 withdrawn; four carry roughly 48 between them. **If the self-test ever reports that fixture clean,
 the fixture has gone stale — add an older package, do not delete the check.**
 
+### The images are scanned before they are published
+
+The filesystem scan reads the source tree; it says nothing about the base image the product actually
+ships on. A base digest bump could drag in a fixable HIGH and hand it to everyone who pulls
+`latest`, and nothing would have looked wrong.
+
+`docker-open.yml` now builds the amd64 half locally, scans it, and only then runs the real
+multi-arch build and push. The ordering is the whole point: **a scan after the push reports on
+something already handed out.** `scripts/check_trivy_gate.py` asserts a pushing build step still
+follows the scan, so the two cannot be reordered back.
+
+buildx cannot load a multi-arch image into the local daemon, hence the amd64-only pre-build. Its
+layers land in the same `type=gha` cache the real build reads, so the marginal cost is the scan
+rather than a second build. **arm64 is not scanned**: for the same pinned base digest the OS package
+set is identical across architectures, and what differs is arch-specific wheels. Worth revisiting the
+day a finding turns up in one of those.
+
+`ci.yml` scans `heldar-ai:ci` and `heldar-web:ci` on any PR that touches an image input, under the
+same policy. The release scan only runs at tag time, which is far too late to learn that a base bump
+introduced a HIGH — this moves that answer to the PR that causes it. (`heldar-core` is not built at
+PR time; the Rust build is too slow to be worth it on every image-touching PR.)
+
+Every Trivy invocation in the repo is held to `exit-code: "1"` by the same guard, so a
+report-only scan cannot be introduced anywhere.
+
 ### The weekly scan files an issue when it goes red
 
 The Monday cron re-scans unchanged code. It is the only mechanism that catches an advisory published

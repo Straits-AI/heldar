@@ -29,6 +29,8 @@ permissions:
   # Keyless Sigstore signing of the image digest.
   id-token: write
   attestations: write
+  # Publishing the image scan to the code-scanning dashboard.
+  security-events: write
 
 concurrency:
   group: docker-open-${{ github.ref }}
@@ -87,6 +89,46 @@ jobs:
             type=semver,pattern={{version}}
             type=raw,value=latest,enable=${{ github.event_name == 'push' }}
             type=raw,value=dev,enable=${{ github.event_name == 'workflow_dispatch' }}
+      # Scan BEFORE publishing. Scanning a pushed image tells you what you have already handed to
+      # everyone who pulls it; the point is not to hand it over. buildx cannot load a multi-arch
+      # image into the local daemon, so this builds the amd64 half alone — its layers land in the
+      # same gha cache the real build below reads, so the marginal cost is the scan, not a rebuild.
+      #
+      # arm64 is NOT scanned. For the same pinned base digest the OS package set is identical across
+      # architectures; what differs is arch-specific wheels. Worth revisiting the day a finding turns
+      # up in one of those.
+      - name: Build amd64 locally for scanning
+        uses: docker/build-push-action@v7
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64
+          load: true
+          push: false
+          tags: ${{ matrix.name }}:scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Scan the image about to be published
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ matrix.name }}:scan
+          format: sarif
+          output: trivy-image-${{ matrix.name }}.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          # Blocking, and deliberately before the push step below: a failure here means nothing was
+          # published, rather than a report about something that already was.
+          exit-code: "1"
+      - name: Upload the image scan SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: trivy-image-${{ matrix.name }}.sarif
+          # Distinct category per image; without it three uploads in one run overwrite each other
+          # and the dashboard shows whichever finished last.
+          category: image-${{ matrix.name }}
+
       - name: Build + push
         id: build
         uses: docker/build-push-action@v7

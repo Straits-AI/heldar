@@ -17,6 +17,10 @@ editing this file — only keeping the two in agreement.
 It also asserts the opposite direction: the fixtures directory MUST stay in the real scan's
 `skip-dirs`. It contains knowingly vulnerable pins, so without that every unrelated PR goes red and
 the first person to hit it deletes the fixtures, taking the self-test with them.
+
+Finally it holds every OTHER Trivy invocation in the repo to the same standard: blocking, and — for
+the image scans in docker-open.yml — ordered BEFORE the push. An image scan after the push reports
+on something already handed to everyone who pulls it, which is a report, not a gate.
 """
 
 from __future__ import annotations
@@ -159,8 +163,61 @@ def check() -> list[str]:
     return problems
 
 
+def check_image_scans() -> list[str]:
+    """Every Trivy step in the repo blocks, and image scans run before the push."""
+    problems: list[str] = []
+    workflows = sorted((ROOT / ".github/workflows").glob("*.yml"))
+
+    for path in workflows:
+        wf = yaml.safe_load(path.read_text())
+        for jid, job in (wf.get("jobs") or {}).items():
+            job_steps = job.get("steps") or []
+            for i, step in enumerate(job_steps):
+                if not str(step.get("uses", "")).startswith("aquasecurity/trivy-action"):
+                    continue
+                with_ = step.get("with", {})
+                if str(with_.get("exit-code", "")) != "1":
+                    problems.append(
+                        f"{path.name}: job {jid!r} step {step.get('name', i)!r} runs Trivy with "
+                        f"exit-code={with_.get('exit-code')!r} — it reports without blocking"
+                    )
+                if with_.get("scan-type") != "image":
+                    continue
+                # An image scan is only a gate if nothing has been published yet.
+                pushes_after = [
+                    s2.get("name", j)
+                    for j, s2 in enumerate(job_steps[i + 1 :], start=i + 1)
+                    if str(s2.get("uses", "")).startswith("docker/build-push-action")
+                    and str(s2.get("with", {}).get("push", "")) not in ("", "false")
+                ]
+                if not pushes_after:
+                    problems.append(
+                        f"{path.name}: job {jid!r} scans an image but no pushing build step follows "
+                        f"it — the scan runs after publication, so it reports rather than gates"
+                    )
+
+    # The release workflow must actually scan what it ships.
+    docker = ROOT / ".github/workflows/docker-open.yml"
+    if docker.exists():
+        wf = yaml.safe_load(docker.read_text())
+        scans = [
+            s2
+            for job in (wf.get("jobs") or {}).values()
+            for s2 in (job.get("steps") or [])
+            if str(s2.get("uses", "")).startswith("aquasecurity/trivy-action")
+            and s2.get("with", {}).get("scan-type") == "image"
+        ]
+        if not scans:
+            problems.append(
+                "docker-open.yml publishes images but never scans one — a base bump could ship a "
+                "HIGH to everyone who pulls `latest`"
+            )
+
+    return problems
+
+
 def main() -> int:
-    problems = check()
+    problems = check() + check_image_scans()
     prefix = "ERROR: " if sys.stdout.isatty() else "::error::"
     for p in problems:
         print(f"{prefix}{p}")

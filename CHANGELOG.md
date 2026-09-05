@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **Container images are scanned before they are published, not after.** The filesystem scan reads
+  the source tree and says nothing about the base image the product ships on, so a digest bump could
+  drag in a fixable HIGH and hand it to everyone pulling `latest` with nothing looking wrong.
+
+  `docker-open.yml` now builds the amd64 half locally, scans it, and only then runs the real
+  multi-arch build and push. The ordering is the point — a scan after the push reports on something
+  already handed out — and `scripts/check_trivy_gate.py` asserts a pushing build step still follows
+  the scan so the two cannot be reordered back. It also holds every Trivy invocation in the repo to
+  `exit-code: "1"`, so a report-only scan cannot be introduced anywhere.
+
+  `ci.yml` scans the same images under the same policy on any PR touching an image input, moving the
+  answer to the PR that causes it rather than to tag time. arm64 is not scanned: for a pinned base
+  digest the OS package set is identical across architectures.
+
 - **A failing weekly security scan now files an issue instead of reporting to nobody.** The Monday
   cron re-scans unchanged code and is the only mechanism that catches an advisory published *after* a
   release — there is no PR for that finding, because nothing was merged to cause it. But a scheduled

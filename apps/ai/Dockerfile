@@ -7,6 +7,10 @@
 #   RUN pip install --no-cache-dir "ultralytics>=8.4.115" "lap>=0.5.13"
 # Pinned base: concrete minor.patch tag + multi-arch index @sha256 digest for reproducibility.
 # To bump: `docker buildx imagetools inspect python:<tag>` and update the digest (see docs/SUPPLY-CHAIN.md).
+# Scanned by Trivy (HIGH/CRITICAL, fixed only) BEFORE anything is published — see
+# docs/SUPPLY-CHAIN.md. A base bump that drags in a fixable HIGH fails the build rather than
+# shipping. Bump the pinned digest to fix; where there is no fix yet, record it in
+# security/dependency-exceptions.json with an owner and an expiry.
 FROM python:3.14.7-slim@sha256:656d12e70054d5fda18a045e2494c96701e9792dd1445f95b3d038df954f57e9
 
 # Keep Python lean and logs unbuffered (so they stream out of the container).

@@ -140,6 +140,76 @@ def a_missing_or_empty_fixture_is_caught():
         _expect(run_with(blank_fixture=name), "no pinned packages", f"{name} blanked")
 
 
+
+# --------------------------------------------------------------------- image scans
+
+def run_images_with(mutate=None) -> list[str]:
+    """Copy every workflow to a sandbox, mutate one, and run the image-scan checks."""
+    import shutil
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp = Path(tmp)
+        wfdir = tmp / ".github/workflows"
+        wfdir.mkdir(parents=True)
+        for src in (ROOT / ".github/workflows").glob("*.yml"):
+            wf = yaml.safe_load(src.read_text())
+            if mutate:
+                mutate(src.name, wf)
+            (wfdir / src.name).write_text(yaml.dump(wf))
+        real = mod.ROOT
+        mod.ROOT = tmp
+        try:
+            return mod.check_image_scans()
+        finally:
+            mod.ROOT = real
+
+
+def image_scans_pass_on_the_real_workflows():
+    assert run_images_with() == [], run_images_with()
+
+
+def a_non_blocking_trivy_step_anywhere_is_caught():
+    def m(name, wf):
+        if name != "docker-open.yml":
+            return
+        for job in wf["jobs"].values():
+            for st in job.get("steps", []):
+                if str(st.get("uses", "")).startswith("aquasecurity/trivy-action"):
+                    st["with"]["exit-code"] = "0"
+    _expect(run_images_with(m), "reports without blocking", "exit-code zeroed on the image scan")
+
+
+def an_image_scan_after_the_push_is_caught():
+    """A scan that runs after publication reports on what was already handed out."""
+    def m(name, wf):
+        if name != "docker-open.yml":
+            return
+        for job in wf["jobs"].values():
+            steps = job.get("steps", [])
+            scan = next(
+                (s for s in steps
+                 if str(s.get("uses", "")).startswith("aquasecurity/trivy-action")
+                 and s.get("with", {}).get("scan-type") == "image"),
+                None,
+            )
+            if scan:
+                steps.remove(scan)
+                steps.append(scan)  # move it to the very end, after the push
+    _expect(run_images_with(m), "reports rather than gates", "scan moved after push")
+
+
+def publishing_images_without_scanning_them_is_caught():
+    def m(name, wf):
+        if name != "docker-open.yml":
+            return
+        for job in wf["jobs"].values():
+            job["steps"] = [
+                s for s in job.get("steps", [])
+                if not (str(s.get("uses", "")).startswith("aquasecurity/trivy-action")
+                        and s.get("with", {}).get("scan-type") == "image")
+            ]
+    _expect(run_images_with(m), "publishes images but never scans one", "scan deleted")
+
+
 CHECKS = [
     the_real_workflow_passes,
     dropping_exit_code_is_caught,
@@ -152,6 +222,10 @@ CHECKS = [
     an_assertion_that_asserts_nothing_is_caught,
     losing_the_assertion_step_entirely_is_caught,
     a_missing_or_empty_fixture_is_caught,
+    image_scans_pass_on_the_real_workflows,
+    a_non_blocking_trivy_step_anywhere_is_caught,
+    an_image_scan_after_the_push_is_caught,
+    publishing_images_without_scanning_them_is_caught,
 ]
 
 if __name__ == "__main__":

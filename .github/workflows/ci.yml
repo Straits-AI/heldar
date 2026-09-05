@@ -284,6 +284,28 @@ jobs:
       - name: build the dashboard image
         if: steps.changed.outputs.run == 'true'
         run: docker build -f apps/web/Dockerfile -t heldar-web:ci apps/web
+      # The release scan (docker-open.yml) only runs at tag time, which is far too late to learn
+      # that a base bump dragged in a HIGH. These two images are already built here; scanning them
+      # costs a few seconds and moves that answer to the PR that causes it.
+      - name: scan the images this PR would ship
+        if: steps.changed.outputs.run == 'true'
+        run: |
+          set -uo pipefail
+          failed=()
+          for image in heldar-ai:ci heldar-web:ci; do
+            echo "::group::trivy $image"
+            # Same policy as the release scan: HIGH/CRITICAL, fixed only, blocking.
+            docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              aquasec/trivy:0.70.0 image --severity HIGH,CRITICAL --ignore-unfixed \
+              --exit-code 1 --scanners vuln --quiet "$image" || failed+=("$image")
+            echo "::endgroup::"
+          done
+          if [ ${#failed[@]} -gt 0 ]; then
+            echo "::error::vulnerable image(s): ${failed[*]}"
+            echo "Fix by bumping the pinned base digest, or accept explicitly in security/dependency-exceptions.json" >&2
+            exit 1
+          fi
+          echo "images clean"
 
   web:
     name: web (build)
