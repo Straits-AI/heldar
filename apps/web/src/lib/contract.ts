@@ -287,8 +287,12 @@ export interface DbConvertResult {
 }
 
 export interface DbLimitUpdate {
+  /** Compute the effect and change nothing (#121). */
+  dry_run?: boolean;
   /** New metadata-DB size cap in GB (> 0). Omit to leave unchanged. */
   max_db_gb?: number | null;
+  /** The `plan_hash` from a dry run. Supplying it makes the commit refuse if anything the plan depended on has moved since. Omit to commit without planning. */
+  plan_hash?: string | null;
 }
 
 export interface DbStatus {
