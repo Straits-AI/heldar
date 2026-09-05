@@ -217,3 +217,198 @@ async fn an_unscoped_caller_keeps_the_specific_messages() {
         "{spans}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Size bounds (#118: "export respects evidence holds, media concurrency and archive size limits").
+//
+// The archive path has had three bounds since it was written — per-export size, free disk, and a
+// cumulative directory cap — and its comment says why: the output lands on the recordings
+// filesystem, so an unbounded export drives the retention sweeper into evicting footage. Evidence
+// bundles land on the SAME filesystem and had none of them. `media_jobs` bounds concurrency only:
+// two permitted bundles can still be any size at all.
+//
+// Nothing sweeps bundles either. They are records of what left the appliance, so deleting one is an
+// operator decision — which without a ceiling means the directory grows until the disk is full.
+
+// The routes module is already imported as `evidence`; the service is a different thing.
+use heldar_kernel::services::evidence as evidence_svc;
+
+/// A camera with `count` segments of `each` bytes, no media on disk: every case here is refused
+/// before a byte is written, and the refusal is what is under test.
+async fn seed_sized(
+    st: &AppState,
+    camera: &str,
+    count: usize,
+    each: i64,
+) -> (chrono::DateTime<Utc>, chrono::DateTime<Utc>) {
+    let now = Utc::now();
+    let start = now - Duration::seconds(60 * count as i64);
+    sqlx::query(
+        "INSERT OR IGNORE INTO cameras (id, name, created_at, updated_at) VALUES (?,?,?,?)",
+    )
+    .bind(camera)
+    .bind(camera)
+    .bind(now)
+    .bind(now)
+    .execute(&st.pool)
+    .await
+    .unwrap();
+    for i in 0..count {
+        let s = start + Duration::seconds(60 * i as i64);
+        sqlx::query(
+            "INSERT INTO segments (id, camera_id, path, start_time, end_time, duration_s, codec,
+                 size_bytes, container, created_at)
+             VALUES (?,?,?,?,?,60.0,'h264',?, 'mp4', ?)",
+        )
+        .bind(format!("{camera}_seg_{i}"))
+        .bind(camera)
+        .bind(format!("/nonexistent/{camera}_{i}.mp4"))
+        .bind(s)
+        .bind(s + Duration::seconds(60))
+        .bind(each)
+        .bind(now)
+        .execute(&st.pool)
+        .await
+        .unwrap();
+    }
+    (start, now)
+}
+
+#[tokio::test]
+async fn a_window_over_the_single_bundle_limit_is_refused_before_any_work() {
+    let mut st = state().await;
+    let (from, to) = seed_sized(&st, "cam_a", 4, 1_000_000).await; // 4 MB of source
+    let mut cfg = (*st.cfg).clone();
+    cfg.evidence_max_bytes = 1_000_000; // under the 4 MB selection
+    st.cfg = Arc::new(cfg);
+
+    let err = evidence_svc::export(
+        &st,
+        &Principal::system_admin(),
+        "cam_a",
+        from,
+        to,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("an over-limit window must be refused");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("single-bundle limit"), "{msg}");
+    assert!(
+        msg.contains("HELDAR_EVIDENCE_MAX_BYTES"),
+        "the refusal must name the knob: {msg}"
+    );
+
+    // ...and nothing was written. A limit that fires after the disk is full is not a limit.
+    let written: Vec<_> = std::fs::read_dir(&st.cfg.evidence_dir)
+        .map(|d| d.flatten().collect())
+        .unwrap_or_default();
+    assert!(
+        written.is_empty(),
+        "an over-limit export left files behind: {written:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_full_evidence_directory_refuses_the_next_bundle() {
+    let mut st = state().await;
+    let (from, to) = seed_sized(&st, "cam_a", 2, 1_000_000).await;
+    // Pretend earlier bundles already filled it.
+    std::fs::write(
+        st.cfg.evidence_dir.join("older.heldar-evidence"),
+        vec![0u8; 3_000_000],
+    )
+    .unwrap();
+    let mut cfg = (*st.cfg).clone();
+    cfg.evidence_max_bytes = 100_000_000; // the single-bundle limit is NOT what bites here
+    cfg.evidence_dir_max_bytes = 3_500_000;
+    st.cfg = Arc::new(cfg);
+
+    let err = evidence_svc::export(
+        &st,
+        &Principal::system_admin(),
+        "cam_a",
+        from,
+        to,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("a full directory must refuse the next bundle");
+    let msg = format!("{err:?}");
+    assert!(msg.contains("HELDAR_EVIDENCE_DIR_MAX_BYTES"), "{msg}");
+    // The refusal has to say why it will not fix itself.
+    assert!(msg.contains("Nothing sweeps bundles"), "{msg}");
+}
+
+/// A dry run exists to answer "will this work" before committing, so it must say no rather than
+/// succeeding and letting the real call fail.
+#[tokio::test]
+async fn the_dry_run_plan_says_an_export_would_be_refused() {
+    let mut st = state().await;
+    let (from, to) = seed_sized(&st, "cam_a", 4, 1_000_000).await;
+    let mut cfg = (*st.cfg).clone();
+    cfg.evidence_max_bytes = 1_000_000;
+    st.cfg = Arc::new(cfg);
+
+    let plan = evidence_svc::plan(&st, "cam_a", from, to)
+        .await
+        .expect("plan");
+    assert!(
+        plan.would_exceed_limits,
+        "the plan did not warn about the ceiling"
+    );
+    assert_eq!(plan.limit_bytes, 1_000_000);
+    assert!(plan.source_bytes > plan.limit_bytes);
+
+    // And the plan still RETURNS, with the gaps and segments an operator needs to pick a smaller
+    // window. Refusing here would hide the very information that lets them fix it.
+    assert_eq!(plan.segments.len(), 4);
+}
+
+#[tokio::test]
+async fn an_export_within_the_limits_is_not_refused_by_them() {
+    let mut st = state().await;
+    let (from, to) = seed_sized(&st, "cam_a", 2, 1_000).await;
+    let mut cfg = (*st.cfg).clone();
+    cfg.evidence_max_bytes = 100_000_000;
+    cfg.evidence_dir_max_bytes = 100_000_000;
+    st.cfg = Arc::new(cfg);
+
+    let plan = evidence_svc::plan(&st, "cam_a", from, to)
+        .await
+        .expect("plan");
+    assert!(
+        !plan.would_exceed_limits,
+        "a small window was flagged as over the ceiling"
+    );
+
+    // The export itself fails later (the fixture segments have no media on disk), but it must not
+    // fail on a SIZE check — that is what this asserts.
+    let err = evidence_svc::export(
+        &st,
+        &Principal::system_admin(),
+        "cam_a",
+        from,
+        to,
+        None,
+        None,
+        None,
+    )
+    .await
+    .expect_err("fixture has no media, so the build cannot succeed");
+    let msg = format!("{err:?}");
+    for knob in [
+        "HELDAR_EVIDENCE_MAX_BYTES",
+        "HELDAR_EVIDENCE_DIR_MAX_BYTES",
+        "not enough free disk",
+    ] {
+        assert!(
+            !msg.contains(knob),
+            "a within-limits export was refused by {knob}: {msg}"
+        );
+    }
+}

@@ -718,7 +718,7 @@ async fn update_progress(state: &AppState, job_id: &str, copied: u64, bytes: u64
 
 /// Sum of regular-file sizes directly under `dir` (non-recursive — exports are flat `.zip` files).
 /// Best-effort: an unreadable directory or entry contributes 0 rather than failing the export.
-async fn dir_size_bytes(dir: &std::path::Path) -> u64 {
+pub(crate) async fn dir_size_bytes(dir: &std::path::Path) -> u64 {
     let mut total = 0u64;
     if let Ok(mut rd) = tokio::fs::read_dir(dir).await {
         while let Ok(Some(entry)) = rd.next_entry().await {

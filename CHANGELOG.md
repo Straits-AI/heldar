@@ -234,6 +234,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An evidence export can no longer fill the disk the recorder writes to** (#118). The archive path
+  has had three bounds since it was written — per-export size, free disk, and a cumulative directory
+  cap — and its comment says why: the output lands on the recordings filesystem, so an unbounded
+  export drives the retention sweeper into evicting footage. Evidence bundles land on the **same**
+  filesystem and had none of them. `media_jobs` bounds only concurrency; two permitted bundles can
+  still be any size at all.
+
+  Nothing sweeps bundles either — they are records of what left the appliance, so deleting one is an
+  operator decision — which without a ceiling meant unbounded growth. All three checks now run
+  *before* any file is written, measured on the sum of the source segments (an upper bound, since the
+  clip is trimmed): `HELDAR_EVIDENCE_MAX_BYTES` (5 GiB) and `HELDAR_EVIDENCE_DIR_MAX_BYTES` (20 GiB),
+  plus a free-disk precondition with a 1 GiB margin.
+
+  A dry run now reports `limit_bytes`, `dir_used_bytes`, `dir_limit_bytes` and `would_exceed_limits`,
+  so "will this work" is answered before committing — and still returns its gaps and segment list
+  when it would be refused, since those are what let an operator pick a smaller window.
+
 - **An event now records the request that caused it** (part of #121). Migration 0020 joined
   `audit_log` to its request; events were the other half of the same question and were left out, so
   the chain broke at the interesting point — an operator holding a request id could see what the box
