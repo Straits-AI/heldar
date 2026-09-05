@@ -137,20 +137,49 @@ jobs:
           docker compose -f compose.yml --profile ai config > /tmp/base.yml
           cd ..
 
-          echo "::group::hardened stack (must pass)"
-          python3 scripts/check_hardened_profile.py --config /tmp/hardened.yml
-          echo "::endgroup::"
-
-          # The check that proves the check. Without the overlay the same stack must be REJECTED —
-          # otherwise a checker that silently passes everything would look identical to a hardened
-          # deployment, which is the failure this whole thing exists to prevent.
-          echo "::group::base stack without the overlay (must FAIL)"
-          if python3 scripts/check_hardened_profile.py --config /tmp/base.yml > /tmp/base.out 2>&1; then
-            echo "::error::the profile checker PASSED an unhardened stack — it is not checking anything"
-            cat /tmp/base.out
+          # Exit codes are asserted EXACTLY and findings counted from JSON, not grepped from text.
+          # A review found the first version of this could not tell a real verdict from a broken
+          # checker: a config with no services exits 2 while printing a line that starts with
+          # ::error::, and an uncaught exception exits 1 with a traceback. Both satisfied a bare
+          # "non-zero means correctly rejected" test, so a checker that crashed on every service
+          # would have been reported as a passing gate.
+          echo "::group::hardened stack (must pass, exit exactly 0)"
+          set +e
+          python3 scripts/check_hardened_profile.py --config /tmp/hardened.yml --format json > /tmp/hard.json 2>/tmp/hard.err
+          hard_rc=$?
+          set -e
+          cat /tmp/hard.err || true
+          hard_blocking=$(jq '[.findings[] | select(.severity == "blocking")] | length' /tmp/hard.json 2>/dev/null || echo -1)
+          if [ "$hard_rc" -ne 0 ]; then
+            echo "::error::hardened stack rejected (exit $hard_rc, $hard_blocking blocking finding(s))"
             exit 1
           fi
-          echo "correctly rejected: $(grep -c '^::error::' /tmp/base.out) blocking finding(s)"
+          echo "hardened: clean"
+          echo "::endgroup::"
+
+          # The check that proves the check. Without the overlay the same stack must be REJECTED,
+          # with exit code EXACTLY 1 and real findings to show for it.
+          echo "::group::base stack without the overlay (must FAIL with real findings)"
+          set +e
+          python3 scripts/check_hardened_profile.py --config /tmp/base.yml --format json > /tmp/base.json 2>/tmp/base.err
+          base_rc=$?
+          set -e
+          base_blocking=$(jq '[.findings[] | select(.severity == "blocking")] | length' /tmp/base.json 2>/dev/null || echo -1)
+          if [ "$base_rc" -eq 0 ]; then
+            echo "::error::the profile checker PASSED an unhardened stack — it is not checking anything"
+            exit 1
+          fi
+          if [ "$base_rc" -ne 1 ]; then
+            echo "::error::checker exited $base_rc on the base stack, not 1 — a broken checker, not a verdict"
+            cat /tmp/base.err || true
+            exit 1
+          fi
+          if [ "$base_blocking" -lt 5 ]; then
+            echo "::error::base stack produced only $base_blocking blocking finding(s) — expected many more"
+            cat /tmp/base.err || true
+            exit 1
+          fi
+          echo "correctly rejected: $base_blocking blocking finding(s), exit exactly 1"
           echo "::endgroup::"
       - name: read-seam lint (cross-app reads go through *_read views)
         run: ./scripts/check-read-seam.sh

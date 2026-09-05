@@ -94,20 +94,26 @@ services:
       # The worker serves no HTTP, so there is nothing for a health check to probe. It touches this
       # file once per supervisor cycle instead; the check below is a staleness test on it.
       HELDAR_AI_HEARTBEAT_FILE: /tmp/heldar-ai.heartbeat
-    # LIVENESS, not readiness. 90s is 9 poll intervals at the default 10s — long enough that a slow
-    # cycle or a model load is not called a failure, short enough to catch a wedged or thrashing
-    # worker. It deliberately does NOT check that the kernel is reachable: that is the kernel's
-    # health check to report, and conflating them marks the worker unhealthy for someone else's
-    # outage. Uses python because pip and the shell tools are removed from this image.
+    # LIVENESS, not readiness. The WORKER states its own deadline in the file and this only checks
+    # it has not passed — no threshold is hardcoded here, deliberately. A fixed one is wrong in both
+    # directions: 90s left 0.6s of margin against a retry-exhausted poll at the default timeouts
+    # (79s of HTTP budget plus a poll interval), and an operator raising HELDAR_AI_POLL_INTERVAL
+    # above it would make a perfectly healthy worker permanently unhealthy. The worker computes the
+    # deadline from its own timeout/retry/interval settings, so the check tracks configuration
+    # instead of contradicting it.
+    # Uses python because pip and the shell tools are removed from this image.
     healthcheck:
       test:
         - CMD
         - python
         - -c
         - |
-          import os, sys, time
-          p = "/tmp/heldar-ai.heartbeat"
-          sys.exit(0 if os.path.exists(p) and time.time() - os.path.getmtime(p) < 90 else 1)
+          import json, sys, time
+          try:
+              with open("/tmp/heldar-ai.heartbeat") as f:
+                  sys.exit(0 if json.load(f)["stale_after"] > time.time() else 1)
+          except Exception:
+              sys.exit(1)
       interval: 30s
       timeout: 5s
       retries: 3

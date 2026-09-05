@@ -2068,6 +2068,10 @@ class Supervisor:
                 runner.stop()
                 runner.join(timeout=self.s.http_timeout + 2)
                 del self.runners[tid]
+            # Per ITERATION, covering the join above. A fleet-wide config change restarts every
+            # task in turn, each join costing up to http_timeout + 2 — normal work that otherwise
+            # stacks up behind a single beat and reads as a wedged worker.
+            self._beat()
 
         # Start runners for new (or just-restarted) tasks.
         for tid, task in by_id.items():
@@ -2116,24 +2120,59 @@ class Supervisor:
                 log.info("re-acquiring the task lease early (a runner reported a ticket problem)")
                 return False
 
-    def _beat(self) -> None:
-        """Record that this loop is still turning.
+    def _max_beat_gap(self) -> float:
+        """The longest this loop can legitimately go between beats, from ITS OWN settings.
 
-        LIVENESS, not readiness — written every cycle whether the poll succeeded or not. The worker
-        exposes no HTTP surface, so without this a container health check has nothing to probe and
-        a wedged process is indistinguishable from an idle one. A kernel it cannot reach is the
-        kernel's health check to report, not this one's; conflating the two would mark the worker
-        unhealthy for someone else's outage.
+        This is computed rather than hardcoded because a fixed threshold is wrong in both
+        directions, and a review caught both:
+
+          * too tight — one exhausted HTTP call is (retries+1) x timeout plus the backoff between
+            attempts. At the DEFAULTS that is 79s, and adding one poll interval leaves 0.6s of
+            margin against a 90s threshold. The thing that consumes it is retry exhaustion, i.e.
+            exactly the kernel outage this check is documented as NOT reporting on.
+          * too loose — an operator raising HELDAR_AI_POLL_INTERVAL above the threshold (there is
+            no ceiling on it) makes a perfectly healthy worker permanently unhealthy, every cycle,
+            with nothing wrong.
+
+        So the worker states its own deadline and the health check reads it. If someone configures
+        long timeouts, the check honestly becomes less sensitive rather than lying in either
+        direction.
+        """
+        attempts = self.s.http_max_retries + 1
+        backoff = sum(
+            min(self.s.backoff_cap, self.s.backoff_base * (2 ** (a - 1))) * 1.25  # max jitter
+            for a in range(1, attempts)
+        )
+        budget = attempts * self.s.http_timeout + backoff + self.s.poll_interval
+        # x2 plus a floor: the aim is zero false alarms on a working worker. A wedged one never
+        # beats again, so it is caught whatever the multiplier.
+        return max(60.0, budget * 2.0)
+
+    def _beat(self) -> None:
+        """Record that this loop is still turning, and until when that remains true.
+
+        LIVENESS, not readiness — written whether the poll succeeded or not. The worker exposes no
+        HTTP surface, so without this a container health check has nothing to probe and a wedged
+        process is indistinguishable from an idle one. A kernel it cannot reach is the kernel's
+        health check to report, not this one's.
+
+        Called from several points in the cycle, not just the top: a bulk config change makes
+        `_reconcile` join each stopped runner in turn, which is normal work that used to stack up
+        behind a single beat and read as a wedge.
 
         Best-effort: a full or read-only volume must never take down a working worker over its own
         health reporting.
         """
         if not self.s.heartbeat_file:
             return
+        now = time.time()
         try:
             path = Path(self.s.heartbeat_file)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(f"{time.time():.0f}\n")
+            path.write_text(
+                json.dumps({"ts": round(now, 3), "stale_after": round(now + self._max_beat_gap(), 3)})
+                + "\n"
+            )
         except OSError as exc:
             if not self._heartbeat_warned:
                 self._heartbeat_warned = True
@@ -2145,6 +2184,7 @@ class Supervisor:
             self._beat()
             try:
                 tasks = self._poll_tasks()
+                self._beat()  # a long retry-exhausted poll is work, not a wedge
                 self._reconcile(tasks)
                 log.debug("active tasks: %d", len(self.runners))
             except WorkerShutdown:

@@ -51,6 +51,35 @@ HEALTHCHECK_EXEMPT = {
 
 REQUIRED_TMPFS_FLAGS = ("noexec", "nosuid", "nodev")
 
+# Host paths that hand over the box no matter what else is set. A container with the docker socket
+# can start a privileged sibling; one with host root can edit anything the kernel reads.
+FATAL_BIND_SOURCES = {
+    "/var/run/docker.sock": "the Docker socket is root-equivalent control of the host",
+    "/run/docker.sock": "the Docker socket is root-equivalent control of the host",
+    "/": "the entire host filesystem",
+    "/etc": "the host's system configuration",
+    "/proc": "the host's process tree",
+    "/sys": "the host's kernel interfaces",
+    "/dev": "the host's devices",
+}
+
+# Namespaces that, if shared with the host, remove the boundary the rest of this file is protecting.
+HOST_NAMESPACE_KEYS = {
+    "pid": "the host process tree — every process on the box is visible and signallable",
+    "ipc": "the host IPC namespace — shared memory belonging to other services",
+    "userns_mode": "the host user namespace — uid mapping stops isolating anything",
+    "cgroup": "the host cgroup namespace",
+}
+
+
+def _is_unlimited(value) -> bool:
+    """Docker reads 0 (and "0", "0b", "0.0") as no limit at all."""
+    text = str(value).strip().lower().rstrip("bkmgt")
+    try:
+        return float(text or "0") == 0.0
+    except ValueError:
+        return False
+
 
 def finding(code, severity, detail, remediation, resource=None):
     f = {"code": code, "severity": severity, "detail": detail, "remediation": remediation}
@@ -60,12 +89,70 @@ def finding(code, severity, detail, remediation, resource=None):
 
 
 def _tmpfs_entries(svc: dict) -> list[str]:
+    """Every tmpfs mount, in BOTH Compose syntaxes.
+
+    Reading only the short-form `tmpfs:` key was a real gap: a service mounting scratch space as
+    `volumes: [{type: tmpfs, ...}]` produced no findings at all, with no noexec and no size bound.
+    A tool whose premise is "an undeclared exemption is a regression" cannot have an undeclared
+    blind spot of its own.
+    """
     t = svc.get("tmpfs") or []
-    return [t] if isinstance(t, str) else list(t)
+    entries = [t] if isinstance(t, str) else list(t)
+
+    for v in svc.get("volumes") or []:
+        if not isinstance(v, dict) or v.get("type") != "tmpfs":
+            continue
+        # Normalise the long form into the short form's "target:opt,opt" shape so one set of checks
+        # covers both, rather than two implementations that can disagree.
+        opts = []
+        tmpfs_opts = v.get("tmpfs") or {}
+        if tmpfs_opts.get("size") is not None:
+            opts.append(f"size={tmpfs_opts['size']}")
+        # The long form expresses these as booleans/flags rather than a comma string.
+        for flag in REQUIRED_TMPFS_FLAGS:
+            if tmpfs_opts.get(flag) or flag in str(tmpfs_opts.get("mode", "")):
+                opts.append(flag)
+        entries.append(f"{v.get('target', '?')}:{','.join(opts)}")
+    return entries
 
 
 def check_service(name: str, svc: dict) -> list[dict]:
     out: list[dict] = []
+
+    # --- the settings that make every other setting moot -------------------------------------
+    # Checked FIRST and hardest. `privileged: true` grants every capability and every device back,
+    # so a service can carry cap_drop ALL, no-new-privileges and a read-only root and still be
+    # root on the box. A checker that reports that service as hardened is worse than no checker:
+    # it converts "nobody looked" into "we verified it".
+    if svc.get("privileged"):
+        out.append(finding(
+            "compose_privileged", "blocking",
+            f"{name} runs privileged, which restores every capability and every host device "
+            f"regardless of cap_drop, no-new-privileges or a read-only root",
+            "Remove `privileged: true` and grant only the specific devices or capabilities a boot "
+            "proves are needed", name))
+
+    for key, what in HOST_NAMESPACE_KEYS.items():
+        val = str(svc.get(key) or "")
+        if val == "host":
+            out.append(finding(
+                "compose_host_namespace", "blocking",
+                f"{name} sets {key}: host, sharing {what}. The stack already gives up the network "
+                f"namespace for camera discovery; giving up this one too leaves no boundary at all",
+                f"Remove `{key}: host` unless a documented requirement needs it", name))
+
+    for v in svc.get("volumes") or []:
+        src = v.get("source") if isinstance(v, dict) else str(v).split(":")[0]
+        if not src:
+            continue
+        why = FATAL_BIND_SOURCES.get(str(src).rstrip("/") or "/")
+        if why:
+            rw = "ro" not in str(v) if not isinstance(v, dict) else not v.get("read_only")
+            out.append(finding(
+                "compose_fatal_bind_mount", "blocking",
+                f"{name} bind-mounts {src} ({why}){' read-write' if rw else ''}; a read-only root "
+                f"filesystem means nothing next to it",
+                "Remove the mount, or narrow it to the specific path the service needs", name))
 
     # --- no-new-privileges -------------------------------------------------------------------
     sec = svc.get("security_opt") or []
@@ -148,6 +235,13 @@ def check_service(name: str, svc: dict) -> list[dict]:
                 "compose_resource_limit_missing", "warning",
                 f"{name} sets no {key} limit; {why}",
                 f"Set deploy.resources.limits.{key}", name))
+        elif _is_unlimited(limits[key]):
+            # Presence is not a ceiling. Docker reads 0 as "unlimited", so `pids: 0` satisfies a
+            # key-presence check while leaving the fork bomb exactly as effective.
+            out.append(finding(
+                "compose_resource_limit_unlimited", "warning",
+                f"{name} sets {key}={limits[key]!r}, which Docker treats as UNLIMITED; {why}",
+                f"Give deploy.resources.limits.{key} a real ceiling", name))
 
     # --- health ------------------------------------------------------------------------------
     if not svc.get("healthcheck"):

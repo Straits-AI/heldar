@@ -244,10 +244,21 @@ indistinguishable from a hardened deployment.
 
 **Health checks.** `core` probes `/readyz`; `web` probes its own nginx with busybox `wget` (the
 alpine image has no curl, and a health check that cannot execute reports unhealthy forever). The AI
-worker serves no HTTP, so it touches `HELDAR_AI_HEARTBEAT_FILE` once per supervisor cycle and the
-check is a staleness test on that file — **liveness, not readiness**. It deliberately does not test
-whether the kernel is reachable: that is the kernel's health check to report, and conflating the two
-marks the worker unhealthy for someone else's outage.
+worker serves no HTTP, so it writes `HELDAR_AI_HEARTBEAT_FILE` several times per supervisor cycle
+and the check asks only whether the deadline in that file has passed — **liveness, not readiness**.
+
+The deadline is **computed by the worker from its own settings**, not hardcoded in the compose file,
+because a fixed threshold is wrong in both directions and review caught both. Too tight: one
+retry-exhausted poll costs `(retries + 1) × timeout` plus backoff — ~79 s at the defaults — so a 90 s
+bar left 0.6 s of margin, and what consumes it is a kernel the worker cannot reach, i.e. precisely the
+outage this check is supposed to stay silent about. Too loose: `HELDAR_AI_POLL_INTERVAL` has no
+ceiling, so raising it past a fixed bar would mark a perfectly healthy worker unhealthy on every
+cycle. Publishing the deadline means the check tracks configuration rather than contradicting it — if
+someone sets long timeouts it becomes honestly less sensitive instead of lying either way.
+
+The worker also beats *inside* the reconcile loop, not only at the top of the cycle: a fleet-wide
+config change stops and joins each runner in turn, which is ordinary work that used to stack up
+behind a single beat and read as a wedge.
 
 MediaMTX has **no** in-container health check and cannot have one: the image is a single layer whose
 entrypoint is the bare binary, with no shell and no HTTP client for a `test:` to exec. Its liveness is

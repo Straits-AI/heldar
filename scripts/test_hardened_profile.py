@@ -150,6 +150,77 @@ def the_real_mediamtx_config_is_loopback_bound():
     assert not [x for x in f if x["severity"] == "blocking"], f
 
 
+
+def privileged_defeats_everything_and_must_block():
+    """`privileged: true` restores every capability and device, making the rest of this file moot.
+
+    An independent review built a service that was privileged, PID-host, docker-socket-mounted and
+    host-root-mounted, and the checker called it clean. That is worse than no checker: it converts
+    "nobody looked" into "we verified it".
+    """
+    f = check(lambda s: s.update(privileged=True))
+    _expect(f, "compose_privileged", "blocking", "privileged")
+
+
+def sharing_a_host_namespace_blocks():
+    for key in ("pid", "ipc", "cgroup", "userns_mode"):
+        f = check(lambda s, k=key: s.update({k: "host"}))
+        _expect(f, "compose_host_namespace", "blocking", key)
+    # a non-host value is fine
+    assert check(lambda s: s.update(pid="container:other")) == []
+
+
+def a_fatal_bind_mount_blocks():
+    """The docker socket is root-equivalent; host root makes a read-only rootfs meaningless."""
+    for src in ("/var/run/docker.sock", "/run/docker.sock", "/", "/etc", "/proc", "/sys", "/dev"):
+        f = check(lambda s, x=src: s.update(volumes=[f"{x}:/mnt:rw"]))
+        _expect(f, "compose_fatal_bind_mount", "blocking", src)
+    # the long syntax too
+    _expect(check(lambda s: s.update(
+        volumes=[{"type": "bind", "source": "/var/run/docker.sock", "target": "/sock"}])),
+        "compose_fatal_bind_mount", "blocking", "long syntax")
+    # an ordinary named volume or narrow bind is not a finding
+    assert check(lambda s: s.update(volumes=["heldar-data:/data"])) == []
+    assert check(lambda s: s.update(volumes=["/srv/heldar/recordings:/data:rw"])) == []
+
+
+def the_whole_review_escape_case_is_caught():
+    """The exact service the reviewer showed passing. It must now produce blocking findings."""
+    def m(s):
+        s.update(privileged=True, pid="host",
+                 volumes=["/var/run/docker.sock:/var/run/docker.sock", "/:/host:rw"],
+                 deploy={"resources": {"limits": {"cpus": "0", "memory": "0", "pids": 0}}})
+    f = check(m, name="ai")
+    blocking = {x["code"] for x in f if x["severity"] == "blocking"}
+    assert {"compose_privileged", "compose_host_namespace", "compose_fatal_bind_mount"} <= blocking, f
+
+
+def a_zero_resource_limit_is_not_a_limit():
+    """Docker reads 0 as unlimited, so presence-only checking left the fork bomb intact."""
+    for key, val in (("pids", 0), ("cpus", "0"), ("memory", "0"), ("memory", "0b"), ("cpus", "0.0")):
+        f = check(lambda s, k=key, v=val: s["deploy"]["resources"]["limits"].update({k: v}))
+        _expect(f, "compose_resource_limit_unlimited", "warning", f"{key}={val}")
+    # real ceilings stay clean
+    assert check(lambda s: s["deploy"]["resources"]["limits"].update(
+        {"cpus": "0.5", "memory": "512m", "pids": 128})) == []
+
+
+def long_form_tmpfs_is_checked_too():
+    """A tool whose premise is 'an undeclared exemption is a regression' cannot have its own."""
+    def m(s):
+        s.pop("tmpfs")
+        s["volumes"] = [{"type": "tmpfs", "target": "/tmp", "tmpfs": {}}]
+    f = check(m)
+    _expect(f, "compose_tmpfs_flags_missing", "warning", "long form, no flags")
+    _expect(f, "compose_tmpfs_unbounded", "warning", "long form, no size")
+
+    def ok(s):
+        s.pop("tmpfs")
+        s["volumes"] = [{"type": "tmpfs", "target": "/tmp",
+                         "tmpfs": {"size": "64m", "noexec": True, "nosuid": True, "nodev": True}}]
+    assert check(ok) == [], check(ok)
+
+
 CHECKS = [
     a_fully_hardened_service_is_clean,
     a_writable_root_blocks,
@@ -163,6 +234,12 @@ CHECKS = [
     a_missing_healthcheck_warns_unless_declared_exempt,
     an_exposed_mediamtx_admin_port_blocks,
     the_real_mediamtx_config_is_loopback_bound,
+    privileged_defeats_everything_and_must_block,
+    sharing_a_host_namespace_blocks,
+    a_fatal_bind_mount_blocks,
+    the_whole_review_escape_case_is_caught,
+    a_zero_resource_limit_is_not_a_limit,
+    long_form_tmpfs_is_checked_too,
 ]
 
 if __name__ == "__main__":
