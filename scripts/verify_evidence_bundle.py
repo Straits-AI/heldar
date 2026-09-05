@@ -297,6 +297,7 @@ def main() -> int:
             return UNKNOWN_KEY
 
         out("VALID", f"{checked} files, signed by {computed_id}, {describe(manifest)}")
+        print(f"  produced by: {describe_producer(manifest)}")
         for limit in manifest.get("attestation", {}).get("limits", []):
             print(f"  note: {limit}")
         return VALID
@@ -588,6 +589,24 @@ def describe(m: dict) -> str:
         s += f", {cov:.0f}s of {req:.0f}s recorded"
     if gaps:
         s += f", {len(gaps)} GAP(S) in the requested window"
+    return s
+
+
+def describe_producer(m: dict) -> str:
+    """What made this bundle, for a reader deciding how much to trust the media.
+
+    `ffmpeg_version` may be null: the appliance records what it could ask the binary, and null means
+    it could not. That is reported as "unidentified" rather than omitted — a reader who is not told
+    assumes it was recorded, and the manifest is signed, so silence here would be the appliance
+    quietly declining to say something it appeared to promise.
+    """
+    p = m.get("producer") or {}
+    heldar = p.get("heldar_version") or "unknown release"
+    ffmpeg = p.get("ffmpeg_version") or "unidentified ffmpeg (the appliance could not ask it)"
+    schema = p.get("schema_version")
+    s = f"Heldar {heldar}, {ffmpeg}"
+    if schema is not None:
+        s += f", schema {schema}"
     return s
 
 
