@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A failing weekly security scan now files an issue instead of reporting to nobody.** The Monday
+  cron re-scans unchanged code and is the only mechanism that catches an advisory published *after* a
+  release — there is no PR for that finding, because nothing was merged to cause it. But a scheduled
+  run has no PR to turn red and no author to notify, so a red cron sat in the Actions tab until
+  somebody happened to look. The one class of finding nothing else could catch was the one nothing
+  surfaced.
+
+  `advisory-report` opens an issue when the weekly run fails, updates that same issue on later
+  failures rather than filing a fresh one every Monday, and closes it when a run comes back clean. It
+  identifies its own issue by a marker in the body, not by title or label, so it can never adopt — or
+  close — an issue somebody wrote by hand.
+
+  `scripts/check_weekly_report.py` enforces coverage rather than configuration: every job in
+  `security.yml` must be in the reporter's `needs`, so adding a scanner without listing it fails the
+  build instead of silently going unreported. Anything not `success` counts as failing — cancelled
+  and skipped included, since a skipped scan has cleared nothing.
+
 - **A release can no longer be published from a commit whose security scan failed.** Nothing
   connected the two: `release.yml` and `docker-open.yml` triggered on a tag push, and the tag could
   sit on any commit at all. Publishing is the irreversible step — a crates.io version can never be

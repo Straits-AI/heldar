@@ -114,6 +114,12 @@ jobs:
           ./scripts/test_require_security_run.sh
           python3 scripts/test_release_gated.py
           python3 scripts/check_release_gated.py
+          # The Monday cron is the only thing that catches an advisory published AFTER a release,
+          # against code nobody has touched — and it reported to nobody: no PR to redden, no author
+          # to notify. The coverage guard is the point: add a fifth scanner without listing it in
+          # the reporter's `needs` and its failures go invisible again.
+          python3 scripts/test_weekly_report.py
+          python3 scripts/check_weekly_report.py
       - name: read-seam lint (cross-app reads go through *_read views)
         run: ./scripts/check-read-seam.sh
       # A generated client that COMPILES is a stronger statement about the contract than any prose:

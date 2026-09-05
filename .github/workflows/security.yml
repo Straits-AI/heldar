@@ -236,3 +236,38 @@ jobs:
         uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: trivy-results.sarif
+
+  # A scheduled run reports to NOBODY. There is no PR to turn red and no author to notify, so a
+  # failing Monday cron sat in the Actions tab until somebody happened to look — and the cron is the
+  # only mechanism that catches an advisory published AFTER a release, against code that has not
+  # changed. The one class of finding nothing else can catch was also the one nothing surfaced.
+  #
+  # `needs` must list EVERY scanning job above; scripts/check_weekly_report.py fails the build if a
+  # job is added without being covered here, because an unlisted job's failure would be invisible.
+  advisory-report:
+    name: weekly advisory report
+    # always(): the point is to run precisely when the jobs it depends on have FAILED.
+    if: always() && github.event_name == 'schedule' && github.repository == 'Straits-AI/heldar'
+    needs: [js-audit, pip-audit, gitleaks, trivy-fs]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: open, update or close the advisory issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RESULTS: ${{ toJSON(needs) }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          # Anything that is not "success" counts as failing — cancelled and skipped included. A
+          # skipped scan has not cleared anything.
+          failed=$(jq -r 'to_entries | map(select(.value.result != "success")) | map(.key) | join(",")' <<<"$RESULTS")
+          echo "non-success jobs: ${failed:-<none>}"
+          python3 scripts/report_weekly_advisories.py \
+            --repo "${{ github.repository }}" \
+            --run-url "$RUN_URL" \
+            --sha "${{ github.sha }}" \
+            --failed "$failed"
