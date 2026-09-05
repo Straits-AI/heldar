@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A camera-scoped credential could enumerate incidents on cameras it does not hold.**
+  `POST /api/v1/evidence/exports` accepts an `incident_id` and derives the camera from that
+  incident's segments. The derived id then reached the ordinary caller-supplied scope check, whose
+  refusal *names the camera* — so probing incident ids read back whether an incident exists (404 vs
+  403), which camera it is tagged to (in the 403 body), and how many cameras it spans (`400 spans N
+  cameras`).
+
+  No footage or metadata leaked: every gatherer in `services::evidence` binds `camera_id` alongside
+  the time range, and `GET /evidence/exports/{id}` already collapsed out-of-scope to the same 404 as
+  nonexistent. What leaked was the fleet roster, one probe at a time — which is precisely what
+  `AppState::resource_camera`'s doc comment warns against, and this was the one place in the tree
+  that resolved a camera from a resource id and then used the raw check anyway.
+
+  For a scoped caller, every outcome that is not "exactly one camera you hold" now collapses to one
+  identical refusal naming neither the incident nor the camera. An unscoped caller keeps the specific
+  messages: nothing in them is new to someone holding every camera. A scoped caller who holds *every*
+  camera an incident spans still gets the useful `spans N cameras` message, since the count tells
+  them nothing they could not already count.
+
+  Tests compare refusals byte for byte rather than by status code — two 403s with different messages
+  are still an oracle. Found by an adversarial audit of #118's scope criterion, which had no test
+  driving the incident-id branch at all.
+
 - **An evidence bundle now says which ffmpeg produced it.** The signed manifest recorded
   `ffmpeg_bin` — the *configured path*, defaulting to the bare string `ffmpeg` — where #118 asks
   which ffmpeg **version** produced the media. That identified no build to anyone verifying a bundle
