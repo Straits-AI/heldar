@@ -260,7 +260,9 @@ export interface DbConvertResult {
 }
 
 export interface DbLimitUpdate {
+  dry_run?: boolean;
   max_db_gb?: number | null;
+  plan_hash?: string | null;
 }
 
 export interface DbStatus {
@@ -1782,8 +1784,8 @@ export class HeldarClient {
   }
 
   /** Requires admin, fleet-only. */
-  setDbLimit(body: DbLimitUpdate): Promise<DbStatus> {
-    return this.call<DbStatus>("PUT", `/api/v1/system/db`, body);
+  setDbLimit(body: DbLimitUpdate): Promise<unknown> {
+    return this.call<unknown>("PUT", `/api/v1/system/db`, body);
   }
 
   /** Requires admin, fleet-only. */

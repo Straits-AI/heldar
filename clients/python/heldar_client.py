@@ -311,7 +311,9 @@ class DbConvertResult:
 
 @dataclass
 class DbLimitUpdate:
+    dry_run: bool = None
     max_db_gb: float | None = None
+    plan_hash: str | None = None
 
 
 @dataclass
