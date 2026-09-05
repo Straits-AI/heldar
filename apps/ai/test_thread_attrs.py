@@ -11,20 +11,47 @@ reported the unit as failed on every single `systemctl stop`, for months.
 
 Static because the runtime path needs a live camera: the collision is visible in
 the source, and that is where it has to be caught.
+
+Do NOT derive the member list from the running interpreter alone. CPython 3.13
+DELETED `Thread._stop`, so on 3.13+ the collision does not exist and a guard that
+asks the live `threading.Thread` finds nothing to report — while the box runs
+3.12, where it very much does exist. Written that way, this file passed on the
+CI matrix's newer half and would have gone on passing after the rename was undone.
 """
 
 from __future__ import annotations
 
 import ast
+import sys
 import threading
 from pathlib import Path
 
 APPS_AI = Path(__file__).resolve().parent
 
-# Every attribute a threading.Thread instance already carries. Assigning any of
-# these in a subclass replaces the real thing.
-THREAD_MEMBERS = frozenset(dir(threading.Thread)) | frozenset(
-    vars(threading.Thread(target=lambda: None))
+# Members that a supported CPython has carried on Thread but which the interpreter
+# running this file may not, because they were removed after 3.12. `_stop` is the
+# whole reason this file exists and is gone from 3.13 onwards; the rest travel with
+# it in the same internal cleanup. Shadowing any of them breaks the versions that
+# still have them, so the guard has to know them by name.
+REMOVED_AFTER_3_12 = frozenset(
+    {
+        "_handle",
+        "_is_stopped",
+        "_reset_internal_locks",
+        "_set_tstate_lock",
+        "_stop",
+        "_tstate_lock",
+        "_wait_for_tstate_lock",
+    }
+)
+
+# Every attribute a Thread instance carries on ANY supported interpreter. Assigning
+# one of these in a subclass replaces the real thing. Unioned with the live class so
+# members added in future versions are covered without editing this list.
+THREAD_MEMBERS = (
+    frozenset(dir(threading.Thread))
+    | frozenset(vars(threading.Thread(target=lambda: None)))
+    | REMOVED_AFTER_3_12
 )
 
 # Names a subclass is expected to set, because Thread itself documents them.
@@ -84,6 +111,19 @@ def test_no_thread_subclass_shadows_a_thread_member() -> None:
     assert not problems, "\n".join(problems)
 
 
+def test_guard_does_not_depend_on_the_running_interpreter() -> None:
+    """`_stop` must be flagged on 3.13+, which no longer has it.
+
+    The guard's job is to protect the deployed interpreter, not the one CI happens
+    to run. This is the assertion that fails if REMOVED_AFTER_3_12 is dropped.
+    """
+    assert "_stop" in THREAD_MEMBERS, (
+        "the name this whole file exists for is not in the member set on "
+        f"python{sys.version_info.major}.{sys.version_info.minor}"
+    )
+    assert REMOVED_AFTER_3_12 <= THREAD_MEMBERS
+
+
 def test_guard_catches_the_bug_it_was_written_for() -> None:
     """The regression itself must trip the guard — otherwise the guard is decoration."""
     problems = thread_subclass_collisions(
@@ -117,6 +157,7 @@ def test_guard_is_not_indiscriminate() -> None:
 
 if __name__ == "__main__":
     test_no_thread_subclass_shadows_a_thread_member()
+    test_guard_does_not_depend_on_the_running_interpreter()
     test_guard_catches_the_bug_it_was_written_for()
     test_guard_is_not_indiscriminate()
     print("ok")
