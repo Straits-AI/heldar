@@ -189,7 +189,15 @@ jobs:
       # resolves PaddleOCR 3.x, the code targeted 2.x, and every failure was swallowed — the worker
       # emitted vehicles with no plate forever while looking healthy. Not a crash, so only an
       # assertion catches it.
-      - run: python3 apps/ai/test_ocr_backend.py
+      # Every test_*.py, not a hand-listed set: `test_ocr_backend.py` was named explicitly here,
+      # so `test_thread_attrs.py` would have been added to the repo and run by nobody. The count
+      # assertion is the point — a glob that matches nothing otherwise "passes".
+      - name: unit tests
+        run: |
+          shopt -s nullglob
+          tests=(apps/ai/test_*.py)
+          (( ${#tests[@]} >= 2 )) || { echo "::error::expected at least 2 apps/ai test files, found ${#tests[@]}"; exit 1; }
+          for t in "${tests[@]}"; do echo "== $t"; python3 "$t"; done
 
   # NO PR JOB BUILT ANY DOCKERFILE until this one. `docker-open.yml` triggers on `push: tags: v*` or
   # manual dispatch, so a base-image bump first executed AT RELEASE TIME — which is how #98 (python

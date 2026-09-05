@@ -59,6 +59,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The AI worker no longer reports failure every time it shuts down cleanly.** `TaskRunner`
+  subclasses `threading.Thread` and stored its stop flag as `self._stop` — but `Thread._stop` is a
+  real CPython method, which `join()` calls (through `_wait_for_tstate_lock`) the moment a thread has
+  finished. So the runners stopped exactly as designed, logged `stopped`, and then the join that
+  reaped them raised `TypeError: 'Event' object is not callable`. The worker exited 1 and systemd
+  marked the unit `failed` on every single `systemctl stop`, for as long as the code has existed.
+
+  The cost was diagnostic, not operational: a graceful shutdown was indistinguishable from a crash,
+  in a unit that also gets OOM-killed for real. Renamed to `_stop_event`; `stop()` and the pacing
+  sleep are unchanged. Found on the live box, tearing the stack down.
+
+  Reproduces on **Python 3.12 and earlier only** — CPython 3.13 removed `Thread._stop`, so on a newer
+  interpreter the shadowing is inert. The box runs 3.12. This is also why the guard cannot ask the
+  running interpreter what a `Thread` member is: asked on 3.13+, it finds nothing and reports success.
+
 - **A whitespace-padded camera id could create a self-link.** `POST /api/v1/movement/links` compared
   the raw `from_camera`/`to_camera` while the insert bound the trimmed values, so
   `{"from_camera":"cam_a","to_camera":" cam_a"}` stored the `cam_a → cam_a` link the guard forbids.
