@@ -1492,6 +1492,15 @@ pub const REQUIREMENTS: &[Requirement] = &[
         admin_only: true,
         scoping: Scoping::FleetOnly,
     },
+    // Names the credentials still posting ticketless AI ingest, which is a fleet-wide read of who
+    // is talking to this box — same gate as the posture report above.
+    Requirement {
+        path: "/api/v1/system/provenance-readiness",
+        method: "get",
+        capability: None,
+        admin_only: true,
+        scoping: Scoping::FleetOnly,
+    },
 ];
 
 /// Inject the security scheme and the per-operation requirements into a generated document.

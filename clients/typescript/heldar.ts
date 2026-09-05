@@ -1796,6 +1796,7 @@ export class HeldarClient {
     return this.call<unknown>("GET", `/api/v1/system/posture`);
   }
 
+  /** Requires admin, fleet-only. */
   getProvenanceReadiness(): Promise<unknown> {
     return this.call<unknown>("GET", `/api/v1/system/provenance-readiness`);
   }

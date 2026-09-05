@@ -777,6 +777,14 @@ async fn a_scoped_credential_cannot_reach_the_egress_surfaces() {
             "",
             "read the box's security posture",
         ),
+        // Names the credentials still posting ticketless AI ingest, so it is a fleet-wide read of
+        // who is talking to this box — same gate as the posture report above.
+        (
+            "GET",
+            "/api/v1/system/provenance-readiness",
+            "",
+            "read AI ingest provenance readiness",
+        ),
         (
             "PUT",
             "/api/v1/system/timezone",
