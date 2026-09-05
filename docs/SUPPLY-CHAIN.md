@@ -179,6 +179,27 @@ The vulnerable fixture pins four packages rather than one. Any single advisory c
 withdrawn; four carry roughly 48 between them. **If the self-test ever reports that fixture clean,
 the fixture has gone stale — add an older package, do not delete the check.**
 
+### Publishing requires a green security run for that exact commit
+
+`release.yml` and `docker-open.yml` both begin with a `security-gate` job
+(`.github/actions/require-security-run`), and every other job in them depends on it. Publishing is
+the irreversible step: a crates.io version can never be replaced, and an image tag — `latest`
+especially — is pulled by everyone who trusts it. Nothing previously connected that to the scan, so
+a tag could sit on a commit whose security run had failed or never finished.
+
+The lookup is **by commit SHA**. `security.yml` does not trigger on tag pushes (it runs on main
+pushes, PRs and the weekly cron), so the run being checked is the one from when that commit landed
+on main. Tagging a commit that never reached main therefore blocks, by design.
+
+The **most recent completed** run wins, deliberately: the weekly cron re-scans unchanged code, so a
+newly published advisory turns a previously-green commit red — and that must block a release rather
+than be overridden by an older success.
+
+The gate fails closed. No run found, an API error, an unrecognised `enforce` value — all block. A
+`workflow_dispatch` dry run reports without blocking; a real publish always enforces.
+`scripts/check_release_gated.py` requires every job in both workflows to reach the gate through
+`needs`, because detaching it is a one-line deletion that looks like nothing in a diff.
+
 ## Verifiable outputs: SBOMs, signatures and provenance
 
 Pinning answers "what did we build from". These answer "is this the thing we built", which a sha256

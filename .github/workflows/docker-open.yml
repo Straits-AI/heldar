@@ -35,7 +35,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Same reasoning as release.yml: a pushed image tag is pulled by whoever trusts it, and `latest`
+  # moves under everyone at once. A build-only dispatch reports without blocking.
+  security-gate:
+    name: security scan is green for this commit
+    if: github.repository == 'Straits-AI/heldar'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/require-security-run
+        with:
+          sha: ${{ github.sha }}
+          enforce: ${{ github.event_name == 'push' || inputs.push }}
+
   images:
+    needs: security-gate
     if: github.repository == 'Straits-AI/heldar'
     runs-on: ubuntu-latest
     strategy:

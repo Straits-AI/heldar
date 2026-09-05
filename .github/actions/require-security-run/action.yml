@@ -1,0 +1,117 @@
+name: Require a green security run
+description: >-
+  Refuse to publish unless the Security workflow has completed successfully for this exact commit.
+
+# Publishing is the irreversible step: a crate version cannot be replaced and an image tag is pulled
+# by whoever trusts it. Until now nothing connected the two — a tag could be pushed at a commit whose
+# security run had failed, or had never finished, and the release would go out regardless.
+#
+# The lookup is by SHA, not by branch or "latest run", because those answer a different question.
+# security.yml does NOT trigger on tag pushes (it runs on main pushes, PRs and a weekly cron), so the
+# run being checked is the one from when this commit landed on main.
+#
+# The most recent COMPLETED run wins, deliberately. The weekly cron re-scans unchanged code, so a
+# freshly-published advisory turns a previously-green commit red — and that must block a release, not
+# be overridden by an older success.
+
+inputs:
+  sha:
+    description: Commit to require a successful security run for.
+    required: true
+  workflow:
+    description: Workflow file to look up.
+    required: false
+    default: security.yml
+  timeout-minutes:
+    description: How long to wait for an in-progress run to finish before giving up.
+    required: false
+    default: "20"
+  enforce:
+    description: >-
+      Set false to report without failing (dry runs). Any other value enforces — a typo must not
+      silently disable the gate.
+    required: false
+    default: "true"
+
+outputs:
+  conclusion:
+    description: Conclusion of the run that was checked, or "none" when no run exists.
+    value: ${{ steps.check.outputs.conclusion }}
+
+runs:
+  using: composite
+  steps:
+    - id: check
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        REPO: ${{ github.repository }}
+        SHA: ${{ inputs.sha }}
+        WORKFLOW: ${{ inputs.workflow }}
+        TIMEOUT_MINUTES: ${{ inputs.timeout-minutes }}
+        ENFORCE: ${{ inputs.enforce }}
+      run: |
+        set -uo pipefail
+
+        # Fail closed. `enforce` is only disabled by the exact string "false"; anything else — a
+        # typo, an empty string from an unset expression — enforces.
+        if [ "$ENFORCE" = "false" ]; then
+          echo "::notice::security gate reporting only (enforce=false)"
+          enforcing=0
+        else
+          enforcing=1
+        fi
+
+        deadline=$(( $(date +%s) + TIMEOUT_MINUTES * 60 ))
+        api="repos/${REPO}/actions/workflows/${WORKFLOW}/runs?head_sha=${SHA}&per_page=100"
+
+        conclusion="none"
+        while :; do
+          # `|| true` so one flaky API call does not read as a failed security run.
+          runs=$(gh api "$api" --jq '[.workflow_runs[] | {status, conclusion, url: .html_url}]' 2>/dev/null || true)
+          [ -n "$runs" ] || runs="[]"
+
+          total=$(jq 'length' <<<"$runs")
+          pending=$(jq '[.[] | select(.status != "completed")] | length' <<<"$runs")
+          latest=$(jq -r '[.[] | select(.status == "completed")] | first | .conclusion // "none"' <<<"$runs")
+          link=$(jq -r '[.[] | select(.status == "completed")] | first | .url // ""' <<<"$runs")
+
+          if [ "$total" = "0" ]; then
+            echo "no ${WORKFLOW} run found for ${SHA} yet"
+          elif [ "$pending" != "0" ]; then
+            echo "${pending} ${WORKFLOW} run(s) still in progress for ${SHA}"
+          else
+            conclusion="$latest"
+            break
+          fi
+
+          if [ "$(date +%s)" -ge "$deadline" ]; then
+            conclusion="$latest"
+            echo "::warning::gave up waiting after ${TIMEOUT_MINUTES} minute(s)"
+            break
+          fi
+          sleep 30
+        done
+
+        echo "conclusion=${conclusion}" >> "$GITHUB_OUTPUT"
+
+        if [ "$conclusion" = "success" ]; then
+          echo "✓ ${WORKFLOW} succeeded for ${SHA}"
+          [ -n "$link" ] && echo "  $link"
+          exit 0
+        fi
+
+        if [ "$conclusion" = "none" ]; then
+          echo "::error::No completed ${WORKFLOW} run exists for ${SHA}, so this commit has never" \
+               "been security-scanned. security.yml does not run on tag pushes — tag a commit that" \
+               "has landed on main and been scanned there."
+        else
+          echo "::error::${WORKFLOW} concluded '${conclusion}' for ${SHA}. Publishing is" \
+               "irreversible: a crate version cannot be replaced and an image tag is pulled by" \
+               "whoever trusts it. Fix the finding and tag the fixed commit."
+          [ -n "$link" ] && echo "  $link"
+        fi
+
+        [ "$enforcing" -eq 1 ] && exit 1
+        echo "::notice::not enforcing — continuing despite '${conclusion}'"
+        exit 0

@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A release can no longer be published from a commit whose security scan failed.** Nothing
+  connected the two: `release.yml` and `docker-open.yml` triggered on a tag push, and the tag could
+  sit on any commit at all. Publishing is the irreversible step — a crates.io version can never be
+  replaced, and an image tag, `latest` above all, is pulled by everyone who trusts it.
+
+  Both workflows now begin with a `security-gate` job, and every other job depends on it. The lookup
+  is by commit SHA, since `security.yml` does not run on tag pushes — so what is checked is the run
+  from when that commit landed on main, and tagging a commit that never reached main blocks. The most
+  recent completed run wins: the weekly cron re-scans unchanged code, so a newly published advisory
+  turns a green commit red and must block a release rather than be overridden by an older success.
+
+  The gate fails closed — no run, an API error, or an unrecognised `enforce` value all block. A
+  `workflow_dispatch` dry run reports without blocking. Its decision logic is driven against a
+  stubbed API in CI rather than first executing during someone's release.
+
 - **The Trivy gate now proves it can fail.** `exit-code: "1"` was absent for a long stretch: the scan
   produced SARIF, findings piled up on the code-scanning dashboard, and every PR showed green. The
   flag is set now — but nothing demonstrated it was still set and still doing something, and a gate
