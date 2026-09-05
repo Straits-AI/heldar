@@ -83,6 +83,15 @@ pub struct BundlePlan {
     /// Segments in the window held against retention. An export does not change these; it is here
     /// so the operator can see the window is under hold.
     pub evidence_locked_segments: i64,
+    /// The single-bundle byte ceiling this export is measured against.
+    pub limit_bytes: u64,
+    /// Bytes already in the evidence directory, and its cumulative ceiling. Nothing sweeps bundles,
+    /// so this is the number that creeps up until an export starts failing.
+    pub dir_used_bytes: u64,
+    pub dir_limit_bytes: u64,
+    /// True when a real export would be REFUSED. A dry run exists to answer "will this work" before
+    /// committing, so it has to say no here rather than succeeding and letting the real call fail.
+    pub would_exceed_limits: bool,
 }
 
 /// A source segment as recorded, with the hash of the file the clip was built from.
@@ -186,6 +195,10 @@ pub async fn plan(
     // confirmation dialog, and hashing gigabytes to answer "how big is this" defeats that.
     let g = gather(st, camera_id, from, to, false).await?;
     let (detection_count, event_count, locked) = counts(st, camera_id, from, to).await?;
+    let source_bytes = source_bytes_of(&g.refs);
+    // Reported, not enforced, on the plan path: a dry run that refuses cannot show WHY, and the
+    // gaps and segment list are exactly what an operator needs in order to pick a smaller window.
+    let dir_used_bytes = crate::services::backup::dir_size_bytes(&st.cfg.evidence_dir).await;
     Ok(BundlePlan {
         camera_id: camera_id.to_string(),
         from,
@@ -193,11 +206,16 @@ pub async fn plan(
         requested_seconds: g.requested_seconds,
         covered_seconds: g.covered_seconds,
         gaps: g.gaps,
-        source_bytes: g.refs.iter().map(|r| r.size_bytes.max(0) as u64).sum(),
+        source_bytes,
         segments: g.refs,
         detection_count,
         event_count,
         evidence_locked_segments: locked,
+        limit_bytes: st.cfg.evidence_max_bytes,
+        dir_used_bytes,
+        dir_limit_bytes: st.cfg.evidence_dir_max_bytes,
+        would_exceed_limits: source_bytes > st.cfg.evidence_max_bytes
+            || dir_used_bytes.saturating_add(source_bytes) > st.cfg.evidence_dir_max_bytes,
     })
 }
 
@@ -235,6 +253,63 @@ async fn counts(
     Ok((d.0, e.0, l.0))
 }
 
+/// Upper bound on a bundle's media: the sum of its source segments. The clip is trimmed to the
+/// requested window, so the finished file is at most this and usually less. Bounding on the upper
+/// figure is the point — a limit that only bites after the work is done is not a limit.
+fn source_bytes_of(refs: &[SegmentRef]) -> u64 {
+    refs.iter().map(|r| r.size_bytes.max(0) as u64).sum()
+}
+
+/// One GiB of margin above the estimate, matching the archive path. The estimate is an upper bound
+/// on the MEDIA; the container, metadata and the staging copy all cost more.
+const DISK_HEADROOM_BYTES: u64 = 1024 * 1024 * 1024;
+
+/// Refuse an export that would not fit, before anything is written.
+///
+/// Three separate questions, because they fail for different reasons and an operator needs to know
+/// which: is this one bundle too big, is there room on the disk right now, and has the directory
+/// filled up with previous bundles? The last matters because nothing sweeps them — they are records
+/// of what left the appliance, and deleting one is an operator decision, so without a ceiling the
+/// directory grows forever on the recording disk.
+async fn check_size_limits(st: &AppState, source_bytes: u64) -> AppResult<()> {
+    if source_bytes > st.cfg.evidence_max_bytes {
+        return Err(AppError::BadRequest(format!(
+            "this window covers {source_bytes} bytes of source footage, over the \
+             {} byte single-bundle limit (HELDAR_EVIDENCE_MAX_BYTES) — export a shorter window, \
+             or raise the limit knowingly",
+            st.cfg.evidence_max_bytes
+        )));
+    }
+
+    tokio::fs::create_dir_all(&st.cfg.evidence_dir)
+        .await
+        .map_err(|e| AppError::Other(e.into()))?;
+
+    if let Some(stats) =
+        crate::services::storage::disk_stats_async(st.cfg.evidence_dir.clone()).await
+    {
+        let needed = source_bytes.saturating_add(DISK_HEADROOM_BYTES);
+        if stats.free_bytes < needed {
+            return Err(AppError::BadRequest(format!(
+                "not enough free disk for this bundle: need ~{needed} bytes, {} free. Refusing \
+                 rather than filling the disk the recorder writes to",
+                stats.free_bytes
+            )));
+        }
+    }
+
+    let used = crate::services::backup::dir_size_bytes(&st.cfg.evidence_dir).await;
+    if used.saturating_add(source_bytes) > st.cfg.evidence_dir_max_bytes {
+        return Err(AppError::BadRequest(format!(
+            "the evidence directory holds {used} bytes; this bundle would exceed the {} byte cap \
+             (HELDAR_EVIDENCE_DIR_MAX_BYTES). Nothing sweeps bundles automatically — they are \
+             records of what left the appliance — so remove ones you no longer need",
+            st.cfg.evidence_dir_max_bytes
+        )));
+    }
+    Ok(())
+}
+
 /// Build and sign a bundle. `audit_id` and `request_id` are recorded in the manifest so the bundle
 /// points back at the appliance's own trail.
 #[allow(clippy::too_many_arguments)]
@@ -263,8 +338,15 @@ pub async fn export(
         ));
     }
 
+    // Refuse before doing any work, not after filling the disk. Backups have had these three
+    // bounds since they were written; evidence export had NONE, and its output lands on the same
+    // filesystem as the recordings — so one request for a month-long window could drive the
+    // retention sweeper into evicting footage to make room for a copy of that same footage.
+    check_size_limits(st, source_bytes_of(&g.refs)).await?;
+
     // One media-job permit for the whole bundle, taken before any file is written, exactly as clip
-    // export does — a bundle is a heavier clip, not a lighter one.
+    // export does — a bundle is a heavier clip, not a lighter one. Note this bounds CONCURRENCY
+    // only: two permitted bundles can still be any size, which is why the byte checks above exist.
     let _permit = st.media_jobs.acquire("evidence_bundle").await?;
     // Hold the source segments for the duration: a retention sweep mid-build would produce a bundle
     // whose manifest hashes segments that no longer exist, which reads as tampering later.

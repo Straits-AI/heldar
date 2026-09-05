@@ -239,6 +239,19 @@ pub struct Config {
     /// (HTTP 400) when it would push the directory over this, so accumulated exports can't fill the
     /// recordings filesystem and drive the retention sweeper into evicting live recordings.
     pub archive_dir_max_bytes: u64,
+    /// Largest single evidence bundle, by the sum of its source segments (`HELDAR_EVIDENCE_MAX_BYTES`).
+    ///
+    /// Evidence bundles land in `evidence_dir`, which defaults to a subdirectory of `data_dir` — the
+    /// same filesystem the recordings are on. Backups have had this bound since they were written;
+    /// evidence exports had none at all, so one request for a month-long window could fill the disk
+    /// the recorder needs and drive the retention sweeper into evicting footage to make room for a
+    /// copy of that same footage.
+    pub evidence_max_bytes: u64,
+    /// Cumulative cap on `evidence_dir` (`HELDAR_EVIDENCE_DIR_MAX_BYTES`).
+    ///
+    /// Nothing sweeps bundles: they are records of what left the appliance, and deleting them is an
+    /// operator decision. Without a ceiling that means unbounded growth on the recording disk.
+    pub evidence_dir_max_bytes: u64,
     /// How long archive exports + finished backup-job rows are kept before retention prunes them.
     pub archive_retention_hours: i64,
     // ---- ONVIF (kernel platform feature; Profile S MVP) ----
@@ -868,6 +881,11 @@ impl Config {
             archive_dir,
             archive_max_bytes: parse_or("HELDAR_ARCHIVE_MAX_BYTES", 10_737_418_240u64),
             archive_dir_max_bytes: parse_or("HELDAR_ARCHIVE_DIR_MAX_BYTES", 53_687_091_200u64),
+            // Deliberately smaller than the archive defaults. An evidence bundle is a targeted
+            // export around one incident, not a bulk copy, and a 5 GiB single bundle already covers
+            // many hours. Raise it knowingly rather than discover the ceiling was never there.
+            evidence_max_bytes: parse_or("HELDAR_EVIDENCE_MAX_BYTES", 5_368_709_120u64),
+            evidence_dir_max_bytes: parse_or("HELDAR_EVIDENCE_DIR_MAX_BYTES", 21_474_836_480u64),
             archive_retention_hours: parse_or("HELDAR_ARCHIVE_RETENTION_HOURS", 48),
             onvif_discovery_timeout_ms: parse_or("HELDAR_ONVIF_DISCOVERY_TIMEOUT_MS", 2000),
             onvif_request_timeout_ms: parse_or("HELDAR_ONVIF_REQUEST_TIMEOUT_MS", 5000),

@@ -219,9 +219,41 @@ an HSM or external secret provider.
 someone a few minutes of footage. It is not evidence: nothing about the resulting MP4 is verifiable
 once it leaves the box. Use a bundle whenever the file may need to be defended later.
 
+## Size limits
+
+An export is refused before anything is written if it would not fit. Three separate checks, because
+they fail for different reasons and an operator needs to know which:
+
+| check | knob | default |
+| --- | --- | --- |
+| this one bundle is too large | `HELDAR_EVIDENCE_MAX_BYTES` | 5 GiB |
+| not enough free disk right now | — (estimate + 1 GiB margin) | — |
+| the directory has filled up | `HELDAR_EVIDENCE_DIR_MAX_BYTES` | 20 GiB |
+
+The size is measured on the **sum of the source segments**, which is an upper bound: the clip is
+trimmed to the requested window, so the finished bundle is at most that and usually less. Bounding on
+the upper figure is the point — a limit that only bites once the work is done is not a limit.
+
+This matters because `evidence_dir` defaults to a subdirectory of `data_dir`, **the same filesystem
+the recordings are on**. Without a ceiling, one request for a month-long window fills the disk the
+recorder writes to, and the retention sweeper responds by evicting footage to make room for a copy of
+that same footage. The archive path has had these bounds since it was written; evidence export had
+none, and `media_jobs` bounds only *concurrency* — two permitted bundles can still be any size.
+
+A dry run reports `limit_bytes`, `dir_used_bytes`, `dir_limit_bytes` and `would_exceed_limits`, so
+the answer to "will this work" arrives before you commit. The plan still returns its gaps and segment
+list when it would be refused: those are what let you choose a smaller window, and hiding them would
+leave you guessing.
+
 ## Retention
 
 Bundles live in `$HELDAR_EVIDENCE_DIR` (default `$HELDAR_DATA_DIR/evidence`) and are indexed in the
 `evidence_bundles` table so `GET /api/v1/evidence/exports` can list what has left the appliance. The
 bundle itself is self-contained and verifiable without that table — the index is a record of
 exports, not the evidence.
+
+**Nothing sweeps bundles automatically.** They are records of what left the appliance, so removing
+one is an operator decision, not a housekeeping job the box should take on its own. That is why the
+directory cap above exists: without it, "nothing deletes them" and "they share the recording disk"
+combine into a disk that fills up. When the cap bites, the refusal says so rather than leaving you to
+work out why exports started failing.
