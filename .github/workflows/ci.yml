@@ -291,12 +291,20 @@ jobs:
         if: steps.changed.outputs.run == 'true'
         run: |
           set -uo pipefail
+          # Suppressions come from the register and nowhere else, so every silenced advisory has an
+          # owner, a follow-up issue and an expiry that fails CI once it passes.
+          python3 scripts/check_security_exceptions.py --ignore-ids --ecosystem container \
+            > "$PWD/.trivyignore"
+          echo "suppressing $(wc -l < "$PWD/.trivyignore" | tr -d ' ') accepted advisory/advisories"
+
           failed=()
           for image in heldar-ai:ci heldar-web:ci; do
             echo "::group::trivy $image"
             # Same policy as the release scan: HIGH/CRITICAL, fixed only, blocking.
             docker run --rm -v /var/run/docker.sock:/var/run/docker.sock \
+              -v "$PWD/.trivyignore:/.trivyignore:ro" \
               aquasec/trivy:0.70.0 image --severity HIGH,CRITICAL --ignore-unfixed \
+              --ignorefile /.trivyignore \
               --exit-code 1 --scanners vuln --quiet "$image" || failed+=("$image")
             echo "::endgroup::"
           done

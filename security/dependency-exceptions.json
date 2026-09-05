@@ -11,16 +11,94 @@
     "rare and short-lived. Add one only when the finding cannot be fixed by an upgrade.",
     "",
     "Fields, all required:",
-    "  id            advisory identifier — GHSA-*, CVE-*, PYSEC-*, RUSTSEC-* or a Trivy id",
+    "  id            advisory identifier \u2014 GHSA-*, CVE-*, PYSEC-*, RUSTSEC-* or a Trivy id",
     "  ecosystem     pip | npm | cargo | container",
     "  component     the package the advisory is against, with the version in use",
     "  reachable     true if OUR code can reach the vulnerable path; false with justification in",
-    "                'reason'. Never guess — if unknown, say so and treat it as reachable.",
+    "                'reason'. Never guess \u2014 if unknown, say so and treat it as reachable.",
     "  reason        why this is being accepted rather than fixed",
     "  control       the compensating control that makes the residual risk acceptable",
     "  owner         GitHub handle accountable for retiring it",
     "  expires       ISO date (YYYY-MM-DD). CI fails from this date onward.",
     "  issue         URL of the follow-up issue tracking the real fix"
   ],
-  "exceptions": []
+  "exceptions": [
+    {
+      "id": "CVE-2026-53612",
+      "ecosystem": "container",
+      "component": "util-linux 2.42.1-r0 (nginx:1.31.5-alpine, Alpine 3.24.1) in heldar-web",
+      "reachable": false,
+      "reason": "No fixed version exists on Alpine 3.24, which every published nginx alpine tag is built on; 2.42.3-r0 is in edge only, and `apk upgrade` in the Dockerfile already takes everything 3.24 offers. The advisory is in privileged mount tooling (mount/nsenter/libmount); the image serves static files under nginx's stock entrypoint and never invokes any of it.",
+      "control": "Container runs unprivileged with no mount capability, so the vulnerable paths are not reachable. Image is digest-pinned and rebuilt with `apk upgrade` on every build, so the fix lands automatically if Alpine backports it to 3.24.",
+      "owner": "wms2537",
+      "expires": "2026-12-04",
+      "issue": "https://github.com/Straits-AI/heldar/issues/207"
+    },
+    {
+      "id": "CVE-2026-53613",
+      "ecosystem": "container",
+      "component": "util-linux 2.42.1-r0 (nginx:1.31.5-alpine, Alpine 3.24.1) in heldar-web",
+      "reachable": false,
+      "reason": "No fixed version exists on Alpine 3.24, which every published nginx alpine tag is built on; 2.42.3-r0 is in edge only, and `apk upgrade` in the Dockerfile already takes everything 3.24 offers. The advisory is in privileged mount tooling (mount/nsenter/libmount); the image serves static files under nginx's stock entrypoint and never invokes any of it.",
+      "control": "Container runs unprivileged with no mount capability, so the vulnerable paths are not reachable. Image is digest-pinned and rebuilt with `apk upgrade` on every build, so the fix lands automatically if Alpine backports it to 3.24.",
+      "owner": "wms2537",
+      "expires": "2026-12-04",
+      "issue": "https://github.com/Straits-AI/heldar/issues/207"
+    },
+    {
+      "id": "CVE-2026-53614",
+      "ecosystem": "container",
+      "component": "util-linux 2.42.1-r0 (nginx:1.31.5-alpine, Alpine 3.24.1) in heldar-web",
+      "reachable": false,
+      "reason": "No fixed version exists on Alpine 3.24, which every published nginx alpine tag is built on; 2.42.3-r0 is in edge only, and `apk upgrade` in the Dockerfile already takes everything 3.24 offers. The advisory is in privileged mount tooling (mount/nsenter/libmount); the image serves static files under nginx's stock entrypoint and never invokes any of it.",
+      "control": "Container runs unprivileged with no mount capability, so the vulnerable paths are not reachable. Image is digest-pinned and rebuilt with `apk upgrade` on every build, so the fix lands automatically if Alpine backports it to 3.24.",
+      "owner": "wms2537",
+      "expires": "2026-12-04",
+      "issue": "https://github.com/Straits-AI/heldar/issues/207"
+    },
+    {
+      "id": "CVE-2026-76642",
+      "ecosystem": "container",
+      "component": "util-linux 2.42.1-r0 (nginx:1.31.5-alpine, Alpine 3.24.1) in heldar-web",
+      "reachable": false,
+      "reason": "No fixed version exists on Alpine 3.24, which every published nginx alpine tag is built on; 2.42.3-r0 is in edge only, and `apk upgrade` in the Dockerfile already takes everything 3.24 offers. The advisory is in privileged mount tooling (mount/nsenter/libmount); the image serves static files under nginx's stock entrypoint and never invokes any of it.",
+      "control": "Container runs unprivileged with no mount capability, so the vulnerable paths are not reachable. Image is digest-pinned and rebuilt with `apk upgrade` on every build, so the fix lands automatically if Alpine backports it to 3.24.",
+      "owner": "wms2537",
+      "expires": "2026-12-04",
+      "issue": "https://github.com/Straits-AI/heldar/issues/207"
+    },
+    {
+      "id": "CVE-2026-78408",
+      "ecosystem": "container",
+      "component": "util-linux 2.42.1-r0 (nginx:1.31.5-alpine, Alpine 3.24.1) in heldar-web",
+      "reachable": false,
+      "reason": "No fixed version exists on Alpine 3.24, which every published nginx alpine tag is built on; 2.42.3-r0 is in edge only, and `apk upgrade` in the Dockerfile already takes everything 3.24 offers. The advisory is in privileged mount tooling (mount/nsenter/libmount); the image serves static files under nginx's stock entrypoint and never invokes any of it.",
+      "control": "Container runs unprivileged with no mount capability, so the vulnerable paths are not reachable. Image is digest-pinned and rebuilt with `apk upgrade` on every build, so the fix lands automatically if Alpine backports it to 3.24.",
+      "owner": "wms2537",
+      "expires": "2026-12-04",
+      "issue": "https://github.com/Straits-AI/heldar/issues/207"
+    },
+    {
+      "id": "CVE-2026-78409",
+      "ecosystem": "container",
+      "component": "util-linux 2.42.1-r0 (nginx:1.31.5-alpine, Alpine 3.24.1) in heldar-web",
+      "reachable": false,
+      "reason": "No fixed version exists on Alpine 3.24, which every published nginx alpine tag is built on; 2.42.3-r0 is in edge only, and `apk upgrade` in the Dockerfile already takes everything 3.24 offers. The advisory is in privileged mount tooling (mount/nsenter/libmount); the image serves static files under nginx's stock entrypoint and never invokes any of it.",
+      "control": "Container runs unprivileged with no mount capability, so the vulnerable paths are not reachable. Image is digest-pinned and rebuilt with `apk upgrade` on every build, so the fix lands automatically if Alpine backports it to 3.24.",
+      "owner": "wms2537",
+      "expires": "2026-12-04",
+      "issue": "https://github.com/Straits-AI/heldar/issues/207"
+    },
+    {
+      "id": "CVE-2026-78410",
+      "ecosystem": "container",
+      "component": "util-linux 2.42.1-r0 (nginx:1.31.5-alpine, Alpine 3.24.1) in heldar-web",
+      "reachable": false,
+      "reason": "No fixed version exists on Alpine 3.24, which every published nginx alpine tag is built on; 2.42.3-r0 is in edge only, and `apk upgrade` in the Dockerfile already takes everything 3.24 offers. The advisory is in privileged mount tooling (mount/nsenter/libmount); the image serves static files under nginx's stock entrypoint and never invokes any of it.",
+      "control": "Container runs unprivileged with no mount capability, so the vulnerable paths are not reachable. Image is digest-pinned and rebuilt with `apk upgrade` on every build, so the fix lands automatically if Alpine backports it to 3.24.",
+      "owner": "wms2537",
+      "expires": "2026-12-04",
+      "issue": "https://github.com/Straits-AI/heldar/issues/207"
+    }
+  ]
 }

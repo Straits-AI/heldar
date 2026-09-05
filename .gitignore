@@ -64,3 +64,4 @@ infra/caddy/*.tar.gz
 # identity that signs its evidence bundles (#118).
 *.pkcs8
 evidence-signing-key*
+.trivyignore   # generated in CI from security/dependency-exceptions.json

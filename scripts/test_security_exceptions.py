@@ -120,19 +120,22 @@ def the_audits_take_their_suppressions_from_the_register():
     That is the exact failure the register exists to prevent, so the register must be the ONLY
     place an advisory id appears in the security workflow.
     """
-    wf_path = Path(__file__).resolve().parent.parent / ".github/workflows/security.yml"
-    wf = wf_path.read_text()
+    wfdir = Path(__file__).resolve().parent.parent / ".github/workflows"
 
-    assert "check_security_exceptions.py --ignore-ids" in wf, (
+    assert "check_security_exceptions.py --ignore-ids" in (wfdir / "security.yml").read_text(), (
         "security.yml does not take its suppression list from the register"
     )
 
+    # EVERY workflow, not just security.yml: the image scans in ci.yml and docker-open.yml suppress
+    # advisories too, and a literal id hardcoded in either would be just as ownerless and unexpiring.
     literal = re.compile(r"\b(GHSA-[0-9a-z-]{5,}|CVE-\d{4}-\d{4,}|PYSEC-\d{4}-\d+)\b")
-    for lineno, line in enumerate(wf.splitlines(), 1):
-        if (hit := literal.search(line)) and not line.lstrip().startswith("#"):
-            raise AssertionError(
-                f"security.yml:{lineno} suppresses {hit.group()} outside the register: {line.strip()!r}"
-            )
+    for wf_path in sorted(wfdir.glob("*.yml")):
+        for lineno, line in enumerate(wf_path.read_text().splitlines(), 1):
+            if (hit := literal.search(line)) and not line.lstrip().startswith("#"):
+                raise AssertionError(
+                    f"{wf_path.name}:{lineno} suppresses {hit.group()} outside the register: "
+                    f"{line.strip()!r}"
+                )
 
 
 def unfixed_findings_are_ignored_only_where_that_is_documented():

@@ -108,6 +108,14 @@ jobs:
           tags: ${{ matrix.name }}:scan
           cache-from: type=gha
           cache-to: type=gha,mode=max
+      # Accepted advisories come from the register — with an owner, a follow-up issue and an
+      # expiry that fails CI once it passes — never from a flag hardcoded in this file.
+      - name: Collect accepted advisories
+        run: |
+          set -euo pipefail
+          python3 scripts/check_security_exceptions.py --ignore-ids --ecosystem container > .trivyignore
+          echo "suppressing $(wc -l < .trivyignore | tr -d ' ') accepted advisory/advisories"
+
       - name: Scan the image about to be published
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -117,6 +125,7 @@ jobs:
           output: trivy-image-${{ matrix.name }}.sarif
           severity: HIGH,CRITICAL
           ignore-unfixed: true
+          trivyignores: .trivyignore
           # Blocking, and deliberately before the push step below: a failure here means nothing was
           # published, rather than a report about something that already was.
           exit-code: "1"
