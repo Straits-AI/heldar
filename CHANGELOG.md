@@ -288,6 +288,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **A lost response followed by a retry is now proven to leave exactly one side effect** (#121), on a
+  real route rather than a fake handler. The existing tests exercise the idempotency layer with a
+  counting stub, which proves the layer dedupes — not that it is *mounted* where it matters. Its
+  position inside the auth floor is load-bearing (a key is scoped to the principal the floor
+  resolves), and nothing outside `build_app` asserted the arrangement survives. A middleware that is
+  correct and unreachable looks exactly like one that works.
+
+  `POST /api/v1/webhooks` is the endpoint because it mints a fresh id per call, so an identical body
+  genuinely creates two rows. An endpoint with a natural key would collide on the second insert and
+  leave one row whether the layer worked or not — passing for the wrong reason. Three of the five
+  tests exist to stop exactly that: a different key *must* create a second row, no key at all *must*
+  create a second row, and two credentials sharing a key string *must not* share a result.
+
 - **`heldar-movement` is driven end to end** (`crates/heldar-server/tests/movement_scope_e2e.rs`):
   every route, against credentials minted through the real `POST /api/v1/api-keys` — unscoped, scoped
   to both ends of a link, to one end, and to neither — asserting no cross-camera read or act and no
