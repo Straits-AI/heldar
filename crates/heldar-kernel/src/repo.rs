@@ -155,9 +155,15 @@ pub async fn log_event(
     payload: Value,
 ) -> sqlx::Result<()> {
     let now = Utc::now();
+    // Captured here rather than threaded through 31 call sites, each of which would be a place to
+    // pass the wrong thing. The task-local is set by the request middleware and does NOT cross
+    // `tokio::spawn`, so a background emitter — a camera going offline, a disk warning, a retention
+    // sweep — records NULL. That is the correct answer, not a gap: it says the box did this by
+    // itself rather than naming whichever request happened to be in flight at the time.
+    let request_id = crate::request_id::current();
     sqlx::query(
-        "INSERT INTO events (id, camera_id, site_id, event_type, severity, timestamp, payload, created_at)
-         VALUES (?, ?, NULL, ?, ?, ?, ?, ?)",
+        "INSERT INTO events (id, camera_id, site_id, event_type, severity, timestamp, payload, created_at, request_id)
+         VALUES (?, ?, NULL, ?, ?, ?, ?, ?, ?)",
     )
     .bind(Uuid::new_v4().to_string())
     .bind(camera_id)
@@ -166,6 +172,7 @@ pub async fn log_event(
     .bind(now)
     .bind(Json(payload))
     .bind(now)
+    .bind(request_id)
     .execute(pool)
     .await?;
     Ok(())
@@ -254,4 +261,152 @@ pub async fn set_evidence_locked(
     .execute(pool)
     .await?;
     Ok(res.rows_affected())
+}
+
+/// An event has to say whether an operator caused it, or the box noticed it by itself.
+#[cfg(test)]
+mod event_correlation_tests {
+    use super::*;
+
+    async fn pool() -> SqlitePool {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        pool
+    }
+
+    async fn last_request_id(pool: &SqlitePool) -> Option<String> {
+        sqlx::query_scalar("SELECT request_id FROM events ORDER BY rowid DESC LIMIT 1")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// The point of the column: an operator holding a request id from a bug report can find what the
+    /// box EMITTED, not only what it recorded doing.
+    #[tokio::test]
+    async fn an_event_emitted_inside_a_request_carries_its_id() {
+        let pool = pool().await;
+        crate::request_id::CURRENT
+            .scope("req_abc123".to_string(), async {
+                log_event(
+                    &pool,
+                    Some("cam_a"),
+                    "camera_online",
+                    "info",
+                    serde_json::json!({}),
+                )
+                .await
+                .unwrap();
+            })
+            .await;
+        assert_eq!(last_request_id(&pool).await.as_deref(), Some("req_abc123"));
+    }
+
+    /// NULL is the ANSWER here, not a gap. A camera going offline, a disk warning and a retention
+    /// sweep are things the box noticed on its own; naming whichever request happened to be in
+    /// flight would be worse than saying nothing.
+    #[tokio::test]
+    async fn an_event_emitted_outside_a_request_records_null() {
+        let pool = pool().await;
+        log_event(
+            &pool,
+            Some("cam_a"),
+            "camera_offline",
+            "warning",
+            serde_json::json!({}),
+        )
+        .await
+        .unwrap();
+        assert_eq!(last_request_id(&pool).await, None);
+    }
+
+    /// The task-local deliberately does not cross `tokio::spawn` (see request_id.rs). A detached
+    /// background job must therefore record NULL even when a request is in flight — otherwise a
+    /// sweep triggered while somebody happened to be browsing would be attributed to them.
+    #[tokio::test]
+    async fn a_spawned_task_does_not_inherit_the_callers_id() {
+        let pool = pool().await;
+        crate::request_id::CURRENT
+            .scope("req_inflight".to_string(), async {
+                let p = pool.clone();
+                tokio::spawn(async move {
+                    log_event(&p, None, "retention_delete", "info", serde_json::json!({}))
+                        .await
+                        .unwrap();
+                })
+                .await
+                .unwrap();
+            })
+            .await;
+        assert_eq!(
+            last_request_id(&pool).await,
+            None,
+            "a detached task inherited a request id it was not part of"
+        );
+    }
+
+    /// Webhook deliveries get this for free rather than keeping a third copy of the id: the ledger
+    /// already points at the event, so "which request caused this webhook to fire" is a join.
+    #[tokio::test]
+    async fn a_webhook_delivery_reaches_the_request_through_its_event() {
+        let pool = pool().await;
+        crate::request_id::CURRENT
+            .scope("req_join".to_string(), async {
+                log_event(
+                    &pool,
+                    Some("cam_a"),
+                    "object_detected",
+                    "info",
+                    serde_json::json!({}),
+                )
+                .await
+                .unwrap();
+            })
+            .await;
+        let event_id: String =
+            sqlx::query_scalar("SELECT id FROM events ORDER BY rowid DESC LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+
+        sqlx::query(
+            "INSERT INTO webhook_subscriptions (id, name, url, event_types, enabled,
+                                                created_at, updated_at)
+             VALUES ('sub_a', 'test', 'https://example.invalid/h', '[]', 1, ?, ?)",
+        )
+        .bind(Utc::now())
+        .bind(Utc::now())
+        .execute(&pool)
+        .await
+        .unwrap();
+        crate::services::webhooks::record_delivery(
+            &pool,
+            "del_a",
+            "sub_a",
+            Some(&event_id),
+            Some("object_detected"),
+            true,
+            1,
+            Some(200),
+            None,
+        )
+        .await;
+
+        let joined: Option<String> = sqlx::query_scalar(
+            "SELECT e.request_id FROM webhook_deliveries d JOIN events e ON e.id = d.event_id
+              WHERE d.id = 'del_a'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            joined.as_deref(),
+            Some("req_join"),
+            "a delivery could not be traced back to the request that caused its event"
+        );
+    }
 }

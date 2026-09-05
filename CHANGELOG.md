@@ -211,6 +211,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **An event now records the request that caused it** (part of #121). Migration 0020 joined
+  `audit_log` to its request; events were the other half of the same question and were left out, so
+  the chain broke at the interesting point — an operator holding a request id could see what the box
+  recorded doing, but not what it *emitted*, which is what alerting, the dashboard timeline and every
+  webhook subscriber actually consume.
+
+  Captured centrally in `repo::log_event` rather than threaded through its 31 call sites, each of
+  which would be a place to pass the wrong thing. Webhook deliveries reach it by join —
+  `webhook_deliveries.event_id` already points at the event — rather than keeping a third copy of the
+  same id in sync by hand.
+
+  **NULL is an answer, not a gap.** The task-local deliberately does not cross `tokio::spawn`, so a
+  camera going offline, a disk warning or a retention sweep records NULL. A non-NULL row means an
+  operator or an integration asked for this; a NULL row means the box did it by itself. There is a
+  test asserting a spawned task does *not* inherit the id of a request that happened to be in flight.
+
 - **The AI worker no longer reports failure every time it shuts down cleanly.** `TaskRunner`
   subclasses `threading.Thread` and stored its stop flag as `self._stop` — but `Thread._stop` is a
   real CPython method, which `join()` calls (through `_wait_for_tstate_lock`) the moment a thread has
