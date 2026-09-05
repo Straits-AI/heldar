@@ -234,6 +234,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A backup job now records the request that started it** (#121), completing the correlation chain
+  begun for `audit_log` (0020) and events (0021). Jobs are the one an operator is most likely to ask
+  about, because a transfer is long-lived and side-effectful and outlives the call that asked for it.
+  `created_by` already recorded *which credential* ordered it, so revocation can bite mid-flight; this
+  records *which call*, so the job joins to its audit row and the events it emitted.
+
+  NULL is meaningful on both paths rather than a gap: a policy job is created by the scheduler, which
+  serves no request, and an on-demand archive runs inline inside its own request
+  (`create_archive` is awaited by its caller, never spawned) and so records the id. A non-NULL row was
+  asked for by somebody; a NULL row was the schedule doing its job.
+
 - **An evidence export can no longer fill the disk the recorder writes to** (#118). The archive path
   has had three bounds since it was written — per-export size, free disk, and a cumulative directory
   cap — and its comment says why: the output lands on the recordings filesystem, so an unbounded
