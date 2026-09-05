@@ -293,6 +293,19 @@ real worker was about to use used to make its genuine detection a silent no-op.
 > `machine_auth_promoted_by_mode` — which is `true` for a production deployment
 > mode and applies to `machine_auth` only).
 
+> **Asking the box instead of grepping logs.** `GET /api/v1/system/provenance-readiness`
+> answers "would `enforce` break anything here?" directly — the effective tier, a verdict, and the
+> credentials, cameras and task types still posting ticketless, with when one last did. It is
+> deliberately conservative in three ways, because a readiness report that overstates itself is what
+> gets `enforce` set on a fleet that then stops detecting:
+>
+> * under `off` the verdict is `unknown`, never ready — that tier records nothing, so an empty list
+>   is not evidence of anything;
+> * `notice_count` counts hourly **notices**, not batches, because the emitter is rate-limited to
+>   one per credential per hour — a thousand ticketless batches from one credential appear once;
+> * total silence reports `likely_ready`, not `ready`. A fleet that all mints tickets and a fleet
+>   that has stopped posting entirely look identical from here, and the endpoint says so.
+
 The attribute rewrite, the reserved-event denylist and the severity clamp are
 **unconditional in every tier**, including auth-off — no legitimate client ever
 depended on asserting them. Only the *ticket requirement* is staged.

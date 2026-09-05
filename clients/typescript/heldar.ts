@@ -1796,6 +1796,10 @@ export class HeldarClient {
     return this.call<unknown>("GET", `/api/v1/system/posture`);
   }
 
+  getProvenanceReadiness(): Promise<unknown> {
+    return this.call<unknown>("GET", `/api/v1/system/provenance-readiness`);
+  }
+
   /** Requires capability `system:read`, scope-neutral. */
   getRetentionLimits(): Promise<RetentionLimits> {
     return this.call<RetentionLimits>("GET", `/api/v1/system/retention`);

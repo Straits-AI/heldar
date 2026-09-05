@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The frame-ticket policy is now enforced by tests, not just described in seven places.**
+  `HELDAR_DEPLOYMENT_MODE=production*` promotes `HELDAR_MACHINE_AUTH` and deliberately does **not**
+  promote `HELDAR_INGEST_PROVENANCE` — a client-protocol requirement that 401s every worker not yet
+  minting tickets. That asymmetry is stated in `config.rs`, `README.md`, `docs/AI-WORKERS.md`, ADR
+  0005, `compose.prod.yml`, `.env.production.example` and this file, and was enforced by a single
+  literal `false` with nothing testing it. Changing it to `mode_is_production` is a three-word edit
+  that makes all seven wrong at once and takes AI ingest down on every production deployment.
+  `config::promotion_policy_tests` now pins the behaviour and
+  `scripts/check_provenance_policy.py` pins the prose — issue #117 was filed precisely because the
+  two had already drifted apart once.
+
+- **`GET /api/v1/system/provenance-readiness`** answers "can this box turn on `enforce` without
+  401ing its own workers?" without an operator grepping logs across a fleet. It reports the effective
+  tier, a verdict, and which credentials, cameras and task types are still posting ticketless. It is
+  conservative on purpose: under `off` the verdict is `unknown` rather than ready, since that tier
+  records nothing and an empty list from a list nobody writes to is not evidence; the count is of
+  hourly notices rather than batches, because the emitter is rate-limited per credential per hour;
+  and total silence reports `likely_ready`, since a fleet that all mints tickets and one that has
+  stopped posting look identical from here. Ticketless-ingest events now also record `task_type`, so
+  the report names what to upgrade rather than only which credential.
+
 - **The hardened container profile is now verified rather than assumed, and every service reports
   health.** `deploy/compose.hardened.yml` was booted and checked by hand once; nothing re-checked it
   afterwards. Container hardening rots in a way that looks like nothing — a capability added back to

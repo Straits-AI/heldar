@@ -1749,6 +1749,9 @@ class HeldarClient:
         """Requires admin, fleet-only."""
         return self._call('GET', f'/api/v1/system/posture')
 
+    def get_provenance_readiness(self) -> Any:
+        return self._call('GET', f'/api/v1/system/provenance-readiness')
+
     def get_retention_limits(self) -> Any:
         """Requires capability `system:read`, scope-neutral."""
         return self._call('GET', f'/api/v1/system/retention')

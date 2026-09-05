@@ -120,6 +120,7 @@ pub const API_VERSION: &str = "0.1.0";
         crate::routes::evidence::get_one,
         crate::routes::evidence::signing_key,
         crate::routes::system::get_posture,
+        crate::routes::system::get_provenance_readiness,
         crate::routes::system::get_timezone,
         crate::routes::system::put_timezone,
         crate::routes::sites::list,

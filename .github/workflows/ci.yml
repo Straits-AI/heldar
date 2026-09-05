@@ -125,6 +125,12 @@ jobs:
           # crash, a service that gains a writable path — the stack keeps working, which is exactly
           # why nobody notices.
           python3 scripts/test_hardened_profile.py
+          # Seven documents state that HELDAR_DEPLOYMENT_MODE never turns on frame tickets, and one
+          # literal in config.rs enforces it. #117 was filed because those two had already drifted:
+          # the README claimed the opposite of the code. The behaviour is pinned by
+          # config::promotion_policy_tests; this pins the prose.
+          python3 scripts/test_provenance_policy.py
+          python3 scripts/check_provenance_policy.py
       - name: the hardened profile still hardens
         # Reads a RENDERED config rather than the overlay files: re-implementing Compose's merge
         # semantics would mean auditing a posture Compose might not actually produce. `config`

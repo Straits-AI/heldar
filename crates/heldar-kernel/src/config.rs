@@ -1325,3 +1325,151 @@ mod guardrail_tests {
         assert!(!bind_is_loopback(""), "empty string");
     }
 }
+
+/// The one policy that seven documents describe and one literal enforces.
+///
+/// `HELDAR_DEPLOYMENT_MODE=production*` promotes `HELDAR_MACHINE_AUTH` to `enforce` and deliberately
+/// does NOT promote `HELDAR_INGEST_PROVENANCE`. That asymmetry is the whole of issue #117: machine
+/// auth is a server-side narrowing that changes no client protocol, while requiring a frame ticket
+/// rejects every worker that does not yet mint one — third-party, not-yet-upgraded, or simply
+/// someone else's. Inferring it from a deployment label would mean an operator who followed the
+/// hardening advice silently loses ALL AI ingest while recording, health and the dashboard keep
+/// looking perfectly fine.
+///
+/// That policy is stated in `config.rs`, `README.md`, `docs/AI-WORKERS.md`, ADR 0005,
+/// `deploy/compose.prod.yml`, `.env.production.example` and the CHANGELOG — and enforced by the
+/// single literal `false` passed to `tier_from_env`. Changing it to `mode_is_production` is a
+/// three-word edit that makes all seven wrong at once and takes AI ingest down on every production
+/// deployment. Until these tests there was nothing between that edit and a release; the issue was
+/// filed *because* the documents had already drifted apart once.
+#[cfg(test)]
+mod promotion_policy_tests {
+    use super::*;
+
+    /// The environment is process-global, so these run under one lock rather than in parallel.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Sets env vars and removes exactly those again on drop, so one test cannot leak into another.
+    struct Env(Vec<&'static str>);
+    impl Env {
+        fn new() -> Self {
+            // Clear both tiers first: the developer running the suite may have either one exported.
+            for k in [
+                "HELDAR_MACHINE_AUTH",
+                "HELDAR_INGEST_PROVENANCE",
+                "HELDAR_DEPLOYMENT_MODE",
+            ] {
+                std::env::remove_var(k);
+            }
+            Env(Vec::new())
+        }
+        fn set(mut self, k: &'static str, v: &str) -> Self {
+            std::env::set_var(k, v);
+            self.0.push(k);
+            self
+        }
+    }
+    impl Drop for Env {
+        fn drop(&mut self) {
+            for k in &self.0 {
+                std::env::remove_var(k);
+            }
+        }
+    }
+
+    #[test]
+    fn production_mode_promotes_machine_auth_but_never_frame_tickets() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for mode in ["production", "production-lan", "production-exposed"] {
+            let _e = Env::new().set("HELDAR_DEPLOYMENT_MODE", mode);
+            let cfg = Config::from_env();
+
+            assert_eq!(
+                cfg.machine_auth,
+                EnforcementTier::Enforce,
+                "{mode} must promote HELDAR_MACHINE_AUTH — it is a server-side narrowing"
+            );
+            assert_eq!(
+                cfg.ingest_provenance,
+                EnforcementTier::Warn,
+                "{mode} must NOT promote HELDAR_INGEST_PROVENANCE. Requiring a frame ticket is a \
+                 CLIENT protocol change: it 401s every worker that does not yet mint one, so an \
+                 operator who hardened the deployment mode would silently lose all AI ingest with \
+                 a healthy-looking box. Seven documents say this does not happen."
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_setting_wins_over_the_deployment_mode_in_both_directions() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+        // The only way to require tickets is to say so.
+        {
+            let _e = Env::new()
+                .set("HELDAR_DEPLOYMENT_MODE", "production")
+                .set("HELDAR_INGEST_PROVENANCE", "enforce");
+            assert_eq!(
+                Config::from_env().ingest_provenance,
+                EnforcementTier::Enforce
+            );
+        }
+        // ...and an operator can still turn it off entirely, production mode or not.
+        {
+            let _e = Env::new()
+                .set("HELDAR_DEPLOYMENT_MODE", "production")
+                .set("HELDAR_INGEST_PROVENANCE", "off");
+            assert_eq!(Config::from_env().ingest_provenance, EnforcementTier::Off);
+        }
+        // Enforcing tickets does not require production mode either.
+        {
+            let _e = Env::new().set("HELDAR_INGEST_PROVENANCE", "enforce");
+            let cfg = Config::from_env();
+            assert_eq!(cfg.ingest_provenance, EnforcementTier::Enforce);
+            assert_eq!(
+                cfg.machine_auth,
+                EnforcementTier::Warn,
+                "unchanged without a mode"
+            );
+        }
+    }
+
+    #[test]
+    fn without_a_deployment_mode_both_tiers_default_to_warn() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _e = Env::new();
+        let cfg = Config::from_env();
+        assert_eq!(cfg.machine_auth, EnforcementTier::Warn);
+        assert_eq!(cfg.ingest_provenance, EnforcementTier::Warn);
+        assert!(!cfg.deployment_mode_is_production());
+    }
+
+    #[test]
+    fn a_non_production_mode_promotes_nothing() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for mode in ["", "lan", "development", "staging", "prod"] {
+            let _e = Env::new().set("HELDAR_DEPLOYMENT_MODE", mode);
+            let cfg = Config::from_env();
+            assert_eq!(cfg.machine_auth, EnforcementTier::Warn, "mode {mode:?}");
+            assert_eq!(
+                cfg.ingest_provenance,
+                EnforcementTier::Warn,
+                "mode {mode:?}"
+            );
+        }
+    }
+
+    /// The reported tier must equal the effective one. An operator reading `GET /api/v1/system` has
+    /// no other way to find out, and the boot banner and the endpoint both derive from these fields.
+    #[test]
+    fn the_reported_posture_matches_the_effective_configuration() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _e = Env::new()
+            .set("HELDAR_DEPLOYMENT_MODE", "production")
+            .set("HELDAR_INGEST_PROVENANCE", "enforce");
+        let cfg = Config::from_env();
+        assert_eq!(cfg.ingest_provenance.as_str(), "enforce");
+        assert_eq!(cfg.machine_auth.as_str(), "enforce");
+        assert!(cfg.deployment_mode_is_production());
+    }
+}
