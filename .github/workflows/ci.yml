@@ -105,6 +105,15 @@ jobs:
           python3 -m pip install --quiet --disable-pip-version-check pyyaml
           python3 scripts/test_trivy_gate.py
           python3 scripts/check_trivy_gate.py
+          # Publishing is irreversible — a crates.io version cannot be replaced and an image tag is
+          # pulled by whoever trusts it — so every publishing job must depend on a green security
+          # run for its exact commit. Detaching that gate is a ONE-LINE deletion with nothing
+          # alarming in the diff, which is why it needs a guard rather than a review convention.
+          # The action's own decision logic runs only during a release, so it is driven here against
+          # a stubbed API instead of first executing when someone is trying to ship.
+          ./scripts/test_require_security_run.sh
+          python3 scripts/test_release_gated.py
+          python3 scripts/check_release_gated.py
       - name: read-seam lint (cross-app reads go through *_read views)
         run: ./scripts/check-read-seam.sh
       # A generated client that COMPILES is a stronger statement about the contract than any prose:

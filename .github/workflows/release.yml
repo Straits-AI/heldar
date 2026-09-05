@@ -23,7 +23,29 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # Publishing is the irreversible step: a crate version can never be replaced, and a release asset
+  # is pulled by whoever trusts the tag. Nothing previously connected that to the security scan — a
+  # tag could sit on a commit whose scan had failed, or had never finished, and the release went out
+  # anyway. security.yml does not trigger on tag pushes, so this looks up the run from when the
+  # commit landed on main.
+  security-gate:
+    name: security scan is green for this commit
+    if: github.repository == 'Straits-AI/heldar'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read   # to read another workflow's run conclusions
+    steps:
+      - uses: actions/checkout@v7
+      - uses: ./.github/actions/require-security-run
+        with:
+          sha: ${{ github.sha }}
+          # A dry run is for exercising the packaging path, so it reports without blocking. The
+          # real publish below always enforces.
+          enforce: ${{ !inputs.dry_run }}
+
   publish:
+    needs: security-gate
     name: publish to crates.io
     # Only the canonical public repo publishes — a no-op in the private monorepo or any fork.
     if: github.repository == 'Straits-AI/heldar'
