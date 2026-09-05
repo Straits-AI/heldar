@@ -382,8 +382,8 @@ async fn create_policy_job(
     sqlx::query(
         "INSERT INTO backup_jobs
            (id, policy_id, destination_id, kind, camera_ids, from_time, to_time,
-            incident_lock_only, status, created_at, created_by, created_by_kind)
-         VALUES (?, ?, ?, 'policy', ?, ?, ?, ?, 'pending', ?, ?, ?)",
+            incident_lock_only, status, created_at, created_by, created_by_kind, request_id)
+         VALUES (?, ?, ?, 'policy', ?, ?, ?, ?, 'pending', ?, ?, ?, ?)",
     )
     .bind(&job_id)
     .bind(&p.id)
@@ -395,6 +395,9 @@ async fn create_policy_job(
     .bind(now)
     .bind(creator.map(|c| c.id.clone()))
     .bind(creator.map(|c| c.kind))
+    // The scheduler serves no request, so this is None — recorded rather than omitted, so a NULL
+    // here means the same thing it means on the on-demand path below: nobody asked for this now.
+    .bind(crate::request_id::current())
     .execute(&state.pool)
     .await?;
     sqlx::query(
@@ -821,8 +824,8 @@ pub async fn create_archive(
         "INSERT INTO backup_jobs
            (id, policy_id, destination_id, kind, camera_ids, from_time, to_time,
             incident_lock_only, status, files_total, started_at, created_at,
-            created_by, created_by_kind)
-         VALUES (?, NULL, NULL, 'on_demand_archive', ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?)",
+            created_by, created_by_kind, request_id)
+         VALUES (?, NULL, NULL, 'on_demand_archive', ?, ?, ?, ?, 'running', ?, ?, ?, ?, ?, ?)",
     )
     .bind(&job_id)
     .bind(SqlxJson(json_from_strs(&camera_ids)))
@@ -834,6 +837,9 @@ pub async fn create_archive(
     .bind(now)
     .bind(&creator.id)
     .bind(creator.kind)
+    // This one DOES have a request: create_archive runs inline, awaited by its caller, never
+    // spawned — the same property the doc comment above relies on for its authorization argument.
+    .bind(crate::request_id::current())
     .execute(&state.pool)
     .await?;
 
@@ -2324,6 +2330,169 @@ mod tests {
             copied_files(&dst.0, "camA"),
             vec!["one.mp4".to_string()],
             "the copy continued past the denial"
+        );
+    }
+}
+
+/// A job has to say whether somebody asked for it, or the schedule produced it.
+#[cfg(test)]
+mod job_correlation_tests {
+    use super::*;
+
+    async fn state() -> AppState {
+        let pool = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        crate::db::run_migrations(&pool).await.unwrap();
+        let cfg = Arc::new(Config::from_env());
+        std::fs::create_dir_all(&cfg.archive_dir).ok();
+        AppState {
+            recorder: crate::services::recorder::RecorderManager::new(pool.clone(), cfg.clone()),
+            sampler: crate::services::sampler::SamplerManager::new(pool.clone(), cfg.clone()),
+            live: crate::services::live_publisher::LivePublisherManager::new(
+                pool.clone(),
+                cfg.clone(),
+                reqwest::Client::new(),
+            ),
+            mirror: None,
+            consumers: Arc::new(Vec::new()),
+            modules: Arc::new(Vec::new()),
+            catalog: Arc::new(crate::services::registry::CatalogService::new(&cfg)),
+            http: reqwest::Client::new(),
+            media_jobs: crate::services::media_jobs::MediaJobGovernor::new(2),
+            started_at: Utc::now(),
+            pool,
+            cfg,
+        }
+    }
+
+    async fn seed_segment(st: &AppState, camera: &str) -> (DateTime<Utc>, DateTime<Utc>) {
+        let now = Utc::now();
+        let start = now - chrono::Duration::seconds(60);
+        sqlx::query(
+            "INSERT OR IGNORE INTO cameras (id, name, created_at, updated_at) VALUES (?,?,?,?)",
+        )
+        .bind(camera)
+        .bind(camera)
+        .bind(now)
+        .bind(now)
+        .execute(&st.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO segments (id, camera_id, path, start_time, end_time, duration_s, codec,
+                 size_bytes, container, created_at)
+             VALUES ('seg_1', ?, '/nonexistent/seg_1.mp4', ?, ?, 60.0, 'h264', 1024, 'mp4', ?)",
+        )
+        .bind(camera)
+        .bind(start)
+        .bind(now)
+        .bind(now)
+        .execute(&st.pool)
+        .await
+        .unwrap();
+        (start, now)
+    }
+
+    async fn recorded_request_id(st: &AppState) -> Option<String> {
+        sqlx::query_scalar("SELECT request_id FROM backup_jobs ORDER BY rowid DESC LIMIT 1")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap()
+    }
+
+    /// `create_archive` runs INLINE — awaited by its caller, never spawned — which is the same
+    /// property its doc comment relies on for the authorization argument. So the task-local is still
+    /// in scope when the row is written.
+    ///
+    /// The zip itself fails (the fixture segment has no file on disk), and that is fine: the row is
+    /// inserted with status `running` BEFORE the copy starts, which is exactly the row an operator
+    /// asking "who started this and why is it still running" would be looking at.
+    #[tokio::test]
+    async fn an_on_demand_archive_records_the_request_that_asked_for_it() {
+        let st = state().await;
+        let (from, to) = seed_segment(&st, "cam_a").await;
+        let creator = JobCreator {
+            id: "key_x".to_string(),
+            kind: JobCreator::KIND_API_KEY,
+        };
+
+        crate::request_id::CURRENT
+            .scope("req_archive".to_string(), async {
+                let _ = create_archive(
+                    &st,
+                    vec!["cam_a".into()],
+                    Some(from),
+                    Some(to),
+                    false,
+                    false,
+                    &creator,
+                )
+                .await;
+            })
+            .await;
+
+        assert_eq!(
+            recorded_request_id(&st).await.as_deref(),
+            Some("req_archive"),
+            "an operator holding a request id cannot find the job it started"
+        );
+    }
+
+    /// The scheduler serves no request. NULL here is the answer, and it is what distinguishes a job
+    /// somebody asked for from one the schedule produced on its own — attributing a nightly transfer
+    /// to whoever happened to be browsing would be worse than recording nothing.
+    #[tokio::test]
+    async fn a_job_created_outside_a_request_records_null() {
+        let st = state().await;
+        let (from, to) = seed_segment(&st, "cam_a").await;
+        let creator = JobCreator {
+            id: "key_x".to_string(),
+            kind: JobCreator::KIND_API_KEY,
+        };
+        let _ = create_archive(
+            &st,
+            vec!["cam_a".into()],
+            Some(from),
+            Some(to),
+            false,
+            false,
+            &creator,
+        )
+        .await;
+        assert_eq!(recorded_request_id(&st).await, None);
+    }
+
+    /// The bind list and the placeholder list are checked by SQLite at RUNTIME, not by the compiler.
+    /// Adding a column to one and forgetting the other builds cleanly and fails on the first real
+    /// archive — this asserts the statement executes at all.
+    #[tokio::test]
+    async fn the_insert_statement_still_matches_its_bindings() {
+        let st = state().await;
+        let (from, to) = seed_segment(&st, "cam_a").await;
+        let creator = JobCreator {
+            id: "key_x".to_string(),
+            kind: JobCreator::KIND_API_KEY,
+        };
+        let _ = create_archive(
+            &st,
+            vec!["cam_a".into()],
+            Some(from),
+            Some(to),
+            false,
+            false,
+            &creator,
+        )
+        .await;
+        let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM backup_jobs")
+            .fetch_one(&st.pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows, 1,
+            "the job row was never written — check bind/placeholder parity"
         );
     }
 }
