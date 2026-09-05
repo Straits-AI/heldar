@@ -1903,17 +1903,17 @@ class TaskRunner(threading.Thread):
         self.client = client
         self.log = task_logger(task)
         self.analyzer = build_analyzer(task, self.log)
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         self._last_captured: Optional[str] = None
         # Set on the first 404 from POST /ai/embeddings (a kernel that predates issue #38):
         # log once, then drop embeddings for this task instead of warning on every frame.
         self._embeddings_unsupported = False
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def _should_run(self) -> bool:
-        return not self._stop.is_set() and not SHUTDOWN.is_set()
+        return not self._stop_event.is_set() and not SHUTDOWN.is_set()
 
     def _cycle(self) -> None:
         frame = self.client.fetch_frame(self.task)
@@ -2018,7 +2018,7 @@ class TaskRunner(threading.Thread):
                 self.log.exception("unexpected error in cycle")
             elapsed = time.monotonic() - start
             # Interruptible pacing sleep — wakes immediately on stop().
-            if self._stop.wait(max(0.0, period - elapsed)):
+            if self._stop_event.wait(max(0.0, period - elapsed)):
                 break
         self.log.info("stopped")
 
