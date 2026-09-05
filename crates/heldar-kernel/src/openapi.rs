@@ -321,6 +321,7 @@ pub fn document_with(extra: &[utoipa::openapi::OpenApi]) -> serde_json::Value {
     }
     let mut spec = serde_json::to_value(doc).unwrap_or_else(|_| serde_json::json!({}));
     crate::openapi_security::decorate(&mut spec);
+    crate::openapi_idempotency::decorate(&mut spec);
     spec
 }
 
@@ -334,5 +335,6 @@ pub fn document() -> serde_json::Value {
     let mut spec =
         serde_json::to_value(ApiDoc::openapi()).unwrap_or_else(|_| serde_json::json!({}));
     crate::openapi_security::decorate(&mut spec);
+    crate::openapi_idempotency::decorate(&mut spec);
     spec
 }

@@ -206,6 +206,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documented
 
+- **`Idempotency-Key` is now in the contract**, on all 114 operations that honour it, with the 409
+  conflict it can return (#121). The header has worked across the whole `/api/v1` surface for a
+  while; the contract said nothing about it, so an integrator learned it from prose or from a 409
+  they did not expect. For a header whose entire purpose is safe retries by machines, "discoverable
+  by failing" is the wrong way round.
+
+  Added as a post-pass over the generated document, the same way route security requirements are —
+  this is one fact about a hundred operations, and as per-handler attributes it would be a hundred
+  copies to keep in step, where the first one somebody forgot would be indistinguishable from an
+  operation that genuinely does not support it. The pass derives its list from the HTTP method, which
+  is what the middleware itself branches on, and a test asserts the two lists stay identical.
+
+  The description states the unprotected cases plainly: a request with no `Content-Length` or a body
+  over 64 KiB runs without deduplication and a retry may repeat the effect. That is deliberate
+  behaviour — replay needs a stored body — but silence about it would leave a caller believing a
+  guarantee they do not have.
+
 - **How long a scope decision lasts**, per surface, in `docs/ACCESS-CONTROL.md`. `/media/*` re-authorizes
   every single request, so a clip, playback session or archive URL is not a bearer capability and a
   re-scope bites mid-scrub; AI leases re-derive their candidate list from the current scope on every
