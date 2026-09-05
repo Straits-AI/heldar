@@ -1,0 +1,26 @@
+{
+  "$comment": [
+    "Accepted, time-bounded dependency vulnerabilities (issue #114).",
+    "",
+    "An entry here SUPPRESSES a finding in the blocking audit. That is a decision with an owner and",
+    "an expiry, not a mute button: scripts/check_security_exceptions.py fails CI when an entry is",
+    "past its 'expires' date, so an exception cannot be forgotten into permanence. Extending one is",
+    "a reviewable commit that says who re-accepted the risk and until when.",
+    "",
+    "Empty is the correct state. Every AI profile audits clean as of 2026-09-05; entries should be",
+    "rare and short-lived. Add one only when the finding cannot be fixed by an upgrade.",
+    "",
+    "Fields, all required:",
+    "  id            advisory identifier — GHSA-*, CVE-*, PYSEC-*, RUSTSEC-* or a Trivy id",
+    "  ecosystem     pip | npm | cargo | container",
+    "  component     the package the advisory is against, with the version in use",
+    "  reachable     true if OUR code can reach the vulnerable path; false with justification in",
+    "                'reason'. Never guess — if unknown, say so and treat it as reachable.",
+    "  reason        why this is being accepted rather than fixed",
+    "  control       the compensating control that makes the residual risk acceptable",
+    "  owner         GitHub handle accountable for retiring it",
+    "  expires       ISO date (YYYY-MM-DD). CI fails from this date onward.",
+    "  issue         URL of the follow-up issue tracking the real fix"
+  ],
+  "exceptions": []
+}

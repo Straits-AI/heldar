@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The blocking dependency gate now covers the AI stacks that actually ship.** `pip-audit` examined
+  `requirements-core.txt` and nothing else, so torch, opencv, the CUDA wheels and PaddleOCR — by a
+  wide margin the largest and fastest-moving native trees in the product — were outside it entirely.
+  Pointing the audit at the requirements files would not have fixed that either: they carry open
+  floors (`ultralytics>=8.4.115`), so the answer changes with whatever the resolver picks that
+  morning, and a gate whose verdict drifts is not a gate.
+
+  Each documented install profile (`core`, `detect`, `anpr`, `embed`) now has a committed, fully
+  pinned lock in `apps/ai/constraints/`, compiled for linux x86_64 / Python 3.12 — what the shipped
+  image and the box both run, and the only platform on which the `nvidia-*` wheels are even present.
+  All four are audited on every PR and weekly, and all four are clean today. `scripts/check_ai_locks.py`
+  fails the build when a lock is missing, unpinned, orphaned, or stale against the requirements it
+  was compiled from, so a requirements edit cannot leave the gate auditing last month's tree.
+
+  Accepted advisories go in `security/dependency-exceptions.json` and must name the component, whether
+  our code reaches the vulnerable path, the compensating control, an owner, a follow-up issue and an
+  expiry. CI fails from the expiry date onward and rejects a date more than 180 days out. The audit
+  takes its suppression list from that file alone — a hardcoded advisory id anywhere in the security
+  workflow fails its own test. The register is empty, which is the correct state.
+
+  Regenerate locks with `./scripts/lock_ai_profiles.sh` after any requirements change. CI never
+  regenerates: a lock produced by CI is a lock nobody reviewed.
+
 - **Revoking an API key now stops the backup transfer it left running.** `POST /backup/policies/{id}/trigger`
   answers 202 and detaches the copy, which keeps moving footage for up to `HELDAR_BACKUP_JOB_TIMEOUT_S`
   (default an hour) — and for `sftp`/`ftp`/`s3` destinations, off the box entirely, where no later

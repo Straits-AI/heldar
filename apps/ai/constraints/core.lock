@@ -1,0 +1,17 @@
+# Pinned lock for the 'core' AI profile — GENERATED, do not edit by hand.
+# Regenerate with scripts/lock_ai_profiles.sh after changing: apps/ai/requirements-core.txt
+# inputs-sha256: ea988cefa39f14744cc2b57268bcbe28db7a7203ffe5b02f7f7aa7015b43cfec
+certifi==2026.7.22
+    # via requests
+charset-normalizer==3.5.1
+    # via requests
+idna==3.19
+    # via requests
+numpy==2.5.2
+    # via -r apps/ai/requirements-core.txt
+pillow==12.3.0
+    # via -r apps/ai/requirements-core.txt
+requests==2.34.2
+    # via -r apps/ai/requirements-core.txt
+urllib3==2.7.0
+    # via requests

@@ -87,6 +87,16 @@ jobs:
           python3 scripts/check_pinned_versions.py
           python3 scripts/bench/test_doc_drift.py
           python3 scripts/check_documented_metrics.py
+          # The AI dependency locks are what the blocking audit actually reads (#114). A lock that
+          # has drifted from its requirements file keeps the gate green while covering last month's
+          # tree — the guard makes that a build failure, and these controls prove the guard can fail.
+          python3 scripts/test_ai_locks.py
+          python3 scripts/check_ai_locks.py
+          # The exceptions register is EMPTY and should stay that way, which makes its controls the
+          # only thing that ever exercises the validator. Without them, the first real suppression
+          # would be the first time this code ran — on the day someone is unblocking a release.
+          python3 scripts/test_security_exceptions.py
+          python3 scripts/check_security_exceptions.py
       - name: read-seam lint (cross-app reads go through *_read views)
         run: ./scripts/check-read-seam.sh
       # A generated client that COMPILES is a stronger statement about the contract than any prose:

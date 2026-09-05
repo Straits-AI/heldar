@@ -79,6 +79,78 @@ leave a `TODO pin @sha256 digest` comment rather than fabricating one.
 move on a reviewed, deliberate cadence instead of drifting silently on a re-pull. Treat those PRs as
 the normal path for base-image and MediaMTX updates.
 
+## Vulnerability scanning: what is blocking, and what is deliberately not
+
+Four gates run on every PR and on a weekly schedule: `npm audit` (high+), `pip-audit`, `cargo
+audit`, Gitleaks, and Trivy over the filesystem. All of them fail the build. Two policy decisions
+inside that are worth stating plainly, because both look like holes otherwise.
+
+### AI dependencies are audited from pinned locks, not from the requirements files
+
+`apps/ai/requirements*.txt` carry open floors (`ultralytics>=8.4.115`). Auditing those directly
+answers "what does the resolver pick this morning?", which is not a question anyone can ship. Worse,
+until #114 only `requirements-core.txt` was audited at all — so torch, opencv, the CUDA wheels and
+PaddleOCR, by far the largest and fastest-moving native trees in the product, were invisible to the
+blocking gate.
+
+Each documented install profile therefore has a committed, fully pinned lock in
+`apps/ai/constraints/`:
+
+| profile | inputs | what it is |
+| --- | --- | --- |
+| `core` | `requirements-core.txt` | HTTP + frame decode; what the container image installs |
+| `detect` | `requirements.txt` | core + YOLOv8 / ByteTrack (pulls torch) |
+| `anpr` | `requirements.txt` + `requirements-anpr.txt` | detect + PaddleOCR plate reading |
+| `embed` | `requirements.txt` + `requirements-embed.txt` | detect + CLIP embeddings for semantic search |
+
+Locks are compiled for **linux x86_64, Python 3.12** — what the shipped image and the box both run.
+Compiled anywhere else the `nvidia-*` wheels drop out of the tree entirely and the gate silently
+stops covering them, so the platform is pinned in `scripts/lock_ai_profiles.sh` rather than left to
+whoever regenerates.
+
+Regenerate after any requirements edit, and commit the result:
+
+```bash
+./scripts/lock_ai_profiles.sh
+```
+
+CI does not regenerate — a lock produced by CI is a lock nobody reviewed. It runs
+`scripts/check_ai_locks.py`, which fails if a lock is missing, unpinned, orphaned, or **stale**:
+each lock records the sha256 of the exact inputs it was compiled from, so editing
+`requirements.txt` without regenerating breaks the build instead of quietly auditing last month's
+tree. The profile list lives in that script and nowhere else; the lock generator and the audit loop
+both read it from there.
+
+### Accepted advisories are owned and expire
+
+A blocking gate with no pressure valve gets switched off wholesale the first time an advisory has no
+fix. The valve is `security/dependency-exceptions.json`. An entry suppresses exactly one finding and
+must carry the advisory id, the component, whether **our** code can reach the vulnerable path, why
+it is accepted, the compensating control, an owner, a follow-up issue, and an expiry date.
+
+`scripts/check_security_exceptions.py` is what makes "time-bounded" more than a word: it fails CI
+from the expiry date onward, and rejects an expiry more than 180 days out as not a time-bound at
+all. Extending an exception is a reviewable commit that says who re-accepted the risk and until
+when. The audit steps take their suppression list from that file and nowhere else — a hardcoded
+advisory id anywhere in the security workflow fails
+`scripts/test_security_exceptions.py`.
+
+The register is currently **empty**: all four AI profiles audit clean as of 2026-09-05.
+
+### Trivy: `ignore-unfixed: true`, on purpose
+
+The filesystem scan reports HIGH and CRITICAL findings and **fails** on them, but passes
+`ignore-unfixed: true` — a finding with no released fix does not block a merge. This is a deliberate
+choice, not an oversight: an unfixable finding blocks every unrelated PR for as long as upstream
+takes, which is how a gate stops being taken seriously. Unfixed findings are still published to the
+code-scanning dashboard (the SARIF upload runs `if: always()`, so it uploads even when the scan
+fails), so they are visible, just not blocking.
+
+`website/` is skipped for the same reason and is documented inline in the workflow: its HIGH
+findings are Docusaurus's own build-time transitives, which never reach the deployed Worker.
+
+Revisit both the day a finding lands on a runtime path.
+
 ## Verifiable outputs: SBOMs, signatures and provenance
 
 Pinning answers "what did we build from". These answer "is this the thing we built", which a sha256
