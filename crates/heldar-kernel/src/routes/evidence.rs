@@ -74,9 +74,10 @@ pub async fn create(
 ) -> AppResult<Json<ExportResponse>> {
     principal.require_cap(Cap::VideoExport, "export evidence bundles")?;
 
-    let camera_id = resolve_camera(&st, &req).await?;
-    // AFTER resolution, never before: with an incident id the camera is derived, so checking the
-    // supplied id would check something the export does not read.
+    // `resolve_camera` performs the scope check for the DERIVED (incident) case itself, because a
+    // refusal there must not name the camera it resolved. What remains here is the caller-supplied
+    // case, where the id is already known to them and a specific message discloses nothing.
+    let camera_id = resolve_camera(&st, &principal, &req).await?;
     st.camera_scope_check(&principal, &camera_id)?;
 
     let from = util::parse_rfc3339(&req.from)
@@ -133,7 +134,25 @@ pub async fn create(
 }
 
 /// The camera an export addresses: named directly, or derived from an incident's segments.
-async fn resolve_camera(st: &AppState, req: &ExportRequest) -> AppResult<String> {
+///
+/// # Why this takes the principal
+///
+/// A camera id in the request body is something the caller already knows, so refusing it can say so
+/// plainly. An id DERIVED from an incident is not: naming it in a 403 hands a scoped caller a camera
+/// they do not hold, and answering 404-vs-403-vs-400 tells them whether the incident exists and how
+/// many cameras it spans. That is an id-space oracle, and `AppState::resource_camera`'s doc comment
+/// already forbids exactly this shape — "its message embeds the owning camera id, which hands a
+/// scoped caller the fleet roster one probe at a time". This function was the one place in the tree
+/// that resolved a camera from a resource id and then used the raw caller-supplied-id check anyway.
+///
+/// So for a SCOPED caller every outcome that is not "exactly one camera you hold" collapses to one
+/// identical refusal, following the same convention `resource_camera` uses. An unscoped caller keeps
+/// today's specific messages: nothing in them is new information to someone who holds every camera.
+async fn resolve_camera(
+    st: &AppState,
+    principal: &Principal,
+    req: &ExportRequest,
+) -> AppResult<String> {
     match (&req.camera_id, &req.incident_id) {
         (Some(_), Some(_)) => Err(AppError::BadRequest(
             "give either `camera_id` or `incident_id`, not both — an incident names its own camera, \
@@ -149,6 +168,20 @@ async fn resolve_camera(st: &AppState, req: &ExportRequest) -> AppResult<String>
             .bind(inc)
             .fetch_all(&st.pool)
             .await?;
+            let scoped = principal.camera_scope().is_some();
+            let all_visible = cams.iter().all(|c| principal.camera_allowed(&c.0));
+
+            // One refusal for every "not exactly one camera you hold" outcome, so a scoped caller
+            // cannot tell an incident that does not exist from one on somebody else's camera from
+            // one spanning cameras they do not hold. Byte for byte identical — the count, the
+            // camera id and the incident id all stay out of it.
+            if scoped && !(all_visible && !cams.is_empty()) {
+                return Err(crate::state::scope_denied_owner(
+                    "incident",
+                    "export evidence for this incident",
+                ));
+            }
+
             match cams.len() {
                 0 => Err(AppError::NotFound(format!(
                     "incident {inc} has no recorded segments"
@@ -157,6 +190,9 @@ async fn resolve_camera(st: &AppState, req: &ExportRequest) -> AppResult<String>
                 // A multi-camera incident is a real thing, but a bundle attests to ONE camera's
                 // footage. Picking one silently would produce a document whose scope is narrower
                 // than the incident an investigator believes it covers.
+                //
+                // Reachable by a scoped caller only when they hold EVERY camera the incident spans,
+                // in which case the count tells them nothing they could not already count.
                 _ => Err(AppError::BadRequest(format!(
                     "incident {inc} spans {} cameras — export one bundle per camera by naming \
                      `camera_id`, so each bundle attests to footage it actually contains",
