@@ -11,7 +11,7 @@
 # docs/SUPPLY-CHAIN.md. A base bump that drags in a fixable HIGH fails the build rather than
 # shipping. Bump the pinned digest to fix; where there is no fix yet, record it in
 # security/dependency-exceptions.json with an owner and an expiry.
-FROM python:3.14.7-slim@sha256:656d12e70054d5fda18a045e2494c96701e9792dd1445f95b3d038df954f57e9
+FROM python:3.14.7-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6
 
 # Keep Python lean and logs unbuffered (so they stream out of the container).
 ENV PYTHONUNBUFFERED=1 \
@@ -22,7 +22,11 @@ WORKDIR /app
 
 # Install deps first for better layer caching.
 COPY requirements-core.txt .
-RUN pip install --no-cache-dir -r requirements-core.txt
+# The base image ships setuptools, and pip vendors msgpack; the first image scan (#114)
+# found a fixable HIGH in each. Neither is used at runtime — the worker imports requests,
+# pillow and numpy — but they are present, so they are upgraded rather than left behind.
+RUN pip install --no-cache-dir --upgrade pip setuptools \
+ && pip install --no-cache-dir -r requirements-core.txt
 
 COPY worker.py .
 
