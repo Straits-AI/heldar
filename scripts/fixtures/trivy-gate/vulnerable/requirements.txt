@@ -1,0 +1,8 @@
+# DELIBERATELY VULNERABLE — see ../README.md. Never installed, never imported; scanned only.
+# Four packages, not one: a single advisory can be re-scored below HIGH and silently retire the
+# check. Every entry below has fixes available upstream, so the real scan's `ignore-unfixed: true`
+# cannot suppress them.
+requests==2.19.1
+urllib3==1.24.1
+jinja2==2.10
+pyyaml==5.1

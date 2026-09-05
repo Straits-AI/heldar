@@ -151,6 +151,65 @@ jobs:
       security-events: write
     steps:
       - uses: actions/checkout@v7
+      # --- gate self-test ---------------------------------------------------------------------
+      # `exit-code: "1"` on the real scan below was ABSENT for a long time: the job produced SARIF,
+      # the dashboard filled up, and every PR showed green. A gate that never fails and a gate that
+      # cannot fail look identical from the outside, and this one's failure path had never once
+      # executed. So run the same action, at the same version, with the same verdict-affecting
+      # inputs, against two fixtures whose answer is known.
+      #
+      # The clean fixture is not redundant: without it, a Trivy that failed on everything — a broken
+      # DB download, a bad flag — would satisfy "the vulnerable fixture failed" and prove nothing.
+      #
+      # scripts/check_trivy_gate.py asserts these inputs still match the real scan. Without that the
+      # self-test could go on passing against a configuration nobody ships.
+      - name: self-test — the seeded vulnerable fixture MUST fail the scan
+        id: seeded
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: scripts/fixtures/trivy-gate/vulnerable
+          format: sarif
+          output: selftest-seeded.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: self-test — the clean fixture MUST pass the scan
+        id: clean
+        continue-on-error: true
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: scripts/fixtures/trivy-gate/clean
+          format: sarif
+          output: selftest-clean.sarif
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: the gate blocks on a real finding, and only on a real finding
+        env:
+          SEEDED: ${{ steps.seeded.outcome }}
+          CLEAN: ${{ steps.clean.outcome }}
+        run: |
+          set -uo pipefail
+          failures=0
+          if [ "$SEEDED" != "failure" ]; then
+            echo "::error::Trivy did NOT fail on scripts/fixtures/trivy-gate/vulnerable (outcome: $SEEDED)."
+            echo "Either exit-code has been dropped from the scan, or the fixture has gone stale." >&2
+            echo "Do not delete the fixture — add an older package. See scripts/fixtures/trivy-gate/README.md" >&2
+            failures=$((failures + 1))
+          fi
+          if [ "$CLEAN" != "success" ]; then
+            echo "::error::Trivy failed on scripts/fixtures/trivy-gate/clean (outcome: $CLEAN)."
+            echo "The scanner is red on everything, so a failing seeded fixture would prove nothing." >&2
+            echo "Bump the clean fixture's pins, or investigate the scanner itself." >&2
+            failures=$((failures + 1))
+          fi
+          [ "$failures" -eq 0 ] || exit 1
+          echo "gate self-test passed: blocks on the vulnerable fixture, clean on the clean one"
+      # --- end gate self-test -----------------------------------------------------------------
+
       - name: trivy filesystem scan
         uses: aquasecurity/trivy-action@v0.36.0
         with:
@@ -167,7 +226,7 @@ jobs:
           # ships is how a gate gets switched off for real. Not silently ignored: the dashboard still
           # shows them via the SARIF upload below. Drop this the day the docs site gains a runtime
           # dependency, or Docusaurus ships the bump.
-          skip-dirs: website
+          skip-dirs: website,scripts/fixtures
           # Blocking. Without this the job produced SARIF and reported SUCCESS, so a HIGH/CRITICAL
           # finding lived on the code-scanning dashboard while the PR showed green. The upload below
           # is `if: always()`, so the finding is still published when this fails.
