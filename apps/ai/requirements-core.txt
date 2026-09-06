@@ -3,5 +3,5 @@
 # live in requirements.txt, which includes this file. worker.py imports them lazily, so a core-only
 # install runs every motion-type task and cleanly reports model-type tasks as unavailable.
 requests>=2.34.2
-pillow>=10.4
+pillow>=12.3.0
 numpy>=1.26
