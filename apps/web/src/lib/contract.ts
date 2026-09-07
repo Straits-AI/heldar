@@ -206,7 +206,8 @@ export interface CameraLinkCreate {
 export interface CameraView {
   address?: string | null;
   anr_enabled: boolean;
-  anr_replay_url_template?: string | null;
+  /** The ANR replay template, with any userinfo masked — NEVER the raw value.  This field is the documented way to override the default playback endpoint, and `services/anr.rs` tells the operator to put "address+credentials" in it. Served raw it handed `rtsp://user:pass@host/...` to every holder of `camera:read`, which is every AI worker key even under `HELDAR_INGEST_PROVENANCE=enforce` — falsifying "AI workers never receive camera RTSP credentials" (#128).  Masked rather than omitted so an operator can still SEE which template is configured. To change it, send the new value on `CameraUpdate`; the raw string only ever travels inbound, exactly as `password` and `record_url` already do. */
+  anr_replay_url_template_masked?: string | null;
   capabilities: unknown;
   codec?: string | null;
   created_at: string;

@@ -231,7 +231,7 @@ pub struct CameraLinkCreate {
 pub struct CameraView {
     pub address: Option<String>,
     pub anr_enabled: bool,
-    pub anr_replay_url_template: Option<String>,
+    pub anr_replay_url_template_masked: Option<String>,
     pub capabilities: serde_json::Value,
     pub codec: Option<String>,
     pub created_at: String,

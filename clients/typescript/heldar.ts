@@ -186,7 +186,7 @@ export interface CameraLinkCreate {
 export interface CameraView {
   address?: string | null;
   anr_enabled: boolean;
-  anr_replay_url_template?: string | null;
+  anr_replay_url_template_masked?: string | null;
   capabilities: unknown;
   codec?: string | null;
   created_at: string;

@@ -222,7 +222,13 @@ export function RecordingSettingsPanel({
   const [postRoll, setPostRoll] = useState(String(camera.post_roll_seconds));
   const [mirrorEnabled, setMirrorEnabled] = useState(camera.mirror_enabled);
   const [anrEnabled, setAnrEnabled] = useState(camera.anr_enabled);
-  const [anrTemplate, setAnrTemplate] = useState(camera.anr_replay_url_template ?? "");
+  // NOT pre-filled from the camera: the server now returns this MASKED
+  // (`rtsp://***:***@host/…`) because the raw template carries RTSP credentials and every
+  // `camera:read` holder — including every AI worker key — could read it (#128). Pre-filling would
+  // round-trip the mask straight back over the operator's real credentials on the next save.
+  // Empty means "leave unchanged", which is already what the server does with an absent or blank
+  // value.
+  const [anrTemplate, setAnrTemplate] = useState("");
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -256,7 +262,10 @@ export function RecordingSettingsPanel({
       post_roll_seconds: Number(postRoll) || 0,
       mirror_enabled: mirrorEnabled,
       anr_enabled: anrEnabled,
-      anr_replay_url_template: anrTemplate.trim() ? anrTemplate.trim() : null,
+      // Sent only when the operator typed a new one. Blank leaves the stored template alone —
+      // sending null would not clear it either (the handler falls back to the current value), so
+      // omitting is the honest encoding of "no change".
+      ...(anrTemplate.trim() ? { anr_replay_url_template: anrTemplate.trim() } : {}),
     };
     setBusy(true);
     try {
@@ -391,13 +400,21 @@ export function RecordingSettingsPanel({
           <Field
             label="ANR replay URL template"
             htmlFor="rs-anr-tpl"
-            hint="{start}/{end} placeholders · blank = default Hikvision RTSP playback"
+            hint={
+              camera.anr_replay_url_template_masked
+                ? `Currently: ${camera.anr_replay_url_template_masked} · {start}/{end} placeholders · leave blank to keep it`
+                : "{start}/{end} placeholders · unset = default Hikvision RTSP playback"
+            }
           >
             <Input
               id="rs-anr-tpl"
               value={anrTemplate}
               onChange={(e) => setAnrTemplate(e.target.value)}
-              placeholder="rtsp://…/playback?starttime={start}&endtime={end}"
+              placeholder={
+                camera.anr_replay_url_template_masked
+                  ? "Type a new template to replace the current one"
+                  : "rtsp://…/playback?starttime={start}&endtime={end}"
+              }
               disabled={!canManage}
             />
           </Field>

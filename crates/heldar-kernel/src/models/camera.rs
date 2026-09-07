@@ -109,7 +109,18 @@ pub struct CameraView {
     pub post_roll_seconds: i64,
     pub mirror_enabled: bool,
     pub anr_enabled: bool,
-    pub anr_replay_url_template: Option<String>,
+    /// The ANR replay template, with any userinfo masked — NEVER the raw value.
+    ///
+    /// This field is the documented way to override the default playback endpoint, and
+    /// `services/anr.rs` tells the operator to put "address+credentials" in it. Served raw it
+    /// handed `rtsp://user:pass@host/...` to every holder of `camera:read`, which is every AI
+    /// worker key even under `HELDAR_INGEST_PROVENANCE=enforce` — falsifying "AI workers never
+    /// receive camera RTSP credentials" (#128).
+    ///
+    /// Masked rather than omitted so an operator can still SEE which template is configured. To
+    /// change it, send the new value on `CameraUpdate`; the raw string only ever travels inbound,
+    /// exactly as `password` and `record_url` already do.
+    pub anr_replay_url_template_masked: Option<String>,
     pub native_anpr_enabled: bool,
     pub native_events_enabled: bool,
     pub enabled: bool,
@@ -154,7 +165,10 @@ impl From<Camera> for CameraView {
             post_roll_seconds: c.post_roll_seconds,
             mirror_enabled: c.mirror_enabled,
             anr_enabled: c.anr_enabled,
-            anr_replay_url_template: c.anr_replay_url_template,
+            anr_replay_url_template_masked: c
+                .anr_replay_url_template
+                .as_deref()
+                .map(camera_url::mask_url),
             native_anpr_enabled: c.native_anpr_enabled,
             native_events_enabled: c.native_events_enabled,
             enabled: c.enabled,
@@ -316,4 +330,125 @@ pub enum RecordMode {
     Event,
     /// Schedule windows plus triggers.
     ScheduledEvent,
+}
+
+/// No RTSP credential may reach a client through `CameraView`, whatever the field is called.
+#[cfg(test)]
+mod credential_exposure_tests {
+    use super::*;
+
+    const USER: &str = "admin";
+    const PASS: &str = "SuperSecret123";
+
+    /// A camera whose every credential-bearing field carries the same recognisable secret, so one
+    /// sweep over the serialized view catches whichever field forgets to mask.
+    fn credentialed_camera() -> Camera {
+        let creds = format!("rtsp://{USER}:{PASS}@10.0.0.5:554/Streaming/Channels/101");
+        Camera {
+            id: "cam_a".into(),
+            site_id: None,
+            name: "Dock".into(),
+            vendor: "hikvision".into(),
+            model: None,
+            address: Some("10.0.0.5".into()),
+            rtsp_port: 554,
+            username: Some(USER.into()),
+            password: Some(PASS.into()),
+            main_stream_url: Some(creds.clone()),
+            sub_stream_url: Some(creds.clone()),
+            record_stream: "main".into(),
+            codec: None,
+            resolution_main: None,
+            resolution_sub: None,
+            fps_main: None,
+            fps_sub: None,
+            capabilities: sqlx::types::Json(serde_json::json!({})),
+            record_enabled: true,
+            segment_seconds: 60,
+            retention_hours: 72,
+            storage_quota_bytes: None,
+            record_audio: false,
+            record_mode: "continuous".into(),
+            pre_roll_seconds: 0,
+            post_roll_seconds: 0,
+            mirror_enabled: false,
+            anr_enabled: true,
+            // The field this test was written for: `services/anr.rs` tells the operator to put
+            // "address+credentials" here, and it was served verbatim to every `camera:read` holder.
+            anr_replay_url_template: Some(format!(
+                "rtsp://{USER}:{PASS}@10.0.0.5:554/playback?starttime={{start}}&endtime={{end}}"
+            )),
+            native_anpr_enabled: false,
+            native_events_enabled: false,
+            enabled: true,
+            priority: 0,
+            live_warm: false,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    /// VALUE-shaped, not name-shaped, and that is the whole point.
+    ///
+    /// `openapi_contract::no_response_schema_exposes_a_write_only_secret` sweeps for PROPERTY NAMES
+    /// like `password` and `secret`. It is a good guard and it structurally could not catch this
+    /// one: the leaking field is called `anr_replay_url_template`, which looks like configuration.
+    /// Sweeping the serialized JSON for the credential itself catches whatever the next such field
+    /// is called, without anyone having to think of it in advance.
+    #[test]
+    fn no_credential_survives_into_the_serialized_camera_view() {
+        let view = CameraView::from(credentialed_camera());
+        let json = serde_json::to_string(&view).expect("CameraView serializes");
+
+        assert!(
+            !json.contains(PASS),
+            "a camera password reached a client through CameraView: {json}"
+        );
+        assert!(
+            !json.contains(&format!("{USER}:{PASS}")),
+            "RTSP userinfo reached a client through CameraView: {json}"
+        );
+    }
+
+    /// Masked, not omitted: an operator still has to be able to see WHICH template is configured,
+    /// or they cannot tell a misconfigured camera from an unconfigured one.
+    #[test]
+    fn the_template_is_still_visible_in_masked_form() {
+        let view = CameraView::from(credentialed_camera());
+        let masked = view
+            .anr_replay_url_template_masked
+            .expect("a configured template must still be reported, masked");
+
+        assert!(!masked.contains(PASS), "not masked: {masked}");
+        assert!(
+            masked.contains("10.0.0.5") && masked.contains("starttime"),
+            "masking removed the parts that make it identifiable: {masked}"
+        );
+    }
+
+    /// An unset template stays unset rather than becoming an empty mask, so "not configured" and
+    /// "configured with no credentials" stay distinguishable.
+    #[test]
+    fn an_absent_template_stays_absent() {
+        let mut cam = credentialed_camera();
+        cam.anr_replay_url_template = None;
+        assert!(CameraView::from(cam)
+            .anr_replay_url_template_masked
+            .is_none());
+    }
+
+    /// A template with no credentials in it is passed through readable — masking must not damage
+    /// the common case.
+    #[test]
+    fn a_credential_free_template_is_unchanged() {
+        let mut cam = credentialed_camera();
+        let plain = "rtsp://10.0.0.5:554/playback?starttime={start}&endtime={end}";
+        cam.anr_replay_url_template = Some(plain.into());
+        assert_eq!(
+            CameraView::from(cam)
+                .anr_replay_url_template_masked
+                .as_deref(),
+            Some(plain)
+        );
+    }
 }

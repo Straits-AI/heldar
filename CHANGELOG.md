@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **The ANR replay template no longer hands RTSP credentials to every AI worker** (#128).
+  `anr_replay_url_template` is the documented way to override a camera's playback endpoint, and
+  `services/anr.rs` tells the operator to put "address+credentials" in it. `CameraView` served it
+  **verbatim** to any holder of `camera:read` — which is every AI worker key, even under
+  `HELDAR_MACHINE_AUTH=enforce`. That directly falsified #128's "AI workers never receive camera
+  RTSP credentials".
+
+  The same struct already gets this right twice over: `password` is never serialized (only
+  `has_password`), and `record_url` is never serialized raw (only `record_url_masked`). This one
+  field bypassed both conventions. It is now `anr_replay_url_template_masked` — masked rather than
+  omitted, so an operator can still see *which* template is configured and tell a misconfigured
+  camera from an unconfigured one.
+
+  The existing contract sweep could not have caught it: it looks for property NAMES like `password`
+  and `secret`, and this one is called `anr_replay_url_template`, which reads as configuration. The
+  new guard is **value**-shaped — it builds a camera whose every credential-bearing field carries the
+  same secret and asserts none of it survives serialization, so the next field of this kind is caught
+  without anyone having to anticipate it.
+
+  Dashboard: the edit box is no longer pre-filled from the camera. Pre-filling would have
+  round-tripped the mask over the operator's real credentials on the next save; the current template
+  is shown masked as context instead, and blank means "leave unchanged".
+
 - **A camera-scoped credential could enumerate incidents on cameras it does not hold.**
   `POST /api/v1/evidence/exports` accepts an `incident_id` and derives the camera from that
   incident's segments. The derived id then reached the ordinary caller-supplied scope check, whose
