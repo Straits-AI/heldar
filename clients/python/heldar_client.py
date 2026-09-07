@@ -251,7 +251,7 @@ class CameraView:
     updated_at: str
     vendor: str
     address: str | None = None
-    anr_replay_url_template: str | None = None
+    anr_replay_url_template_masked: str | None = None
     codec: str | None = None
     fps_main: int | None = None
     fps_sub: int | None = None
