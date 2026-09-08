@@ -274,6 +274,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`heldarctl --output json` now works** (#122). Only `--output=json` and `--json` were parsed, so
+  `--output json` — the spelling `docs/HELDARCTL.md`, the skills and `doctor`'s own fallback
+  remediation all print — fell through to human output and **exit 0**. A script piping it into `jq`
+  got unparseable text and a success code: a silent wrong answer rather than a usage error.
+  `--output yaml` did the same.
+
+  The helper that accepts both spellings already existed and is what `--context` uses; this one
+  decision hand-matched the `=` form instead. An unrecognised value is now refused rather than
+  defaulted, because a caller that asked for JSON and silently received prose would parse the failure
+  as data.
+
+- **`doctor`'s human output no longer hides its `info` findings.** They were skipped entirely, which
+  removed exactly the ones saying the run could not see everything — posture's `unknown`, whose whole
+  point is that treating unverified as a pass is wrong, and the new `scope.partial_fleet`. The
+  summary line is unchanged and still accurate: it claims nothing about `info`, which is now visible
+  above it rather than silently absent.
+
 - **`heldarctl doctor` no longer reports a clean bill of health it did not verify** (#122). The
   collection path dropped errors on the floor — `.ok()` on `/api/v1/cameras` and
   `/api/v1/health/cameras`, `if let Ok(..)` on the posture. With no camera JSON, `camera_health`
