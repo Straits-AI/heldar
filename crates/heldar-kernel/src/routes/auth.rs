@@ -226,7 +226,11 @@ pub async fn logout(
     get, path = "/api/v1/auth/me", tag = "auth",
     operation_id = "getCurrentPrincipal",
     responses(
-        (status = 200, description = "The resolved caller"),
+        (status = 200, description = "The resolved caller: `id`, `name`, `role`, `kind`, plus \
+            `scope_kind` (`all` | `cameras`) and `scope_cameras` — the camera ids this credential \
+            can see, or null when it is fleet-scoped. A client cannot otherwise tell a whole-box \
+            answer from a filtered one, since a scoped credential gets a filtered 200 rather than \
+            an error."),
         (status = 401, description = "No credential", body = crate::openapi::ErrorBody),
     ),
 )]
@@ -240,6 +244,17 @@ pub async fn me(principal: Principal) -> AppResult<Json<Value>> {
             crate::auth::PrincipalKind::ApiKey => "api_key",
             crate::auth::PrincipalKind::System => "system",
         },
+        // WHAT THIS CREDENTIAL CAN SEE. Discloses nothing: a camera-scoped caller can already list
+        // exactly these cameras from /api/v1/cameras, and a fleet-scoped one learns only that it is
+        // fleet-scoped. Without it a client cannot tell a whole-box answer from a filtered one —
+        // `heldarctl doctor` reported a camera-scoped key's subset as if it were the fleet, because
+        // a scoped credential gets a filtered 200 rather than an error and nothing else says so.
+        "scope_kind": principal.scope.kind(),
+        "scope_cameras": principal.camera_scope().map(|s| {
+            let mut v: Vec<&str> = s.iter().map(String::as_str).collect();
+            v.sort_unstable(); // stable output: this is read by tooling and diffed by humans
+            v
+        }),
     })))
 }
 

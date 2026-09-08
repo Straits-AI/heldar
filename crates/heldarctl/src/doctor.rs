@@ -199,6 +199,64 @@ pub fn camera_health(cameras: &serde_json::Value, statuses: &serde_json::Value) 
     out
 }
 
+/// A check `doctor` could not perform, reported instead of skipped.
+///
+/// THE BUG THIS EXISTS FOR: the collection path used to drop these errors on the floor — `.ok()` on
+/// `/api/v1/cameras` and `/api/v1/health/cameras`, `if let Ok(..)` on the posture. With no camera
+/// JSON, [`camera_health`] never ran, so `camera.not_recording` — the finding this module calls the
+/// failure this product exists to prevent — could not be produced, [`blocks`] was false, and the
+/// command printed "no warnings or blocking findings" and exited 0.
+///
+/// A box answering 403 or 500 on those routes therefore got a clean bill of health from the tool
+/// whose whole job is to say what is wrong with it. `docs/HELDARCTL.md` documents gating CI on the
+/// exit code, so that silence was load-bearing.
+///
+/// BLOCKING, deliberately, and this is the one place `doctor` departs from "unverified is not a
+/// failure". That principle is right for [`from_posture`], where `unknown` describes a control that
+/// could not be assessed on a box that is otherwise answering. Here the tool cannot answer its own
+/// question at all — and the caller is a CI gate reading an exit code, which has no way to tell
+/// "nothing is wrong" from "nothing was checked" unless this says so.
+pub fn unavailable(endpoint: &'static str, exit_code: i32) -> Finding {
+    // 2 is AUTH and 6 is SERVER in `main::exit`; anything else reached us from a path that already
+    // printed its own diagnostic.
+    let (detail, remediation) = match exit_code {
+        2 => (
+            format!(
+                "{endpoint} refused this credential, so the checks that depend on it were not run"
+            ),
+            "Use a credential holding `camera:read` (and `system:read` for the posture), or run              doctor with an admin key. A key that cannot read the fleet cannot report on it.",
+        ),
+        _ => (
+            format!("{endpoint} did not answer, so the checks that depend on it were not run"),
+            "Check the box is up and this route is reachable. Until it answers, this command              cannot tell you whether the box is recording.",
+        ),
+    };
+    Finding::new(
+        "collect.unavailable",
+        Severity::Blocking,
+        detail,
+        remediation,
+    )
+    .about(endpoint.to_string())
+}
+
+/// The verdict covers only part of the fleet, because the credential does.
+///
+/// A camera-scoped key gets a FILTERED 200 from `/api/v1/cameras` — not an error — so the checks all
+/// run and report on a subset while looking exactly like a whole-fleet verdict. Info rather than
+/// Warning: the box is doing its job, and what is limited is this report's reach. Saying so is the
+/// point; silently narrowing the meaning of "healthy" is what it replaces.
+pub fn scope_limited(cameras_visible: usize) -> Finding {
+    Finding::new(
+        "scope.partial_fleet",
+        Severity::Info,
+        format!(
+            "this credential is camera-scoped, so every finding below covers only the              {cameras_visible} camera(s) it can see — not the whole box"
+        ),
+        "Run with a fleet-scoped credential for a whole-box verdict.",
+    )
+}
+
 /// The exit code for a set of findings. `true` when anything blocks.
 pub fn blocks(findings: &[Finding]) -> bool {
     findings.iter().any(|f| f.severity == Severity::Blocking)
@@ -289,5 +347,84 @@ mod tests {
             );
             assert!(!f.code.is_empty() && !f.detail.trim().is_empty(), "{f:?}");
         }
+    }
+}
+
+/// `doctor` must never report health it did not verify.
+#[cfg(test)]
+mod collection_failure_tests {
+    use super::*;
+
+    /// THE REGRESSION. The collection path dropped these errors, so a box answering 403 or 500 on
+    /// the camera routes produced no camera findings at all — and `blocks()` over the remaining
+    /// findings was false, which is exit 0 and "no warnings or blocking findings".
+    #[test]
+    fn an_unavailable_check_blocks_rather_than_vanishing() {
+        for code in [2, 6, 3] {
+            let f = unavailable("/api/v1/cameras", code);
+            assert_eq!(f.severity, Severity::Blocking, "exit code {code}");
+            assert!(blocks(&[f]), "exit code {code} did not block");
+        }
+    }
+
+    /// The two reasons need different remediations: one is fixed by granting a capability, the
+    /// other by fixing the box. A single generic message sends the operator to the wrong place.
+    #[test]
+    fn the_refusal_and_the_outage_read_differently() {
+        let refused = unavailable("/api/v1/cameras", 2);
+        let down = unavailable("/api/v1/cameras", 6);
+        assert!(
+            refused.detail.contains("refused this credential"),
+            "{}",
+            refused.detail
+        );
+        assert!(
+            refused.remediation.contains("camera:read"),
+            "{}",
+            refused.remediation
+        );
+        assert!(down.detail.contains("did not answer"), "{}", down.detail);
+        assert_ne!(refused.remediation, down.remediation);
+    }
+
+    /// Which check could not run has to survive into the JSON, or a CI gate sees a blocking exit
+    /// with nothing naming the cause.
+    #[test]
+    fn the_finding_names_the_endpoint_it_could_not_reach() {
+        let f = unavailable("/api/v1/health/cameras", 6);
+        assert_eq!(f.resource.as_deref(), Some("/api/v1/health/cameras"));
+        assert!(f.detail.contains("/api/v1/health/cameras"));
+        let json = serde_json::to_string(&f).unwrap();
+        assert!(json.contains("collect.unavailable"), "{json}");
+    }
+
+    /// A camera-scoped key gets a FILTERED 200, not an error, so every check runs and reports on a
+    /// subset while looking like a whole-box verdict. Info, not Blocking: the box is doing its job;
+    /// what is limited is this report's reach.
+    #[test]
+    fn a_partial_fleet_is_labelled_without_failing_the_run() {
+        let f = scope_limited(2);
+        assert_eq!(f.severity, Severity::Info);
+        assert!(
+            !blocks(std::slice::from_ref(&f)),
+            "a scoped credential must not fail the run by itself"
+        );
+        assert!(f.detail.contains("2 camera(s)"), "{}", f.detail);
+        assert!(f.detail.contains("not the whole box"), "{}", f.detail);
+    }
+
+    /// The whole point of the change, stated as the property that was false before: a run that
+    /// could not read the cameras must not be indistinguishable from a healthy one.
+    #[test]
+    fn a_run_that_could_not_check_is_not_a_run_that_found_nothing() {
+        let healthy: Vec<Finding> = vec![compatibility("0.1.0", Some("0.1.0"))];
+        assert!(!blocks(&healthy), "the baseline must be a passing run");
+
+        let mut could_not_check = healthy.clone();
+        could_not_check.push(unavailable("/api/v1/cameras", 2));
+        assert!(
+            blocks(&could_not_check),
+            "a run missing the camera checks reported the same verdict as a healthy one"
+        );
     }
 }
