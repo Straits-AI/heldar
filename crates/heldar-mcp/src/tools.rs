@@ -35,6 +35,42 @@ pub struct Tool {
     pub arg_description: &'static str,
 }
 
+/// The capability a tool's route requires, read from the contract rather than restated here.
+///
+/// `None` means no capability gates that route — which for these routes means ADMIN-ONLY, and no
+/// capability grant reaches it however generous. That distinction is why the return type is
+/// `Option` rather than a slug with an "admin" sentinel: "needs a capability you lack" and "needs
+/// to not be a capability-scoped key at all" are different answers to give an agent.
+pub fn required_cap(tool: &Tool) -> Option<&'static str> {
+    heldar_client::REQUIREMENTS
+        .iter()
+        .find(|(m, p, _, _)| {
+            m.eq_ignore_ascii_case(tool.method) && normalize(p) == normalize(tool.path)
+        })
+        .and_then(|r| r.2)
+}
+
+/// `/api/v1/cameras/{}/timeline` and `/api/v1/cameras/{camera_id}/timeline` are the same route
+/// written two ways — the tools table uses positional `{}`, the contract uses names.
+pub fn normalize(path: &str) -> String {
+    let mut out = String::with_capacity(path.len());
+    let mut depth = 0usize;
+    for c in path.chars() {
+        match c {
+            '{' => {
+                depth += 1;
+                if depth == 1 {
+                    out.push_str("{}");
+                }
+            }
+            '}' => depth = depth.saturating_sub(1),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Every tool. Read-only by construction.
 pub const TOOLS: &[Tool] = &[
     Tool {
@@ -133,9 +169,31 @@ pub struct ToolSpec {
     pub input_schema: serde_json::Value,
 }
 
+/// The tools a credential holding `granted` can actually call.
+///
+/// ADVERTISING A TOOL THE CALLER CANNOT USE IS THE BUG THIS FIXES. `tools/list` handed every caller
+/// all ten regardless of grant, so an agent was told it could read the security posture, called it,
+/// and got an opaque 403 — the failure mode discovery exists to prevent. An agent cannot tell a
+/// capability it lacks from a box that is broken.
+///
+/// A tool whose route is gated by no capability (admin-only) is never advertised to a
+/// capability-scoped key, because no grant can reach it.
+pub fn specs_for(granted: &[String]) -> Vec<ToolSpec> {
+    specs_of(TOOLS.iter().filter(|t| match required_cap(t) {
+        Some(cap) => granted.iter().any(|g| g == cap),
+        None => false,
+    }))
+}
+
+/// The whole catalogue, unfiltered. Test-only: nothing in the binary renders it, and a `pub fn`
+/// that only tests call is dead weight that clippy is right to reject.
+#[cfg(test)]
 pub fn specs() -> Vec<ToolSpec> {
-    TOOLS
-        .iter()
+    specs_of(TOOLS.iter())
+}
+
+fn specs_of<'a>(tools: impl Iterator<Item = &'a Tool>) -> Vec<ToolSpec> {
+    tools
         .map(|t| ToolSpec {
             name: t.name,
             description: t.description,
@@ -443,5 +501,123 @@ mod least_privilege_key_tests {
                 "`{name}` is reachable only by an admin key and docs/MCP.md does not say so"
             );
         }
+    }
+}
+
+/// `tools/list` must describe what THIS credential can call.
+#[cfg(test)]
+mod discovery_tests {
+    use super::{required_cap, specs, specs_for, TOOLS};
+
+    fn names(specs: &[super::ToolSpec]) -> Vec<&'static str> {
+        specs.iter().map(|s| s.name).collect()
+    }
+
+    fn caps(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// THE BUG. Every caller was handed all ten tools regardless of grant, so an agent was told it
+    /// could read the security posture, called it, and got an opaque 403 — indistinguishable, from
+    /// the agent's side, from a broken box.
+    #[test]
+    fn a_narrow_grant_is_offered_fewer_tools_than_a_wide_one() {
+        let narrow = specs_for(&caps(&["camera:read"]));
+        let wide = specs_for(&caps(&[
+            "camera:read",
+            "system:read",
+            "video:playback",
+            "ai:tasks",
+        ]));
+        assert!(
+            narrow.len() < wide.len(),
+            "discovery ignored the grant: {} vs {}",
+            narrow.len(),
+            wide.len()
+        );
+        assert!(
+            !narrow.is_empty(),
+            "a camera:read key can still list cameras"
+        );
+    }
+
+    /// Every advertised tool must be one the grant actually covers — the property the old code
+    /// violated for every credential that was not an administrator's.
+    #[test]
+    fn nothing_advertised_is_out_of_reach() {
+        for grant in [
+            vec!["camera:read"],
+            vec!["system:read"],
+            vec!["camera:read", "video:playback"],
+            vec!["camera:read", "system:read", "video:playback", "ai:tasks"],
+        ] {
+            let g = caps(&grant);
+            for spec in specs_for(&g) {
+                let tool = TOOLS.iter().find(|t| t.name == spec.name).unwrap();
+                let need = required_cap(tool).expect("an advertised tool has a capability gate");
+                assert!(
+                    g.iter().any(|c| c == need),
+                    "{grant:?} was offered `{}`, which needs `{need}`",
+                    spec.name
+                );
+            }
+        }
+    }
+
+    /// The documented least-privilege grant must reach everything a least-privilege key can reach.
+    /// If this and the doc disagree, one of them is lying to an operator.
+    #[test]
+    fn the_documented_grant_reaches_every_capability_gated_tool() {
+        let offered = names(&specs_for(&caps(&[
+            "camera:read",
+            "system:read",
+            "video:playback",
+            "ai:tasks",
+        ])));
+        let expected: Vec<&str> = TOOLS
+            .iter()
+            .filter(|t| required_cap(t).is_some())
+            .map(|t| t.name)
+            .collect();
+        assert_eq!(offered, expected);
+    }
+
+    /// A tool no capability gates is admin-only, and no grant reaches it — so it is never
+    /// advertised to a capability-scoped key. Silence beats an opaque 403.
+    #[test]
+    fn an_admin_only_tool_is_never_advertised_to_a_scoped_key() {
+        let admin_only: Vec<&str> = TOOLS
+            .iter()
+            .filter(|t| required_cap(t).is_none())
+            .map(|t| t.name)
+            .collect();
+        assert!(
+            !admin_only.is_empty(),
+            "this test is vacuous unless at least one tool is admin-only"
+        );
+        // Even an absurdly generous capability list must not surface it.
+        let everything = caps(&[
+            "camera:read",
+            "system:read",
+            "video:playback",
+            "ai:tasks",
+            "events:read",
+            "identity:read",
+            "registry:manage",
+        ]);
+        for name in admin_only {
+            assert!(
+                !names(&specs_for(&everything)).contains(&name),
+                "`{name}` is admin-only but was advertised to a capability grant"
+            );
+        }
+    }
+
+    /// The unfiltered listing still covers the whole catalogue. It has no caller in the binary —
+    /// `--help` prints prose, not the tool table — so it is test-only, and this is what keeps it
+    /// meaningful: `specs_for` must be a SUBSET of the catalogue, never a different set.
+    #[test]
+    fn the_unfiltered_listing_still_describes_the_whole_sidecar() {
+        assert_eq!(specs().len(), TOOLS.len());
     }
 }

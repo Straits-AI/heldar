@@ -292,6 +292,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`tools/list` now reflects the calling credential** (#123). It returned all ten tools to everyone
+  regardless of grant, so an agent was told it could read the security posture, called it, and got an
+  opaque 403 — and an agent cannot tell a capability it lacks from a box that is broken. Silence about
+  a tool it cannot use is more useful than an error it cannot interpret.
+
+  The sidecar asks `GET /api/v1/auth/me` once at startup and filters the catalogue by each tool's
+  required capability, read from the contract rather than a second hand-maintained list. A tool gated
+  by no capability is admin-only and is never advertised to a capability-scoped key, since no grant
+  reaches it.
+
+  A failure of that startup call is **fatal**, not a fallback to advertising everything: falling back
+  would restore the old behaviour quietly at the moment the box is least well understood, and a token
+  that cannot read `/auth/me` cannot call any tool either.
+
+- **`GET /api/v1/auth/me` reports the caller's `capabilities`**, expanded, so an `admin` grant lists
+  what it implies rather than the single stored bit. A caller learns nothing it could not discover by
+  trying every route and reading the 403s — the point is that it should not have to.
+
 - **`heldarctl --output json` now works** (#122). Only `--output=json` and `--json` were parsed, so
   `--output json` — the spelling `docs/HELDARCTL.md`, the skills and `doctor`'s own fallback
   remediation all print — fell through to human output and **exit 0**. A script piping it into `jq`

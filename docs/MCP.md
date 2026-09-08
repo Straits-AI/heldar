@@ -47,6 +47,20 @@ Two things worth knowing before you mint it, because both were wrong here before
   is the thing this section tells you not to do. Read the posture through `heldarctl doctor`
   instead.
 
+## Discovery reflects the key, not the catalogue
+
+`tools/list` returns only the tools the calling credential can actually reach. The sidecar asks
+`GET /api/v1/auth/me` once at startup and filters the catalogue by each tool's required capability,
+read from the contract.
+
+It used to return all ten to everyone. An agent was told it could read the security posture, called
+it, and got an opaque 403 — and an agent cannot tell a capability it lacks from a box that is broken.
+Silence about a tool it cannot use is more useful than an error it cannot interpret.
+
+If that startup call fails, the sidecar **exits** rather than falling back to advertising everything.
+Falling back would restore the old behaviour quietly, at the moment the box is least well understood,
+and a token that cannot read `/auth/me` cannot call any tool either — there is nothing to degrade to.
+
 ## Read-only is structural
 
 Every tool carries `method: "GET"`, and the dispatcher sends nothing else. There is **no code path**

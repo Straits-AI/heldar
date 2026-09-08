@@ -226,7 +226,8 @@ pub async fn logout(
     get, path = "/api/v1/auth/me", tag = "auth",
     operation_id = "getCurrentPrincipal",
     responses(
-        (status = 200, description = "The resolved caller: `id`, `name`, `role`, `kind`, plus \
+        (status = 200, description = "The resolved caller: `id`, `name`, `role`, `kind`, \
+            `capabilities` (expanded, so an `admin` grant lists what it implies), plus \
             `scope_kind` (`all` | `cameras`) and `scope_cameras` — the camera ids this credential \
             can see, or null when it is fleet-scoped. A client cannot otherwise tell a whole-box \
             answer from a filtered one, since a scoped credential gets a filtered 200 rather than \
@@ -235,6 +236,19 @@ pub async fn logout(
     ),
 )]
 pub async fn me(principal: Principal) -> AppResult<Json<Value>> {
+    // WHAT THIS CREDENTIAL CAN DO, expanded — so `admin` reports the capabilities it implies rather
+    // than the single bit that was stored. A caller learns nothing here it could not discover by
+    // trying every route and reading the 403s; the point is that it should not have to. The MCP
+    // sidecar advertised all ten tools to every credential, so an agent was told it could read the
+    // security posture, called it, and got an opaque 403.
+    let effective = principal.caps.expanded();
+    let mut capabilities: Vec<&str> = crate::auth::Cap::ALL
+        .iter()
+        .filter(|c| effective.contains(**c))
+        .map(|c| c.slug())
+        .collect();
+    capabilities.sort_unstable(); // stable output: read by tooling, diffed by humans
+
     Ok(Json(json!({
         "id": principal.id,
         "name": principal.name,
@@ -249,6 +263,7 @@ pub async fn me(principal: Principal) -> AppResult<Json<Value>> {
         // fleet-scoped. Without it a client cannot tell a whole-box answer from a filtered one —
         // `heldarctl doctor` reported a camera-scoped key's subset as if it were the fleet, because
         // a scoped credential gets a filtered 200 rather than an error and nothing else says so.
+        "capabilities": capabilities,
         "scope_kind": principal.scope.kind(),
         "scope_cameras": principal.camera_scope().map(|s| {
             let mut v: Vec<&str> = s.iter().map(String::as_str).collect();
