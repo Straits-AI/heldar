@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Security
 
+- **A frame ticket now binds the frame's bytes, not only who/where/when** (#128). The MAC preimage
+  was version, credential, camera, task, capture time and expiry — six fields, none of them about the
+  content. So a ticket said who may speak, about which camera and task, and for which instant, and
+  never which bytes.
+
+  That matters because the sampler overwrites a single `latest_<profile>.jpg` in place: a worker that
+  reads the file a second time, or reads it after a newer frame lands, analyses different bytes than
+  its ticket was minted for — and nothing downstream could tell. The hash costs one SHA-256 of a
+  sub-stream JPEG the handler already holds in memory.
+
+  **What this does not buy:** it does not stop a malicious worker. One holding a valid ticket also
+  holds the hash inside it and can echo it while having analysed anything; the kernel never sees the
+  frame again. What it buys is that the accidental case becomes visible, and that "silently analysed
+  the wrong frame" becomes "claimed a hash it did not analyse" — a statement on the record rather
+  than a gap in one.
+
+  Ticket version is `f2`; `f1` tickets no longer verify, invalidating at most one TTL of in-flight
+  tickets on upgrade (120s by default). `sign` and `verify` now share one preimage builder — they
+  were two separate copies of the same format string, which is exactly how a preimage drifts.
+
 - **The ANR replay template no longer hands RTSP credentials to every AI worker** (#128).
   `anr_replay_url_template` is the documented way to override a camera's playback endpoint, and
   `services/anr.rs` tells the operator to put "address+credentials" in it. `CameraView` served it

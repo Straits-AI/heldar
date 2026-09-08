@@ -262,6 +262,26 @@ can no longer name a frame it never held. That closes a suppression trick: the
 outbox is first-writer-wins on `(camera_id, frame_id)`, so pre-claiming the id the
 real worker was about to use used to make its genuine detection a silent no-op.
 
+The ticket also binds the **frame's bytes**. Its MAC covers a SHA-256 of the JPEG it was minted for,
+so a ticket rewritten to name different content does not verify, and a verified ticket tells the
+kernel which bytes the analysis claims to describe.
+
+Be precise about what that buys, because overclaiming it would be worse than not having it. It does
+**not** stop a malicious worker: a worker holding a valid ticket also holds the hash inside it, and
+can echo it while having analysed something else. The kernel never sees the frame again, so nothing
+at ingest can tell the difference.
+
+What it does buy is that the *accidental* case becomes visible. The sampler overwrites a single
+`latest_<profile>.jpg` in place, so a worker that reads the file a second time — or reads it after a
+newer frame lands — analyses different bytes than its ticket was minted for. Previously the ticket
+bound who, where and when, and never *what*, so that slip was undetectable and unattributable. It
+also turns "silently analysed the wrong frame" into "claimed a hash it did not analyse", which is a
+statement on the record rather than a gap in one.
+
+Ticket version `f2` carries the hash; `f1` tickets no longer verify. On upgrade that invalidates at
+most one TTL of in-flight tickets — 120s by default — and a worker's response to a rejected ticket is
+already to pull a new frame.
+
 **Enforcement is staged** via `HELDAR_INGEST_PROVENANCE`:
 
 | Tier | Ticketless ingest | Notes |
