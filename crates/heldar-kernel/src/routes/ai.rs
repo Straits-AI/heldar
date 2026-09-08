@@ -707,6 +707,11 @@ pub async fn latest_frame(
             let key_id = credential_id(&principal);
             match ai_leases::is_live(&st.pool, task_id, &key_id).await {
                 Ok(Some(lease)) if lease.camera_id == id => {
+                    // The bytes are already in memory for the response, so binding the ticket to
+                    // them costs one hash of a sub-stream JPEG and nothing else. Without it the
+                    // ticket bound who, where and when, and never WHAT — and the sampler overwrites
+                    // one `latest_<profile>.jpg` in place, so a worker reading the file a second
+                    // time analyses different bytes than its ticket was minted for, undetectably.
                     ticket = frame_ticket::mint(
                         &key_id,
                         &id,
@@ -714,6 +719,7 @@ pub async fn latest_frame(
                         captured_at.timestamp_millis(),
                         Utc::now().timestamp(),
                         st.cfg.frame_ticket_ttl_secs,
+                        &frame_ticket::content_hash(&bytes),
                     );
                 }
                 Ok(_) => {
@@ -1474,7 +1480,16 @@ mod tests {
     const CAPTURED_MS: i64 = 1_700_000_000_123;
 
     fn mint_for(key: &str, camera: &str, task: &str) -> String {
-        frame_ticket::mint(key, camera, task, CAPTURED_MS, Utc::now().timestamp(), 120).unwrap()
+        frame_ticket::mint(
+            key,
+            camera,
+            task,
+            CAPTURED_MS,
+            Utc::now().timestamp(),
+            120,
+            &frame_ticket::content_hash(b"fixture frame"),
+        )
+        .unwrap()
     }
 
     /// THE HEADLINE ENFORCE CONTROL: without a ticket there is no ingest.
@@ -1622,6 +1637,7 @@ mod tests {
             CAPTURED_MS,
             Utc::now().timestamp() - 600,
             60,
+            &frame_ticket::content_hash(b"fixture frame"),
         )
         .unwrap();
         assert!(resolve_binding(
