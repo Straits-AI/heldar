@@ -577,15 +577,42 @@ async fn doctor_cmd(ctx_name: Option<&str>, json: bool) -> Result<i32> {
     }
 
     // The box's own posture and health, not a second implementation of either.
-    if let Ok(p) = get(&http, base, &token, "/api/v1/system/posture").await? {
-        findings.extend(doctor::from_posture(&p));
+    //
+    // A FAILED CALL IS A FINDING, NOT A SKIP. These three used to be `.ok()` and `if let Ok(..)`,
+    // which meant a box answering 403 or 500 produced no camera findings, `blocks()` was false, and
+    // the command printed "no warnings or blocking findings" and exited 0 — a clean bill of health
+    // from the tool whose job is to say what is wrong. docs/HELDARCTL.md documents gating CI on that
+    // exit code.
+    match get(&http, base, &token, "/api/v1/system/posture").await? {
+        Ok(p) => findings.extend(doctor::from_posture(&p)),
+        Err(code) => findings.push(doctor::unavailable("/api/v1/system/posture", code)),
     }
-    let cameras = get(&http, base, &token, "/api/v1/cameras").await?.ok();
-    let health = get(&http, base, &token, "/api/v1/health/cameras")
-        .await?
-        .ok();
-    if let (Some(c), Some(h)) = (cameras, health) {
-        findings.extend(doctor::camera_health(&c, &h));
+
+    // Reported before the camera checks so a partial verdict is labelled as one. A camera-scoped
+    // key gets a filtered 200 rather than an error, so nothing else here can tell.
+    if let Ok(me) = get(&http, base, &token, "/api/v1/auth/me").await? {
+        if me["scope_kind"].as_str() == Some("cameras") {
+            let n = me["scope_cameras"].as_array().map(Vec::len).unwrap_or(0);
+            findings.push(doctor::scope_limited(n));
+        }
+    }
+
+    let cameras = match get(&http, base, &token, "/api/v1/cameras").await? {
+        Ok(v) => Some(v),
+        Err(code) => {
+            findings.push(doctor::unavailable("/api/v1/cameras", code));
+            None
+        }
+    };
+    let health = match get(&http, base, &token, "/api/v1/health/cameras").await? {
+        Ok(v) => Some(v),
+        Err(code) => {
+            findings.push(doctor::unavailable("/api/v1/health/cameras", code));
+            None
+        }
+    };
+    if let (Some(c), Some(h)) = (&cameras, &health) {
+        findings.extend(doctor::camera_health(c, h));
     }
 
     let blocking = doctor::blocks(&findings);

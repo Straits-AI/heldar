@@ -274,6 +274,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`heldarctl doctor` no longer reports a clean bill of health it did not verify** (#122). The
+  collection path dropped errors on the floor — `.ok()` on `/api/v1/cameras` and
+  `/api/v1/health/cameras`, `if let Ok(..)` on the posture. With no camera JSON, `camera_health`
+  never ran, so `camera.not_recording` — the finding the module itself calls *the failure this
+  product exists to prevent* — could not be produced, nothing blocked, and the command printed
+  "no warnings or blocking findings" and exited **0**.
+
+  A box answering 403 or 500 on those routes therefore got a passing verdict from the tool whose job
+  is to say what is wrong with it, and `docs/HELDARCTL.md` documents gating CI on that exit code.
+
+  A failed check is now a **blocking** finding naming the endpoint, with different remediations for
+  "this credential was refused" and "the box did not answer" — they send an operator to different
+  places. This is the one spot `doctor` departs from "unverified is not a failure": that principle
+  fits `from_posture`, where a control could not be assessed on a box that is otherwise answering;
+  here the tool cannot answer its own question, and a CI gate reading an exit code has no way to
+  tell "nothing is wrong" from "nothing was checked".
+
+- **A camera-scoped credential's verdict is now labelled as partial.** Such a key gets a *filtered
+  200* rather than an error, so every check ran and reported on a subset while looking exactly like a
+  whole-box verdict. `GET /api/v1/auth/me` now also reports `scope_kind` and `scope_cameras` — which
+  discloses nothing, since a scoped caller can already list exactly those cameras — and `doctor`
+  emits an Info finding saying how many cameras the verdict actually covers.
+
 - **Setting the metadata-DB cap now shows what it would delete, before it deletes it** (#121).
   `PUT /api/v1/system/db` writes a value the retention sweeper enforces later — shedding embed-query
   results, then CLIP embeddings, then detections — and its own doc comment already called this "the
