@@ -101,6 +101,54 @@ impl Upstream {
     }
 
     /// Call one tool. GET only — the method comes from the tool table, not from the caller.
+    /// The capabilities the box attributes to this token, asked once at startup.
+    ///
+    /// Advertising a tool the caller cannot use is what this exists to stop: `tools/list` used to
+    /// hand every caller all ten regardless of grant, so an agent was told it could read the
+    /// security posture, called it, and got an opaque 403. An agent cannot tell a capability it
+    /// lacks from a box that is broken, and it has no way to find out except by trying.
+    ///
+    /// A failure here is FATAL rather than a fallback to advertising everything. Falling back would
+    /// restore exactly the behaviour being fixed, quietly, at the moment the box is least well
+    /// understood — and a token that cannot read `/auth/me` cannot call any tool either, so there is
+    /// nothing to degrade to.
+    async fn granted_capabilities(&self) -> Result<Vec<String>> {
+        let resp = self
+            .http
+            .get(format!("{}/api/v1/auth/me", self.base))
+            .bearer_auth(&self.token)
+            .send()
+            .await
+            .with_context(|| format!("cannot reach {} to resolve this token", self.base))?;
+        let status = resp.status();
+        let body: serde_json::Value = resp
+            .json()
+            .await
+            .context("/api/v1/auth/me did not return JSON")?;
+        if !status.is_success() {
+            anyhow::bail!(
+                "/api/v1/auth/me answered {status}: {}. The token cannot identify itself, so no \
+                 tool it advertises would work either.",
+                body["error"].as_str().unwrap_or("no detail")
+            );
+        }
+        let caps: Vec<String> = body["capabilities"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if caps.is_empty() {
+            anyhow::bail!(
+                "/api/v1/auth/me reported no capabilities for this token. Either the box predates \
+                 the field, or the credential grants nothing — advertise nothing rather than guess."
+            );
+        }
+        Ok(caps)
+    }
+
     async fn call(&self, tool: &tools::Tool, arg: Option<&str>) -> Result<serde_json::Value> {
         let path = match (tool.arg, arg) {
             (None, _) => tool.path.to_string(),
@@ -149,6 +197,8 @@ impl Upstream {
 
 async fn serve_stdio() -> Result<()> {
     let upstream = Upstream::from_env()?;
+    // Resolved once, before the first request is served: tools/list must reflect THIS credential.
+    let granted = upstream.granted_capabilities().await?;
     let stdin = BufReader::new(tokio::io::stdin());
     let mut lines = stdin.lines();
     let mut stdout = tokio::io::stdout();
@@ -188,7 +238,10 @@ async fn serve_stdio() -> Result<()> {
             )),
             // A notification has no id and takes no reply.
             "notifications/initialized" => None,
-            "tools/list" => Some(result(id, serde_json::json!({ "tools": tools::specs() }))),
+            "tools/list" => Some(result(
+                id,
+                serde_json::json!({ "tools": tools::specs_for(&granted) }),
+            )),
             "tools/call" => Some(handle_call(&upstream, id, &req).await),
             other => Some(error(
                 id,
