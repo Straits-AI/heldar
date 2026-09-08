@@ -312,3 +312,136 @@ mod tests {
         );
     }
 }
+
+/// The key `docs/MCP.md` tells an operator to mint must be the key these tools actually need.
+#[cfg(test)]
+mod least_privilege_key_tests {
+    use super::TOOLS;
+    use std::collections::BTreeSet;
+
+    /// `/api/v1/cameras/{}/timeline` and `/api/v1/cameras/{camera_id}/timeline` are the same route
+    /// written two ways — the tools table uses positional `{}`, the contract uses names.
+    fn normalize(path: &str) -> String {
+        let mut out = String::with_capacity(path.len());
+        let mut depth = 0usize;
+        for c in path.chars() {
+            match c {
+                '{' => {
+                    depth += 1;
+                    if depth == 1 {
+                        out.push_str("{}");
+                    }
+                }
+                '}' => depth = depth.saturating_sub(1),
+                _ if depth == 0 => out.push(c),
+                _ => {}
+            }
+        }
+        out
+    }
+
+    /// What each tool requires, read from the GENERATED contract rather than restated here.
+    fn required_caps() -> (BTreeSet<&'static str>, Vec<&'static str>) {
+        let mut caps: BTreeSet<&'static str> = BTreeSet::new();
+        let mut uncoverable: Vec<&'static str> = Vec::new();
+
+        for tool in TOOLS {
+            let want = normalize(tool.path);
+            let req = heldar_client::REQUIREMENTS
+                .iter()
+                .find(|(m, p, _, _)| m.eq_ignore_ascii_case(tool.method) && normalize(p) == want)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "tool `{}` calls {} {}, which is not in the contract's requirements — \
+                         either the route moved or the tool points at nothing",
+                        tool.name, tool.method, tool.path
+                    )
+                });
+            match req.2 {
+                Some(c) => {
+                    caps.insert(c);
+                }
+                // No capability gates it, which for these routes means admin_only. A grant of
+                // capabilities cannot reach it at all, however generous.
+                None => uncoverable.push(tool.name),
+            }
+        }
+        (caps, uncoverable)
+    }
+
+    fn documented_grant() -> BTreeSet<String> {
+        let doc = include_str!("../../../docs/MCP.md");
+        // The fenced block immediately after the "capability-scoped key" paragraph.
+        let after = doc
+            .split_once("A key with more capability than the agent needs")
+            .expect("the least-privilege paragraph is still there")
+            .1;
+        let fence = after
+            .split_once("```")
+            .expect("a fenced grant follows it")
+            .1
+            .split_once("```")
+            .expect("the fence closes")
+            .0;
+        fence
+            .split_whitespace()
+            .filter(|t| t.contains(':'))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// THE BUG. docs/MCP.md said `camera:read`, `system:read`, `events:read` scoped to cameras.
+    /// That grant CANNOT BE MINTED — `events:read` is in UNSCOPABLE_CAPS, so combining it with
+    /// `scope_kind: cameras` is a 400 — and it omitted `video:playback` and `ai:tasks`, so four
+    /// tools 403'd for anyone who dropped the scope to get past the first error. It is the first
+    /// thing an operator does with this sidecar.
+    #[test]
+    fn the_documented_grant_is_exactly_what_the_tools_require() {
+        let (needed, _) = required_caps();
+        let documented: BTreeSet<String> = documented_grant();
+        let needed_owned: BTreeSet<String> = needed.iter().map(|s| s.to_string()).collect();
+
+        let missing: Vec<_> = needed_owned.difference(&documented).collect();
+        let extra: Vec<_> = documented.difference(&needed_owned).collect();
+        assert!(
+            missing.is_empty(),
+            "docs/MCP.md omits {missing:?}, so those tools 403 for anyone following it"
+        );
+        assert!(
+            extra.is_empty(),
+            "docs/MCP.md grants {extra:?}, which no tool uses — capability the agent does not need \
+             is capability the agent has"
+        );
+    }
+
+    /// The half that made the old grant impossible rather than merely wrong. Kept as its own test
+    /// because it fails for a different reason and deserves to say so.
+    #[test]
+    fn the_documented_grant_can_actually_be_minted_scoped() {
+        // Mirrors heldar_kernel::auth::UNSCOPABLE_CAPS. Not imported: heldar-mcp does not depend on
+        // the kernel, and should not start to for a test. The list is two entries and the kernel
+        // refuses loudly at mint time if it ever grows.
+        const UNSCOPABLE: [&str; 2] = ["events:read", "identity:read"];
+        for cap in documented_grant() {
+            assert!(
+                !UNSCOPABLE.contains(&cap.as_str()),
+                "docs/MCP.md tells an operator to grant `{cap}` AND scope to cameras, which the API \
+                 refuses with a 400 — the documented key cannot be minted"
+            );
+        }
+    }
+
+    /// A tool no capability grant can reach has to be called out, or an operator concludes the
+    /// sidecar is broken when it is doing exactly what it was told.
+    #[test]
+    fn a_tool_no_least_privilege_key_can_reach_is_documented_as_such() {
+        let (_, uncoverable) = required_caps();
+        let doc = include_str!("../../../docs/MCP.md");
+        for name in &uncoverable {
+            assert!(
+                doc.contains(name) && doc.contains("admin-only"),
+                "`{name}` is reachable only by an admin key and docs/MCP.md does not say so"
+            );
+        }
+    }
+}

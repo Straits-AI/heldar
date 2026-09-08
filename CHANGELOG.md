@@ -229,6 +229,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Documented
 
+- **The least-privilege key `docs/MCP.md` told you to mint could not be minted** (#123). It named
+  `camera:read`, `system:read` and `events:read`, scoped to cameras — but `events:read` is in
+  `UNSCOPABLE_CAPS`, so combining it with `scope_kind: cameras` is refused with a 400. An operator
+  who dropped the scope to get past that then found `get_timeline`, `get_recording_gaps`,
+  `get_incident` and `list_ai_workers` returning 403, because `video:playback` and `ai:tasks` were
+  missing. This is the first thing anyone does with the sidecar, and it made four of ten tools look
+  broken.
+
+  The grant is now `camera:read`, `system:read`, `video:playback`, `ai:tasks` — and it is **derived
+  from the contract, not restated**. `crates/heldar-mcp/src/tools.rs` resolves every tool's route
+  against the generated client's `REQUIREMENTS` and fails if the documented list and the tools'
+  actual needs ever disagree, in either direction: a missing capability 403s, and a surplus one is
+  capability the agent did not need but has.
+
+  Also recorded: `get_security_posture` is **admin-only**, so no least-privilege key reaches it at
+  all. The doc said nothing, which left an operator to conclude the sidecar was broken when it was
+  doing exactly what it had been told.
+
 - **`Idempotency-Key` is now in the contract**, on all 114 operations that honour it, with the 409
   conflict it can return (#121). The header has worked across the whole `/api/v1` surface for a
   while; the contract said nothing about it, so an integrator learned it from prose or from a 409
