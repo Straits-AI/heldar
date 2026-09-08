@@ -27,8 +27,25 @@ what to expose; it never decides who may see it.
 an environment variable is readable from `/proc` and inherited by children.
 
 **Use a dedicated, capability-scoped key.** Never an administrator's, and never a browser session.
-Mint one with only `camera:read`, `system:read` and `events:read`, scoped to the cameras the agent
-should see. A key with more capability than the agent needs is a key the agent has.
+A key with more capability than the agent needs is a key the agent has.
+
+```
+camera:read  system:read  video:playback  ai:tasks
+```
+
+scoped to the cameras the agent should see. That is the exact set the tools call, derived from the
+contract rather than recalled — `crates/heldar-mcp/tests/least_privilege_key.rs` fails if this list
+and the tools' actual requirements ever disagree.
+
+Two things worth knowing before you mint it, because both were wrong here before:
+
+- **`events:read` is not on the list, and must not be.** No tool uses it, and it is in
+  `UNSCOPABLE_CAPS` — so `scope_kind: cameras` combined with it is refused with a 400. A grant naming
+  it cannot be minted scoped at all.
+- **`get_security_posture` is admin-only** and no least-privilege key can reach it. The other nine
+  tools work with the grant above; that one answers 403 unless the key is an administrator's, which
+  is the thing this section tells you not to do. Read the posture through `heldarctl doctor`
+  instead.
 
 ## Read-only is structural
 
