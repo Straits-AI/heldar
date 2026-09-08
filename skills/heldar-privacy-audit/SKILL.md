@@ -142,12 +142,13 @@ There is exactly one mapping, and it is not negotiable:
    accepted, so a detection can be attributed to a camera with no server-issued frame ticket. Add,
    from `docs/MCP.md`: the MCP sidecar strips passwords, tokens and stream URLs but **discloses
    camera device addresses** to whatever model is on the other end, by design.
-8. **Cross-check with `heldarctl doctor --json`, and know its two blind spots first.** The flag is
-   `--json` or `--output=json`; `--output json` is not parsed, and silently yields human output. On a
-   credential that cannot read the posture, doctor's posture call 403s to stderr and the run prints
-   *"no warnings or blocking findings"* — a clean report from an audit that read nothing. And its
-   human-readable output drops every `info` finding, which is exactly where posture's `unknown`
-   findings land. Read `findings[].code` and `severity` from the JSON. Doctor's severities are its
+8. **Cross-check with `heldarctl doctor --json`.** All three spellings work — `--json`,
+   `--output json`, `--output=json` — and an unrecognised `--output` value is now a usage error
+   rather than a silent fall back to prose. A credential that cannot read the posture or the cameras
+   now produces a **blocking** `collect.unavailable` finding and a non-zero exit, instead of the
+   *"no warnings or blocking findings"* it used to print — a clean report from an audit that read
+   nothing. `info` findings are printed in the human output too, which is where posture's `unknown`
+   and `scope.partial_fleet` land. Read `findings[].code` and `severity` from the JSON. Doctor's severities are its
    own (`weak`→warning, `unknown`→info); do not adopt them as audit verdicts, and never quote its
    exit code as an audit result.
 

@@ -58,7 +58,13 @@ fn main() {
 #[tokio::main(flavor = "current_thread")]
 async fn run() -> Result<i32> {
     let args: Vec<String> = std::env::args().skip(1).collect();
-    let json = args.iter().any(|a| a == "--output=json" || a == "--json");
+    let json = match output_json(&args) {
+        Ok(v) => v,
+        Err(msg) => {
+            eprintln!("heldarctl: {msg}");
+            return Ok(exit::USAGE);
+        }
+    };
     let ctx_name = flag(&args, "--context");
 
     match args.first().map(String::as_str) {
@@ -88,6 +94,29 @@ async fn run() -> Result<i32> {
             eprintln!("heldarctl: unknown command {other:?} — try `heldarctl help`");
             Ok(exit::USAGE)
         }
+    }
+}
+
+/// Whether output should be JSON, from the flags — or an error naming what was wrong.
+///
+/// `flag` accepts BOTH `--output json` and `--output=json`, and always has: it is what `--context`
+/// uses. This decision used to hand-match the `=` form only, so `--output json` — the spelling
+/// `docs/HELDARCTL.md`, the skills and `doctor`'s own remediation text all print — fell through to
+/// human output and exit 0. A script piping that into `jq` got unparseable text and a SUCCESS code:
+/// a silent wrong answer rather than a usage error. `--output yaml` did the same.
+///
+/// An unrecognised value is refused rather than defaulting to text. A caller that asked for json and
+/// silently got text would parse the failure as data, which is the failure mode this whole function
+/// exists to remove.
+fn output_json(args: &[String]) -> std::result::Result<bool, String> {
+    match flag(args, "--output").as_deref() {
+        Some("json") => Ok(true),
+        Some("text") => Ok(false),
+        Some(other) => Err(format!(
+            "unknown --output {other:?} (expected `json` or `text`). Refusing rather than falling \
+             back: a script that asked for json and got text would parse the failure as data."
+        )),
+        None => Ok(args.iter().any(|a| a == "--json")),
     }
 }
 
@@ -626,11 +655,17 @@ fn emit_findings(findings: &[doctor::Finding], json: bool) {
         "blocking": findings.iter().filter(|f| f.severity == doctor::Severity::Blocking).count(),
     });
     output::emit(&v, json, |v| {
+        // INFO FINDINGS ARE PRINTED, not skipped. They used to be dropped here, which hid exactly
+        // the ones that say the run could not see everything: posture's `unknown` (whose whole
+        // point is that treating unverified as a pass is wrong) and `scope.partial_fleet` (which
+        // says the verdict covers only the cameras this credential holds). A reader of the human
+        // output got a confident answer with the caveats removed.
         let mut s = String::new();
+        let mut serious = 0usize;
         for f in v["findings"].as_array().unwrap_or(&vec![]) {
             let sev = f["severity"].as_str().unwrap_or("info");
-            if sev == "info" {
-                continue;
+            if sev != "info" {
+                serious += 1;
             }
             s.push_str(&format!(
                 "{:<8} {:<28} {}\n         -> {}\n",
@@ -640,7 +675,9 @@ fn emit_findings(findings: &[doctor::Finding], json: bool) {
                 f["remediation"].as_str().unwrap_or(""),
             ));
         }
-        if s.is_empty() {
+        // Still said, and still accurate — it claims nothing about `info`, which is now visible
+        // above it rather than silently absent.
+        if serious == 0 {
             s.push_str("no warnings or blocking findings\n");
         }
         s.trim_end().to_string()
@@ -750,5 +787,67 @@ mod tests {
             src.contains("retention            show or set the recording disk limits"),
             "the help no longer lists `retention`"
         );
+    }
+}
+
+/// A caller that asked for JSON must never silently receive prose.
+#[cfg(test)]
+mod output_flag_tests {
+    use super::output_json;
+
+    fn args(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_string).collect()
+    }
+
+    /// THE REGRESSION. `--output json` is the spelling docs/HELDARCTL.md prints, the one the skills
+    /// print, and the one `doctor`'s own fallback remediation prints — and it was the one spelling
+    /// that did not work. A script piping it into `jq` got prose and exit 0.
+    #[test]
+    fn every_documented_spelling_selects_json() {
+        for a in [
+            "doctor --output json",
+            "doctor --output=json",
+            "doctor --json",
+            "--output json doctor",
+            "doctor --context box-a --output json",
+        ] {
+            assert_eq!(output_json(&args(a)), Ok(true), "{a}");
+        }
+    }
+
+    #[test]
+    fn the_default_and_the_explicit_text_form_are_human() {
+        for a in ["doctor", "doctor --context box-a", "doctor --output text"] {
+            assert_eq!(output_json(&args(a)), Ok(false), "{a}");
+        }
+    }
+
+    /// Refused, not defaulted. Falling back to text here would hand a script that asked for json a
+    /// success exit and unparseable output — the same silent wrong answer, one value along.
+    #[test]
+    fn an_unknown_format_is_a_usage_error() {
+        for a in [
+            "doctor --output yaml",
+            "doctor --output JSON",
+            "doctor --output=",
+        ] {
+            let got = output_json(&args(a));
+            assert!(got.is_err(), "{a} was accepted: {got:?}");
+            assert!(
+                got.unwrap_err().contains("expected `json` or `text`"),
+                "{a}"
+            );
+        }
+    }
+
+    /// `--json` keeps working as the shorthand it always was, including alongside `--context`.
+    #[test]
+    fn the_shorthand_still_works_and_does_not_swallow_the_next_argument() {
+        assert_eq!(
+            output_json(&args("doctor --json --context box-a")),
+            Ok(true)
+        );
+        // `--context` takes a value; `--json` does not, so it must not consume `box-a`.
+        assert_eq!(output_json(&args("doctor --context box-a")), Ok(false));
     }
 }

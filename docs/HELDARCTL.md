@@ -35,7 +35,9 @@ heldarctl retention set --max-gb 40          # PLANS the change, applies nothing
 heldarctl retention set --max-gb 40 --yes    # applies exactly the plan it printed
 ```
 
-Every command takes `--context <name>` and `--output=json`.
+Every command takes `--context <name>` and `--output json` (or `--output=json`, or the `--json`
+shorthand). An unrecognised `--output` value is a usage error rather than a silent fall back to
+prose: a script that asked for JSON and received text would parse the failure as data.
 
 ## `doctor`
 
