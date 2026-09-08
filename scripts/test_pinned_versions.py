@@ -9,9 +9,17 @@ it is decoration.
 
 The third case is the one that keeps the guard honest: if its regexes stop matching the files they
 read, it must SAY so rather than silently comparing nothing and passing.
+
+ANCHORS ARE PATTERNS, NOT LITERAL VERSIONS. Six of these seven controls used to anchor on the exact
+version in the tree — `bluenviron/mediamtx:1.20.1`, `node:24.20.0-bookworm-slim@`. That makes a
+control go VACUOUS on precisely the pull request that bumps its dependency, which is the one moment
+the guard most needs to work: Dependabot's MediaMTX bump and the node 22 -> 24 bump each silenced
+their own control this way. `Anchor` matches whatever version is there now and rewrites it to a
+sentinel, so a bump changes nothing about whether the control fires.
 """
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -19,33 +27,65 @@ import sys
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 CHECK = os.path.join(ROOT, "scripts", "check_pinned_versions.py")
 
+class Anchor:
+    """A version-shaped anchor: match whatever is pinned now, rewrite it to something else.
+
+    A literal anchor names the version in the tree today, so the control silences itself the moment
+    that version changes — on the very pull request doing the changing. This matches the SHAPE and
+    substitutes a sentinel, so it keeps working across bumps without anybody remembering to edit it.
+    """
+
+    def __init__(self, pattern: str, replacement: str):
+        self.rx = re.compile(pattern)
+        self.replacement = replacement
+
+    def count(self, src: str) -> int:
+        return len(self.rx.findall(src))
+
+    def apply(self, src: str) -> str:
+        return self.rx.sub(self.replacement, src)
+
+    def __repr__(self) -> str:
+        return f"Anchor({self.rx.pattern!r})"
+
+
+def apply_mutation(src: str, old, new: str) -> str:
+    return old.apply(src) if isinstance(old, Anchor) else src.replace(old, new)
+
+
+def count_anchor(src: str, old) -> int:
+    return old.count(src) if isinstance(old, Anchor) else src.count(old)
+
+
 CASES = [
     (
         "the shipped bug: compose bumped, setup script left behind",
         "scripts/setup_caddy.sh",
-        'VERSION="${CADDY_VERSION:-2.11.4}"',
-        'VERSION="${CADDY_VERSION:-2.10.2}"',
+        Anchor(r'VERSION="\$\{CADDY_VERSION:-[\d.]+\}"', 'VERSION="${CADDY_VERSION:-0.0.1}"'),
+        None,
         "they disagree",
     ),
     (
         "the two MediaMTX pins drifting apart",
         "deploy/compose.yml",
-        "bluenviron/mediamtx:1.20.1",
-        "bluenviron/mediamtx:1.20.0",
+        Anchor(r"bluenviron/mediamtx:[\d.]+", "bluenviron/mediamtx:0.0.1"),
+        None,
         "differs between the dev stack",
     ),
     (
         "the drift merging #78 actually left: requirements moved, the recipe did not",
         "apps/ai/Dockerfile",
-        '"lap>=0.5.13"',
-        '"lap>=0.5"',
-        "tells operators to install lap>=0.5",
+        Anchor(r'"lap>=[\d.]+"', '"lap>=0.0.1"'),
+        None,
+        # Version-free on purpose: the sentinel this control writes is not a real version, and
+        # asserting on one would re-introduce the fragility the Anchor removed.
+        "tells operators to install lap>=",
     ),
     (
         "the drift this check was written for: a base image bumped, the policy table left behind",
         "apps/ai/Dockerfile",
-        "FROM python:3.14.7-slim@",
-        "FROM python:3.15.0-slim@",
+        Anchor(r"FROM python:[\d.]+-slim@", "FROM python:0.0.1-slim@"),
+        None,
         "does not pin that image",
     ),
     (
@@ -58,8 +98,8 @@ CASES = [
     (
         "the shape #144 proposed: the builder image moved, CI left behind",
         "apps/web/Dockerfile",
-        "FROM node:24.20.0-bookworm-slim@",
-        "FROM node:26.8.1-bookworm-slim@",
+        Anchor(r"FROM node:[\d.]+-bookworm-slim@", "FROM node:0.0.1-bookworm-slim@"),
+        None,
         "different toolchains",
     ),
     (
@@ -76,8 +116,10 @@ CASES = [
     (
         "the guard's own parser drifting from the file it reads",
         "scripts/setup_caddy.sh",
-        'VERSION="${CADDY_VERSION:-2.11.4}"',
-        'VERSION="2.11.4"',
+        # Drops the ${CADDY_VERSION:-...} shape the guard's regex depends on, keeping whatever
+        # version is actually pinned — so this still exercises the parser after a Caddy bump.
+        Anchor(r'VERSION="\$\{CADDY_VERSION:-([\d.]+)\}"', r'VERSION="\1"'),
+        None,
         "parser has drifted",
     ),
 ]
@@ -94,7 +136,7 @@ def main():
         expect_n = case[5] if len(case) > 5 else None
         path = os.path.join(ROOT, rel)
         src = open(path).read()
-        n = src.count(old)
+        n = count_anchor(src, old)
         if n == 0 or (expect_n is not None and n != expect_n):
             print(f"  VACUOUS {name}: anchor appears {n} times in {rel}"
                   + (f" (expected {expect_n})" if expect_n is not None else ""))
@@ -105,9 +147,15 @@ def main():
                   f"say how many you mean to change")
             bad += 1
             continue
+        mutated = apply_mutation(src, old, new)
+        if mutated == src:
+            # A mutation that changes nothing tests nothing, however many times the anchor matched.
+            print(f"  VACUOUS {name}: the mutation left {rel} byte-identical")
+            bad += 1
+            continue
         shutil.copy(path, path + ".bak")
         try:
-            open(path, "w").write(src.replace(old, new))
+            open(path, "w").write(mutated)
             r = run()
             ok = r.returncode == 1 and want in r.stdout
             print(("  ok    " if ok else "  FAIL  ") + name)

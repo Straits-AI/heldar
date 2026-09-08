@@ -395,6 +395,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Testing
 
+- **The pinned-version controls no longer silence themselves on the pull request that bumps a
+  dependency.** Six of the seven anchored on the exact version in the tree — `mediamtx:1.20.1`,
+  `node:24.20.0-bookworm-slim@` — so a bump made the anchor vanish and the control reported VACUOUS.
+  That is the one moment the guard most needs to work, and it happened twice in practice: the node
+  22 → 24 bump silenced two controls, and Dependabot's MediaMTX 1.21.0 bump silenced another.
+
+  Anchors are now patterns that match whatever version is pinned and rewrite it to a sentinel, so a
+  bump changes nothing about whether the control fires. Verified by simulating four simultaneous
+  bumps (MediaMTX, node, Caddy, python): previously one control went vacuous, now none do.
+
+  The runner also refuses a mutation that leaves the file byte-identical — a substitution that
+  changes nothing tests nothing, however many times its anchor matched.
+
 - **A lost response followed by a retry is now proven to leave exactly one side effect** (#121), on a
   real route rather than a fake handler. The existing tests exercise the idempotency layer with a
   counting stub, which proves the layer dedupes — not that it is *mounted* where it matters. Its
