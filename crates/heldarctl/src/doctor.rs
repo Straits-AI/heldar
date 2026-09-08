@@ -406,7 +406,7 @@ mod collection_failure_tests {
         let f = scope_limited(2);
         assert_eq!(f.severity, Severity::Info);
         assert!(
-            !blocks(&[f.clone()]),
+            !blocks(std::slice::from_ref(&f)),
             "a scoped credential must not fail the run by itself"
         );
         assert!(f.detail.contains("2 camera(s)"), "{}", f.detail);

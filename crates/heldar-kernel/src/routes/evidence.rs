@@ -175,7 +175,10 @@ async fn resolve_camera(
             // cannot tell an incident that does not exist from one on somebody else's camera from
             // one spanning cameras they do not hold. Byte for byte identical — the count, the
             // camera id and the incident id all stay out of it.
-            if scoped && !(all_visible && !cams.is_empty()) {
+            // De Morgan'd from `!(all_visible && !cams.is_empty())`, which said the same thing
+            // less plainly: refuse unless this caller holds every camera the incident touches AND
+            // the incident touches at least one.
+            if scoped && (!all_visible || cams.is_empty()) {
                 return Err(crate::state::scope_denied_owner(
                     "incident",
                     "export evidence for this incident",
