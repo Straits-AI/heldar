@@ -5,7 +5,7 @@
 # docs/SUPPLY-CHAIN.md. A base bump that drags in a fixable HIGH fails the build rather than
 # shipping. Bump the pinned digest to fix; where there is no fix yet, record it in
 # security/dependency-exceptions.json with an owner and an expiry.
-FROM node:24.20.0-bookworm-slim@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e AS builder
+FROM node:26.8.2-bookworm-slim@sha256:cd9f682fa2885cd1056e830424764158570061c59736a1da836bc3d73df095ae AS builder
 WORKDIR /app
 COPY package*.json ./
 RUN npm install
