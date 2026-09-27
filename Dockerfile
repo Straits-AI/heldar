@@ -27,7 +27,7 @@ RUN cargo build --release --bin heldar-core ${FEATURES:+--features "$FEATURES"}
 
 # Pinned runtime base: bookworm (Debian 12) codename + multi-arch index @sha256 digest.
 # To bump: `docker buildx imagetools inspect debian:bookworm-slim` and update the digest.
-FROM debian:bookworm-slim@sha256:88200866dfff7ea7f5cbcb6ec7c8a701889efe6fe859fe64d6990e4b07ea4171
+FROM debian:bookworm-slim@sha256:3783cc01769c7b2b1b83a5c5ad96c815348e28ed7da68e2e3687004faa906251
 ARG FEATURES=""
 # ffmpeg: recorder/clip/snapshot/sampler. curl: container HEALTHCHECK. ca-certificates: outbound TLS.
 # tzdata is required for `chrono::Local` (recording-schedule windows are evaluated in the server's
