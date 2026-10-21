@@ -12,4 +12,4 @@
 # via the config keys clip_model/clip_pretrained, and for the query side via env
 # HELDAR_AI_CLIP_MODEL / HELDAR_AI_CLIP_PRETRAINED — both sides must use the SAME checkpoint or
 # the kernel compares vectors from different embedding spaces.
-open_clip_torch>=2.24
+open_clip_torch>=3.3.0
