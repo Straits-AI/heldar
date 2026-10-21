@@ -11,7 +11,7 @@ repository = "https://github.com/Straits-AI/heldar"
 heldar-kernel = { path = "../heldar-kernel" }
 # Pure-Rust Wasm interpreter — no JIT/Cranelift, light dep tree, fast compile. The plugin host is an
 # OPTIONAL feature on the composing server, so the default appliance binary never links this.
-wasmi = "1.1"
+wasmi = "2.0"
 tokio = { version = "1.53.1", features = ["rt", "sync", "time"] }
 sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite"] }
 serde = { version = "1", features = ["derive"] }
