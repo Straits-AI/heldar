@@ -17,7 +17,7 @@
 # docs/SUPPLY-CHAIN.md. A base bump that drags in a fixable HIGH fails the build rather than
 # shipping. Bump the pinned digest to fix; where there is no fix yet, record it in
 # security/dependency-exceptions.json with an owner and an expiry.
-FROM rust:1.98.0-bookworm@sha256:82150a52ec202c1b14d7817e14516c392bb7f5cfebd88f1ed531cb37ebd39922 AS builder
+FROM rust:1.99.1-bookworm@sha256:48b7f435b8fc6378ce43b44f15e3a47fd8919b2825f835c39bd4bd3da50af5b8 AS builder
 # Optional cargo features to compile in (space-separated), e.g. FEATURES="smtp". Empty = default build.
 ARG FEATURES=""
 WORKDIR /app
