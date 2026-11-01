@@ -13,7 +13,7 @@ COPY . .
 RUN npm run build
 
 # Pinned runtime base: concrete minor.patch tag + multi-arch index @sha256 digest.
-FROM nginx:1.31.5-alpine@sha256:72ba65eb42c10344912a84ff42408db7d34f2feb642204570ab8fc5ffd29f1d3
+FROM nginx:1.31.8-alpine@sha256:785835ea65db4bba6f021acc0f3be91b0fef76a53fe41f8588c6698d2aed0606
 # util-linux in this base still carries six fixable HIGHs (TOCTOU in mount, nosuid/noexec bypass)
 # that the image scan flags. The nginx tag is digest-pinned, so the STARTING point stays exactly
 # reproducible; this floats only Alpine's security patches forward from it, which is the one thing
