@@ -8,7 +8,7 @@ services:
     # Pinned to a specific released version + multi-arch index @sha256 digest so a restart never
     # silently jumps MediaMTX versions. To bump: pick a release, then
     # `docker buildx imagetools inspect bluenviron/mediamtx:<ver>` for the digest (see docs/SUPPLY-CHAIN.md).
-    image: bluenviron/mediamtx:1.20.1@sha256:1b029d11049be75630e9b73bb0d5f47b08a7db4eaee89a80bf8f53bc40e56414
+    image: bluenviron/mediamtx:1.21.3@sha256:59e43552f3be43695b70c19424dc2a42fcec18075f88d91561a24ac5d70a586c
     restart: unless-stopped
     network_mode: host
     volumes:
