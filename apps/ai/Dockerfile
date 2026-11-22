@@ -11,7 +11,7 @@
 # docs/SUPPLY-CHAIN.md. A base bump that drags in a fixable HIGH fails the build rather than
 # shipping. Bump the pinned digest to fix; where there is no fix yet, record it in
 # security/dependency-exceptions.json with an owner and an expiry.
-FROM python:3.14.7-slim@sha256:cad9a2c871761c413caa6fdd6441c783451e740a48aaeba60ae62a8b53525ef6
+FROM python:3.15.2-slim@sha256:65a65fc7b30b06cb6df4930fd4650697cb23f4c2698ab81fc87e4b031bc36928
 
 # Keep Python lean and logs unbuffered (so they stream out of the container).
 ENV PYTHONUNBUFFERED=1 \
