@@ -23,7 +23,7 @@ services:
     # would let a long-running recorder silently jump MediaMTX versions on any restart/re-pull.
     # To bump: pick a release, then `docker buildx imagetools inspect bluenviron/mediamtx:<ver>`
     # for the new digest (see docs/SUPPLY-CHAIN.md).
-    image: bluenviron/mediamtx:1.20.1@sha256:1b029d11049be75630e9b73bb0d5f47b08a7db4eaee89a80bf8f53bc40e56414
+    image: bluenviron/mediamtx:1.21.4@sha256:c730bccdbc8739f8f0c13cefe9bea8b61926f599b88fa4d0d229baa91846c7bc
     restart: unless-stopped
     network_mode: host
     volumes:
